@@ -1,0 +1,17 @@
+# Default owners for everything in the repo
+* @thvtzy
+
+# Architecture decisions
+ARCHITECTURE.md @thvtzy
+
+# Spec language
+src/spec/ @thvtzy
+
+# Synthesis engine (critical path)
+src/synthesis/ @thvtzy
+
+# Verification (critical path)
+src/verify/ @thvtzy
+
+# Codegen
+src/codegen/ @thvtzy

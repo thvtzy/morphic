@@ -1,0 +1,35 @@
+# ── Rust ──────────────────────────────────────
+/target/
+**/*.rs.bk
+*.pdb
+
+# ── IDE ───────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── OS ────────────────────────────────────────
+Thumbs.db
+*.tmp
+
+# ── Build artifacts ───────────────────────────
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# ── Generated Morphic output ──────────────────
+**/*.gen.rs
+**/*.gen.c
+**/*.gen.py
+**/*.gen.js
+**/*.gen.wasm
+
+# ── Misc ──────────────────────────────────────
+.env
+.env.local
+*.log

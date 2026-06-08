@@ -1,9 +1,13 @@
 # ⚡ Morphic — Self-Synthesizing Programming Language
 
 <p align="center">
-  <img src="https://img.shields.io/badge/status-alpha-red?style=for-the-badge" alt="Status: Alpha">
-  <img src="https://img.shields.io/badge/language-Rust-orange?style=for-the-badge" alt="Rust">
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=for-the-badge" alt="MIT">
+  <a href="https://github.com/thvtzy/morphic/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge" alt="License: MIT"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge" alt="Language: Rust"></a>
+  <a href="https://github.com/thvtzy/morphic/actions"><img src="https://img.shields.io/github/actions/workflow/status/thvtzy/morphic/ci.yml?branch=master&style=for-the-badge&label=CI" alt="CI Status"></a>
+  <br>
+  <img src="https://img.shields.io/badge/status-pre--alpha-red?style=for-the-badge" alt="Status: Pre-alpha">
+  <img src="https://img.shields.io/badge/phase-research-brightgreen?style=for-the-badge" alt="Phase: Research">
+  <a href="https://github.com/thvtzy/morphic/stargazers"><img src="https://img.shields.io/github/stars/thvtzy/morphic?style=for-the-badge&color=yellow" alt="Stars"></a>
 </p>
 
 <p align="center">
