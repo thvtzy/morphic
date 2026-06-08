@@ -1,0 +1,59 @@
+[package]
+name = "morphic"
+version = "0.1.0"
+edition = "2021"
+description = "Self-Synthesizing Programming Language — write specs, not implementations"
+license = "MIT"
+repository = "https://github.com/morphic-lang/morphic"
+
+[[bin]]
+name = "morphic"
+path = "src/main.rs"
+
+[features]
+default = ["llm-remote"]
+llm-local = ["llama-cpp-2"]
+llm-remote = ["reqwest", "tokio"]
+z3-static = ["z3/static-link"]
+
+[dependencies]
+# Parsing
+logos = "0.14"
+chumsky = "0.9"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+colored = "2"
+indicatif = "0.17"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+
+# Search & data structures
+petgraph = "0.6"
+rand = "0.8"
+rayon = "1.10"
+dashmap = "5"
+slotmap = "1"
+
+# Formal verification (optional backend)
+z3 = { version = "0.13", optional = true }
+
+# LLM backends
+llama-cpp-2 = { version = "0.1", optional = true }
+reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+# Misc
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+itertools = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

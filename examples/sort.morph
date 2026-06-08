@@ -1,0 +1,71 @@
+// ┌────────────────────────────────────────────────────────────┐
+// │  MORPHIC EXAMPLE: Self-Synthesizing Sort                  │
+// │  "I don't write quicksort. I write WHAT sorting means."   │
+// └────────────────────────────────────────────────────────────┘
+
+spec sort<T> {
+    doc: "Sort a list of elements using a comparison function."
+    doc: "The implementation is automatically synthesized."
+
+    input: list: List<T>, cmp: fn(T, T) -> Bool
+    output: List<T>
+
+    // ── Semantic Constraints ──────────────────────────────
+    // Don't tell the compiler HOW to sort. Tell it WHAT sorting IS.
+
+    // 1. The output must contain exactly the same elements as input
+    constraint: is_permutation(list, output)
+
+    // 2. The output must be sorted according to the comparator
+    constraint: forall i: Int, j: Int in range(0, len(output)):
+        i < j implies cmp(output[i], output[j])
+
+    // 3. The output must have the same length as input
+    constraint: len(output) == len(list)
+
+    // 4. For an already-sorted list, the output equals the input
+    constraint: is_sorted(list, cmp) implies output == list
+
+    // ── Complexity Requirements ───────────────────────────
+    optimize: time < O(n_log_n)
+    optimize: space < O(n)
+
+    // ── Resource Bounds ───────────────────────────────────
+    resource: memory < 10MB
+    resource: allocations < O(n)
+
+    // ── Edge case invariants ──────────────────────────────
+    invariant: if len(list) == 0 then len(output) == 0
+    invariant: if len(list) == 1 then output == list
+
+    // ── Test Cases (used both for verification and synthesis seeding) ──
+    test "empty list" {
+        input: (List[], |a, b| a < b)
+        expect: List[]
+    }
+
+    test "single element" {
+        input: (List[5], |a, b| a < b)
+        expect: List[5]
+    }
+
+    test "already sorted" {
+        input: (List[1, 2, 3, 4, 5], |a, b| a < b)
+        expect: List[1, 2, 3, 4, 5]
+    }
+
+    test "reverse sorted" {
+        input: (List[5, 4, 3, 2, 1], |a, b| a < b)
+        expect: List[1, 2, 3, 4, 5]
+    }
+
+    test "random order" {
+        input: (List[3, 1, 4, 1, 5, 9, 2, 6], |a, b| a < b)
+        expect: List[1, 1, 2, 3, 4, 5, 6, 9]
+    }
+
+    test "with duplicates" {
+        input: (List[2, 2, 1, 1, 3, 3], |a, b| a < b)
+        expect: List[1, 1, 2, 2, 3, 3]
+    }
+}

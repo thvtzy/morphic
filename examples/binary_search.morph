@@ -1,0 +1,63 @@
+// ┌────────────────────────────────────────────────────────────┐
+// │  MORPHIC EXAMPLE: Self-Synthesizing Binary Search         │
+// │  "I define what it means to find. The compiler invents   │
+// │   binary search — or something better."                   │
+// └────────────────────────────────────────────────────────────┘
+
+spec binary_search<T> {
+    input: haystack: List<T>, needle: T, cmp: fn(T, T) -> Int
+    output: Option<I64>
+
+    // ── Preconditions ─────────────────────────────────────
+    // The haystack must already be sorted
+    require: is_sorted(haystack, cmp)
+
+    // ── Postconditions ────────────────────────────────────
+    // If output is Some(i): the element at position i equals needle
+    ensure: forall i: Int in output:
+        i >= 0 && i < len(haystack) && haystack[i] == needle
+
+    // If output is None: needle is not in haystack
+    ensure: output == None() implies
+        forall x: T in haystack: x != needle
+
+    // ── Complexity ────────────────────────────────────────
+    optimize: time < O(log_n)
+    optimize: space < O(1)
+
+    // ── Tests ─────────────────────────────────────────────
+    test "find in middle" {
+        input: (List[1, 3, 5, 7, 9, 11, 13], 7, |a, b| a - b)
+        expect: Some(3)
+    }
+
+    test "find at start" {
+        input: (List[1, 3, 5, 7, 9], 1, |a, b| a - b)
+        expect: Some(0)
+    }
+
+    test "find at end" {
+        input: (List[1, 3, 5, 7, 9], 9, |a, b| a - b)
+        expect: Some(4)
+    }
+
+    test "not found — too small" {
+        input: (List[1, 3, 5, 7, 9], 0, |a, b| a - b)
+        expect: None()
+    }
+
+    test "not found — too large" {
+        input: (List[1, 3, 5, 7, 9], 10, |a, b| a - b)
+        expect: None()
+    }
+
+    test "not found — between elements" {
+        input: (List[1, 3, 5, 7, 9], 4, |a, b| a - b)
+        expect: None()
+    }
+
+    test "empty list" {
+        input: (List[], 5, |a, b| a - b)
+        expect: None()
+    }
+}
