@@ -229,6 +229,9 @@ pub enum IRNode {
         node: Box<IRNode>,
         ty: TypeRef,
     },
+
+    /// Index access: collection[index]
+    Index(Box<IRNode>, Box<IRNode>),
 }
 
 #[derive(Debug, Clone)]
@@ -1647,6 +1650,7 @@ fn ast_depth(node: &IRNode) -> usize {
         IRNode::Alloc { initial, .. } => 1 + ast_depth(initial),
         IRNode::Assign { target, value } => 1 + ast_depth(target).max(ast_depth(value)),
         IRNode::Typed { node, .. } => 1 + ast_depth(node),
+        IRNode::Index(coll, idx) => 1 + ast_depth(coll).max(ast_depth(idx)),
     }
 }
 
@@ -1714,6 +1718,7 @@ fn ast_node_count(node: &IRNode) -> usize {
         IRNode::Alloc { initial, .. } => 1 + ast_node_count(initial),
         IRNode::Assign { target, value } => 1 + ast_node_count(target) + ast_node_count(value),
         IRNode::Typed { node, .. } => 1 + ast_node_count(node),
+        IRNode::Index(coll, idx) => 1 + ast_node_count(coll) + ast_node_count(idx),
     }
 }
 

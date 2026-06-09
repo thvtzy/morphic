@@ -6,6 +6,7 @@
 pub mod engine;
 pub mod selector;
 pub mod interactive;
+pub mod templates;
 
 // Re-exports
 pub use engine::{synthesize, CandidateImplementation, candidate_count, elapsed_ms};
