@@ -3,6 +3,7 @@
 // │  Chooses the optimal implementation from candidates      │
 // └──────────────────────────────────────────────────────────┘
 
+use std::collections::HashMap;
 use super::engine::{CandidateImplementation, ScoreBreakdown};
 use crate::spec::ast::FunctionSpec;
 
@@ -97,10 +98,10 @@ fn dominates(a: &CandidateImplementation, b: &CandidateImplementation) -> bool {
     at_least_as_good && strictly_better
 }
 
-fn select_by_criteria(
-    candidates: &[CandidateImplementation],
+fn select_by_criteria<'a>(
+    candidates: &'a [CandidateImplementation],
     criteria: &[SelectionCriterion],
-) -> Result<&CandidateImplementation, SelectionError> {
+) -> Result<&'a CandidateImplementation, SelectionError> {
     let mut pool: Vec<&CandidateImplementation> = candidates.iter().collect();
 
     for criterion in criteria {
@@ -228,10 +229,19 @@ fn sort_by_criterion(
         }
         SelectionCriterion::ParetoOptimal => {
             // Dominance count: fewer dominators = better
+            let dominance: HashMap<u64, usize> = candidates
+                .iter()
+                .map(|a| {
+                    let count = candidates.iter()
+                        .filter(|o| dominates(o, a))
+                        .count();
+                    (a.id, count)
+                })
+                .collect();
             candidates.sort_by(|a, b| {
-                let da = candidates.iter().filter(|o| dominates(o, a)).count();
-                let db = candidates.iter().filter(|o| dominates(o, b)).count();
-                da.cmp(&db)
+                let da = dominance.get(&a.id).unwrap_or(&0);
+                let db = dominance.get(&b.id).unwrap_or(&0);
+                da.cmp(db)
             });
         }
         SelectionCriterion::MostCompact => {

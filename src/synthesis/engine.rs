@@ -13,7 +13,7 @@
 // │                                 └────────────┘           │
 // └──────────────────────────────────────────────────────────┘
 
-use std::sync::Mutex;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::spec::ast::*;
 use rand::Rng;
@@ -1110,7 +1110,7 @@ fn empty_scores() -> ScoreBreakdown {
     }
 }
 
-fn composite_score(scores: &ScoreBreakdown) -> f64 {
+pub fn composite_score(scores: &ScoreBreakdown) -> f64 {
     0.4 * scores.test_pass_ratio
         + 0.3 * scores.constraint_score
         + 0.2 * scores.complexity_score
@@ -1509,7 +1509,7 @@ fn parse_rust_into_ir(code: &str, _spec: &FunctionSpec) -> Result<Vec<CandidateI
     }])
 }
 
-fn epr_to_pattern(expr: &Expr) -> IRPattern {
+pub fn expr_to_pattern(expr: &Expr) -> IRPattern {
     match expr {
         Expr::IntLit(n) => IRPattern::Literal(IRLiteral::Int(*n)),
         Expr::StringLit(s) => IRPattern::Literal(IRLiteral::String(s.clone())),

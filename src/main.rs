@@ -96,7 +96,13 @@ fn main() -> anyhow::Result<()> {
 
             // Phase 2: Type-check
             println!("  {} Type checking...", "→".dimmed());
-            let spec = spec::typeck::check(spec)?;
+            let type_checked = spec::typeck::check(spec)?;
+
+            // Extract the first function spec for synthesis
+            // A .morph file may contain multiple specs; we synthesize one at a time
+            let spec = type_checked.spec.functions.first()
+                .ok_or_else(|| anyhow::anyhow!("No spec functions found"))?
+                .clone();
 
             // Phase 3: Synthesize
             println!("  {} Synthesizing implementations...", "→".dimmed());
@@ -142,9 +148,11 @@ fn main() -> anyhow::Result<()> {
                 "🔍".bold(), iterations);
             // Interactive mode: stream candidates in real time
             let source = std::fs::read_to_string(&input)?;
-            let spec = spec::parser::parse(&source)?;
-            let spec = spec::typeck::check(spec)?;
-            synthesis::interactive::run(&spec, iterations)?;
+            let parsed = spec::parser::parse(&source)?;
+            let type_checked = spec::typeck::check(parsed)?;
+            let func_spec = type_checked.spec.functions.first()
+                .ok_or_else(|| anyhow::anyhow!("No spec functions found"))?;
+            synthesis::interactive::run(func_spec, iterations)?;
         }
 
         Command::Lsp => {
@@ -174,16 +182,16 @@ path = "main.morph"
 
 use morphic::std::*;
 
-spec main {
+spec main {{
     input: ()
     output: ()
 
     constraint: true
 
-    test {
+    test {{
         // Your specifications here
-    }
-}
+    }}
+}}
 "#, name);
 
             std::fs::write(dir.join("Morphic.toml"), cargo_toml)?;

@@ -6,8 +6,9 @@
 use crate::spec::ast::*;
 use crate::synthesis::engine::{CandidateImplementation, IRNode, IRLiteral, IRBinOp, IRUnaryOp};
 use super::smt::{SmtSolver, SmtFormula, SmtResult, SmtModel};
-use rayon::prelude::*;
 use std::sync::Mutex;
+use rayon::prelude::*;
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// The result of verifying a single candidate
@@ -254,11 +255,10 @@ impl Verifier {
         let start = Instant::now();
 
         if self.use_z3 {
-            self.verify_with_z3(implementation, spec, constraint, kind)
+            let _ = self.verify_with_z3(implementation, spec, constraint, kind);
         } else {
-            // Fall back to bounded model checking / random testing
-            self.verify_with_random_testing(implementation, spec, constraint, kind)
-        };
+            let _ = self.verify_with_random_testing(implementation, spec, constraint, kind);
+        }
 
         ConstraintResult {
             constraint: format_constraint(constraint),

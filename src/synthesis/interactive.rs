@@ -90,7 +90,7 @@ pub fn run(spec: &FunctionSpec, max_iterations: usize) -> anyhow::Result<()> {
                 search_bar.set_message(format!(
                     "Score: {:.1}% | Best candidate: {}",
                     (best_score * 100.0),
-                    snippet.truncate(40),
+                    &snippet[..snippet.len().min(40)],
                 ));
             }
 

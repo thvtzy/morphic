@@ -286,7 +286,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
                 .map(|i| format!("{}// invariant: {}\n", pad, i))
                 .unwrap_or_default();
             format!(
-                "{}while {} {{\n{}{}}}\n",
+                "{}{}while {} {{\n{}{}}}\n",
                 inv_comment,
                 pad,
                 ir_to_rust_expr(condition),

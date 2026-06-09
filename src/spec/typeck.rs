@@ -168,17 +168,18 @@ fn check_constraint(constraint: &Constraint, env: &TypeEnv) -> Result<(), TypeEr
 fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
     match expr {
         Expr::Var(name) => {
-            env.variables.get(name)
-                .or_else(|| env.function_sigs.get(name).map(|f| {
-                    let args: Vec<TypeRef> = f.params.iter().map(|p| p.ty.clone()).collect();
-                    TypeRef::Function(args, Box::new(f.return_type.clone()))
-                }))
-                .cloned()
-                .ok_or_else(|| TypeError {
-                    message: format!("Undefined variable: '{}'", name),
-                    function: None,
-                    span: None,
-                })
+            if let Some(ty) = env.variables.get(name) {
+                return Ok(ty.clone());
+            }
+            if let Some(f) = env.function_sigs.get(name) {
+                let args: Vec<TypeRef> = f.params.iter().map(|p| p.ty.clone()).collect();
+                return Ok(TypeRef::Function(args, Box::new(f.return_type.clone())));
+            }
+            Err(TypeError {
+                message: format!("Undefined variable: '{}'", name),
+                function: None,
+                span: None,
+            })
         }
         Expr::IntLit(_) => Ok(TypeRef::Int),
         Expr::FloatLit(_) => Ok(TypeRef::Float),
