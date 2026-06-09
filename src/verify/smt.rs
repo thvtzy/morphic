@@ -155,7 +155,7 @@ mod tests {
         let three = s.int_val(3);
         let ten = s.int_val(10);
         let sum = z3_add(&x, &three);
-        s.assert(&sum._eq(&ten));
+        s.assert(&sum.eq(&ten));
         match s.check() {
             SmtResult::Sat(_) => {} // x = 7 works
             other => panic!("Expected SAT, got {:?}", other),

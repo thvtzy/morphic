@@ -143,7 +143,7 @@ fn encode_constraint(c: &Constraint, z3: &Z3Session) -> z3::ast::Bool {
         Constraint::Order(OrderOp::LessThan, a, b) => encode_expr_int(a, z3).lt(&encode_expr_int(b, z3)),
         Constraint::Order(OrderOp::LessThanOrEqual, a, b) => encode_expr_int(a, z3).le(&encode_expr_int(b, z3)),
         Constraint::Order(OrderOp::GreaterThan, a, b) => encode_expr_int(a, z3).gt(&encode_expr_int(b, z3)),
-        Constraint::Eq(a, b) => encode_expr_int(a, z3)._eq(&encode_expr_int(b, z3)),
+        Constraint::Eq(a, b) => encode_expr_int(a, z3).eq(&encode_expr_int(b, z3)),
         Constraint::And(parts) => {
             if parts.is_empty() {
                 return z3::ast::Bool::from_bool(true);
@@ -175,7 +175,7 @@ fn encode_expr_bool(expr: &Expr, z3: &Z3Session) -> z3::ast::Bool {
     match expr {
         Expr::BoolLit(true) => z3::ast::Bool::from_bool(true),
         Expr::BoolLit(false) => z3::ast::Bool::from_bool(false),
-        Expr::BinOp(BinOp::Eq, l, r) => encode_expr_int(l, z3)._eq(&encode_expr_int(r, z3)),
+        Expr::BinOp(BinOp::Eq, l, r) => encode_expr_int(l, z3).eq(&encode_expr_int(r, z3)),
         Expr::BinOp(BinOp::Lt, l, r) => encode_expr_int(l, z3).lt(&encode_expr_int(r, z3)),
         Expr::BinOp(BinOp::Le, l, r) => encode_expr_int(l, z3).le(&encode_expr_int(r, z3)),
         Expr::BinOp(BinOp::Gt, l, r) => encode_expr_int(l, z3).gt(&encode_expr_int(r, z3)),
