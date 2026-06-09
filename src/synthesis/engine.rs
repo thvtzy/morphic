@@ -232,6 +232,25 @@ pub enum IRNode {
 
     /// Index access: collection[index]
     Index(Box<IRNode>, Box<IRNode>),
+
+    // ── v0.5 Self-Hosting IR additions ──────────────────
+
+    /// Infinite loop with body (until Break)
+    Loop { body: Box<IRNode> },
+
+    /// Break from a Loop, optionally returning a value
+    Break { value: Option<Box<IRNode>> },
+
+    /// Struct/record type definition
+    StructDef {
+        name: String,
+        fields: Vec<(String, TypeRef)>,
+        body: Box<IRNode>,
+    },
+
+    /// Try-operand: if Result is Err, propagate it up
+    /// Equivalent to Rust's `?` operator
+    TryPropagate(Box<IRNode>),
 }
 
 #[derive(Debug, Clone)]
@@ -1651,6 +1670,10 @@ fn ast_depth(node: &IRNode) -> usize {
         IRNode::Assign { target, value } => 1 + ast_depth(target).max(ast_depth(value)),
         IRNode::Typed { node, .. } => 1 + ast_depth(node),
         IRNode::Index(coll, idx) => 1 + ast_depth(coll).max(ast_depth(idx)),
+        IRNode::Loop { body } => 1 + ast_depth(body),
+        IRNode::Break { value } => 1 + value.as_ref().map(|v| ast_depth(v)).unwrap_or(0),
+        IRNode::StructDef { body, .. } => 1 + ast_depth(body),
+        IRNode::TryPropagate(inner) => 1 + ast_depth(inner),
     }
 }
 
@@ -1719,6 +1742,10 @@ fn ast_node_count(node: &IRNode) -> usize {
         IRNode::Assign { target, value } => 1 + ast_node_count(target) + ast_node_count(value),
         IRNode::Typed { node, .. } => 1 + ast_node_count(node),
         IRNode::Index(coll, idx) => 1 + ast_node_count(coll) + ast_node_count(idx),
+        IRNode::Loop { body } => 1 + ast_node_count(body),
+        IRNode::Break { value } => 1 + value.as_ref().map(|v| ast_node_count(v)).unwrap_or(0),
+        IRNode::StructDef { body, .. } => 1 + ast_node_count(body),
+        IRNode::TryPropagate(inner) => 1 + ast_node_count(inner),
     }
 }
 
