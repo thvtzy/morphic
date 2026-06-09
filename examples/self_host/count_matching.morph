@@ -1,0 +1,18 @@
+SelfHostLib {
+spec count_matching {
+    input: list: List<Int>, threshold: Int
+    output: Int
+
+    constraint: forall x: Int in list:
+        if x > threshold then output > 0
+    constraint: output >= 0
+    constraint: output <= len(list)
+
+    optimize: time < O(n)
+    optimize: space < O(1)
+
+    test "all-match" { input: ([10, 20, 30], 5); expect: 3 }
+    test "none-match" { input: ([1, 2, 3], 5); expect: 0 }
+    test "mixed" { input: ([1, 10, 2, 20], 5); expect: 2 }
+}
+}
