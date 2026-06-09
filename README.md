@@ -243,8 +243,9 @@ morphic/
 | Document | Description |
 |---|---|
 | **[GUIDE.md](GUIDE.md)** | Beginner tutorial — from zero to first synthesized function |
-| **[ARCHITECTURE.md](ARCHITECTURE.md)** | Full compiler pipeline + design decisions |
 | **[LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md)** | Complete .morph language specification |
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | Full compiler pipeline + design decisions |
+| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 pre-flight plan — risks, safeties, milestones |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to contribute + good first issues |
 
 ---
