@@ -5,12 +5,13 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge" alt="Language: Rust"></a>
   <a href="https://github.com/thvtzy/morphic/actions"><img src="https://img.shields.io/github/actions/workflow/status/thvtzy/morphic/ci.yml?branch=master&style=for-the-badge&label=CI" alt="CI Status"></a>
   <br>
-  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v0.2.0-brightgreen?style=for-the-badge" alt="Version: v0.2.0"></a>
+  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v0.4.0-brightgreen?style=for-the-badge" alt="Version: v0.4.0"></a>
   <img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status: Alpha">
   <img src="https://img.shields.io/badge/z3-verified-blue?style=for-the-badge" alt="Z3 Verified">
+  <img src="https://img.shields.io/badge/LLM-Ollama-purple?style=for-the-badge" alt="LLM: Ollama">
   <br>
   <a href="https://github.com/thvtzy/morphic/stargazers"><img src="https://img.shields.io/github/stars/thvtzy/morphic?style=for-the-badge&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/coverage-8%20tests-green?style=for-the-badge" alt="Tests: 8"></a>
+  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-19%20passed-green?style=for-the-badge" alt="Tests: 19"></a>
 </p>
 
 <p align="center">
@@ -187,7 +188,10 @@ ERROR: Postcondition violated
     output = [3, 1, 2]    ← implementation didn't sort
 ```
 
-### 4. Self-Optimizing
+### 4. Template Library
+9 algorithmic patterns seed the synthesis engine: divide-and-conquer, binary search, two-pointer, sliding window, fold, iterator chain, linear scan, memoization, simple compute. The right template is auto-selected based on spec shape detection.
+
+### 5. Self-Optimizing
 The IR that Morphic outputs can be fed back as input. The compiler can **optimize its own generated code.** Morphic functions can call other Morphic functions — each is a spec, not an implementation, so the compiler can cross-optimize.
 
 ---
@@ -198,6 +202,9 @@ The IR that Morphic outputs can be fed back as input. The compiler can **optimiz
 morphic/
 ├── Cargo.toml                    # Rust project config
 ├── README.md                     # This file
+├── GUIDE.md                      # Beginner tutorial
+├── LANGUAGE_REFERENCE.md         # Complete language spec
+├── ARCHITECTURE.md               # Compiler pipeline
 ├── examples/
 │   ├── sort.morph                # Self-synthesizing sort
 │   └── binary_search.morph       # Self-synthesizing binary search
@@ -205,18 +212,24 @@ morphic/
 │   ├── main.rs                   # CLI entry point
 │   ├── spec/
 │   │   ├── mod.rs                # Specification module
-│   │   ├── ast.rs                # AST types (complete)
+│   │   ├── ast.rs                # AST types
 │   │   ├── parser.rs             # .morph parser (recursive descent)
 │   │   └── typeck.rs             # Type checker + constraint validator
+│   ├── llm/
+│   │   ├── mod.rs                # LLM module
+│   │   ├── client.rs             # Ollama + OpenAI + Anthropic clients
+│   │   ├── prompt.rs             # Prompt engineering for synthesis
+│   │   └── parser.rs             # Code extraction from LLM outputs
 │   ├── synthesis/
 │   │   ├── mod.rs                # Synthesis module
 │   │   ├── engine.rs             # MCTS + Genetic + LLM engine
+│   │   ├── templates.rs          # 9 algorithmic patterns
 │   │   ├── selector.rs           # Pareto-optimal candidate selection
 │   │   └── interactive.rs        # Interactive synthesis UI
 │   ├── verify/
 │   │   ├── mod.rs                # Verification module
 │   │   ├── verifier.rs           # Z3-based formal verification
-│   │   └── smt.rs                # SMT-LIB2 translation layer
+│   │   └── smt.rs                # Z3 FFI layer (v0.20)
 │   └── codegen/
 │       └── mod.rs                # Multi-target code generation
 └── tests/
@@ -242,9 +255,9 @@ morphic/
 |---|---|---|
 | **0.1** | Parser + IR + MCTS stub + codegen (5 targets) | ✅ Done |
 | **0.2** | Z3 FFI: real formal verification (bundled binary) | ✅ Done |
-| **0.3** | LLM integration: Ollama (local) + API (remote) | 🔨 Next |
-| **0.4** | Template library: divide-conquer, DP, greedy patterns | 📅 Planned |
-| **0.5** | Self-hosting: Morphic compiler written in Morphic | 📅 Planned |
+| **0.3** | LLM module: Ollama client + prompt + parser (local + remote) | ✅ Done |
+| **0.4** | Template library: 9 algorithmic patterns + spec shape detection | ✅ Done |
+| **0.5** | Self-hosting: Morphic compiler written in Morphic | 🔨 Next |
 | **0.6** | WASM playground: Morphic in the browser | 📅 Planned |
 | **1.0** | Production-ready — verified standard library | 🎯 Target |
 
@@ -265,11 +278,12 @@ This is the same dual-license used by the Rust compiler, Tokio, Serde, and most 
 
 ## 🤝 Contributing
 
-This is pre-alpha. Everything is fluid. If you want to contribute:
+Morphic is alpha — ideas welcome, PRs celebrated.
 
-1. Read `ARCHITECTURE.md`
+1. Read [ARCHITECTURE.md](ARCHITECTURE.md) and [GUIDE.md](GUIDE.md)
 2. Pick an issue tagged `good-first-issue`
-3. Morphic is built in Rust with Z3 via FFI
+3. Install dependencies: Rust 1.75+, Z3 (bundled via `gh-release`)
+4. Submit PR with tests
 
 ---
 

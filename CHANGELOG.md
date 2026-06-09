@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.4.0] — 2026-06-09
+
+### Added
+- **Template library** — 9 algorithmic patterns (v0.4)
+- **LLM module** — Ollama + OpenAI + Anthropic clients (v0.3)
+- **Prompt engineering** — spec → structured synthesis prompt
+- **Response parser** — multi-format code extraction
+- **IRNode::Index variant** — collection indexing in IR
+- **Spec shape detection** — auto-select matching templates
+
+### Changed
+- **reqwest** — now required dependency (was optional)
+- **Cargo.toml** — v0.4.0, simplified feature flags
+
+Tests: 19/19 passing (5 parser + 3 Z3 + 3 prompt + 3 parser + 3 templates + 1 client + 1 selector)
+
+---
+
 ## [0.2.0] — 2026-06-09
 
 ### Added
