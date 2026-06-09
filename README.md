@@ -5,9 +5,12 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge" alt="Language: Rust"></a>
   <a href="https://github.com/thvtzy/morphic/actions"><img src="https://img.shields.io/github/actions/workflow/status/thvtzy/morphic/ci.yml?branch=master&style=for-the-badge&label=CI" alt="CI Status"></a>
   <br>
-  <img src="https://img.shields.io/badge/status-pre--alpha-red?style=for-the-badge" alt="Status: Pre-alpha">
-  <img src="https://img.shields.io/badge/phase-research-brightgreen?style=for-the-badge" alt="Phase: Research">
+  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v0.2.0-brightgreen?style=for-the-badge" alt="Version: v0.2.0"></a>
+  <img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status: Alpha">
+  <img src="https://img.shields.io/badge/z3-verified-blue?style=for-the-badge" alt="Z3 Verified">
+  <br>
   <a href="https://github.com/thvtzy/morphic/stargazers"><img src="https://img.shields.io/github/stars/thvtzy/morphic?style=for-the-badge&color=yellow" alt="Stars"></a>
+  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/coverage-8%20tests-green?style=for-the-badge" alt="Tests: 8"></a>
 </p>
 
 <p align="center">
@@ -110,7 +113,7 @@ spec sort<T> {
 
 ```bash
 # Install (requires Rust toolchain)
-git clone https://github.com/morphic-lang/morphic
+git clone https://github.com/thvtzy/morphic
 cd morphic
 cargo build --release
 
@@ -222,16 +225,28 @@ morphic/
 
 ---
 
+## 📚 Documentation
+
+| Document | Description |
+|---|---|
+| **[GUIDE.md](GUIDE.md)** | Beginner tutorial — from zero to first synthesized function |
+| **[ARCHITECTURE.md](ARCHITECTURE.md)** | Full compiler pipeline + design decisions |
+| **[LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md)** | Complete .morph language specification |
+| **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to contribute + good first issues |
+
+---
+
 ## 🎯 Roadmap
 
-| Version | Feature |
-|---|---|
-| **0.2** | Full Z3 FFI integration (bypass subprocess) |
-| **0.3** | Local LLM support via llama.cpp (offline synthesis) |
-| **0.4** | Self-hosting: Morphic compiler written in Morphic |
-| **0.5** | Incremental synthesis — reuse previously synthesized functions |
-| **0.6** | Web playground (WASM-compiled Morphic in browser) |
-| **1.0** | Production-ready — verified standard library |
+| Version | Feature | Status |
+|---|---|---|
+| **0.1** | Parser + IR + MCTS stub + codegen (5 targets) | ✅ Done |
+| **0.2** | Z3 FFI: real formal verification (bundled binary) | ✅ Done |
+| **0.3** | LLM integration: Ollama (local) + API (remote) | 🔨 Next |
+| **0.4** | Template library: divide-conquer, DP, greedy patterns | 📅 Planned |
+| **0.5** | Self-hosting: Morphic compiler written in Morphic | 📅 Planned |
+| **0.6** | WASM playground: Morphic in the browser | 📅 Planned |
+| **1.0** | Production-ready — verified standard library | 🎯 Target |
 
 ---
 
