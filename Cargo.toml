@@ -11,15 +11,15 @@ name = "morphic"
 path = "src/main.rs"
 
 [features]
-default = ["llm-remote"]
-llm-local = ["llama-cpp-2"]
+default = []
 llm-remote = ["reqwest", "tokio"]
-z3-static = ["z3/static-link"]
+llm-local = ["llama-cpp-2"]
+z3-support = ["z3"]
 
 [dependencies]
 # Parsing
-logos = "0.14"
-chumsky = "0.9"
+logos = "0.15"
+chumsky = "1"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -34,24 +34,28 @@ serde_json = "1"
 thiserror = "2"
 
 # Search & data structures
-petgraph = "0.6"
+petgraph = "0.7"
 rand = "0.8"
 rayon = "1.10"
-dashmap = "5"
+dashmap = "6"
 slotmap = "1"
 
-# Formal verification (optional backend)
-z3 = { version = "0.13", optional = true }
+# Formal verification (optional — requires Z3 4.12+ installed on system)
+z3 = { version = "0.6", optional = true }
 
-# LLM backends
+# LLM backends (optional — enable via features)
 llama-cpp-2 = { version = "0.1", optional = true }
 reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
-tokio = { version = "1", features = ["full"], optional = true }
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
 
 # Misc
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
-itertools = "0.13"
+itertools = "0.14"
+
+# Remove RUSTFLAGS warning for unused imports during development
+[profile.dev]
+opt-level = 0
 
 [profile.release]
 opt-level = 3
