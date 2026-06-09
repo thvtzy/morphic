@@ -1,0 +1,148 @@
+// ┌────────────────────────────────────────────────────────────┐
+// │  M0 Phase B: Functional-Style Tokenizer                     │
+// │  Proof that Morphic IR can express compiler components      │
+// │  WITHOUT self/&mut/OOP — pure functional struct passing     │
+// └────────────────────────────────────────────────────────────┘
+
+// ── Types ──────────────────────────────────────────────────
+
+type TokenizerState = {
+    source: String,
+    pos: Int,
+    line: Int,
+    col: Int,
+    tokens: List<Token>
+}
+
+type Token = {
+    kind: TokenKind,
+    lexeme: String,
+    line: Int,
+    col: Int
+}
+
+type TokenKind = Int  // ADT simulated: 0=Ident, 1=IntLit, 2=StringLit, 3=LParen, etc.
+
+type StepResult = Result<TokenizerState, String>
+
+// ── State Accessors (pure functions) ──────────────────────
+
+spec peek {
+    input: state: TokenizerState
+    output: Option<Char>
+
+    constraint: if state.pos >= len(state.source) then output == None()
+    constraint: if state.pos < len(state.source) then output == Some(state.source[state.pos])
+
+    test "non-empty" { input: { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }; expect: Some('h') }
+    test "at-end" { input: { source: "", pos: 0, line: 1, col: 1, tokens: [] }; expect: None() }
+}
+
+spec next_char {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos == state.pos + 1
+    constraint: if peek(state) == Some('\n')
+        then output.line == state.line + 1 && output.col == 1
+        else output.col == state.col + 1
+
+    test "normal" {
+        input: { source: "ab", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: { source: "ab", pos: 1, line: 1, col: 2, tokens: [] }
+    }
+}
+
+// ── Tokenizer Core ────────────────────────────────────────
+
+spec is_whitespace {
+    input: c: Char
+    output: Bool
+
+    constraint: output == (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+
+    test "space" { input: ' '; expect: true }
+    test "letter" { input: 'a'; expect: false }
+    test "newline" { input: '\n'; expect: true }
+}
+
+spec is_ident_start {
+    input: c: Char
+    output: Bool
+
+    constraint: output == (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+
+    test "lower" { input: 'a'; expect: true }
+    test "digit" { input: '5'; expect: false }
+    test "underscore" { input: '_'; expect: true }
+}
+
+spec is_ident_continue {
+    input: c: Char
+    output: Bool
+
+    constraint: output == is_ident_start(c) || (c >= '0' && c <= '9')
+
+    test "letter" { input: 'x'; expect: true }
+    test "digit-ok" { input: '7'; expect: true }
+    test "special" { input: '{'; expect: false }
+}
+
+spec skip_whitespace {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    invariant: output.pos >= state.pos
+    invariant: len(output.source) == len(state.source)
+
+    test "no-whitespace" {
+        input: { source: "hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
+    }
+
+    test "skip-spaces" {
+        input: { source: "  hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: { source: "  hi", pos: 2, line: 1, col: 3, tokens: [] }
+    }
+}
+
+spec tokenize_one {
+    input: state: TokenizerState
+    output: StepResult
+
+    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+    constraint: output.is_ok() || state.pos >= len(state.source)
+
+    test "keyword-spec" {
+        input: { source: "spec", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok({ source: "spec", pos: 4, line: 1, col: 5, tokens: [
+            { kind: 0, lexeme: "spec", line: 1, col: 1 }
+        ] })
+    }
+
+    test "end-of-input" {
+        input: { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok({ source: "", pos: 0, line: 1, col: 1, tokens: [] })
+    }
+}
+
+spec tokenize_all {
+    input: state: TokenizerState
+    output: Result<List<Token>, String>
+
+    constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
+    optimize: time < O(n)
+
+    test "simple-spec" {
+        input: { source: "spec sort", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([
+            { kind: 0, lexeme: "spec", line: 1, col: 1 },
+            { kind: 0, lexeme: "sort", line: 1, col: 6 }
+        ])
+    }
+
+    test "empty" {
+        input: { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([])
+    }
+}
