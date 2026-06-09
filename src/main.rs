@@ -4,6 +4,7 @@
 // └────────────────────────────────────────────────────────────┘
 
 mod spec;
+mod llm;
 mod synthesis;
 mod verify;
 mod codegen;

@@ -1,6 +1,6 @@
 [package]
 name = "morphic"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Self-Synthesizing Programming Language — write specs, not implementations"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [features]
 default = ["z3-support"]
-llm-remote = ["reqwest", "tokio"]
+llm-remote = ["tokio"]
 llm-local = ["llama-cpp-2"]
 z3-support = ["z3", "z3/gh-release"]
 
@@ -32,12 +32,14 @@ serde_json = "1"
 rayon = "1.10"
 rand = "0.8"
 
-# Formal verification (v0.2: bundled Z3 4.13 via z3 crate FFI)
+# HTTP client (Ollama + optional remote LLM)
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+
+# Formal verification (v0.2: bundled Z3 via z3 crate FFI)
 z3 = { version = "0.20", optional = true, features = ["gh-release"] }
 
 # LLM backends (optional — enable via features)
 llama-cpp-2 = { version = "0.1", optional = true }
-reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
 tokio = { version = "1", features = ["rt", "macros"], optional = true }
 
 [profile.dev]

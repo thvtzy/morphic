@@ -109,7 +109,7 @@ pub fn z3_and(a: &z3::ast::Bool, b: &z3::ast::Bool) -> z3::ast::Bool {
     z3::ast::Bool::and(&[a, b])
 }
 
-fn extract_model(model: &z3::Model) -> HashMap<String, SmtValue> {
+fn extract_model(_model: &z3::Model) -> HashMap<String, SmtValue> {
     // v0.20: model.iter() returns FuncDecl objects.
     // Model extraction requires tracking created vars — simplified for v0.2.
     // Full counterexample extraction will be added when we track var bindings.
