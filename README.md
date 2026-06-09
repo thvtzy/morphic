@@ -1,7 +1,7 @@
 # ⚡ Morphic — Self-Synthesizing Programming Language
 
 <p align="center">
-  <a href="https://github.com/thvtzy/morphic/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge" alt="License: MIT"></a>
+  <a href="https://github.com/thvtzy/morphic/blob/master/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue.svg?style=for-the-badge" alt="License: MIT OR Apache-2.0"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge" alt="Language: Rust"></a>
   <a href="https://github.com/thvtzy/morphic/actions"><img src="https://img.shields.io/github/actions/workflow/status/thvtzy/morphic/ci.yml?branch=master&style=for-the-badge&label=CI" alt="CI Status"></a>
   <br>
@@ -237,7 +237,14 @@ morphic/
 
 ## 📜 License
 
-MIT — use it, fork it, build on it.
+This project is dual-licensed under either:
+
+- **[MIT License](LICENSE-MIT)** — simple, permissive
+- **[Apache License 2.0](LICENSE-APACHE)** — includes patent protection
+
+at your option. See [NOTICE](NOTICE) for details.
+
+This is the same dual-license used by the Rust compiler, Tokio, Serde, and most of the Rust ecosystem.
 
 ---
 

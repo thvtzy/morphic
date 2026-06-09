@@ -3,8 +3,8 @@ name = "morphic"
 version = "0.1.0"
 edition = "2021"
 description = "Self-Synthesizing Programming Language — write specs, not implementations"
-license = "MIT"
-repository = "https://github.com/morphic-lang/morphic"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thvtzy/morphic"
 
 [[bin]]
 name = "morphic"
