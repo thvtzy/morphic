@@ -1,6 +1,6 @@
 [package]
 name = "morphic"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Self-Synthesizing Programming Language — write specs, not implementations"
 license = "MIT OR Apache-2.0"
@@ -11,10 +11,10 @@ name = "morphic"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["z3-support"]
 llm-remote = ["reqwest", "tokio"]
 llm-local = ["llama-cpp-2"]
-z3-support = ["z3"]
+z3-support = ["z3", "z3/gh-release"]
 
 [dependencies]
 # CLI & error handling
@@ -32,8 +32,8 @@ serde_json = "1"
 rayon = "1.10"
 rand = "0.8"
 
-# Formal verification (optional — requires Z3 4.12+ installed on system)
-z3 = { version = "0.6", optional = true }
+# Formal verification (v0.2: bundled Z3 4.13 via z3 crate FFI)
+z3 = { version = "0.20", optional = true, features = ["gh-release"] }
 
 # LLM backends (optional — enable via features)
 llama-cpp-2 = { version = "0.1", optional = true }

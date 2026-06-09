@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.0] — 2024-06-09
+## [0.2.0] — 2026-06-09
+
+### Added
+- **Real Z3 FFI integration** — z3 crate v0.20 via `gh-release` (prebuilt binary, no cmake needed)
+- **Z3Session** — thread-local context API matching v0.20 design
+- **Constraint → Z3 translation** — Int/Bool encoding for pre/postconditions
+- **Verification tests** — 3 Z3 tests: SAT, UNSAT, arithmetic correctness
+- **Default feature: z3-support** — Z3 verification enabled out of the box
+
+### Changed
+- **z3 crate**: 0.6 → 0.20 (major API refactor)
+- **smt.rs**: Rewritten for real Z3 FFI (was subprocess-based)
+- **verifier.rs**: Rewritten with Z3 constraint encoding
+- **Cargo.toml**: `z3-support` uses `gh-release` (auto-downloads Z3 binary)
+
+### Fixed
+- All 16 v0.1 compile errors resolved
+- Parser tests fixed
+- HashMap/rayon imports throughout codebase
+
+---
+
+## [0.1.0] — 2026-06-09
 
 ### Added
 - **Initial release** — Self-Synthesizing Programming Language
