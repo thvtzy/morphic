@@ -17,6 +17,7 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.allow_failure || false }}
     strategy:
       matrix:
         include:
@@ -26,9 +27,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: morphic.exe
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            binary: morphic
 
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +53,9 @@ jobs:
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: cd dist && 7z a -tzip ../morphic-${{ matrix.target }}.zip *
+        run: |
+          cd dist
+          Compress-Archive -Path * -DestinationPath "../morphic-${{ matrix.target }}.zip"
 
       - uses: actions/upload-artifact@v4
         with:
