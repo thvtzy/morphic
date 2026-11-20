@@ -494,4 +494,228 @@ spec rust_literal_fixed_text {
     test "unit-text" { input: 5 expect: "()" }
 }
 
+// -- Pattern templates (ir_pattern_to_rust) ---------------------
+
+spec rust_pattern_form {
+    doc: "Rendering family of an IR pattern in ir_pattern_to_rust (src/codegen/mod.rs:813): 0 = fixed text (Wildcard, via rust_pattern_fixed_text), 1 = name (Variable: the rust_ident-rendered name itself -- slice 3 owns rust_ident), 2 = literal (Literal: the family of rust_pattern_literal_form), 3 = constructor template (the name, then '(' + sub-patterns joined ', ' + ')' -- or the bare name when there are no sub-patterns, pinned by rust_pattern_ctor_name), 4 = guard template (the pattern, then ' if ', then the guard text -- the guard is already text in the IR and is interpolated raw). Total over all five IRPattern kinds. The templates' fixed texts are stated here; their assembly needs concatenation and is unpinned (slice-2 note)."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<3||kind>3||output==3
+    constraint: kind<4||kind>4||output==4
+
+    optimize: time < O(n)
+
+    test "wildcard-form" { input: 0 expect: 0 }
+    test "literal-form" { input: 2 expect: 2 }
+    test "guard-form" { input: 4 expect: 4 }
+}
+
+spec rust_pattern_fixed_text {
+    doc: "Value-independent text of an IR pattern kind: only Wildcard (0) has one -- '_' (src/codegen/mod.rs:815)."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="_"
+
+    optimize: time < O(n)
+
+    test "wildcard-text" { input: 0 expect: "_" }
+}
+
+spec rust_pattern_literal_form {
+    doc: "Rendering family of a literal inside a pattern (the Literal arm of ir_pattern_to_rust, src/codegen/mod.rs:817-822): 0 = value text (Int renders its decimal text; Bool renders via rust_literal_bool), 1 = wildcard fallback (Float, Char and Unit patterns render '_' regardless of value -- pinned by rust_pattern_literal_text; such a pattern therefore matches EVERYTHING, silently widening the match arm), 2 = quoted-raw template (String: a quote, the contents with no escaping, a quote -- as in expression position). Total over all six IRLiteral kinds."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==0
+    constraint: kind<3||kind>3||output==2
+    constraint: kind<4||kind>4||output==1
+    constraint: kind<5||kind>5||output==1
+
+    optimize: time < O(n)
+
+    test "int-value-text" { input: 0 expect: 0 }
+    test "float-wildcard" { input: 1 expect: 1 }
+    test "string-quoted" { input: 3 expect: 2 }
+    test "unit-wildcard" { input: 5 expect: 1 }
+}
+
+spec rust_pattern_literal_text {
+    doc: "Fixed text of the pattern-literal fallback rows (src/codegen/mod.rs:821): Float (1), Char (4) and Unit (5) literal patterns all render '_'. Int, Bool and String literals are value-dependent and unpinned here."
+    input: kind: Int
+    output: String
+
+    constraint: kind<1||kind>1||output=="_"
+    constraint: kind<4||kind>4||output=="_"
+    constraint: kind<5||kind>5||output=="_"
+
+    optimize: time < O(n)
+
+    test "float-text" { input: 1 expect: "_" }
+    test "char-text" { input: 4 expect: "_" }
+    test "unit-text" { input: 5 expect: "_" }
+}
+
+spec rust_pattern_ctor_name {
+    doc: "A constructor pattern with NO sub-patterns renders as its bare name (ir_pattern_to_rust, src/codegen/mod.rs:823-827): output == name exactly, for every name. The name arrives already rendered by rust_ident (slice 3 owns sanitization). The with-sub-patterns branch -- the name, then '(' + the joined sub-pattern renderings + ')' -- is assembly and unpinned (slice-2 note). Multi-input spec: no in-spec tests (the test syntax cannot bind tuple inputs); golden cases live in tests/m3_proof.rs."
+    input: name: String, has_subs: Bool
+    output: String
+
+    constraint: has_subs==true||output==name
+
+    optimize: time < O(n)
+}
+
+// -- Spec-expression templates (expr_to_rust) -------------------
+
+spec rust_expr_form {
+    doc: "Rendering family of a spec expression in expr_to_rust (src/codegen/mod.rs:1177-1200) -- the walker that emits spec tests into generated code (generate_rust's test module) and constraint operands into precondition asserts: 0 = name (Var: the rust_ident-rendered name), 1 = decimal text (IntLit), 2 = value text (BoolLit, via rust_literal_bool), 3 = quoted-raw template (StringLit), 4 = call template (the name, then '(' + args joined ', ' + ')'), 5 = binary template ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from spec_binop_symbol, slice 1), 6 = fallback fixed text '??' (via rust_expr_fixed_text). Total over all thirteen Expr kinds. Two sharp edges of the original are pinned deliberately: FloatLit (2) and UnaryOp (9) have NO arm and fall through to '??' like the structural kinds -- a float literal in a spec test renders as '??' in the generated test. And StringLit's bare quoted rendering is pinned as-is: the E0308 it can cause (a &str literal passed where the synthesized function takes String) is a property of generate_rust placing this rendering in call position -- the driver slice owns it; the IR side's ownership rewrite (ir_to_rust_expr_typed) has no counterpart here."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==6
+    constraint: kind<3||kind>3||output==2
+    constraint: kind<4||kind>4||output==3
+    constraint: kind<5||kind>5||output==6
+    constraint: kind<6||kind>6||output==6
+    constraint: kind<7||kind>7||output==4
+    constraint: kind<8||kind>8||output==5
+    constraint: kind<9||kind>9||output==6
+    constraint: kind<10||kind>10||output==6
+    constraint: kind<11||kind>11||output==6
+    constraint: kind<12||kind>12||output==6
+
+    optimize: time < O(n)
+
+    test "var-form" { input: 0 expect: 0 }
+    test "floatlit-fallback" { input: 2 expect: 6 }
+    test "call-form" { input: 7 expect: 4 }
+    test "binop-form" { input: 8 expect: 5 }
+    test "comprehension-fallback" { input: 12 expect: 6 }
+}
+
+spec rust_expr_fixed_text {
+    doc: "Fixed text of expr_to_rust's catch-all (src/codegen/mod.rs:1199): every Expr kind without an arm -- FloatLit (2), Field (5), Index (6), UnaryOp (9), Lambda (10), Length (11), Comprehension (12) -- renders '??'."
+    input: kind: Int
+    output: String
+
+    constraint: kind<2||kind>2||output=="??"
+    constraint: kind<5||kind>5||output=="??"
+    constraint: kind<6||kind>6||output=="??"
+    constraint: kind<9||kind>9||output=="??"
+    constraint: kind<10||kind>10||output=="??"
+    constraint: kind<11||kind>11||output=="??"
+    constraint: kind<12||kind>12||output=="??"
+
+    optimize: time < O(n)
+
+    test "floatlit-text" { input: 2 expect: "??" }
+    test "unaryop-text" { input: 9 expect: "??" }
+}
+
+// -- Constraint templates (constraint_to_rust) ------------------
+
+spec rust_constraint_form {
+    doc: "Rendering family of a constraint in constraint_to_rust (src/codegen/mod.rs:1162-1174) -- the walker behind generate_rust's precondition debug_assert!s: 0 = fixed text 'true' (True itself, plus every kind the catch-all swallows: Expr, Forall, Exists, Implies, Or, Predicate -- pinned row by row in rust_constraint_fixed_text), 1 = negation template ('!(' + inner rendering + ')'), 2 = equality template (left + ' == ' + right, operands rendered by expr_to_rust), 3 = order (rust_order_form: LessThan/LessThanOrEqual are templates over expr_to_rust operands, GreaterThan/GreaterThanOrEqual fall back to 'true'), 4 = conjunction template ('(' + parts joined ' && ' + ')'). Total over all eleven Constraint kinds. Pinning family 0 completely is the point: an Or precondition, for example, asserts nothing in generated code today."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==0
+    constraint: kind<2||kind>2||output==0
+    constraint: kind<3||kind>3||output==0
+    constraint: kind<4||kind>4||output==0
+    constraint: kind<5||kind>5||output==4
+    constraint: kind<6||kind>6||output==0
+    constraint: kind<7||kind>7||output==1
+    constraint: kind<8||kind>8||output==2
+    constraint: kind<9||kind>9||output==3
+    constraint: kind<10||kind>10||output==0
+
+    optimize: time < O(n)
+
+    test "true-form" { input: 0 expect: 0 }
+    test "and-form" { input: 5 expect: 4 }
+    test "or-swallowed" { input: 6 expect: 0 }
+    test "not-form" { input: 7 expect: 1 }
+    test "order-form" { input: 9 expect: 3 }
+}
+
+spec rust_constraint_fixed_text {
+    doc: "Fixed text of constraint_to_rust's True arm and catch-all (src/codegen/mod.rs:1163,1173): True (0), Expr (1), Forall (2), Exists (3), Implies (4), Or (6) and Predicate (10) all render 'true'."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="true"
+    constraint: kind<1||kind>1||output=="true"
+    constraint: kind<2||kind>2||output=="true"
+    constraint: kind<3||kind>3||output=="true"
+    constraint: kind<4||kind>4||output=="true"
+    constraint: kind<6||kind>6||output=="true"
+    constraint: kind<10||kind>10||output=="true"
+
+    optimize: time < O(n)
+
+    test "true-text" { input: 0 expect: "true" }
+    test "or-text" { input: 6 expect: "true" }
+    test "predicate-text" { input: 10 expect: "true" }
+}
+
+spec rust_order_form {
+    doc: "Rendering family of an Order constraint's operator (constraint_to_rust, src/codegen/mod.rs:1166-1167): 0 = comparison template with separator ' < ' (LessThan), 1 = comparison template with separator ' <= ' (LessThanOrEqual), 2 = fallback fixed text 'true' (GreaterThan and GreaterThanOrEqual have no arm and are swallowed by the catch-all, so a '>' precondition asserts nothing in generated code). Total over all four OrderOp codes. The separators are pinned by rust_order_separator."
+    input: op: Int
+    output: Int
+
+    constraint: op<0||op>0||output==0
+    constraint: op<1||op>1||output==1
+    constraint: op<2||op>2||output==2
+    constraint: op<3||op>3||output==2
+
+    optimize: time < O(n)
+
+    test "lt-form" { input: 0 expect: 0 }
+    test "le-form" { input: 1 expect: 1 }
+    test "gt-fallback" { input: 2 expect: 2 }
+    test "ge-fallback" { input: 3 expect: 2 }
+}
+
+spec rust_order_separator {
+    doc: "Infix separator of an order comparison in constraint_to_rust, spaces included: ' < ' for LessThan (0), ' <= ' for LessThanOrEqual (1). GreaterThan and GreaterThanOrEqual never reach a separator (rust_order_form family 2) and are unpinned here."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output==" < "
+    constraint: op<1||op>1||output==" <= "
+
+    optimize: time < O(n)
+
+    test "lt-separator" { input: 0 expect: " < " }
+    test "le-separator" { input: 1 expect: " <= " }
+}
+
+// -- Condition-position wrap (expr_in_condition_position) -------
+
+spec rust_condition_wrap {
+    doc: "Whether expr_in_condition_position (src/codegen/mod.rs:587-601) wraps a node's rendering in parentheses when the node appears as an if/while condition or a match scrutinee: the block-like kinds -- Block (1), Let (2), If (3), While (4), For (5), Match (6), Lambda (13), Closure (14), Loop (24), StructDef (26) -- wrap; every other kind renders bare (a BinOp, for example, is already parenthesized by its own template and is NOT wrapped again). Total over all 28 IRNode kinds. The wrap template itself ('(' + rendering + ')') is assembly and unpinned (slice-2 note); what is pinned is exactly the classification the original's match states."
+    input: kind: Int
+    output: Bool
+
+    constraint: output == (kind==1||kind==2||kind==3||kind==4||kind==5||kind==6||kind==13||kind==14||kind==24||kind==26)
+
+    optimize: time < O(n)
+
+    test "match-wraps" { input: 6 expect: true }
+    test "loop-wraps" { input: 24 expect: true }
+    test "literal-bare" { input: 9 expect: false }
+    test "hole-bare" { input: 0 expect: false }
+}
+
 }
