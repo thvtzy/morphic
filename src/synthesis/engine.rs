@@ -1314,12 +1314,23 @@ enum PathElem {
 #[derive(Debug, Clone)]
 struct HoleRef {
     path: HolePath,
+    /// The type the hole declares for its filling
+    /// (`IRNode::Hole::expected_type`), captured when the hole
+    /// was found. Holes are only ever located through
+    /// `find_hole_positions`, so this is always the type of the
+    /// actual hole at `path` in the tree the ref was taken from.
+    /// Filling generation reads it to stay type-directed; before
+    /// this field existed the fillers never saw the type at all.
+    expected_type: Option<TypeRef>,
 }
 
 fn find_holes_rec(node: &IRNode, path: &mut HolePath, holes: &mut Vec<HoleRef>) {
     match node {
-        IRNode::Hole { .. } => {
-            holes.push(HoleRef { path: path.clone() });
+        IRNode::Hole { expected_type, .. } => {
+            holes.push(HoleRef {
+                path: path.clone(),
+                expected_type: expected_type.clone(),
+            });
         }
         IRNode::Block(stmts) => {
             for (i, stmt) in stmts.iter().enumerate() {
@@ -1668,7 +1679,116 @@ fn build_simple_loop(_spec: &FunctionSpec, engine: &SynthesisEngine) -> IRNode {
 
 // ── Mutation helpers ──────────────────────────────────────
 
+/// Literal fillings whose type is exactly `ty` — the menu for a
+/// hole that knows its expected type. Returns None for types
+/// with no literal menu: named/generic types, functions, maps,
+/// sets (codegen emits them unimported), arrays, and Option —
+/// the IR has no Option literal node, so there is no honest
+/// `None` filling to offer. Callers fall back to the legacy
+/// type-blind menu on None.
+fn typed_literal_fillings(ty: &TypeRef) -> Option<Vec<IRNode>> {
+    fn lit(l: IRLiteral) -> IRNode {
+        IRNode::Literal(l)
+    }
+    Some(match ty {
+        TypeRef::Bool => vec![lit(IRLiteral::Bool(true)), lit(IRLiteral::Bool(false))],
+        TypeRef::Int
+        | TypeRef::I8
+        | TypeRef::I16
+        | TypeRef::I32
+        | TypeRef::I64
+        | TypeRef::U8
+        | TypeRef::U16
+        | TypeRef::U32
+        | TypeRef::U64 => vec![lit(IRLiteral::Int(0)), lit(IRLiteral::Int(1))],
+        TypeRef::Float => vec![lit(IRLiteral::Float(0.0))],
+        TypeRef::String => vec![lit(IRLiteral::String(String::new()))],
+        TypeRef::Char => vec![lit(IRLiteral::Char('a'))],
+        TypeRef::Unit => vec![lit(IRLiteral::Unit)],
+        TypeRef::List(_) => vec![IRNode::Collection {
+            kind: CollectionKind::List,
+            elements: Vec::new(),
+        }],
+        TypeRef::Tuple(parts) => {
+            let mut elements = Vec::new();
+            for part in parts {
+                elements.push(typed_literal_fillings(part)?.into_iter().next()?);
+            }
+            vec![IRNode::Collection {
+                kind: CollectionKind::Tuple,
+                elements,
+            }]
+        }
+        _ => return None,
+    })
+}
+
+/// Does this node have type `ty` by construction? Only the
+/// shapes `expr_to_ir` can produce for a test's expected output
+/// (literals and collections of literals) are recognized;
+/// anything else — Vars, Calls, BinOps, Holes — is conservatively
+/// rejected, so a value is only admitted to a typed menu when
+/// its type is certain.
+fn node_matches_type(node: &IRNode, ty: &TypeRef) -> bool {
+    match (node, ty) {
+        (IRNode::Literal(IRLiteral::Bool(_)), TypeRef::Bool) => true,
+        (
+            IRNode::Literal(IRLiteral::Int(_)),
+            TypeRef::Int
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64,
+        ) => true,
+        (IRNode::Literal(IRLiteral::Float(_)), TypeRef::Float) => true,
+        (IRNode::Literal(IRLiteral::String(_)), TypeRef::String) => true,
+        (IRNode::Literal(IRLiteral::Char(_)), TypeRef::Char) => true,
+        (IRNode::Literal(IRLiteral::Unit), TypeRef::Unit) => true,
+        (IRNode::Collection { kind: CollectionKind::List, elements }, TypeRef::List(elem)) => {
+            elements.iter().all(|e| node_matches_type(e, elem))
+        }
+        (IRNode::Collection { kind: CollectionKind::Tuple, elements }, TypeRef::Tuple(parts)) => {
+            elements.len() == parts.len()
+                && elements
+                    .iter()
+                    .zip(parts.iter())
+                    .all(|(e, t)| node_matches_type(e, t))
+        }
+        _ => false,
+    }
+}
+
 fn generate_hole_fillings(hole: &HoleRef, node: &MCTSNode, spec: &FunctionSpec) -> Vec<IRNode> {
+    // Type-directed menu: when the hole knows its expected type
+    // (the TestInduced seed's wildcard hole carries the spec's
+    // return type), every filling must be an expression of that
+    // type. The legacy menu below is type-blind — it always led
+    // with Int(0) — so seed completions put `_ => 0` in Bool and
+    // String functions: honest tpr 1.0 (the arm is unreachable
+    // by the tests) but rejected by rustc (E0308).
+    if let Some(ty) = &hole.expected_type {
+        if let Some(mut fillings) = typed_literal_fillings(ty) {
+            // A test's expected output is return-typed by
+            // construction, so the distinct outputs belong in
+            // the menu too (e.g. the real Int/String values the
+            // spec already names).
+            for test in &spec.tests {
+                let output = expr_to_ir(&test.expected_output);
+                if node_matches_type(&output, ty)
+                    && !fillings
+                        .iter()
+                        .any(|f| format!("{:?}", f) == format!("{:?}", output))
+                {
+                    fillings.push(output);
+                }
+            }
+            return fillings;
+        }
+    }
     // Generate diverse fillings for the hole. Every variable a
     // filling references must be in scope at the hole's position:
     // the previous version hardcoded Var("x") and `a + b` — names
@@ -1798,8 +1918,18 @@ fn random_scoped_leaf(scope: &[String]) -> IRNode {
     }
 }
 
-fn random_filling(_hole: &HoleRef, scope: &[String]) -> IRNode {
+fn random_filling(hole: &HoleRef, scope: &[String]) -> IRNode {
     use rand::Rng;
+    // Type-directed draw: a hole that knows its expected type is
+    // filled from the typed literal menu — never with a
+    // wrong-typed literal, a Return wrapper, or a fresh Hole
+    // (the legacy arms below, kept exactly for untyped holes).
+    if let Some(ty) = &hole.expected_type {
+        if let Some(fillings) = typed_literal_fillings(ty) {
+            let idx = rand::thread_rng().gen_range(0..fillings.len());
+            return fillings.into_iter().nth(idx).unwrap();
+        }
+    }
     match rand::thread_rng().gen_range(0u32..5) {
         0 => IRNode::Literal(IRLiteral::Int(0)),
         1 => IRNode::Literal(IRLiteral::Bool(true)),
@@ -2811,7 +2941,7 @@ mod tests {
     /// code returned Var("result") / Var("output") here).
     #[test]
     fn random_filling_only_emits_in_scope_vars() {
-        let hole = HoleRef { path: Vec::new() };
+        let hole = HoleRef { path: Vec::new(), expected_type: None };
         let scope = vec!["kind".to_string(), "y".to_string()];
         for _ in 0..500 {
             let filling = random_filling(&hole, &scope);
