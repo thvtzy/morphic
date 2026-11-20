@@ -1,11 +1,15 @@
 // ─────────────────────────────────────────────────────────────
-//  M3 SYNTHESIS PROBE (test-only) — slice 1: leaf mappings
+//  M3 SYNTHESIS PROBE (test-only) — slices 1–2: leaf mappings
+//  + small template families
 //
 //  Generalizes the M2 synthesis probe (src/m2_synthesis_probe.rs)
 //  to the Codegen module: runs the real build pipeline (parse →
 //  typecheck → synthesize at opt level 1 → verify_all (Z3) →
 //  select_best → codegen) for every spec in
-//  examples/self_host/codegen.morph, through the module-aware
+//  examples/self_host/codegen.morph (all 28: the 8 slice-1 leaf
+//  mappings and the 20 slice-2 template families, including
+//  the Bool-input rust_literal_bool and the multi-input
+//  rust_pattern_ctor_name), through the module-aware
 //  path (synthesize_with_module + Verifier::with_specs), exactly
 //  as the M2 probe does for validator.morph / printer.morph.
 //
