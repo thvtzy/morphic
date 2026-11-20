@@ -471,7 +471,11 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_compare(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_add()?;
-        if self.peek() == Some('<') || self.peek() == Some('>') || self.peek() == Some('=') {
+        if self.peek() == Some('<')
+            || self.peek() == Some('>')
+            || self.peek() == Some('=')
+            || self.peek() == Some('!')
+        {
             let op = match self.peek_n(2).as_str() {
                 "<=" => { self.eat_str("<=")?; BinOp::Le }
                 ">=" => { self.eat_str(">=")?; BinOp::Ge }
@@ -1213,6 +1217,46 @@ mod tests {
             err.message.contains("bogus"),
             "unexpected error message: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn parse_not_equal_operator() {
+        // '!=' is documented (LANGUAGE_REFERENCE section 6:
+        // `require: b != 0`) and parse_expr_compare has a "!=" arm,
+        // but its guard only entered on '<', '>' or '=', so the
+        // operator was unreachable and the parse failed on '!'.
+        let src = r#"
+        TestMod {
+        spec divide {
+            input: a: Int, b: Int
+            output: Int
+
+            require: b != 0
+            constraint: output != a
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let func = &spec.functions[0];
+        assert_eq!(func.preconditions.len(), 1);
+        assert!(
+            matches!(
+                func.preconditions[0],
+                Constraint::Expr(Expr::BinOp(BinOp::Neq, _, _))
+            ),
+            "expected Neq constraint, got: {:?}",
+            func.preconditions[0]
+        );
+        assert_eq!(func.postconditions.len(), 1);
+        assert!(
+            matches!(
+                func.postconditions[0],
+                Constraint::Expr(Expr::BinOp(BinOp::Neq, _, _))
+            ),
+            "expected Neq constraint, got: {:?}",
+            func.postconditions[0]
         );
     }
 
