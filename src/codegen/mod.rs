@@ -550,7 +550,7 @@ fn ir_to_rust_expr_typed(node: &IRNode, expected: Option<&TypeRef>) -> String {
     match node {
         IRNode::Typed { node, ty } => ir_to_rust_expr_typed(node, Some(ty)),
         IRNode::Literal(IRLiteral::String(s)) if expected == Some(&TypeRef::String) => {
-            format!("\"{}\".to_string()", s)
+            format!("\"{}\".to_string()", escape_rust_str(s))
         }
         _ => ir_to_rust_expr(node),
     }
@@ -566,6 +566,50 @@ fn ir_to_rust_expr_typed(node: &IRNode, expected: Option<&TypeRef>) -> String {
 /// loss is the String-ownership rewrite in return/tail positions
 /// nested inside the block, which the untyped expression emitter
 /// already forgoes elsewhere (If branches, Lambda bodies).
+/// Escape a string's contents for emission inside a Rust
+/// string literal (Phase 29, defect 3). `"` and `\` take a
+/// backslash; `\n`, `\r` and `\t` use their short forms;
+/// every other control character uses `\u{...}`. All other
+/// characters — including non-ASCII text — are emitted
+/// as-is, so a literal without special characters renders
+/// byte-identically to the pre-fix emitter. The rule is a
+/// per-character transformation: in the self-hosted specs
+/// it is mirror-pinned (finding F5), and the spec equation
+/// for the literal template pins the wrap on the
+/// no-special-characters subdomain.
+fn escape_rust_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape one character for emission inside a Rust char
+/// literal (Phase 29, defect 3, the adjacent arm of the
+/// string rule).
+fn escape_rust_char(c: char) -> String {
+    match c {
+        '\'' => "\\'".to_string(),
+        '\\' => "\\\\".to_string(),
+        '\n' => "\\n".to_string(),
+        '\r' => "\\r".to_string(),
+        '\t' => "\\t".to_string(),
+        c if c.is_control() => format!("\\u{{{:x}}}", c as u32),
+        c => c.to_string(),
+    }
+}
+
 /// Left operand of an IR Concat in `ir_to_rust_expr`
 /// (Phase 29, defect 1). Rust's `Add` for text is
 /// `String + &str`: the left operand must be an owned
@@ -578,7 +622,7 @@ fn ir_to_rust_expr_typed(node: &IRNode, expected: Option<&TypeRef>) -> String {
 fn concat_owned_operand(node: &IRNode) -> String {
     match node {
         IRNode::Literal(IRLiteral::String(s)) => {
-            format!("\"{}\".to_string()", s)
+            format!("\"{}\".to_string()", escape_rust_str(s))
         }
         _ => ir_to_rust_expr(node),
     }
@@ -701,8 +745,8 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
             IRLiteral::Int(n) => n.to_string(),
             IRLiteral::Float(f) => f.to_string(),
             IRLiteral::Bool(b) => b.to_string(),
-            IRLiteral::String(s) => format!("\"{}\"", s),
-            IRLiteral::Char(c) => format!("'{}'", c),
+            IRLiteral::String(s) => format!("\"{}\"", escape_rust_str(s)),
+            IRLiteral::Char(c) => format!("'{}'", escape_rust_char(*c)),
             IRLiteral::Unit => "()".into(),
         },
         IRNode::Var(name) => rust_ident(name),
@@ -925,7 +969,7 @@ fn ir_pattern_to_rust(pattern: &IRPattern) -> String {
         IRPattern::Literal(lit) => match lit {
             IRLiteral::Int(n) => n.to_string(),
             IRLiteral::Bool(b) => b.to_string(),
-            IRLiteral::String(s) => format!("\"{}\"", s),
+            IRLiteral::String(s) => format!("\"{}\"", escape_rust_str(s)),
             _ => "_".into(),
         },
         IRPattern::Constructor(name, sub_patterns) => {
@@ -1286,7 +1330,7 @@ fn expr_to_rust(expr: &Expr) -> String {
     match expr {
         Expr::IntLit(n) => n.to_string(),
         Expr::BoolLit(b) => b.to_string(),
-        Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::StringLit(s) => format!("\"{}\"", escape_rust_str(s)),
         Expr::Var(name) => rust_ident(name),
         Expr::Call(name, args) => {
             let args_str: Vec<String> = args.iter().map(expr_to_rust).collect();
@@ -2706,6 +2750,90 @@ mod tests {
         assert!(!int_match.contains(".as_str()"), "rendered: {}", int_match);
     }
 
+    #[test]
+    fn rust_string_literals_are_escaped() {
+        // Defect 3 (parse-level): string literals were
+        // emitted with contents RAW, so any literal
+        // containing `"`, `\` or a control character
+        // produced syntactically invalid Rust (`"""` for
+        // the quote templates). All five emission sites
+        // escape per Rust source rules; literals without
+        // special characters render byte-identically.
+        let lit = |s: &str| IRNode::Literal(IRLiteral::String(s.into()));
+        // Expression position.
+        assert_eq!(ir_to_rust_expr(&lit("a\"b")), "\"a\\\"b\"");
+        assert_eq!(ir_to_rust_expr(&lit("a\\b")), "\"a\\\\b\"");
+        assert_eq!(ir_to_rust_expr(&lit("line\nbreak")), "\"line\\nbreak\"");
+        assert_eq!(ir_to_rust_expr(&lit("a\tb")), "\"a\\tb\"");
+        assert_eq!(ir_to_rust_expr(&lit("a\u{1}b")), "\"a\\u{1}b\"");
+        // Innocent contents: identity.
+        assert_eq!(ir_to_rust_expr(&lit("Int")), "\"Int\"");
+        assert_eq!(ir_to_rust_expr(&lit("café")), "\"café\"");
+        assert_eq!(ir_to_rust_expr(&lit("with space")), "\"with space\"");
+        assert_eq!(ir_to_rust_expr(&lit("")), "\"\"");
+        // Owned position (typed emitter).
+        assert_eq!(
+            ir_to_rust_expr_typed(&lit("a\"b"), Some(&TypeRef::String)),
+            "\"a\\\"b\".to_string()"
+        );
+        // Concat left position (defect 1's owned arm).
+        assert_eq!(
+            concat_owned_operand(&lit("a\"")),
+            "\"a\\\"\".to_string()"
+        );
+        // Pattern position.
+        assert_eq!(
+            ir_pattern_to_rust(&IRPattern::Literal(IRLiteral::String(
+                "a\"b".into()
+            ))),
+            "\"a\\\"b\""
+        );
+        // Spec-Expr position (generated test modules and
+        // precondition asserts).
+        assert_eq!(
+            expr_to_rust(&Expr::StringLit("a\"b".into())),
+            "\"a\\\"b\""
+        );
+        // Char literals: the same defect class at the
+        // adjacent arm.
+        let chr = |c: char| IRNode::Literal(IRLiteral::Char(c));
+        assert_eq!(ir_to_rust_expr(&chr('\'')), "'\\''");
+        assert_eq!(ir_to_rust_expr(&chr('\\')), "'\\\\'");
+        assert_eq!(ir_to_rust_expr(&chr('\n')), "'\\n'");
+        assert_eq!(ir_to_rust_expr(&chr('a')), "'a'");
+    }
+
+    #[test]
+    fn rust_quote_bearing_literals_compile_and_run() {
+        // The quote templates' winner shape: a body whose
+        // value is a quote-bearing literal (here the single
+        // character `"`), plus a generated test module whose
+        // expected value contains quotes — the
+        // rust_precondition_block parse failure flowed
+        // through the test module's spec-Expr rendering.
+        let mut cand = candidate_with(
+            "echo_quote",
+            vec![("s", TypeRef::String)],
+            TypeRef::String,
+            IRNode::Literal(IRLiteral::String("say \"hi\"\nbye".into())),
+        );
+        cand.spec.tests = vec![Test {
+            name: Some("quotes".into()),
+            input: Expr::StringLit("x".into()),
+            expected_output: Expr::StringLit("say \"hi\"\nbye".into()),
+            timeout_ms: None,
+            property: false,
+        }];
+        let code = generate(&cand, "rust").unwrap();
+        compile_rust_lib(&code);
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(echo_quote(\"x\".to_string()), \"say \\\"hi\\\"\\nbye\");\n\
+             println!(\"quote ok\");",
+        );
+        assert!(out.contains("quote ok"), "run output: {}", out);
+    }
+
     /// Compile a generated file with `rustc --edition 2021
     /// --crate-type lib` (the probe's external check, in-process).
     /// Skips silently only when no rustc is reachable at all.
@@ -2715,9 +2843,19 @@ mod tests {
             eprintln!("rustc not reachable; skipping compile check");
             return;
         };
+        // Unique per call: tests run on parallel threads in
+        // one process, and a pid-only directory made
+        // concurrent compile checks stomp on each other's
+        // winner.rs/rlib (surfaced by Phase 29's added
+        // compile legs as a spurious archive error in an
+        // unrelated test).
         let dir = std::env::temp_dir().join(format!(
-            "morphic_codegen_compile_{}",
-            std::process::id()
+            "morphic_codegen_compile_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("winner.rs");
