@@ -411,4 +411,120 @@ spec broken {
             assert!(src.matches("test \"").count() >= 10, "{} should carry in-spec tests", path);
         }
     }
+
+    #[test]
+    fn build_first_spec_resolves_module_calls() {
+        // The CLI build path must be module-aware (Phase 19): the
+        // fixture's FIRST spec is a composition spec whose
+        // constraint calls a spec defined LATER in the same file.
+        // Standalone synthesis gives it no constraint seed and no
+        // way to resolve the call, so the winner cannot be the
+        // resolved callee body. The module-aware pipeline — the
+        // one the probe and cross-validation run
+        // (synthesize_with_module + Verifier::with_specs) —
+        // inlines the callee, so the build must succeed, the
+        // generated Rust must BE the callee's behavior (the
+        // range check itself, no call left in the output), and
+        // the generated tests must pass when executed.
+        let src = r#"
+CompositionFixture {
+spec composed_first {
+    doc: "Composition proof: the first spec calls a later spec in the same module."
+    input: kind: Int
+    output: Bool
+
+    constraint: output == later_check(kind)
+
+    optimize: time < O(n)
+
+    test "call-kind-ok" { input: 4 expect: true }
+    test "bad-kind-rejected" { input: 77 expect: false }
+}
+
+spec later_check {
+    doc: "Callee, defined after its caller."
+    input: kind: Int
+    output: Bool
+
+    constraint: output == (kind>=0&&kind<=9)
+
+    optimize: time < O(n)
+
+    test "literal-kind" { input: 0 expect: true }
+    test "unknown-kind" { input: 10 expect: false }
+}
+}
+"#;
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_m2_build_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = dir.join("composition_fixture.morph");
+        let out_rs = dir.join("composition_fixture.rs");
+        {
+            let mut f = std::fs::File::create(&fixture).unwrap();
+            f.write_all(src.as_bytes()).unwrap();
+        }
+
+        let out = Command::new(morphic_bin())
+            .arg("build")
+            .arg(&fixture)
+            .args(["-O", "1", "--target", "rust", "-o"])
+            .arg(&out_rs)
+            .output()
+            .expect("failed to run morphic binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "morphic build of a composition-first module failed:\nstdout:\n{}\nstderr:\n{}",
+            stdout, stderr
+        );
+        assert!(
+            stdout.contains("Generated:"),
+            "build did not report a generated file:\n{}",
+            stdout
+        );
+
+        let code = std::fs::read_to_string(&out_rs).unwrap();
+        // The resolved behavior: the callee's own postcondition,
+        // inlined — not a call to the callee.
+        assert!(
+            code.contains("kind >= 0") && code.contains("kind <= 9"),
+            "generated code does not contain the resolved range check:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("later_check"),
+            "generated code still calls the callee instead of inlining it:\n{}",
+            code
+        );
+
+        // The generated code must compile, and the spec's tests
+        // (emitted as a #[cfg(test)] module) must pass executed.
+        let test_bin = dir.join("composition_fixture_test");
+        let compile = Command::new("rustc")
+            .args(["--edition", "2021", "--test"])
+            .arg(&out_rs)
+            .arg("-o")
+            .arg(&test_bin)
+            .output()
+            .expect("failed to run rustc");
+        assert!(
+            compile.status.success(),
+            "generated code failed to compile:\n{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = Command::new(&test_bin)
+            .output()
+            .expect("failed to run generated tests");
+        assert!(
+            run.status.success(),
+            "generated tests failed:\n{}",
+            String::from_utf8_lossy(&run.stdout)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
