@@ -977,6 +977,7 @@ mod tests {
             generation: 0,
             provenance: Provenance::Template { template_name: "test".into() },
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -1138,6 +1139,7 @@ mod tests {
                 mutation_kind: "test".into(),
             },
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -1519,6 +1521,298 @@ mod tests {
         );
         let best = select_best(vec![fancy, truthful], &spec).unwrap();
         assert_eq!(best.id, 1);
+    }
+
+    // ── Refutation gate (Phase 16) ─────────────────────────
+    //
+    // Phase 14 made the verifier judge the candidate itself,
+    // and Phase 15's cross-validation showed what selection
+    // then did with those verdicts: the winners the verifier
+    // REFUTES still won. Selection crowns by measured tpr
+    // (composite weight 0.85, in-spec tests only) while a
+    // refutation costs only the 0.05 constraint weight, so the
+    // per-test match for is_known_type_tag — tpr 1.000, its
+    // wildcard wrong on spec-determined untested inputs — beat
+    // every spec-exact rival. This gate mirrors the
+    // completeness and return-type gates in shape: a candidate
+    // whose recorded verdict is VerificationFailed cannot win
+    // while any unrefuted candidate survives the earlier
+    // gates; if every survivor is refuted, selection falls
+    // back to ranking the refuted pool unchanged.
+    //
+    // The verdicts are the ones verify_all records on each
+    // candidate (CandidateImplementation::verification_status)
+    // — the single source of truth; selection never recomputes
+    // them. Unrefuted means Verified, Inconclusive (the
+    // verifier could not judge — e.g. constraints that call
+    // other specs), Malformed, or no recorded verdict at all.
+
+    use crate::verify::verifier::VerificationStatus;
+
+    fn with_status(
+        mut c: CandidateImplementation,
+        status: VerificationStatus,
+    ) -> CandidateImplementation {
+        c.verification_status = Some(status);
+        c.verified = status == VerificationStatus::Verified;
+        c
+    }
+
+    /// The per-test match shape: hole-free, return-typed
+    /// (TypeVerdict::Matches), measures tpr 1.0 on in-spec
+    /// tests whose cases it covers — and, with the wildcard
+    /// below, wrong on untested inputs, which is exactly why
+    /// the verifier refutes this shape for range specs.
+    fn per_test_match() -> IRNode {
+        IRNode::Match {
+            scrutinee: Box::new(var("kind")),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::Literal(IRLiteral::Bool(true)),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Int(2)),
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Bool(true)),
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn select_best_refuted_candidate_cannot_win() {
+        // (i) The Phase 15 pathology in miniature: a refuted
+        // candidate measuring tpr 1.0 outscores an unrefuted
+        // one on the composite AND on MostCorrect — before the
+        // gate it wins; the gate must crown the unrefuted one.
+        let spec = spec_with(vec![("kind", TypeRef::Int)], TypeRef::Bool);
+        let refuted = with_status(
+            candidate_for(
+                &spec,
+                1,
+                per_test_match(),
+                breakdown(1.0, 0.5, 1.0, 1.0),
+            ),
+            VerificationStatus::VerificationFailed,
+        );
+        let unrefuted = with_status(
+            candidate_for(
+                &spec,
+                2,
+                IRNode::Literal(IRLiteral::Bool(true)),
+                breakdown(0.5, 1.0, 0.0, 0.0),
+            ),
+            VerificationStatus::Inconclusive,
+        );
+        assert!(
+            refuted.score > unrefuted.score,
+            "test setup: the refuted candidate must outscore the unrefuted one"
+        );
+        let best = select_best(vec![refuted, unrefuted], &spec).unwrap();
+        assert_eq!(best.id, 2);
+    }
+
+    #[test]
+    fn select_best_refutation_gate_falls_back_when_all_refuted() {
+        // (ii) Every survivor refuted: the gate must not empty
+        // the pool — the old ranking decides, as documented.
+        let spec = spec_with(vec![("kind", TypeRef::Int)], TypeRef::Bool);
+        let weak = with_status(
+            candidate_for(
+                &spec,
+                1,
+                per_test_match(),
+                breakdown(0.5, 0.5, 0.0, 0.0),
+            ),
+            VerificationStatus::VerificationFailed,
+        );
+        let strong = with_status(
+            candidate_for(
+                &spec,
+                2,
+                per_test_match(),
+                breakdown(1.0, 0.5, 1.0, 1.0),
+            ),
+            VerificationStatus::VerificationFailed,
+        );
+        let best = select_best(vec![weak, strong], &spec).unwrap();
+        assert_eq!(best.id, 2);
+    }
+
+    #[test]
+    fn select_best_inconclusive_is_never_gated_out() {
+        // (iii) Inconclusive means "could not judge" — the
+        // verdict of every candidate for validate_kind_tag /
+        // print_node_kind, whose constraints call other specs.
+        // It is unrefuted and must survive the gate even with
+        // the worst scores in the pool.
+        let spec = spec_with(vec![("kind", TypeRef::Int)], TypeRef::Bool);
+        let refuted = with_status(
+            candidate_for(
+                &spec,
+                1,
+                per_test_match(),
+                breakdown(1.0, 0.5, 1.0, 1.0),
+            ),
+            VerificationStatus::VerificationFailed,
+        );
+        let inconclusive = with_status(
+            candidate_for(
+                &spec,
+                2,
+                IRNode::Literal(IRLiteral::Bool(false)),
+                breakdown(0.0, 0.0, 0.0, 0.0),
+            ),
+            VerificationStatus::Inconclusive,
+        );
+        let best = select_best(vec![refuted, inconclusive], &spec).unwrap();
+        assert_eq!(best.id, 2);
+    }
+
+    #[test]
+    fn select_best_no_verified_preference_beyond_refutation_gate() {
+        // (iii, cont.) The gate excludes ONLY the refuted; it
+        // must not grow a Verified-preference. A higher-ranked
+        // Inconclusive candidate still beats a lower-ranked
+        // Verified one — preferring Verified is a separate,
+        // later decision.
+        let spec = spec_with(vec![("kind", TypeRef::Int)], TypeRef::Bool);
+        let verified = with_status(
+            candidate_for(
+                &spec,
+                1,
+                IRNode::Literal(IRLiteral::Bool(true)),
+                breakdown(0.5, 1.0, 0.0, 0.0),
+            ),
+            VerificationStatus::Verified,
+        );
+        let inconclusive = with_status(
+            candidate_for(
+                &spec,
+                2,
+                per_test_match(),
+                breakdown(1.0, 0.5, 1.0, 1.0),
+            ),
+            VerificationStatus::Inconclusive,
+        );
+        let best = select_best(vec![verified, inconclusive], &spec).unwrap();
+        assert_eq!(best.id, 2);
+    }
+
+    #[test]
+    fn select_best_verified_truth_still_wins() {
+        // (iv) Regression: a Verified tpr-1.0 seed completion —
+        // the node_arity / is_literal_kind / is_infix_kind
+        // winner shape — still wins with the gate active, over
+        // a refuted rival that outscores it on the composite
+        // and an inconclusive one.
+        let spec = spec_with(vec![("kind", TypeRef::Int)], TypeRef::Bool);
+        let truthful = with_status(
+            candidate_for(
+                &spec,
+                1,
+                per_test_match(),
+                breakdown(1.0, 1.0, 0.0, 0.0),
+            ),
+            VerificationStatus::Verified,
+        );
+        let refuted = with_status(
+            candidate_for(
+                &spec,
+                2,
+                per_test_match(),
+                breakdown(1.0, 0.5, 1.0, 1.0),
+            ),
+            VerificationStatus::VerificationFailed,
+        );
+        let inconclusive = with_status(
+            candidate_for(
+                &spec,
+                3,
+                IRNode::Literal(IRLiteral::Bool(true)),
+                breakdown(0.5, 0.5, 0.5, 0.5),
+            ),
+            VerificationStatus::Inconclusive,
+        );
+        assert!(
+            refuted.score > truthful.score,
+            "test setup: the refuted rival must outscore the verified one"
+        );
+        let best = select_best(vec![refuted, inconclusive, truthful], &spec).unwrap();
+        assert_eq!(best.id, 1);
+    }
+
+    #[test]
+    fn synthesized_verified_spec_winner_is_verified() {
+        // (iv) Integration, mirroring the probe pipeline
+        // (synthesize → verify_all → select_best) for
+        // is_literal_kind, whose seed completion the
+        // candidate-encoding verifier proves (Phase 14).
+        // Guarantee: WHENEVER the hole-free pool contains a
+        // Verified candidate measuring tpr 1.0 that is not
+        // provably mistyped, the winner is Verified. The
+        // refutation gate removes the refuted tpr-1.0 rivals
+        // (the same match with the wrong wildcard); among the
+        // unrefuted survivors such a candidate tops every
+        // ranking criterion, because Verified after verify_all's
+        // re-scoring means constraint_score 1.0 (holds = Proven
+        // only) and any Inconclusive rival sits strictly below
+        // on MostCorrect. Randomized engine → retry per attempt
+        // and assert on the first attempt whose premise holds,
+        // the same pattern as the test-less integration test
+        // below.
+        use crate::synthesis::engine::{count_holes, synthesize};
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/self_host/validator.morph", root);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        let checked = crate::spec::typeck::check(parsed).unwrap();
+        let spec = checked
+            .spec
+            .functions
+            .iter()
+            .find(|f| f.name == "is_literal_kind")
+            .unwrap()
+            .clone();
+
+        let mut asserted = false;
+        for _attempt in 0..8 {
+            let candidates = synthesize(&spec, 1).expect("opt-1 synthesis");
+            let pool = crate::verify::verifier::verify_all(candidates, &spec)
+                .expect("verify_all");
+            let premise = pool
+                .iter()
+                .filter(|c| count_holes(&c.body) == 0)
+                .any(|c| {
+                    c.verified
+                        && c.scores.test_pass_ratio >= 1.0
+                        && return_type_verdict(&c.body, &spec) != TypeVerdict::Mismatched
+                });
+            if !premise {
+                continue;
+            }
+            let winner = select_best(pool, &spec).expect("select_best");
+            assert!(
+                winner.verified,
+                "winner for is_literal_kind is not Verified although the \
+                 hole-free pool held a Verified tpr-1.0 candidate"
+            );
+            assert_eq!(
+                winner.verification_status,
+                Some(VerificationStatus::Verified)
+            );
+            asserted = true;
+            break;
+        }
+        assert!(
+            asserted,
+            "8 synthesis attempts for is_literal_kind never produced a \
+             hole-free Verified tpr-1.0 candidate"
+        );
     }
 
     #[test]

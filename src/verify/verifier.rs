@@ -903,6 +903,7 @@ mod tests {
             generation: 0,
             provenance: Provenance::HumanGuided,
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -1024,6 +1025,53 @@ mod tests {
         );
         assert_eq!(result.status, VerificationStatus::VerificationFailed);
         assert!(result.counterexample.is_some());
+    }
+
+    /// verify_all must RECORD the verdict it computed on each
+    /// candidate (`verification_status`), not collapse it to
+    /// the `verified` bool: selection's refutation gate reads
+    /// exactly this field. What is recorded must agree with
+    /// verify_one on the same body — one source of truth for
+    /// the verdict, computed once, in the verifier.
+    #[test]
+    fn verify_all_records_status_on_candidates() {
+        let spec = load_spec("validator", "node_arity");
+        let correct = match_on(
+            var("kind"),
+            vec![
+                lit_arm(0, int(0)),
+                lit_arm(1, int(0)),
+                lit_arm(3, int(1)),
+                lit_arm(6, int(1)),
+                lit_arm(2, int(2)),
+                lit_arm(5, int(2)),
+                wild(int(0)),
+            ],
+        );
+        let bodies = vec![correct, int(0)];
+        // The decisive pair: one Verified, one refuted.
+        let expected: Vec<VerificationStatus> = bodies
+            .iter()
+            .map(|b| status_of(&spec, b.clone()))
+            .collect();
+        assert_eq!(
+            expected,
+            vec![
+                VerificationStatus::Verified,
+                VerificationStatus::VerificationFailed
+            ]
+        );
+        let candidates: Vec<CandidateImplementation> = bodies
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| candidate(&spec, i as u64 + 1, b))
+            .collect();
+        let out = verify_all(candidates, &spec).expect("verify_all");
+        assert_eq!(out.len(), expected.len());
+        for (c, want) in out.iter().zip(expected.iter()) {
+            assert_eq!(c.verification_status.as_ref(), Some(want));
+            assert_eq!(c.verified, *want == VerificationStatus::Verified);
+        }
     }
 
     // ── Honest verdicts outside the subset ────────────────
