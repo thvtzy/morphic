@@ -9,6 +9,7 @@ mod synthesis;
 mod verify;
 mod codegen;
 mod m2_synthesis_probe;
+mod m2_cross_validation;
 
 use clap::{Parser, Subcommand};
 use colored::*;
