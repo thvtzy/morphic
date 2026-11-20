@@ -175,6 +175,16 @@ mod probe {
                 let verified = verify::verifier::verify_all(candidates, func)
                     .expect("verify_all must not error");
                 let n_verified = verified.iter().filter(|c| c.verified).count();
+                // Refutation-gate instrumentation (Phase 16): how
+                // much of the pool entering selection is NOT
+                // refuted, and what verdict the winner carries.
+                let n_unrefuted = verified
+                    .iter()
+                    .filter(|c| {
+                        c.verification_status
+                            != Some(verify::VerificationStatus::VerificationFailed)
+                    })
+                    .count();
 
                 // Phase 5: selection, exactly as `morphic build` does.
                 let winner = selector::select_best(verified, func).expect("select_best");
@@ -192,14 +202,17 @@ mod probe {
                 };
 
                 println!(
-                    "PROBE|{}|{}|synth=ok(n={})|ms={}|verified={}/{}|winner_verified={}|winner_prov={}|winner_holes={}|winner_score={:.3}|winner_tpr={:.3}|codegen={}",
+                    "PROBE|{}|{}|synth=ok(n={})|ms={}|verified={}/{}|pool_unrefuted={}/{}|winner_verified={}|winner_status={:?}|winner_prov={}|winner_holes={}|winner_score={:.3}|winner_tpr={:.3}|codegen={}",
                     file,
                     name,
                     n_candidates,
                     synth_ms,
                     n_verified,
                     n_candidates,
+                    n_unrefuted,
+                    n_candidates,
                     winner.verified,
+                    winner.verification_status,
                     provenance_name(&winner.provenance),
                     holes,
                     winner.score,
