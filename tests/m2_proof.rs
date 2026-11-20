@@ -380,9 +380,9 @@ spec bad {
     #[test]
     fn check_rejects_syntax_error() {
         // Negative control: an unknown keyword inside a spec body must
-        // fail the parser. (Note: a merely truncated file is silently
-        // accepted by the current parser — EOF closes open blocks —
-        // so this control uses a token the parser actively rejects.)
+        // fail the parser. (Truncated files are also rejected since
+        // the parser-hardening pass; this control keeps using a token
+        // the parser actively rejects.)
         let src = r#"
 T {
 spec broken {
