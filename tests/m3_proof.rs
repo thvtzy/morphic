@@ -1,6 +1,6 @@
 // ┌────────────────────────────────────────────────────────────┐
-// │  M3: Codegen — Proof Tests (slices 1–2: leaf mappings +   │
-// │  small template families)                                  │
+// │  M3: Codegen — Proof Tests (slices 1–3: leaf mappings +   │
+// │  small template families + name/text assembly)             │
 // │                                                            │
 // │  Two layers, mirroring tests/m2_proof.rs:                  │
 // │                                                            │
@@ -455,6 +455,254 @@ fn rust_condition_wrap(kind: i64) -> Option<bool> {
     }
 }
 
+// ═════════════════════════════════════════════════════════════
+// A3. MIRRORS — slice 3 name/text assembly
+//
+// rust_ident, the String-ownership rule of
+// ir_to_rust_expr_typed, and generate_rust's assembly
+// pieces. With F1 resolved (the `++` operator), the .morph
+// specs pin this slice's templates as equations over
+// already-rendered parts; the mirrors below state the same
+// behavior in Rust, plus the parts no spec can state:
+// rust_ident's per-char loop (finding F5) and the ", "
+// joins (iteration), which the assembly mirrors perform
+// exactly as the originals do.
+// ═════════════════════════════════════════════════════════════
+
+/// Mirror of `rust_ident` whole (src/codegen/mod.rs:32-52),
+/// copied line for line: the per-char loop, the empty
+/// fallback, the keyword suffix.
+fn rust_ident_verbatim(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 1);
+    for (i, ch) in name.chars().enumerate() {
+        if ch == '_' || ch.is_alphanumeric() {
+            if i == 0 && ch.is_ascii_digit() {
+                out.push('_');
+            }
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    if is_rust_keyword(&out) {
+        out.push('_');
+    }
+    out
+}
+
+/// Mirror of the per-char step of `rust_ident`
+/// (src/codegen/mod.rs:33-48): keep `_` and alphanumeric
+/// chars — `char::is_alphanumeric`, which is UNICODE-aware,
+/// despite the original's doc comment claiming the kept set
+/// is `[A-Za-z0-9_]` — prefix `_` when the FIRST char is an
+/// ASCII digit (only ASCII: a leading Unicode digit is kept
+/// with no prefix), replace every other char with `_`; the
+/// empty name becomes "_". No spec pins this loop (finding
+/// F5); this mirror is its only executable statement.
+fn rust_ident_sanitize(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 1);
+    for (i, ch) in name.chars().enumerate() {
+        if ch == '_' || ch.is_alphanumeric() {
+            if i == 0 && ch.is_ascii_digit() {
+                out.push('_');
+            }
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
+}
+
+/// Mirror of the keyword-suffix step of `rust_ident`
+/// (src/codegen/mod.rs:49-51) applied to the sanitized
+/// string: append `_` iff it is a keyword (the slice-1
+/// `is_rust_keyword` mirror above). This is the step the
+/// spec `rust_ident_suffix` pins as a composition over
+/// `rust_keyword`.
+fn rust_ident_suffix(name: &str) -> String {
+    if is_rust_keyword(name) {
+        format!("{}_", name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Mirror of the spec `rust_ident_empty`: the per-char
+/// step's empty fallback is the one case the spec pins —
+/// Some exactly for the empty name.
+fn rust_ident_empty(name: &str) -> Option<String> {
+    if name.is_empty() {
+        Some("_".to_string())
+    } else {
+        None
+    }
+}
+
+/// Mirror of the dispatch classification of
+/// `ir_to_rust_expr_typed` (src/codegen/mod.rs:549-558):
+/// 0 = delegate to the untyped emitter, 1 = Literal (the
+/// ownership check decides), 2 = Typed (re-enter with the
+/// declared type as expectation). Domain: the 28 IRNode
+/// kinds, as with `rust_condition_wrap`.
+fn rust_typed_form(kind: i64) -> Option<i64> {
+    match kind {
+        9 => Some(1),
+        22 => Some(2),
+        0..=27 => Some(0),
+        _ => None,
+    }
+}
+
+/// Mirror of the ownership leaf check of
+/// `ir_to_rust_expr_typed` (src/codegen/mod.rs:552-554):
+/// owned exactly for a String literal (kind 3) under a
+/// String expectation (ExpectedTypeCode 3); code 26 is
+/// None, and every other code is Some(other type).
+fn rust_string_ownership(lit: i64, expected: i64) -> bool {
+    lit == 3 && expected == 3
+}
+
+/// Mirror of the bare String literal rendering
+/// (src/codegen/mod.rs:610; the same template in pattern
+/// position at src/codegen/mod.rs:820): quote + RAW
+/// contents + quote — no escaping, so a quote inside the
+/// contents renders as-is.
+fn rust_string_literal_text(contents: &str) -> String {
+    format!("\"{}\"", contents)
+}
+
+/// Mirror of the owned String literal rendering
+/// (src/codegen/mod.rs:553): the bare template with
+/// `.to_string()` appended.
+fn rust_string_literal_owned_text(contents: &str) -> String {
+    format!("\"{}\".to_string()", contents)
+}
+
+/// Mirror of one doc-header line (src/codegen/mod.rs:73).
+fn rust_doc_line(line: &str) -> String {
+    format!("//! {}\n", line)
+}
+
+/// Mirror of one signature parameter's text
+/// (src/codegen/mod.rs:91): rendered name, ": ", rendered
+/// type.
+fn rust_param_text(name: &str, ty: &str) -> String {
+    format!("{}: {}", name, ty)
+}
+
+/// Mirror of the signature's generics bracket
+/// (src/codegen/mod.rs:80-88) over the pre-joined rendered
+/// generic names.
+fn rust_generics_text(joined: &str, present: bool) -> String {
+    if present {
+        format!("<{}>", joined)
+    } else {
+        String::new()
+    }
+}
+
+/// Mirror of the signature line (src/codegen/mod.rs:107-110)
+/// over pre-rendered parts.
+fn rust_signature(name: &str, generics: &str, params: &str, ret: &str) -> String {
+    format!("pub fn {}{}({}) -> {} {{\n", name, generics, params, ret)
+}
+
+/// Mirror of one precondition assert line
+/// (src/codegen/mod.rs:100-101) over the pre-rendered
+/// constraint text.
+fn rust_precondition_assert(rendered: &str) -> String {
+    format!("    debug_assert!({}, \"Precondition violated\");\n", rendered)
+}
+
+/// Mirror of the precondition block
+/// (src/codegen/mod.rs:96-104) over the pre-joined assert
+/// lines, push for push: attribute line, "{", the asserts,
+/// "}" and a blank line. The block is emitted BEFORE the
+/// signature in the original (surprise 13).
+fn rust_precondition_block(asserts: &str) -> String {
+    let mut out = String::new();
+    out.push_str("#[cfg(debug_assertions)]\n");
+    out.push_str("{\n");
+    out.push_str(asserts);
+    out.push_str("}\n\n");
+    out
+}
+
+/// Mirror of the test-name choice (src/codegen/mod.rs:136):
+/// 0 = the test's own name, 1 = the indexed default. Only
+/// the choice is spec-pinned (rust_test_name_form).
+fn rust_test_name_form(has_name: bool) -> i64 {
+    if has_name {
+        0
+    } else {
+        1
+    }
+}
+
+/// Mirror of the default test name's TEXT
+/// (src/codegen/mod.rs:136): `test_{i}` with the index in
+/// decimal — mirror-only, because the spec language has
+/// no Int -> decimal conversion (finding F2).
+fn rust_test_name_default(index: usize) -> String {
+    format!("test_{}", index)
+}
+
+/// Mirror of one generated test's block
+/// (src/codegen/mod.rs:139-150), push for push, over
+/// pre-rendered parts.
+fn rust_test_case(
+    test_name: &str,
+    fn_name: &str,
+    input_text: &str,
+    expected_text: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str("    #[test]\n");
+    out.push_str(&format!("    fn {}() {{\n", test_name));
+    out.push_str(&format!(
+        "        let result = {}({});\n",
+        fn_name, input_text
+    ));
+    out.push_str(&format!(
+        "        assert_eq!(result, {});\n",
+        expected_text
+    ));
+    out.push_str("    }\n");
+    out
+}
+
+/// Mirror of the test-module wrapper
+/// (src/codegen/mod.rs:131-133,151), push for push, over
+/// the pre-joined test blocks.
+fn rust_test_module(tests: &str) -> String {
+    let mut out = String::new();
+    out.push_str("\n#[cfg(test)]\n");
+    out.push_str("mod tests {\n");
+    out.push_str("    use super::*;\n\n");
+    out.push_str(tests);
+    out.push_str("}\n");
+    out
+}
+
+/// Mirror of `generate_rust`'s two standalone fixed texts:
+/// piece 0 = the function body's closing brace
+/// (src/codegen/mod.rs:127), piece 1 = the blank line
+/// after the doc header (src/codegen/mod.rs:75).
+fn rust_file_fixed_text(piece: i64) -> Option<&'static str> {
+    match piece {
+        0 => Some("}\n"),
+        1 => Some("\n"),
+        _ => None,
+    }
+}
+
 // ── Assembly mirrors: the recursive walkers, composed from ──
 // ── the pinned pieces exactly as the originals compose them ──
 
@@ -698,6 +946,48 @@ fn condition_text(kind: i64, rendered: &str) -> String {
         Some(true) => format!("({})", rendered),
         _ => rendered.to_string(),
     }
+}
+
+/// Faithful assembly of `generate_rust`'s fixed structure
+/// (src/codegen/mod.rs:66-156) from the slice-3 mirrors.
+/// The parts arrive as the original holds them at each
+/// step: doc as its split lines, the signature already
+/// assembled by `rust_signature` from pre-rendered pieces,
+/// preconditions as their constraint_to_rust renderings,
+/// the body pre-rendered (the walker slices own it), and
+/// the test blocks pre-joined. The presence branches are
+/// the original's own: header iff a doc exists, block iff
+/// preconditions are non-empty (emitted BEFORE the
+/// signature — surprise 13), test module iff test blocks
+/// exist.
+fn generate_rust_assembled(
+    doc_lines: Option<&[&str]>,
+    signature: &str,
+    precondition_renderings: &[&str],
+    body: &str,
+    test_blocks: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    if let Some(lines) = doc_lines {
+        for line in lines {
+            out.push_str(&rust_doc_line(line));
+        }
+        out.push_str(rust_file_fixed_text(1).unwrap());
+    }
+    if !precondition_renderings.is_empty() {
+        let asserts: String = precondition_renderings
+            .iter()
+            .map(|r| rust_precondition_assert(r))
+            .collect();
+        out.push_str(&rust_precondition_block(&asserts));
+    }
+    out.push_str(signature);
+    out.push_str(body);
+    out.push_str(rust_file_fixed_text(0).unwrap());
+    if let Some(blocks) = test_blocks {
+        out.push_str(&rust_test_module(blocks));
+    }
+    out
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -1435,6 +1725,288 @@ mod golden_tests {
         assert_eq!(condition_text(11, "(a && b)"), "(a && b)");
         assert_eq!(condition_text(10, "flag"), "flag");
     }
+
+    // ── Slice 3: name/text assembly ──
+
+    #[test]
+    fn ident_sanitize_step() {
+        // Mirror-only coverage (finding F5): the per-char
+        // step is a loop no spec can state; the expected
+        // values are the original's behavior, char for char.
+        // Kept chars: letters, digits, underscore
+        assert_eq!(rust_ident_sanitize("sort"), "sort");
+        assert_eq!(rust_ident_sanitize("_x"), "_x");
+        assert_eq!(rust_ident_sanitize("a1_b"), "a1_b");
+        // Every other char becomes '_'
+        assert_eq!(rust_ident_sanitize("empty-list"), "empty_list");
+        assert_eq!(rust_ident_sanitize("a b"), "a_b");
+        assert_eq!(rust_ident_sanitize("a.b"), "a_b");
+        assert_eq!(rust_ident_sanitize("---"), "___");
+        // A leading ASCII digit gets a '_' prefix
+        assert_eq!(rust_ident_sanitize("9lives"), "_9lives");
+        assert_eq!(rust_ident_sanitize("9"), "_9");
+        // The empty name becomes "_"
+        assert_eq!(rust_ident_sanitize(""), "_");
+        // The kept set is char::is_alphanumeric — UNICODE —
+        // despite the original's doc comment claiming
+        // [A-Za-z0-9_]: accented letters pass through, and
+        // a leading Unicode digit is kept with NO prefix
+        // (the prefix check is is_ascii_digit only)
+        assert_eq!(rust_ident_sanitize("café"), "café");
+        assert_eq!(rust_ident_sanitize("٣x"), "٣x");
+    }
+
+    #[test]
+    fn ident_suffix_and_composition() {
+        // .morph tests: type/Self/try suffix; sort, type_
+        // and _ pass through
+        assert_eq!(rust_ident_suffix("type"), "type_");
+        assert_eq!(rust_ident_suffix("Self"), "Self_");
+        assert_eq!(rust_ident_suffix("try"), "try_");
+        assert_eq!(rust_ident_suffix("sort"), "sort");
+        assert_eq!(rust_ident_suffix("type_"), "type_");
+        assert_eq!(rust_ident_suffix("_"), "_");
+        // More of the keyword set: lowercase self, fn, loop
+        assert_eq!(rust_ident_suffix("self"), "self_");
+        assert_eq!(rust_ident_suffix("fn"), "fn_");
+        assert_eq!(rust_ident_suffix("loop"), "loop_");
+        // The decomposition is exact: the verbatim mirror
+        // equals suffix-after-sanitize on every name,
+        // including names whose chars are replaced
+        let names = [
+            "type", "Self", "fn", "sort", "empty-list", "9lives", "", "---",
+            "type ", "ma tch", "café", "a.b", "_x", "while", "loop",
+        ];
+        for n in names {
+            assert_eq!(
+                rust_ident_verbatim(n),
+                rust_ident_suffix(&rust_ident_sanitize(n)),
+                "composition mismatch for {:?}",
+                n
+            );
+        }
+        // Full-function goldens through the verbatim mirror
+        assert_eq!(rust_ident_verbatim("type"), "type_");
+        assert_eq!(rust_ident_verbatim("empty-list"), "empty_list");
+        assert_eq!(rust_ident_verbatim("9lives"), "_9lives");
+        assert_eq!(rust_ident_verbatim(""), "_");
+        assert_eq!(rust_ident_verbatim("while"), "while_");
+        // A trailing space sanitizes to '_', so the result
+        // is NOT suffixed a second time
+        assert_eq!(rust_ident_verbatim("type "), "type_");
+    }
+
+    #[test]
+    fn ident_empty_spec_mirror() {
+        // The one case the spec pins
+        assert_eq!(rust_ident_empty(""), Some("_".to_string()));
+        // Every non-empty name is unpinned by the spec
+        assert_eq!(rust_ident_empty("x"), None);
+        assert_eq!(rust_ident_empty("type"), None);
+    }
+
+    #[test]
+    fn typed_form_total() {
+        // .morph tests: literal-check, typed-reenter,
+        // binop/var delegate
+        assert_eq!(rust_typed_form(9), Some(1));
+        assert_eq!(rust_typed_form(22), Some(2));
+        assert_eq!(rust_typed_form(11), Some(0));
+        assert_eq!(rust_typed_form(10), Some(0));
+        // The full 28-kind domain: exactly Literal routes
+        // to the ownership check, exactly Typed re-enters
+        for kind in 0..=27 {
+            let want = if kind == 9 {
+                1
+            } else if kind == 22 {
+                2
+            } else {
+                0
+            };
+            assert_eq!(rust_typed_form(kind), Some(want), "kind {}", kind);
+        }
+        // Off-range
+        assert_eq!(rust_typed_form(28), None);
+        assert_eq!(rust_typed_form(-1), None);
+    }
+
+    #[test]
+    fn string_ownership_grid() {
+        // Owned exactly at (String literal, String
+        // expectation); expectation 26 is None, the other
+        // codes are Some(type)
+        for lit in 0..=5 {
+            for expected in [0, 1, 2, 3, 4, 5, 13, 25, 26] {
+                assert_eq!(
+                    rust_string_ownership(lit, expected),
+                    lit == 3 && expected == 3,
+                    "lit {} expected {}",
+                    lit,
+                    expected
+                );
+            }
+        }
+        assert!(rust_string_ownership(3, 3));
+        assert!(!rust_string_ownership(3, 26));
+        assert!(!rust_string_ownership(0, 3));
+    }
+
+    #[test]
+    fn string_literal_templates() {
+        // .morph tests: plain, empty, raw quote
+        assert_eq!(rust_string_literal_text("Int"), "\"Int\"");
+        assert_eq!(rust_string_literal_text(""), "\"\"");
+        // The contents render RAW: a quote or backslash
+        // inside is not escaped (a quote breaks the
+        // generated Rust — pinned as-is)
+        assert_eq!(rust_string_literal_text("a\"b"), "\"a\"b\"");
+        assert_eq!(rust_string_literal_text("a\\b"), "\"a\\b\"");
+        // .morph tests: owned forms
+        assert_eq!(
+            rust_string_literal_owned_text("Int"),
+            "\"Int\".to_string()"
+        );
+        assert_eq!(rust_string_literal_owned_text(""), "\"\".to_string()");
+        // The owned form is exactly the bare form +
+        // ".to_string()" on every content
+        for c in ["", "x", "Vec<i64>", "a\"b"] {
+            assert_eq!(
+                rust_string_literal_owned_text(c),
+                format!("{}.to_string()", rust_string_literal_text(c))
+            );
+        }
+    }
+
+    #[test]
+    fn doc_and_fixed_text() {
+        // .morph tests: a doc line, an empty doc line
+        assert_eq!(rust_doc_line("Sorts a list"), "//! Sorts a list\n");
+        assert_eq!(rust_doc_line(""), "//! \n");
+        assert_eq!(rust_doc_line("  indented"), "//!   indented\n");
+        // .morph tests: both fixed-text pieces
+        assert_eq!(rust_file_fixed_text(0), Some("}\n"));
+        assert_eq!(rust_file_fixed_text(1), Some("\n"));
+        assert_eq!(rust_file_fixed_text(2), None);
+        assert_eq!(rust_file_fixed_text(-1), None);
+    }
+
+    #[test]
+    fn signature_pieces() {
+        // Parameters: rendered name, ": ", rendered type
+        assert_eq!(rust_param_text("a", "i64"), "a: i64");
+        assert_eq!(rust_param_text("list", "Vec<String>"), "list: Vec<String>");
+        // Generics: absent is empty, present is bracketed
+        assert_eq!(rust_generics_text("", false), "");
+        assert_eq!(rust_generics_text("T", true), "<T>");
+        assert_eq!(rust_generics_text("T, U", true), "<T, U>");
+        // Signature lines over pre-rendered parts
+        assert_eq!(
+            rust_signature("add", "", "a: i64, b: i64", "i64"),
+            "pub fn add(a: i64, b: i64) -> i64 {\n"
+        );
+        assert_eq!(
+            rust_signature("sort", "<T>", "list: Vec<T>", "Vec<T>"),
+            "pub fn sort<T>(list: Vec<T>) -> Vec<T> {\n"
+        );
+        assert_eq!(rust_signature("f", "", "", "()"), "pub fn f() -> () {\n");
+    }
+
+    #[test]
+    fn precondition_pieces() {
+        // .morph tests: a real rendering, the swallowed
+        // 'true' rendering
+        assert_eq!(
+            rust_precondition_assert("x > 0"),
+            "    debug_assert!(x > 0, \"Precondition violated\");\n"
+        );
+        assert_eq!(
+            rust_precondition_assert("true"),
+            "    debug_assert!(true, \"Precondition violated\");\n"
+        );
+        // .morph test: the block over one assert
+        assert_eq!(
+            rust_precondition_block(
+                "    debug_assert!(true, \"Precondition violated\");\n"
+            ),
+            "#[cfg(debug_assertions)]\n{\n    debug_assert!(true, \"Precondition violated\");\n}\n\n"
+        );
+        // Two asserts concatenate in order, nothing between
+        let two = format!(
+            "{}{}",
+            rust_precondition_assert("a"),
+            rust_precondition_assert("b")
+        );
+        assert_eq!(
+            rust_precondition_block(&two),
+            "#[cfg(debug_assertions)]\n{\n    debug_assert!(a, \"Precondition violated\");\n    debug_assert!(b, \"Precondition violated\");\n}\n\n"
+        );
+    }
+
+    #[test]
+    fn test_module_pieces() {
+        // .morph tests: the name choice both ways
+        assert_eq!(rust_test_name_form(true), 0);
+        assert_eq!(rust_test_name_form(false), 1);
+        // The default's text is mirror-only (finding F2)
+        assert_eq!(rust_test_name_default(0), "test_0");
+        assert_eq!(rust_test_name_default(12), "test_12");
+        // One test block over pre-rendered parts
+        assert_eq!(
+            rust_test_case("adds", "add", "3", "7"),
+            "    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n"
+        );
+        // A String test input sits BARE in call position —
+        // the recorded E0308 property of this path
+        assert_eq!(
+            rust_test_case("names", "f", "\"Int\"", "\"Int\""),
+            "    #[test]\n    fn names() {\n        let result = f(\"Int\");\n        assert_eq!(result, \"Int\");\n    }\n"
+        );
+        // .morph test: the module wrapper over a marker
+        assert_eq!(
+            rust_test_module("X"),
+            "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\nX}\n"
+        );
+        // The wrapper over one real block
+        let block = rust_test_case("adds", "add", "3", "7");
+        assert_eq!(
+            rust_test_module(&block),
+            "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn generate_rust_assembly() {
+        // Full fixed structure: doc header, precondition
+        // block (BEFORE the signature — surprise 13),
+        // signature, body, closing brace, test module
+        let sig = rust_signature("add", "", "a: i64, b: i64", "i64");
+        let case = rust_test_case("adds", "add", "3", "7");
+        let out = generate_rust_assembled(
+            Some(&["Adds things"]),
+            &sig,
+            &["a > 0"],
+            "    a + b\n",
+            Some(&case),
+        );
+        assert_eq!(
+            out,
+            "//! Adds things\n\n#[cfg(debug_assertions)]\n{\n    debug_assert!(a > 0, \"Precondition violated\");\n}\n\npub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n}\n"
+        );
+        // Minimal: no doc, no preconditions, no tests —
+        // signature, body, closing brace only
+        let out = generate_rust_assembled(None, &sig, &[], "    a + b\n", None);
+        assert_eq!(out, "pub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n");
+        // A multi-line doc: every line gets the prefix,
+        // then exactly one blank line
+        let out = generate_rust_assembled(
+            Some(&["one", "two"]),
+            &sig,
+            &[],
+            "    a + b\n",
+            None,
+        );
+        assert!(out.starts_with("//! one\n//! two\n\npub fn add"));
+    }
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -1496,11 +2068,11 @@ spec bad {
     fn spec_file_has_expected_shape() {
         // Supplementary shape check (the pipeline test above is the
         // real validation): the file declares the 8 slice-1 specs
-        // plus the 20 slice-2 specs.
+        // plus the 20 slice-2 specs plus the 16 slice-3 specs.
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 28, "codegen.morph should declare 28 specs");
-        assert!(src.matches("test \"").count() >= 90, "codegen.morph should carry in-spec tests");
+        assert_eq!(spec_decls, 44, "codegen.morph should declare 44 specs");
+        assert!(src.matches("test \"").count() >= 118, "codegen.morph should carry in-spec tests");
     }
 }
