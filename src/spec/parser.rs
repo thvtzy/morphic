@@ -859,7 +859,21 @@ impl<'a> Parser<'a> {
             return Err(self.simple_error("Expected O(...) for complexity bound"));
         }
         self.expect_char('(')?;
-        let inner = self.parse_identifier()?;
+        // Read the bound token verbatim up to ')': forms like `1`,
+        // `n^2` and `2^n` are not identifiers, so parse_identifier
+        // rejected them and the match arms below were unreachable.
+        let mut inner = String::new();
+        while let Some(c) = self.peek() {
+            if c == ')' {
+                break;
+            }
+            inner.push(c);
+            self.advance();
+        }
+        let inner = inner.trim().to_string();
+        if inner.is_empty() {
+            return Err(self.simple_error("Expected complexity bound inside O(...)"));
+        }
         self.expect_char(')')?;
 
         match inner.as_str() {
@@ -1301,6 +1315,37 @@ mod tests {
             err.message.contains("bogus"),
             "unexpected error message: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn parse_constant_big_o() {
+        // `O(1)` is documented (LANGUAGE_REFERENCE section 7) and
+        // used by is_sorted/count_matching/binary_search, but
+        // parse_big_o read the bound with parse_identifier, which
+        // rejects digits — the `BigO::Constant` match arm was
+        // unreachable and every `O(1)` failed to parse.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>
+            output: Int
+
+            constraint: true
+            optimize: space < O(1)
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let complexity = spec.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity bound");
+        assert!(
+            matches!(complexity.bound, BigO::Constant),
+            "expected O(1), got: {:?}",
+            complexity.bound
         );
     }
 
