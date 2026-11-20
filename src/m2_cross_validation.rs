@@ -79,6 +79,7 @@ mod xval {
     use std::collections::HashSet;
     use std::fmt::Write as _;
     use std::process::Command;
+    use std::time::{Duration, Instant};
 
     // ─────────────────────────────────────────────────────────
     //  Value model
@@ -475,6 +476,36 @@ mod xval {
         winner_code: &str,
         inputs: &[Vec<i64>],
     ) -> Result<Vec<Out>, String> {
+        execute_winner_with_timeout(
+            run_idx,
+            func,
+            winner_code,
+            inputs,
+            Duration::from_secs(RUNNER_TIMEOUT_SECS),
+        )
+    }
+
+    /// Per-runner wall-clock limit. A sweep is at most a few
+    /// hundred calls of a pure function — milliseconds for any
+    /// terminating winner. The limit exists because winners can
+    /// be non-terminating: once selection stopped crowning the
+    /// (terminating) per-test matches, loop-bodied Inconclusive
+    /// candidates began winning, and a body like
+    /// `match depth { 1 => { while true { … } … }, … }` spins
+    /// forever on a legal sweep input. Without a limit the
+    /// harness itself hangs (observed: a Phase 16 measurement
+    /// run killed after ~54 minutes at 100% CPU); with one, a
+    /// non-terminating winner reads as what the harness has
+    /// always counted it as — fails to run, total disagreement.
+    const RUNNER_TIMEOUT_SECS: u64 = 10;
+
+    fn execute_winner_with_timeout(
+        run_idx: usize,
+        func: &spec::ast::FunctionSpec,
+        winner_code: &str,
+        inputs: &[Vec<i64>],
+        timeout: Duration,
+    ) -> Result<Vec<Out>, String> {
         let dir = std::env::temp_dir().join(format!(
             "morphic_xval_{}_{}_{}",
             std::process::id(),
@@ -511,13 +542,40 @@ mod xval {
             };
             return Err(format!("rustc failed: {}", excerpt.join(" | ")));
         }
-        let run = Command::new(&bin_path)
-            .output()
+        // Run with stdout redirected to a file (so polling
+        // try_wait cannot deadlock on a full pipe) and a hard
+        // deadline: kill a runner that does not finish — see
+        // RUNNER_TIMEOUT_SECS for why winners can hang.
+        let stdout_path = dir.join("stdout.txt");
+        let stdout_file = std::fs::File::create(&stdout_path)
+            .map_err(|e| format!("stdout file: {}", e))?;
+        let mut child = Command::new(&bin_path)
+            .stdout(std::process::Stdio::from(stdout_file))
+            .spawn()
             .map_err(|e| format!("spawn runner: {}", e))?;
-        if !run.status.success() {
-            return Err(format!("runner exited {}", run.status));
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = std::fs::remove_dir_all(&dir);
+                        return Err(format!(
+                            "runner timed out after {}s (non-terminating winner)",
+                            timeout.as_secs()
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => return Err(format!("wait runner: {}", e)),
+            }
+        };
+        if !status.success() {
+            return Err(format!("runner exited {}", status));
         }
-        let stdout = String::from_utf8(run.stdout)
+        let stdout = std::fs::read_to_string(&stdout_path)
             .map_err(|_| "runner output is not UTF-8".to_string())?;
         let lines: Vec<&str> = stdout.lines().collect();
         if lines.len() != inputs.len() {
@@ -922,6 +980,28 @@ mod xval {
         let ag = compare("is_literal_kind", &inputs, &outs);
         assert_eq!(ag.sweep_pinned_agree, ag.sweep_pinned_total);
         assert!(ag.disagreements.is_empty());
+
+        // A non-terminating winner must read as "fails to run"
+        // (total disagreement), never hang the harness: loop
+        // bodies are exactly what the verifier calls
+        // Inconclusive, and they win pools once refuted
+        // candidates are gated out. Short limit so the suite
+        // stays fast; the production limit is
+        // RUNNER_TIMEOUT_SECS.
+        let hanging = "pub fn is_literal_kind(kind: i64) -> bool {\n    loop {}\n}\n";
+        let err = execute_winner_with_timeout(
+            0,
+            &bool_func,
+            hanging,
+            &inputs,
+            Duration::from_secs(1),
+        )
+        .expect_err("non-terminating winner must fail, not hang");
+        assert!(
+            err.contains("timed out"),
+            "timeout must be the recorded failure, got: {}",
+            err
+        );
 
         let wrong = "pub fn is_literal_kind(kind: i64) -> bool {\n    kind == 2\n}\n";
         let outs = execute_winner(0, &bool_func, wrong, &inputs).expect("wrong winner must run");
