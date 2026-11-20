@@ -23,6 +23,46 @@ pub fn generate(candidate: &CandidateImplementation, target: &str) -> Result<Str
 
 // ── Rust Codegen ──────────────────────────────────────────
 
+/// Sanitize a name from spec/IR text into a valid Rust identifier.
+/// Names in specs are free text (e.g. test names like "empty-list"),
+/// so anything that is not `[A-Za-z0-9_]` becomes `_`; a leading digit
+/// gets a `_` prefix, and a result that collides with a Rust keyword
+/// gets a `_` suffix. Applied at every Rust emission point so that a
+/// name's declaration and all its uses sanitize identically.
+fn rust_ident(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 1);
+    for (i, ch) in name.chars().enumerate() {
+        if ch == '_' || ch.is_alphanumeric() {
+            if i == 0 && ch.is_ascii_digit() {
+                out.push('_');
+            }
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    if is_rust_keyword(&out) {
+        out.push('_');
+    }
+    out
+}
+
+fn is_rust_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "break" | "const" | "continue" | "crate" | "else" | "enum" | "extern"
+            | "false" | "fn" | "for" | "if" | "impl" | "in" | "let" | "loop" | "match"
+            | "mod" | "move" | "mut" | "pub" | "ref" | "return" | "self" | "Self"
+            | "static" | "struct" | "super" | "trait" | "true" | "type" | "unsafe"
+            | "use" | "where" | "while" | "async" | "await" | "dyn" | "abstract"
+            | "become" | "box" | "do" | "final" | "macro" | "override" | "priv"
+            | "typeof" | "unsized" | "virtual" | "yield" | "try"
+    )
+}
+
 fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
     let mut out = String::new();
 
@@ -40,14 +80,14 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
         String::new()
     } else {
         let g = candidate.spec.generics.iter()
-            .map(|gp| gp.name.clone())
+            .map(|gp| rust_ident(&gp.name))
             .collect::<Vec<_>>()
             .join(", ");
         format!("<{}>", g)
     };
 
     let params: Vec<String> = candidate.spec.params.iter()
-        .map(|p| format!("{}: {}", p.name, ty_to_rust(&p.ty)))
+        .map(|p| format!("{}: {}", rust_ident(&p.name), ty_to_rust(&p.ty)))
         .collect();
 
     let ret = ty_to_rust(&candidate.spec.return_type);
@@ -66,7 +106,7 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
     // Function definition
     out.push_str(&format!(
         "pub fn {}{}({}) -> {} {{\n",
-        candidate.spec.name, generics, params.join(", "), ret
+        rust_ident(&candidate.spec.name), generics, params.join(", "), ret
     ));
 
     // Body
@@ -84,10 +124,10 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
         for (i, test) in candidate.spec.tests.iter().enumerate() {
             let test_name = test.name.clone().unwrap_or_else(|| format!("test_{}", i));
             out.push_str(&format!("    #[test]\n"));
-            out.push_str(&format!("    fn {}() {{\n", test_name));
+            out.push_str(&format!("    fn {}() {{\n", rust_ident(&test_name)));
             out.push_str(&format!(
                 "        let result = {}({});\n",
-                candidate.spec.name,
+                rust_ident(&candidate.spec.name),
                 expr_to_rust(&test.input)
             ));
             out.push_str(&format!(
@@ -267,7 +307,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
         IRNode::Let { name, value, body } => {
             format!(
                 "{}let {} = {};\n{}",
-                pad, name, ir_to_rust_expr(value), ir_to_rust(body, indent)
+                pad, rust_ident(name), ir_to_rust_expr(value), ir_to_rust(body, indent)
             )
         }
 
@@ -298,7 +338,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
         IRNode::For { var, start, end, body } => {
             format!(
                 "{}for {} in {}..{} {{\n{}{}}}\n",
-                pad, var,
+                pad, rust_ident(var),
                 ir_to_rust_expr(start),
                 ir_to_rust_expr(end),
                 ir_to_rust(body, indent + 1),
@@ -322,7 +362,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
 
         IRNode::Call { function, args } => {
             let args_str: Vec<String> = args.iter().map(|a| ir_to_rust_expr(a)).collect();
-            format!("{}{}({})\n", pad, function, args_str.join(", "))
+            format!("{}{}({})\n", pad, rust_ident(function), args_str.join(", "))
         }
 
         IRNode::Return(expr) => {
@@ -332,7 +372,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
         IRNode::Alloc { name, ty, initial } => {
             format!(
                 "{}let mut {}: {} = {};\n",
-                pad, name, ty_to_rust(ty), ir_to_rust_expr(initial)
+                pad, rust_ident(name), ty_to_rust(ty), ir_to_rust_expr(initial)
             )
         }
 
@@ -422,7 +462,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
             IRLiteral::Char(c) => format!("'{}'", c),
             IRLiteral::Unit => "()".into(),
         },
-        IRNode::Var(name) => name.clone(),
+        IRNode::Var(name) => rust_ident(name),
         IRNode::BinOp(op, lhs, rhs) => {
             let rust_op = match op {
                 IRBinOp::Add => "+", IRBinOp::Sub => "-",
@@ -463,7 +503,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
         }
         IRNode::Call { function, args } => {
             let args_str: Vec<String> = args.iter().map(|a| ir_to_rust_expr(a)).collect();
-            format!("{}({})", function, args_str.join(", "))
+            format!("{}({})", rust_ident(function), args_str.join(", "))
         }
         IRNode::If { condition, then_branch, else_branch } => {
             format!(
@@ -475,7 +515,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
         }
         IRNode::Lambda { params, body } => {
             let params_str: Vec<String> = params.iter()
-                .map(|(n, _)| n.clone())
+                .map(|(n, _)| rust_ident(n))
                 .collect();
             format!(
                 "|{}| {{ {} }}",
@@ -501,7 +541,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
 fn ir_pattern_to_rust(pattern: &IRPattern) -> String {
     match pattern {
         IRPattern::Wildcard => "_".into(),
-        IRPattern::Variable(name) => name.clone(),
+        IRPattern::Variable(name) => rust_ident(name),
         IRPattern::Literal(lit) => match lit {
             IRLiteral::Int(n) => n.to_string(),
             IRLiteral::Bool(b) => b.to_string(),
@@ -511,9 +551,9 @@ fn ir_pattern_to_rust(pattern: &IRPattern) -> String {
         IRPattern::Constructor(name, sub_patterns) => {
             let subs: Vec<String> = sub_patterns.iter().map(ir_pattern_to_rust).collect();
             if subs.is_empty() {
-                name.clone()
+                rust_ident(name)
             } else {
-                format!("{}({})", name, subs.join(", "))
+                format!("{}({})", rust_ident(name), subs.join(", "))
             }
         }
         IRPattern::Guard(pat, guard) => {
@@ -801,7 +841,7 @@ fn ty_to_rust(ty: &TypeRef) -> String {
         }
         TypeRef::Array(t, n) => format!("[{}; {}]", ty_to_rust(t), n),
         TypeRef::Ref(t) => format!("&{}", ty_to_rust(t)),
-        TypeRef::Named(name) | TypeRef::Generic(name) => name.clone(),
+        TypeRef::Named(name) | TypeRef::Generic(name) => rust_ident(name),
         TypeRef::Function(args, ret) => {
             let args_str: Vec<String> = args.iter().map(ty_to_rust).collect();
             format!("fn({}) -> {}", args_str.join(", "), ty_to_rust(ret))
@@ -867,10 +907,10 @@ fn expr_to_rust(expr: &Expr) -> String {
         Expr::IntLit(n) => n.to_string(),
         Expr::BoolLit(b) => b.to_string(),
         Expr::StringLit(s) => format!("\"{}\"", s),
-        Expr::Var(name) => name.clone(),
+        Expr::Var(name) => rust_ident(name),
         Expr::Call(name, args) => {
             let args_str: Vec<String> = args.iter().map(expr_to_rust).collect();
-            format!("{}({})", name, args_str.join(", "))
+            format!("{}({})", rust_ident(name), args_str.join(", "))
         }
         Expr::BinOp(op, lhs, rhs) => {
             let rust_op = match op {
@@ -930,3 +970,92 @@ impl std::fmt::Display for CodegenError {
 }
 
 impl std::error::Error for CodegenError {}
+
+// ── Tests ─────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::ast::{Expr, Param, Test};
+    use crate::synthesis::engine::{Provenance, ScoreBreakdown};
+    use std::collections::HashMap;
+
+    fn candidate(spec_name: &str, body: IRNode) -> CandidateImplementation {
+        CandidateImplementation {
+            id: 1,
+            body,
+            spec_name: spec_name.into(),
+            spec: FunctionSpec {
+                name: spec_name.into(),
+                doc: None,
+                generics: vec![],
+                params: vec![Param {
+                    name: "kind".into(),
+                    ty: TypeRef::Int,
+                    annotations: HashMap::new(),
+                }],
+                return_type: TypeRef::Bool,
+                preconditions: vec![],
+                postconditions: vec![],
+                invariants: vec![],
+                complexity: None,
+                resource: None,
+                tests: vec![],
+                annotations: HashMap::new(),
+            },
+            score: 1.0,
+            scores: ScoreBreakdown {
+                test_pass_ratio: 1.0,
+                constraint_score: 1.0,
+                complexity_score: 1.0,
+                quality_score: 1.0,
+                synthesis_time_us: 0,
+            },
+            generation: 0,
+            provenance: Provenance::HumanGuided,
+            verified: true,
+        }
+    }
+
+    fn spec_test(name: &str) -> Test {
+        Test {
+            name: Some(name.into()),
+            input: Expr::IntLit(0),
+            expected_output: Expr::BoolLit(true),
+            timeout_ms: None,
+            property: false,
+        }
+    }
+
+    // Regression (M2 synthesis run, defect 1): spec test names were
+    // emitted verbatim as Rust fn identifiers — "empty-list" made
+    // 12/14 generated winner files unparseable.
+    #[test]
+    fn rust_codegen_sanitizes_spec_and_test_names() {
+        let mut cand = candidate("is-literal-kind", IRNode::Var("kind".into()));
+        cand.spec.tests = vec![spec_test("empty-list"), spec_test("binary-not-literal")];
+        let code = generate(&cand, "rust").unwrap();
+        assert!(code.contains("pub fn is_literal_kind("), "spec name not sanitized:\n{}", code);
+        assert!(code.contains("fn empty_list()"), "test name not sanitized:\n{}", code);
+        assert!(code.contains("fn binary_not_literal()"), "test name not sanitized:\n{}", code);
+        assert!(!code.contains("empty-list"), "raw hyphenated name leaked:\n{}", code);
+        assert!(!code.contains("is-literal-kind"), "raw hyphenated name leaked:\n{}", code);
+    }
+
+    // Sanitization must also guard Rust keywords and leading digits,
+    // and apply to parameter names (declaration and use sites alike).
+    #[test]
+    fn rust_codegen_sanitizes_keywords_digits_and_params() {
+        let mut cand = candidate("kw", IRNode::Var("type".into()));
+        cand.spec.params = vec![Param {
+            name: "type".into(),
+            ty: TypeRef::Int,
+            annotations: HashMap::new(),
+        }];
+        cand.spec.tests = vec![spec_test("match"), spec_test("3d case")];
+        let code = generate(&cand, "rust").unwrap();
+        assert!(code.contains("type_: i64"), "keyword param not sanitized:\n{}", code);
+        assert!(code.contains("fn match_()"), "keyword test name not sanitized:\n{}", code);
+        assert!(code.contains("fn _3d_case()"), "digit-led test name not sanitized:\n{}", code);
+    }
+}
