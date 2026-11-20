@@ -306,6 +306,21 @@ impl<'a> Parser<'a> {
     // ── Parsing Helpers ──────────────────────────────────
 
     fn parse_constraint(&mut self) -> Result<Constraint, ParseError> {
+        let lhs = self.parse_simple_constraint()?;
+        // `a implies b` — documented in LANGUAGE_REFERENCE section 6
+        // and supported by the AST, type checker, verifier and
+        // synthesis engine, but never produced by the parser.
+        // Implication binds loosest and associates to the right.
+        self.skip_whitespace_and_comments();
+        if self.peek() == Some('i') && self.peek_n(7) == "implies" {
+            self.eat_keyword("implies")?;
+            let rhs = self.parse_constraint()?;
+            return Ok(Constraint::Implies(Box::new(lhs), Box::new(rhs)));
+        }
+        Ok(lhs)
+    }
+
+    fn parse_simple_constraint(&mut self) -> Result<Constraint, ParseError> {
         self.skip_whitespace_and_comments();
 
         if self.peek() == Some('t') {
@@ -332,7 +347,9 @@ impl<'a> Parser<'a> {
 
         if self.peek() == Some('!') {
             self.advance();
-            let inner = self.parse_constraint()?;
+            // Negation binds tighter than implication, so the operand
+            // is a simple constraint, not a full one.
+            let inner = self.parse_simple_constraint()?;
             return Ok(Constraint::Not(Box::new(inner)));
         }
 
@@ -1232,6 +1249,43 @@ mod tests {
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn parse_implies_constraint() {
+        // `a implies b` is documented (LANGUAGE_REFERENCE section 6)
+        // and Constraint::Implies is handled by the type checker, the
+        // Z3 verifier and the synthesis engine — but the parser never
+        // produced it, so any spec using it failed to parse.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>
+            output: Bool
+
+            constraint: is_sorted(list) implies output == true
+            constraint: forall i: Int in range(0, len(list)):
+                list[i] > 0 implies output == true
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let func = &spec.functions[0];
+        assert_eq!(func.postconditions.len(), 2);
+        assert!(
+            matches!(func.postconditions[0], Constraint::Implies(_, _)),
+            "expected Implies, got: {:?}",
+            func.postconditions[0]
+        );
+        match &func.postconditions[1] {
+            Constraint::Forall { body, .. } => assert!(
+                matches!(**body, Constraint::Implies(_, _)),
+                "expected Implies forall body, got: {:?}",
+                body
+            ),
+            other => panic!("expected Forall, got: {:?}", other),
+        }
     }
 
     #[test]
