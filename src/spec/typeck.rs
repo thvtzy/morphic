@@ -226,6 +226,18 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
                     return Ok(TypeRef::List(Box::new(TypeRef::Named("_".into()))));
                 }
                 "__tuple__" => return Ok(TypeRef::Tuple(arg_tys)),
+                // Option constructors (LANGUAGE_REFERENCE section 4):
+                // `Option<Int>` values are written Some(5) / None().
+                "Some" => {
+                    let inner = arg_tys
+                        .into_iter()
+                        .next()
+                        .unwrap_or(TypeRef::Named("_".into()));
+                    return Ok(TypeRef::Option(Box::new(inner)));
+                }
+                "None" => {
+                    return Ok(TypeRef::Option(Box::new(TypeRef::Named("_".into()))));
+                }
                 _ => {}
             }
             // A spec defined in this module wins over the standard
@@ -334,6 +346,36 @@ mod tests {
         assert!(
             result.is_ok(),
             "stdlib calls must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn option_constructors_typecheck() {
+        // Some(v) / None() are the documented Option constructors
+        // (LANGUAGE_REFERENCE section 4), used by binary_search in
+        // constraints and test expectations. The parser lowers them
+        // to Call nodes and the checker rejected them as undefined
+        // functions.
+        let src = r#"
+        T {
+        spec f {
+            input: list: List<Int>, needle: Int
+            output: Option<Int>
+
+            constraint: output == None() implies len(list) == 0
+
+            test "missing" { input: ([1, 2], 5); expect: None() }
+            test "found" { input: ([1, 2], 2); expect: Some(1) }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "Option constructors must typecheck, got: {:?}",
             result.err().map(|e| e.message)
         );
     }
