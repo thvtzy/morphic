@@ -6,7 +6,7 @@
 use crate::spec::ast::*;
 use crate::synthesis::engine::{
     CandidateImplementation, IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp,
-    ScoreBreakdown, composite_score,
+    ScoreBreakdown, SpecIndex, composite_score, MAX_INLINE_DEPTH,
 };
 use super::smt::{Z3Session, SmtResult, SmtValue, z3_add, z3_sub, z3_mul, z3_and};
 use std::collections::HashMap;
@@ -45,14 +45,41 @@ pub struct Counterexample {
 
 pub struct Verifier {
     timeout_per_constraint_ms: u64,
+    /// The module the verified spec lives in, for resolving
+    /// spec-to-spec calls by inlining (see `sym_invoke`).
+    /// Empty unless built with `with_specs`/`with_index` — a
+    /// standalone verifier judges exactly what it judged
+    /// before: calls it cannot resolve make a body or a
+    /// constraint unencodable, hence Inconclusive.
+    index: SpecIndex,
 }
 
 impl Default for Verifier {
-    fn default() -> Self { Self { timeout_per_constraint_ms: 5_000 } }
+    fn default() -> Self {
+        Self {
+            timeout_per_constraint_ms: 5_000,
+            index: SpecIndex::empty(),
+        }
+    }
 }
 
 impl Verifier {
     pub fn new() -> Self { Self::default() }
+
+    /// A verifier that knows the whole module the spec belongs
+    /// to, so calls to sibling specs — in candidate bodies and
+    /// in postconditions alike — resolve by inlining the
+    /// callee's body.
+    pub fn with_specs(specs: &[FunctionSpec]) -> Self {
+        Self::with_index(SpecIndex::from_specs(specs))
+    }
+
+    pub fn with_index(index: SpecIndex) -> Self {
+        Self {
+            index,
+            ..Self::default()
+        }
+    }
 
     pub fn verify_all(
         &self,
@@ -103,7 +130,11 @@ impl Verifier {
         // encodable subset; every constraint is then Unknown and
         // the candidate can only be Inconclusive, never Verified.
         let param_env = param_env(spec);
-        let output = sym_eval(&candidate.body, &mut param_env.clone());
+        let output = sym_eval(
+            &candidate.body,
+            &mut param_env.clone(),
+            &EvalCtx::root(&self.index),
+        );
 
         let mut any_refuted = false;
         let mut any_unknown = false;
@@ -174,7 +205,7 @@ impl Verifier {
         };
         let mut env = param_env.clone();
         env.insert("output".to_string(), output.clone());
-        let Some(formula) = encode_constraint(constraint, &env) else {
+        let Some(formula) = encode_constraint(constraint, &env, &EvalCtx::root(&self.index)) else {
             return done(false, None, Tri::Unknown);
         };
 
@@ -222,13 +253,15 @@ enum Tri {
 //
 //   Literal, Var, BinOp, UnaryOp (Neg/Not/Abs/Len), If, Match
 //   (literal/variable/wildcard patterns), Let, Block, Return,
-//   Call ("len" and the "List" literal), Collection, Index,
-//   Typed.
+//   Call ("len", the "List" literal, and — when the verifier
+//   carries the module — calls to other specs, inlined),
+//   Collection, Index, Typed.
 //
 // Anything else — holes, loops, mutation, lambdas and other
-// function values, higher-order combinators, unknown calls,
-// guard/constructor patterns that cannot be decided — makes
-// the body unencodable (`None`), never a guessed value.
+// function values, higher-order combinators, calls that do
+// not resolve, guard/constructor patterns that cannot be
+// decided — makes the body unencodable (`None`), never a
+// guessed value.
 //
 // Representable sorts are Int, Bool and String, plus literal
 // lists of representable values (needed for len/Index over
@@ -247,6 +280,73 @@ enum Sym {
 }
 
 type SymEnv = HashMap<String, Sym>;
+
+/// Resolution context for spec-to-spec calls, threaded
+/// through every encoder in this module: the module index to
+/// resolve against, the stack of spec names currently being
+/// inlined on this path (the cycle guard), and the inlining
+/// depth (the expansion cap). A call whose target is already
+/// on the stack, or that would exceed
+/// `MAX_INLINE_DEPTH`, is unencodable — the honest outcome is
+/// Inconclusive, never a guessed value or an unbounded
+/// expansion.
+struct EvalCtx<'a> {
+    index: &'a SpecIndex,
+    visiting: Vec<String>,
+    depth: usize,
+}
+
+impl<'a> EvalCtx<'a> {
+    fn root(index: &'a SpecIndex) -> Self {
+        Self {
+            index,
+            visiting: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    fn can_inline(&self, name: &str) -> bool {
+        self.depth < MAX_INLINE_DEPTH && !self.visiting.iter().any(|v| v == name)
+    }
+
+    fn child(&self, name: &str) -> Self {
+        let mut visiting = self.visiting.clone();
+        visiting.push(name.to_string());
+        Self {
+            index: self.index,
+            visiting,
+            depth: self.depth + 1,
+        }
+    }
+}
+
+/// Invoke a call to another spec, symbolically: the callee's
+/// body — `SpecIndex::callee_body`, the same body the callee's
+/// constraint seed is built from — is evaluated in a fresh
+/// environment binding the callee's parameters to the
+/// already-encoded argument values. Substituting VALUES, not
+/// syntax, makes capture impossible by construction. Shared
+/// by the body side (`sym_call`, IR calls) and the constraint
+/// side (`encode_expr`, spec-expression calls), so a call
+/// denotes the same thing in a candidate and in the
+/// postcondition it is judged against.
+fn sym_invoke(ctx: &EvalCtx, name: &str, args: Vec<Sym>) -> Option<Sym> {
+    if !ctx.can_inline(name) {
+        return None;
+    }
+    let callee = ctx.index.get(name)?;
+    if callee.params.len() != args.len() {
+        return None;
+    }
+    let body = ctx.index.callee_body(name)?;
+    let mut env: SymEnv = callee
+        .params
+        .iter()
+        .map(|p| p.name.clone())
+        .zip(args)
+        .collect();
+    sym_eval(&body, &mut env, &ctx.child(name))
+}
 
 /// Internal control flow, mirroring the interpreter: `Return`
 /// unwinds to the top of the candidate body.
@@ -288,24 +388,24 @@ fn param_env(spec: &FunctionSpec) -> SymEnv {
     env
 }
 
-fn sym_eval(node: &IRNode, env: &mut SymEnv) -> Option<Sym> {
-    Some(sym_eval_flow(node, env)?.into_value())
+fn sym_eval(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<Sym> {
+    Some(sym_eval_flow(node, env, ctx)?.into_value())
 }
 
-fn sym_eval_flow(node: &IRNode, env: &mut SymEnv) -> Option<SymFlow> {
+fn sym_eval_flow(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<SymFlow> {
     match node {
         IRNode::Literal(lit) => Some(SymFlow::Normal(sym_literal(lit)?)),
 
         IRNode::Var(name) => env.get(name).cloned().map(SymFlow::Normal),
 
         IRNode::BinOp(op, l, r) => {
-            let lv = sym_eval(l, env)?;
-            let rv = sym_eval(r, env)?;
+            let lv = sym_eval(l, env, ctx)?;
+            let rv = sym_eval(r, env, ctx)?;
             Some(SymFlow::Normal(sym_binop_ir(*op, lv, rv)?))
         }
 
         IRNode::UnaryOp(op, inner) => {
-            let v = sym_eval(inner, env)?;
+            let v = sym_eval(inner, env, ctx)?;
             Some(SymFlow::Normal(sym_unary_ir(*op, v)?))
         }
 
@@ -313,29 +413,29 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv) -> Option<SymFlow> {
             condition,
             then_branch,
             else_branch,
-        } => match sym_eval(condition, env)? {
+        } => match sym_eval(condition, env, ctx)? {
             Sym::Bool(cond) => {
-                let t = sym_eval(then_branch, env)?;
-                let e = sym_eval(else_branch, env)?;
+                let t = sym_eval(then_branch, env, ctx)?;
+                let e = sym_eval(else_branch, env, ctx)?;
                 Some(SymFlow::Normal(sym_ite(&cond, t, e)?))
             }
             _ => None,
         },
 
         IRNode::Let { name, value, body } => {
-            let v = match sym_eval_flow(value, env)? {
+            let v = match sym_eval_flow(value, env, ctx)? {
                 SymFlow::Returned(v) => return Some(SymFlow::Returned(v)),
                 SymFlow::Normal(v) => v,
             };
             let mut inner = env.clone();
             inner.insert(name.clone(), v);
-            sym_eval_flow(body, &mut inner)
+            sym_eval_flow(body, &mut inner, ctx)
         }
 
         IRNode::Block(stmts) => {
             let mut last = Sym::Opaque; // an empty block is Unit
             for stmt in stmts {
-                match sym_eval_flow(stmt, env)? {
+                match sym_eval_flow(stmt, env, ctx)? {
                     SymFlow::Returned(v) => return Some(SymFlow::Returned(v)),
                     SymFlow::Normal(v) => last = v,
                 }
@@ -344,16 +444,16 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv) -> Option<SymFlow> {
         }
 
         IRNode::Return(inner) => {
-            let v = sym_eval(inner, env)?;
+            let v = sym_eval(inner, env, ctx)?;
             Some(SymFlow::Returned(v))
         }
 
         IRNode::Match { scrutinee, cases } => {
-            sym_match(scrutinee, cases, env).map(SymFlow::Normal)
+            sym_match(scrutinee, cases, env, ctx).map(SymFlow::Normal)
         }
 
         IRNode::Call { function, args } => {
-            sym_call(function, args, env).map(SymFlow::Normal)
+            sym_call(function, args, env, ctx).map(SymFlow::Normal)
         }
 
         IRNode::Collection { elements, .. } => {
@@ -361,7 +461,7 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv) -> Option<SymFlow> {
             // a List value regardless of kind; mirror that.
             let mut values = Vec::with_capacity(elements.len());
             for el in elements {
-                match sym_eval_flow(el, env)? {
+                match sym_eval_flow(el, env, ctx)? {
                     SymFlow::Returned(v) => return Some(SymFlow::Returned(v)),
                     SymFlow::Normal(v) => values.push(v),
                 }
@@ -370,12 +470,12 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv) -> Option<SymFlow> {
         }
 
         IRNode::Index(coll, idx) => {
-            let coll = sym_eval(coll, env)?;
-            let idx = sym_eval(idx, env)?;
+            let coll = sym_eval(coll, env, ctx)?;
+            let idx = sym_eval(idx, env, ctx)?;
             Some(SymFlow::Normal(sym_index(coll, idx)?))
         }
 
-        IRNode::Typed { node, .. } => sym_eval_flow(node, env),
+        IRNode::Typed { node, .. } => sym_eval_flow(node, env, ctx),
 
         // Everything below is outside the encodable subset,
         // exactly as in the interpreter: unfilled holes, loops,
@@ -424,26 +524,27 @@ fn sym_match(
     scrutinee: &IRNode,
     cases: &[(IRPattern, IRNode)],
     env: &mut SymEnv,
+    ctx: &EvalCtx,
 ) -> Option<Sym> {
-    let scrut = sym_eval(scrutinee, env)?;
+    let scrut = sym_eval(scrutinee, env, ctx)?;
     // (condition, value) per arm; condition None = unconditional.
     let mut arms: Vec<(Option<z3::ast::Bool>, Sym)> = Vec::new();
     for (pattern, body) in cases {
         match pattern {
             IRPattern::Wildcard => {
-                arms.push((None, sym_eval(body, env)?));
+                arms.push((None, sym_eval(body, env, ctx)?));
                 break; // later arms are unreachable
             }
             IRPattern::Variable(name) => {
                 let mut inner = env.clone();
                 inner.insert(name.clone(), scrut.clone());
-                arms.push((None, sym_eval(body, &mut inner)?));
+                arms.push((None, sym_eval(body, &mut inner, ctx)?));
                 break;
             }
             IRPattern::Literal(lit) => {
                 match sym_pattern_cond(&scrut, lit) {
                     PatternCond::Eq(cond) => {
-                        arms.push((Some(cond), sym_eval(body, env)?));
+                        arms.push((Some(cond), sym_eval(body, env, ctx)?));
                     }
                     // Provably never equal (interpreter equality
                     // is sort-strict here): the arm is dead.
@@ -510,22 +611,30 @@ fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
     }
 }
 
-fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv) -> Option<Sym> {
+fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv, ctx: &EvalCtx) -> Option<Sym> {
     match function {
         // `List[...]` is the spec language's list literal; the
         // parser lowers it to a Call named "List" (parser.rs).
         "List" => {
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
-                values.push(sym_eval(arg, env)?);
+                values.push(sym_eval(arg, env, ctx)?);
             }
             Some(Sym::List(values))
         }
         // The one pure builtin the specs and templates rely on.
-        "len" if args.len() == 1 => sym_len(sym_eval(&args[0], env)?),
-        // Template-internal pseudo-calls and spec-to-spec calls
-        // have no definition to encode.
-        _ => None,
+        "len" if args.len() == 1 => sym_len(sym_eval(&args[0], env, ctx)?),
+        // A call to another spec resolves by inlining the
+        // callee's body (see sym_invoke); template-internal
+        // pseudo-calls and unknown names resolve to nothing
+        // and stay unencodable.
+        _ => {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                values.push(sym_eval(arg, env, ctx)?);
+            }
+            sym_invoke(ctx, function, values)
+        }
     }
 }
 
@@ -726,31 +835,31 @@ fn sym_unary_ir(op: IRUnaryOp, v: Sym) -> Option<Sym> {
 // to int 0 and any Or-rooted formula to `true`, which made
 // the verdict a function of constraint syntax alone).
 
-fn encode_constraint(c: &Constraint, env: &SymEnv) -> Option<z3::ast::Bool> {
+fn encode_constraint(c: &Constraint, env: &SymEnv, ctx: &EvalCtx) -> Option<z3::ast::Bool> {
     match c {
         Constraint::True => Some(z3::ast::Bool::from_bool(true)),
-        Constraint::Not(inner) => Some(encode_constraint(inner, env)?.not()),
+        Constraint::Not(inner) => Some(encode_constraint(inner, env, ctx)?.not()),
         Constraint::And(parts) => {
             let mut acc = z3::ast::Bool::from_bool(true);
             for p in parts {
-                acc = z3_and(&acc, &encode_constraint(p, env)?);
+                acc = z3_and(&acc, &encode_constraint(p, env, ctx)?);
             }
             Some(acc)
         }
         Constraint::Or(parts) => {
             let mut acc = z3::ast::Bool::from_bool(false);
             for p in parts {
-                acc = z3::ast::Bool::or(&[&acc, &encode_constraint(p, env)?]);
+                acc = z3::ast::Bool::or(&[&acc, &encode_constraint(p, env, ctx)?]);
             }
             Some(acc)
         }
         Constraint::Implies(a, b) => {
-            Some(encode_constraint(a, env)?.implies(&encode_constraint(b, env)?))
+            Some(encode_constraint(a, env, ctx)?.implies(&encode_constraint(b, env, ctx)?))
         }
         Constraint::Eq(a, b) => match sym_binop(
             BinKind::Eq,
-            encode_expr(a, env)?,
-            encode_expr(b, env)?,
+            encode_expr(a, env, ctx)?,
+            encode_expr(b, env, ctx)?,
         )? {
             Sym::Bool(b) => Some(b),
             _ => None,
@@ -762,12 +871,12 @@ fn encode_constraint(c: &Constraint, env: &SymEnv) -> Option<z3::ast::Bool> {
                 OrderOp::GreaterThan => BinKind::Gt,
                 OrderOp::GreaterThanOrEqual => BinKind::Ge,
             };
-            match sym_binop(kind, encode_expr(a, env)?, encode_expr(b, env)?)? {
+            match sym_binop(kind, encode_expr(a, env, ctx)?, encode_expr(b, env, ctx)?)? {
                 Sym::Bool(b) => Some(b),
                 _ => None,
             }
         }
-        Constraint::Expr(expr) => match encode_expr(expr, env)? {
+        Constraint::Expr(expr) => match encode_expr(expr, env, ctx)? {
             Sym::Bool(b) => Some(b),
             _ => None,
         },
@@ -779,7 +888,7 @@ fn encode_constraint(c: &Constraint, env: &SymEnv) -> Option<z3::ast::Bool> {
     }
 }
 
-fn encode_expr(expr: &Expr, env: &SymEnv) -> Option<Sym> {
+fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
     match expr {
         Expr::Var(name) => env.get(name).cloned(),
         Expr::IntLit(n) => Some(Sym::Int(z3::ast::Int::from_i64(*n))),
@@ -803,28 +912,36 @@ fn encode_expr(expr: &Expr, env: &SymEnv) -> Option<Sym> {
                 BinOp::Ge => BinKind::Ge,
                 BinOp::Concat => BinKind::Concat,
             };
-            sym_binop(kind, encode_expr(l, env)?, encode_expr(r, env)?)
+            sym_binop(kind, encode_expr(l, env, ctx)?, encode_expr(r, env, ctx)?)
         }
         Expr::UnaryOp(op, inner) => match op {
-            UnaryOp::Neg => sym_neg(encode_expr(inner, env)?),
-            UnaryOp::Not => sym_not(encode_expr(inner, env)?),
+            UnaryOp::Neg => sym_neg(encode_expr(inner, env, ctx)?),
+            UnaryOp::Not => sym_not(encode_expr(inner, env, ctx)?),
         },
-        Expr::Length(inner) => sym_len(encode_expr(inner, env)?),
+        Expr::Length(inner) => sym_len(encode_expr(inner, env, ctx)?),
         Expr::Call(name, args) => match name.as_str() {
-            "len" if args.len() == 1 => sym_len(encode_expr(&args[0], env)?),
+            "len" if args.len() == 1 => sym_len(encode_expr(&args[0], env, ctx)?),
             "List" => {
                 let mut values = Vec::with_capacity(args.len());
                 for a in args {
-                    values.push(encode_expr(a, env)?);
+                    values.push(encode_expr(a, env, ctx)?);
                 }
                 Some(Sym::List(values))
             }
-            // Spec-to-spec calls and unknown functions have no
-            // definition to encode.
-            _ => None,
+            // A call to another spec resolves by inlining the
+            // callee's body (see sym_invoke) — this arm is what
+            // makes composition postconditions judgable at all;
+            // unknown functions have no definition to encode.
+            _ => {
+                let mut values = Vec::with_capacity(args.len());
+                for a in args {
+                    values.push(encode_expr(a, env, ctx)?);
+                }
+                sym_invoke(ctx, name, values)
+            }
         },
         Expr::Index(coll, idx) => {
-            sym_index(encode_expr(coll, env)?, encode_expr(idx, env)?)
+            sym_index(encode_expr(coll, env, ctx)?, encode_expr(idx, env, ctx)?)
         }
         Expr::Field(..) | Expr::Lambda(..) | Expr::Comprehension { .. } => None,
     }
@@ -851,8 +968,20 @@ fn is_well_formed(node: &IRNode) -> bool {
 /// resulting body (an unencodable seed would be one more
 /// Inconclusive pool member, indistinguishable from junk).
 pub fn body_is_encodable(spec: &FunctionSpec, body: &IRNode) -> bool {
+    body_is_encodable_with(spec, body, &SpecIndex::empty())
+}
+
+/// `body_is_encodable` in a module context: spec-to-spec
+/// calls in the body resolve against `index` while judging
+/// encodability, so a body whose calls resolve to encodable
+/// callee bodies is itself encodable.
+pub fn body_is_encodable_with(
+    spec: &FunctionSpec,
+    body: &IRNode,
+    index: &SpecIndex,
+) -> bool {
     let mut env = param_env(spec);
-    sym_eval(body, &mut env).is_some()
+    sym_eval(body, &mut env, &EvalCtx::root(index)).is_some()
 }
 
 pub fn verify_all(
