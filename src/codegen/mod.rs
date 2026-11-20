@@ -341,7 +341,7 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
             format!(
                 "{}if {} {{\n{}}} else {{\n{}}}\n",
                 pad,
-                ir_to_rust_expr(condition),
+                expr_in_condition_position(condition),
                 ir_to_rust_tail(then_branch, indent + 1, fn_ret, Some(fn_ret)),
                 ir_to_rust_tail(else_branch, indent + 1, fn_ret, Some(fn_ret)),
             )
@@ -355,7 +355,7 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
                 "{}{}while {} {{\n{}{}}}\n",
                 inv_comment,
                 pad,
-                ir_to_rust_expr(condition),
+                expr_in_condition_position(condition),
                 ir_to_rust(body, indent + 1, fn_ret),
                 pad,
             )
@@ -373,7 +373,7 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
         }
 
         IRNode::Match { scrutinee, cases } => {
-            let mut out = format!("{}match {} {{\n", pad, ir_to_rust_expr(scrutinee));
+            let mut out = format!("{}match {} {{\n", pad, expr_in_condition_position(scrutinee));
             for (pattern, body) in cases {
                 let pat = ir_pattern_to_rust(pattern);
                 out.push_str(&format!("{}{} => {{\n{}{}}},\n",
@@ -543,6 +543,50 @@ fn ir_to_rust_expr_typed(node: &IRNode, expected: Option<&TypeRef>) -> String {
     }
 }
 
+/// Render a statement-shaped node as a Rust block expression
+/// for use in expression position (`Let`, `While`, `For`): the
+/// statement rendering goes inside `{ … }`, where a Let's tail
+/// body still yields its value and the loops yield `()`, exactly
+/// as in statement position. Statement rendering needs the
+/// enclosing function's return type; expression position does
+/// not carry one, so a neutral `Unit` context is used — the only
+/// loss is the String-ownership rewrite in return/tail positions
+/// nested inside the block, which the untyped expression emitter
+/// already forgoes elsewhere (If branches, Lambda bodies).
+fn expr_block_stmt(node: &IRNode) -> String {
+    let neutral = TypeRef::Unit;
+    format!("{{ {} }}", ir_to_rust(node, 0, &neutral).trim_end())
+}
+
+/// The loud fallback for a shape with no honest expression form,
+/// following the codebase's Hole convention: `panic!` has type
+/// `!` and coerces anywhere, so the generated file still parses
+/// and compiles — the gap stays loud instead of silent.
+fn unsupported_expr(shape: &str) -> String {
+    format!("panic!(\"unsupported IR in expression position: {}\")", shape)
+}
+
+/// Block-like expressions (match/if/loop/blocks/lambdas/…) cannot
+/// appear bare where Rust expects a condition or a scrutinee —
+/// `if match … { } { }` and `match match … { } { }` do not parse.
+/// Wrap those in parens; everything else renders exactly as
+/// before, so existing winners' bytes are unchanged.
+fn expr_in_condition_position(node: &IRNode) -> String {
+    match node {
+        IRNode::Match { .. }
+        | IRNode::If { .. }
+        | IRNode::Loop { .. }
+        | IRNode::While { .. }
+        | IRNode::For { .. }
+        | IRNode::Let { .. }
+        | IRNode::Block(_)
+        | IRNode::StructDef { .. }
+        | IRNode::Lambda { .. }
+        | IRNode::Closure { .. } => format!("({})", ir_to_rust_expr(node)),
+        _ => ir_to_rust_expr(node),
+    }
+}
+
 fn ir_to_rust_expr(node: &IRNode) -> String {
     match node {
         IRNode::Literal(lit) => match lit {
@@ -560,6 +604,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 IRBinOp::Mul => "*", IRBinOp::Div => "/",
                 IRBinOp::Mod => "%",
                 IRBinOp::And => "&&", IRBinOp::Or => "||",
+                IRBinOp::Xor => "^",
                 IRBinOp::Eq => "==", IRBinOp::Neq => "!=",
                 IRBinOp::Lt => "<", IRBinOp::Le => "<=",
                 IRBinOp::Gt => ">", IRBinOp::Ge => ">=",
@@ -567,7 +612,6 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 IRBinOp::Concat => "+",
                 IRBinOp::Append => ".push",
                 IRBinOp::Merge => ".extend",
-                _ => "UNKNOWN_OP",
             };
             if *op == IRBinOp::Append {
                 format!("{}.push({})", ir_to_rust_expr(lhs), ir_to_rust_expr(rhs))
@@ -578,18 +622,24 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
             }
         }
         IRNode::UnaryOp(op, inner) => {
-            let rust_op = match op {
-                IRUnaryOp::Neg => "-", IRUnaryOp::Not => "!",
-                IRUnaryOp::Abs => ".abs()", IRUnaryOp::Len => ".len()",
-                IRUnaryOp::Clone => ".clone()",
-                IRUnaryOp::Reverse => ".reverse()",
-                _ => "UNKNOWN_UNOP",
-            };
-            if *op == IRUnaryOp::Len || *op == IRUnaryOp::Abs ||
-               *op == IRUnaryOp::Clone || *op == IRUnaryOp::Reverse {
-                format!("{}{}", ir_to_rust_expr(inner), rust_op)
-            } else {
-                format!("({} {})", rust_op, ir_to_rust_expr(inner))
+            let inner = ir_to_rust_expr(inner);
+            match op {
+                IRUnaryOp::Neg => format!("(- {})", inner),
+                IRUnaryOp::Not => format!("(! {})", inner),
+                IRUnaryOp::Abs => format!("{}.abs()", inner),
+                IRUnaryOp::Len => format!("{}.len()", inner),
+                IRUnaryOp::Clone => format!("{}.clone()", inner),
+                IRUnaryOp::Reverse => format!("{}.reverse()", inner),
+                // List-part ops (the selector's verdict types
+                // them: Head/Last yield the element, Tail/Init
+                // the list). Indexing/slicing is the direct
+                // lowering; the operand text is emitted twice
+                // for Last/Init, which is sound for the IR's
+                // pure expression forms.
+                IRUnaryOp::Head => format!("({})[0]", inner),
+                IRUnaryOp::Last => format!("({})[({}).len() - 1]", inner, inner),
+                IRUnaryOp::Tail => format!("({})[1..].to_vec()", inner),
+                IRUnaryOp::Init => format!("({})[..({}).len() - 1].to_vec()", inner, inner),
             }
         }
         IRNode::Call { function, args } => {
@@ -599,12 +649,12 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
         IRNode::If { condition, then_branch, else_branch } => {
             format!(
                 "if {} {{ {} }} else {{ {} }}",
-                ir_to_rust_expr(condition),
+                expr_in_condition_position(condition),
                 ir_to_rust_expr(then_branch),
                 ir_to_rust_expr(else_branch),
             )
         }
-        IRNode::Lambda { params, body } => {
+        IRNode::Lambda { params, body } | IRNode::Closure { params, body, .. } => {
             let params_str: Vec<String> = params.iter()
                 .map(|(n, _)| rust_ident(n))
                 .collect();
@@ -620,12 +670,130 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 CollectionKind::List => format!("vec![{}]", elems.join(", ")),
                 CollectionKind::Array => format!("[{}]", elems.join(", ")),
                 CollectionKind::Tuple => format!("({})", elems.join(", ")),
-                CollectionKind::Set => format!("HashSet::from([{}])", elems.join(", ")),
-                CollectionKind::Map => format!("HashMap::from([{}])", elems.join(", ")),
+                // Fully qualified: no import is generated for
+                // winner files, so a bare `HashSet::from` fails
+                // with E0433.
+                CollectionKind::Set => format!("std::collections::HashSet::from([{}])", elems.join(", ")),
+                CollectionKind::Map => format!("std::collections::HashMap::from([{}])", elems.join(", ")),
             }
         }
+        IRNode::Map { function, over } => {
+            format!(
+                "({}).iter().map({}).collect()",
+                ir_to_rust_expr(over),
+                ir_to_rust_expr(function),
+            )
+        }
+        IRNode::Filter { predicate, over } => {
+            format!(
+                "({}).iter().filter({}).collect()",
+                ir_to_rust_expr(over),
+                ir_to_rust_expr(predicate),
+            )
+        }
+        IRNode::Fold { operation, initial, over } => {
+            format!(
+                "({}).iter().fold({}, {})",
+                ir_to_rust_expr(over),
+                ir_to_rust_expr(initial),
+                ir_to_rust_expr(operation),
+            )
+        }
+        IRNode::Sort { comparator, collection } => {
+            // The statement form (bind, sort, yield) wrapped as a
+            // block expression so the sorted value is the value.
+            format!(
+                "{{ let mut sorted = {}; sorted.sort_by({}); sorted }}",
+                ir_to_rust_expr(collection),
+                ir_to_rust_expr(comparator),
+            )
+        }
+        IRNode::Match { scrutinee, cases } => {
+            let arms: Vec<String> = cases
+                .iter()
+                .map(|(pat, body)| {
+                    format!(
+                        "{} => {}",
+                        ir_pattern_to_rust(pat),
+                        ir_to_rust_expr(body)
+                    )
+                })
+                .collect();
+            format!(
+                "match {} {{ {} }}",
+                expr_in_condition_position(scrutinee),
+                arms.join(", ")
+            )
+        }
+        IRNode::Block(stmts) => {
+            // A block is an expression in Rust: statements render
+            // as statements, the last one keeps the tail position
+            // (mirrors ir_to_rust_tail's Block arm, in a neutral
+            // return-type context — see expr_block_stmt).
+            let neutral = TypeRef::Unit;
+            let mut inner = String::new();
+            if let Some((last, rest)) = stmts.split_last() {
+                for stmt in rest {
+                    inner.push_str(&ir_to_rust(stmt, 0, &neutral));
+                }
+                inner.push_str(&ir_to_rust_tail(last, 0, &neutral, None));
+            }
+            format!("{{ {} }}", inner.trim_end())
+        }
+        IRNode::Let { .. } | IRNode::While { .. } | IRNode::For { .. } => {
+            expr_block_stmt(node)
+        }
+        IRNode::Loop { body } => {
+            let neutral = TypeRef::Unit;
+            format!(
+                "loop {{\n{}}}",
+                ir_to_rust(body, 0, &neutral).trim_end()
+            )
+        }
+        IRNode::StructDef { name, fields, body } => {
+            // An item definition followed by the body that uses
+            // it — Rust allows item declarations inside a block.
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|(n, t)| format!("{}: {}", rust_ident(n), ty_to_rust(t)))
+                .collect();
+            format!(
+                "{{ struct {} {{ {} }} {} }}",
+                rust_ident(name),
+                fields_str.join(", "),
+                ir_to_rust_expr(body),
+            )
+        }
+        IRNode::Index(coll, idx) => {
+            format!("({})[{}]", ir_to_rust_expr(coll), ir_to_rust_expr(idx))
+        }
+        IRNode::TryPropagate(inner) => {
+            format!("({})?", ir_to_rust_expr(inner))
+        }
+        IRNode::Assign { target, value } => {
+            format!(
+                "({} = {})",
+                ir_to_rust_expr(target),
+                ir_to_rust_expr(value)
+            )
+        }
+        // `return`/`break` greedily consume a following
+        // expression, so they are parenthesized to keep the IR's
+        // operand boundary: `(return 5) + 1` must not become
+        // `return (5 + 1)`.
+        IRNode::Return(inner) => {
+            format!("(return {})", ir_to_rust_expr(inner))
+        }
+        IRNode::Break { value } => match value {
+            Some(v) => format!("(break {})", ir_to_rust_expr(v)),
+            None => "(break)".into(),
+        },
+        IRNode::Hole { .. } => "panic!(\"Hole not filled\")".into(),
+        // An Alloc binds a name for later statements; it has no
+        // value of its own, so there is no honest expression
+        // form — the loud fallback applies.
+        IRNode::Alloc { .. } => unsupported_expr("Alloc"),
         IRNode::Typed { node, ty } => ir_to_rust_expr_typed(node, Some(ty)),
-        _ => "/* UNSUPPORTED */".into(),
     }
 }
 
@@ -1610,6 +1778,55 @@ mod tests {
         });
         assert!(mat.contains("match kind {"), "match not rendered: {}", mat);
         assert!(mat.contains("_ => 0"), "match arm not rendered: {}", mat);
+    }
+
+    #[test]
+    fn rust_expr_block_like_conditions_and_scrutinees_are_parenthesized() {
+        // A Match rendered by the new expression arm cannot sit
+        // bare in a condition or scrutinee position — `if match
+        // … { } { }` does not parse.
+        let body = IRNode::If {
+            condition: Box::new(IRNode::Match {
+                scrutinee: Box::new(IRNode::Var("kind".into())),
+                cases: vec![
+                    (
+                        IRPattern::Literal(IRLiteral::Int(0)),
+                        IRNode::Literal(IRLiteral::Bool(true)),
+                    ),
+                    (
+                        IRPattern::Wildcard,
+                        IRNode::Literal(IRLiteral::Bool(false)),
+                    ),
+                ],
+            }),
+            then_branch: Box::new(IRNode::Literal(IRLiteral::Bool(true))),
+            else_branch: Box::new(IRNode::Literal(IRLiteral::Bool(false))),
+        };
+        let cand = candidate("match_condition", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("if (match kind {"),
+            "match condition not parenthesized:\n{}",
+            code
+        );
+        let nested = ir_to_rust_expr(&IRNode::Match {
+            scrutinee: Box::new(IRNode::Match {
+                scrutinee: Box::new(IRNode::Var("kind".into())),
+                cases: vec![(
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Int(0)),
+                )],
+            }),
+            cases: vec![(
+                IRPattern::Wildcard,
+                IRNode::Literal(IRLiteral::Int(1)),
+            )],
+        });
+        assert!(
+            nested.contains("match (match kind {"),
+            "match scrutinee not parenthesized: {}",
+            nested
+        );
     }
 
     #[test]
