@@ -8,6 +8,7 @@ mod llm;
 mod synthesis;
 mod verify;
 mod codegen;
+mod m2_synthesis_probe;
 
 use clap::{Parser, Subcommand};
 use colored::*;
