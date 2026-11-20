@@ -352,7 +352,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
                 let pat = ir_pattern_to_rust(pattern);
                 out.push_str(&format!("{}{} => {{\n{}{}}},\n",
                     pad_inner, pat,
-                    ir_to_rust(body, indent + 2),
+                    ir_to_rust_tail(body, indent + 2),
                     pad_inner,
                 ));
             }
@@ -449,6 +449,35 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
 
         // Expressions that shouldn't appear as statements
         _ => format!("{}{};\n", pad, ir_to_rust_expr(node)),
+    }
+}
+
+/// Render a node in tail position (a match arm body): its value is the
+/// enclosing block's value, so expression nodes are emitted without the
+/// trailing `;` that statement rendering adds — a `value;` arm would
+/// evaluate to `()` and fail the function's return type (E0308).
+/// Statement-shaped nodes (Let, If, Return, Hole, nested Match, …)
+/// keep their normal statement rendering, which is already tail-shaped
+/// where it needs to be.
+fn ir_to_rust_tail(node: &IRNode, indent: usize) -> String {
+    let pad = "    ".repeat(indent);
+    match node {
+        IRNode::Block(stmts) => {
+            let mut out = String::new();
+            if let Some((last, rest)) = stmts.split_last() {
+                for stmt in rest {
+                    out.push_str(&ir_to_rust(stmt, indent));
+                }
+                out.push_str(&ir_to_rust_tail(last, indent));
+            }
+            out
+        }
+        IRNode::Typed { node, .. } => ir_to_rust_tail(node, indent),
+        IRNode::Literal(_) | IRNode::Var(_) | IRNode::BinOp(..) | IRNode::UnaryOp(..)
+        | IRNode::Lambda { .. } | IRNode::Collection { .. } => {
+            format!("{}{}\n", pad, ir_to_rust_expr(node))
+        }
+        _ => ir_to_rust(node, indent),
     }
 }
 
@@ -1040,6 +1069,63 @@ mod tests {
         assert!(code.contains("fn binary_not_literal()"), "test name not sanitized:\n{}", code);
         assert!(!code.contains("empty-list"), "raw hyphenated name leaked:\n{}", code);
         assert!(!code.contains("is-literal-kind"), "raw hyphenated name leaked:\n{}", code);
+    }
+
+    // Regression (M2 synthesis run, defect 2): Match arm bodies were
+    // emitted as statements (`true;`), discarding the arm value — the
+    // match then evaluated to `()` and the function failed with E0308.
+    // This is the exact winner shape of `is_literal_kind`.
+    #[test]
+    fn rust_codegen_match_arms_yield_their_values() {
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::Literal(IRLiteral::Bool(true)),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+            ],
+        };
+        let cand = candidate("is_literal_kind", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(!code.contains("true;"), "arm value discarded as statement:\n{}", code);
+        assert!(!code.contains("false;"), "arm value discarded as statement:\n{}", code);
+        assert!(code.contains("true\n"), "arm value not a tail expression:\n{}", code);
+        assert!(code.contains("false\n"), "arm value not a tail expression:\n{}", code);
+    }
+
+    // Same defect, non-literal arm bodies: a BinOp arm and a Block arm
+    // whose last statement is an expression must also yield values.
+    #[test]
+    fn rust_codegen_match_arms_yield_expression_and_block_values() {
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(IRNode::Var("kind".into())),
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                    ),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Block(vec![IRNode::Literal(IRLiteral::Int(7))]),
+                ),
+            ],
+        };
+        let mut cand = candidate("next_kind", body);
+        cand.spec.return_type = TypeRef::Int;
+        let code = generate(&cand, "rust").unwrap();
+        assert!(code.contains("(kind + 1)\n"), "BinOp arm not a tail expression:\n{}", code);
+        assert!(!code.contains("(kind + 1);"), "BinOp arm discarded:\n{}", code);
+        assert!(code.contains("7\n"), "Block arm value not yielded:\n{}", code);
+        assert!(!code.contains("7;"), "Block arm value discarded:\n{}", code);
     }
 
     // Sanitization must also guard Rust keywords and leading digits,
