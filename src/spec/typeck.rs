@@ -427,4 +427,128 @@ mod tests {
         let spec = parse(src).unwrap();
         assert!(check(spec).is_err(), "unknown function was accepted");
     }
+
+    // ── Concat `++` typing (Phase 25, finding F1) ────────────
+    //
+    // The layers below the checker are sort-strict about
+    // Concat: the IR interpreter evaluates it only on two
+    // Strings or two Lists, and the Z3 verifier encodes only
+    // those cases. So `++` is the one operator this checker
+    // types precisely — a spec the backends would reject must
+    // fail here, at `morphic check` time.
+
+    #[test]
+    fn concat_of_strings_typechecks() {
+        // The M3 wrap-one template: a String assembled around a
+        // String parameter, compared against a String output.
+        let src = r#"
+        T {
+        spec wrap {
+            input: inner: String
+            output: String
+
+            constraint: output == "Vec<" ++ inner ++ ">"
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "String ++ String must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn concat_rejects_int_operands() {
+        let src = r#"
+        T {
+        spec f {
+            input: a: Int
+            output: Int
+
+            constraint: output == a ++ 2
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(result.is_err(), "Int ++ Int must be a type error");
+        let err = result.err().unwrap();
+        assert!(
+            err.message.contains("++"),
+            "error should name the operator: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn concat_rejects_mixed_operands() {
+        let src = r#"
+        T {
+        spec f {
+            input: name: String
+            output: String
+
+            constraint: output == name ++ 1
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert!(
+            check(spec).is_err(),
+            "String ++ Int must be a type error"
+        );
+    }
+
+    #[test]
+    fn concat_of_compatible_lists_typechecks() {
+        // The interpreter's second Concat case: List ++ List.
+        let src = r#"
+        T {
+        spec f {
+            input: xs: List<Int>, ys: List<Int>
+            output: List<Int>
+
+            constraint: output == xs ++ ys
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "List<Int> ++ List<Int> must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn concat_rejects_mismatched_lists() {
+        // Element types provably different (Int vs String):
+        // the selector's IR verdict calls this untypable, the
+        // interpreter would fail on the values, so check must
+        // reject it too.
+        let src = r#"
+        T {
+        spec f {
+            input: xs: List<Int>, ys: List<String>
+            output: List<Int>
+
+            constraint: output == xs ++ ys
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert!(
+            check(spec).is_err(),
+            "List<Int> ++ List<String> must be a type error"
+        );
+    }
 }

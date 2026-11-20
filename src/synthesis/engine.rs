@@ -4041,6 +4041,123 @@ mod tests {
         );
     }
 
+    /// Phase 25 (finding F1): the parser now surfaces `++` as
+    /// BinOp::Concat, so a spec can finally STATE a string
+    /// assembly. The fixture below — the M3 wrap-one template —
+    /// was impossible before this phase: `parse` rejected the
+    /// second `+` outright, so the spec could not even be
+    /// written. Its equation seed must exist (the postcondition
+    /// IS the body), be Z3-Verified, win selection, execute
+    /// through the IR interpreter at tpr 1.000, and generate
+    /// Rust that compiles — the full path every layer below the
+    /// parser already supported, exercised end to end.
+    #[test]
+    fn concat_equation_seed_is_verified_and_wins() {
+        let src = r#"
+ConcatFixture {
+spec wrap_vec {
+    doc: "Wrap an already-rendered inner type in Vec<...>: the M3 template shape."
+    input: inner: String
+    output: String
+
+    constraint: output == "Vec<" ++ inner ++ ">"
+
+    test "plain" { input: "i64" expect: "Vec<i64>" }
+    test "empty" { input: "" expect: "Vec<>" }
+    test "nested" { input: "Vec<u8>" expect: "Vec<Vec<u8>>" }
+}
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("concat fixture must parse");
+        let checked =
+            crate::spec::typeck::check(parsed).expect("concat fixture must typecheck");
+        let module = checked.spec.functions;
+        let spec = module_spec(&module, "wrap_vec");
+
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &spec, "equation");
+        assert_eq!(count_holes(&seed.body), 0);
+        assert!(
+            format!("{:?}", seed.body).contains("Concat"),
+            "the equation seed's body must be the concat assembly: {:?}",
+            seed.body
+        );
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        // Executed through the IR interpreter: the assembled
+        // strings are exactly the template's, nested case
+        // included — tpr's machinery, checked by hand here.
+        for (inner, expected) in [
+            ("i64", "Vec<i64>"),
+            ("", "Vec<>"),
+            ("Vec<u8>", "Vec<Vec<u8>>"),
+        ] {
+            let mut env = crate::synthesis::eval::Env::new();
+            env.insert(
+                "inner".into(),
+                crate::synthesis::eval::Value::Str(inner.into()),
+            );
+            let v = crate::synthesis::eval::eval(&seed.body, &env)
+                .expect("seed body must evaluate");
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(expected.into()),
+                "inner {:?}",
+                inner
+            );
+        }
+
+        let pool = synthesize_with_module(&spec, 1, &module)
+            .expect("opt-1 synthesis must succeed");
+        assert!(
+            pool.iter()
+                .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+            "final pool must contain the constraint seed"
+        );
+        let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the constraint's own expression"
+        );
+
+        // The generated Rust must compile — the same standalone
+        // check the synthesis probes run (rustc --crate-type
+        // lib on the emitted file).
+        let code = crate::codegen::generate(&winner, "rust").expect("codegen");
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_concat_e2e_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("wrap_vec.rs");
+        std::fs::write(&file, &code).unwrap();
+        let out = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "--crate-type", "lib"])
+            .arg(&file)
+            .arg("-o")
+            .arg(dir.join("libwrap_vec.rlib"))
+            .output()
+            .expect("failed to run rustc");
+        assert!(
+            out.status.success(),
+            "generated Rust failed to compile:\n{}\n--- code ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            code
+        );
+    }
+
     /// Constraint seeds (ii): a lookup spec's guard rows
     /// enumerate the whole table, including rows no in-spec test
     /// exercises (2 → "Float", 3 → "Bool", 7 → "Option" for
