@@ -715,6 +715,23 @@ impl<'a> Parser<'a> {
         let name = self.parse_identifier()?;
 
         match name.as_str() {
+            "fn" => {
+                // Function type: fn(T1, T2) -> R
+                // (LANGUAGE_REFERENCE section 4)
+                self.expect_char('(')?;
+                self.skip_whitespace_and_comments();
+                let args = if self.peek() == Some(')') {
+                    Vec::new()
+                } else {
+                    self.parse_type_args()?
+                };
+                self.expect_char(')')?;
+                self.skip_whitespace_and_comments();
+                self.eat_str("->")?;
+                let ret = self.parse_type_ref()?;
+                Ok(TypeRef::Function(args, Box::new(ret)))
+            }
+
             "Int" => Ok(TypeRef::Int),
             "Float" => Ok(TypeRef::Float),
             "Bool" => Ok(TypeRef::Bool),
@@ -1253,6 +1270,36 @@ mod tests {
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn parse_function_type_param() {
+        // Function types are documented (LANGUAGE_REFERENCE section 4:
+        // `fn(T1, T2) -> R`) and TypeRef::Function exists, but
+        // parse_type_ref treated `fn` as a plain named type and then
+        // choked on the '('. Blocks sort/binary_search, whose specs
+        // take a comparator parameter.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>, cmp: fn(Int, Int) -> Bool
+            output: List<Int>
+
+            constraint: true
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let params = &spec.functions[0].params;
+        assert_eq!(params.len(), 2);
+        match &params[1].ty {
+            TypeRef::Function(args, ret) => {
+                assert_eq!(args.len(), 2);
+                assert!(matches!(**ret, TypeRef::Bool));
+            }
+            other => panic!("expected Function type, got: {:?}", other),
+        }
     }
 
     #[test]
