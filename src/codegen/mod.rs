@@ -387,8 +387,13 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
         }
 
         IRNode::Call { function, args } => {
+            // Statement position: terminated like any other
+            // expression statement — the unterminated form was a
+            // syntax error whenever a statement followed. Value
+            // positions never reach this arm: they route through
+            // ir_to_rust_tail, which emits the bare call.
             let args_str: Vec<String> = args.iter().map(|a| ir_to_rust_expr(a)).collect();
-            format!("{}{}({})\n", pad, rust_ident(function), args_str.join(", "))
+            format!("{}{}({});\n", pad, rust_ident(function), args_str.join(", "))
         }
 
         IRNode::Return(expr) => {
@@ -444,8 +449,9 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
         }
 
         IRNode::Map { function, over } => {
+            // Statement position: terminated (see the Call arm).
             format!(
-                "{}({}).iter().map({}).collect()\n",
+                "{}({}).iter().map({}).collect();\n",
                 pad,
                 ir_to_rust_expr(over),
                 ir_to_rust_expr(function),
@@ -454,7 +460,7 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
 
         IRNode::Filter { predicate, over } => {
             format!(
-                "{}({}).iter().filter({}).collect()\n",
+                "{}({}).iter().filter({}).collect();\n",
                 pad,
                 ir_to_rust_expr(over),
                 ir_to_rust_expr(predicate),
@@ -463,7 +469,7 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
 
         IRNode::Fold { operation, initial, over } => {
             format!(
-                "{}({}).iter().fold({}, {})\n",
+                "{}({}).iter().fold({}, {});\n",
                 pad,
                 ir_to_rust_expr(over),
                 ir_to_rust_expr(initial),
@@ -472,8 +478,12 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
         }
 
         IRNode::Sort { comparator, collection } => {
+            // The final `sorted` is the statement's discarded
+            // value: terminated (see the Call arm). As a function
+            // body or arm value it routes through ir_to_rust_tail
+            // instead and keeps the value.
             format!(
-                "{}let mut sorted = {};\nsorted.sort_by({});\nsorted\n",
+                "{}let mut sorted = {};\nsorted.sort_by({});\nsorted;\n",
                 pad,
                 ir_to_rust_expr(collection),
                 ir_to_rust_expr(comparator),
@@ -516,7 +526,10 @@ fn ir_to_rust_tail(
         // expectation inherited from the enclosing position.
         IRNode::Typed { node, ty } => ir_to_rust_tail(node, indent, fn_ret, Some(ty)),
         IRNode::Literal(_) | IRNode::Var(_) | IRNode::BinOp(..) | IRNode::UnaryOp(..)
-        | IRNode::Lambda { .. } | IRNode::Collection { .. } => {
+        | IRNode::Lambda { .. } | IRNode::Closure { .. } | IRNode::Collection { .. }
+        | IRNode::Call { .. } | IRNode::Map { .. } | IRNode::Filter { .. }
+        | IRNode::Fold { .. } | IRNode::Sort { .. } | IRNode::Index(..)
+        | IRNode::TryPropagate(..) => {
             format!("{}{}\n", pad, ir_to_rust_expr_typed(node, expected))
         }
         _ => ir_to_rust(node, indent, fn_ret),
@@ -2133,10 +2146,18 @@ mod tests {
     #[test]
     fn rust_codegen_previously_broken_shapes_compile() {
         let body = IRNode::Block(vec![
-            // Call in statement position.
+            // Call in statement position (the self-call passes a
+            // fresh list for the second parameter so `items`
+            // stays borrowable for the statements after it).
             IRNode::Call {
                 function: "check".into(),
-                args: vec![IRNode::Var("kind".into())],
+                args: vec![
+                    IRNode::Var("kind".into()),
+                    IRNode::Collection {
+                        kind: CollectionKind::List,
+                        elements: vec![],
+                    },
+                ],
             },
             // Fold in statement position.
             IRNode::Fold {
