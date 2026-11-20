@@ -1502,7 +1502,10 @@ fn random_ir_tree(_spec: &FunctionSpec, depth: u32, engine: &SynthesisEngine) ->
             end: Box::new(IRNode::Literal(IRLiteral::Int(10))),
             body: Box::new(random_ir_tree(_spec, depth - 1, engine)),
         },
-        3 => IRNode::Call { function: "_".into(), args: vec![] },
+        // An unfilled leaf is an honest Hole (tracked by count_holes
+        // and penalized at evaluation) — never a fake `Call` to "_",
+        // which codegen would emit as a call to a nonexistent function.
+        3 => IRNode::Hole { id: engine.new_id(), expected_type: None },
         4 => IRNode::Return(Box::new(random_ir_tree(_spec, depth - 1, engine))),
         5 => IRNode::Collection { kind: CollectionKind::List, elements: vec![] },
         _ => IRNode::Hole { id: engine.new_id(), expected_type: None },
@@ -1829,6 +1832,96 @@ impl ComplexityBound {
             ComplexityDimension::Space => "space",
             ComplexityDimension::AmortizedTime => "amortized time",
             ComplexityDimension::Communication => "communication",
+        }
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_spec() -> FunctionSpec {
+        FunctionSpec {
+            name: "test".into(),
+            doc: None,
+            generics: vec![],
+            params: vec![],
+            return_type: TypeRef::Unit,
+            preconditions: vec![],
+            postconditions: vec![],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: HashMap::new(),
+        }
+    }
+
+    /// True if the tree contains a `Call` to the placeholder
+    /// function "_" anywhere (mirrors the `count_holes` traversal).
+    fn contains_placeholder_call(node: &IRNode) -> bool {
+        match node {
+            IRNode::Call { function, args } =>
+                function == "_" || args.iter().any(contains_placeholder_call),
+            IRNode::Block(stmts) => stmts.iter().any(contains_placeholder_call),
+            IRNode::Let { value, body, .. } =>
+                contains_placeholder_call(value) || contains_placeholder_call(body),
+            IRNode::If { condition, then_branch, else_branch } =>
+                contains_placeholder_call(condition)
+                    || contains_placeholder_call(then_branch)
+                    || contains_placeholder_call(else_branch),
+            IRNode::While { condition, body, .. } =>
+                contains_placeholder_call(condition) || contains_placeholder_call(body),
+            IRNode::For { start, end, body, .. } =>
+                contains_placeholder_call(start)
+                    || contains_placeholder_call(end)
+                    || contains_placeholder_call(body),
+            IRNode::Match { scrutinee, cases } =>
+                contains_placeholder_call(scrutinee)
+                    || cases.iter().any(|(_, b)| contains_placeholder_call(b)),
+            IRNode::Return(expr) => contains_placeholder_call(expr),
+            IRNode::BinOp(_, l, r) =>
+                contains_placeholder_call(l) || contains_placeholder_call(r),
+            IRNode::UnaryOp(_, inner) => contains_placeholder_call(inner),
+            IRNode::Lambda { body, .. } | IRNode::Closure { body, .. } =>
+                contains_placeholder_call(body),
+            IRNode::Collection { elements, .. } =>
+                elements.iter().any(contains_placeholder_call),
+            IRNode::Map { function, over } | IRNode::Filter { predicate: function, over } =>
+                contains_placeholder_call(function) || contains_placeholder_call(over),
+            IRNode::Fold { operation, initial, over } =>
+                contains_placeholder_call(operation)
+                    || contains_placeholder_call(initial)
+                    || contains_placeholder_call(over),
+            IRNode::Sort { comparator, collection } =>
+                contains_placeholder_call(comparator) || contains_placeholder_call(collection),
+            IRNode::Alloc { initial, .. } => contains_placeholder_call(initial),
+            IRNode::Assign { target, value } =>
+                contains_placeholder_call(target) || contains_placeholder_call(value),
+            IRNode::Typed { node, .. } => contains_placeholder_call(node),
+            _ => false, // Holes, Literals, Vars, etc.
+        }
+    }
+
+    /// Regression: `random_ir_tree` used to emit
+    /// `Call { function: "_", args: [] }` as a leaf — a call to a
+    /// nonexistent function that codegen happily emitted. An
+    /// unfilled leaf must be an honest `Hole` instead.
+    #[test]
+    fn random_ir_tree_never_emits_placeholder_call() {
+        let spec = dummy_spec();
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        for depth in 0..=4 {
+            for _ in 0..200 {
+                let tree = random_ir_tree(&spec, depth, &engine);
+                assert!(
+                    !contains_placeholder_call(&tree),
+                    "random_ir_tree(depth={}) emitted a placeholder Call to \"_\"",
+                    depth
+                );
+            }
         }
     }
 }
