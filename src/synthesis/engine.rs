@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::spec::ast::*;
+use crate::verify::verifier::VerificationStatus;
 use rand::Rng;
 
 // ── Global synthesis statistics ──────────────────────────
@@ -62,6 +63,14 @@ pub struct CandidateImplementation {
 
     /// Whether this candidate passed verification
     pub verified: bool,
+
+    /// The verifier's full verdict on this candidate, recorded
+    /// by `verify_all` at the moment it is computed (the single
+    /// source of truth — selection reads it, never recomputes
+    /// it). `None` until the candidate has been through
+    /// verification. `verified` above is the collapsed form
+    /// (`status == Verified`) kept for existing consumers.
+    pub verification_status: Option<VerificationStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -574,6 +583,7 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::TestInduced { num_tests: spec.tests.len() },
             verified: false,
+            verification_status: None,
         };
 
         Ok(vec![candidate])
@@ -595,6 +605,7 @@ impl SynthesisEngine {
                 generation: 0,
                 provenance: Provenance::Template { template_name: "divide_and_conquer".into() },
                 verified: false,
+                verification_status: None,
             });
         }
 
@@ -610,6 +621,7 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::Template { template_name: "iterator_chain".into() },
             verified: false,
+            verification_status: None,
         });
 
         // Template: Simple loop (for the straightforward approach)
@@ -624,6 +636,7 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::Template { template_name: "simple_loop".into() },
             verified: false,
+            verification_status: None,
         });
 
         Ok(seeds)
@@ -660,6 +673,7 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::Mutation { parent_id: 0, mutation_kind: "random_seed".into() },
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -799,6 +813,7 @@ impl SynthesisEngine {
                             mutation_kind: mutation_kind.into(),
                         },
                         verified: false,
+                        verification_status: None,
                     });
                 }
             }
@@ -889,6 +904,7 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::Template { template_name: "eval".into() },
             verified: false,
+            verification_status: None,
         };
 
         let scores = evaluate_candidate(&candidate, spec);
@@ -987,6 +1003,7 @@ impl SynthesisEngine {
                 parent_b: parent_b.id,
             },
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -1043,6 +1060,7 @@ impl SynthesisEngine {
                 mutation_kind: kind.into(),
             },
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -2471,6 +2489,7 @@ fn parse_rust_into_ir(code: &str, _spec: &FunctionSpec) -> Result<Vec<CandidateI
             prompt_hash: 0,
         },
         verified: false,
+        verification_status: None,
     }])
 }
 
@@ -2881,6 +2900,7 @@ mod tests {
             generation: 0,
             provenance: Provenance::Template { template_name: "test".into() },
             verified: false,
+            verification_status: None,
         }
     }
 

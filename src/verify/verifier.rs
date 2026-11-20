@@ -63,6 +63,10 @@ impl Verifier {
         for mut candidate in candidates {
             let result = self.verify_one(&candidate, spec);
             candidate.verified = result.status == VerificationStatus::Verified;
+            // Record the full verdict on the candidate itself:
+            // selection's refutation gate reads exactly this —
+            // the verdict computed here, nowhere recomputed.
+            candidate.verification_status = Some(result.status.clone());
             let passed = result.constraint_results.iter().filter(|r| r.holds).count();
             let total = result.constraint_results.len();
             if total > 0 {

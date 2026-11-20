@@ -1286,6 +1286,7 @@ mod tests {
             generation: 0,
             provenance: Provenance::HumanGuided,
             verified: true,
+            verification_status: None,
         }
     }
 

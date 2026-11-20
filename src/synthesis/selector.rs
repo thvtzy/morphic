@@ -1553,8 +1553,8 @@ mod tests {
         mut c: CandidateImplementation,
         status: VerificationStatus,
     ) -> CandidateImplementation {
-        c.verification_status = Some(status);
         c.verified = status == VerificationStatus::Verified;
+        c.verification_status = Some(status);
         c
     }
 
