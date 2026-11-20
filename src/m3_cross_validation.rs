@@ -2142,7 +2142,17 @@ mod xval3 {
         // therefore iterate the 28 slice-1+2 specs by name,
         // with their assertions unchanged; the module count
         // assertion moves to 44.
-        const SLICE_1_2: [&str; 28] = [
+        //
+        // Phase 28 flip: the composition-guard builder
+        // (Bool-expression guards — a Bool parameter or a call
+        // to an indexed Bool spec — with expression pins)
+        // recognizes rust_ident_suffix and rust_generics_text,
+        // so the iterated set grows to 30. The two remaining
+        // slice-3 shapes stay unrecognized BY DESIGN and are
+        // asserted as such below: rust_string_ownership's
+        // two-parameter region rows and rust_ident_empty's
+        // String-equality leaf family.
+        const RECOGNIZED: [&str; 30] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -2154,12 +2164,13 @@ mod xval3 {
             "rust_expr_form", "rust_expr_fixed_text", "rust_constraint_form",
             "rust_constraint_fixed_text", "rust_order_form",
             "rust_order_separator", "rust_condition_wrap",
+            "rust_ident_suffix", "rust_generics_text",
         ];
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 44, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
-            if !SLICE_1_2.contains(&func.name.as_str()) {
+            if !RECOGNIZED.contains(&func.name.as_str()) {
                 continue;
             }
             let body = index.callee_body(&func.name).unwrap_or_else(|| {
@@ -2169,6 +2180,13 @@ mod xval3 {
                 verify::verifier::body_is_encodable_with(func, &body, &index),
                 "{}: recognized seed body is not encodable",
                 func.name
+            );
+        }
+        for name in ["rust_string_ownership", "rust_ident_empty"] {
+            assert!(
+                index.callee_body(name).is_none(),
+                "{}: recorded non-goal must stay unrecognized",
+                name
             );
         }
     }

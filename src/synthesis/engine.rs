@@ -5303,7 +5303,10 @@ spec exclaim {
     /// the resolver-visible body (SpecIndex::callee_body) of
     /// every previously recognized spec: the 26 seeded Codegen
     /// specs and all 14 M2 specs. Byte-identical means the
-    /// Debug rendering matches exactly.
+    /// Debug rendering matches exactly. Phase 28 extended the
+    /// fixture with the two composition-guard bodies
+    /// (rust_ident_suffix, rust_generics_text): 28 Codegen
+    /// bodies now.
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -5316,7 +5319,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 40, "26 Codegen + 14 M2 golden bodies");
+        assert_eq!(expected.len(), 42, "28 Codegen + 14 M2 golden bodies");
         for file in ["validator", "printer", "codegen"] {
             let module = load_m2_module(file);
             let index = SpecIndex::from_specs(&module);
