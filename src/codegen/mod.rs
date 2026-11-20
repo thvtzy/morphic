@@ -566,6 +566,24 @@ fn ir_to_rust_expr_typed(node: &IRNode, expected: Option<&TypeRef>) -> String {
 /// loss is the String-ownership rewrite in return/tail positions
 /// nested inside the block, which the untyped expression emitter
 /// already forgoes elsewhere (If branches, Lambda bodies).
+/// Left operand of an IR Concat in `ir_to_rust_expr`
+/// (Phase 29, defect 1). Rust's `Add` for text is
+/// `String + &str`: the left operand must be an owned
+/// String. A string literal renders as a &str, so in left
+/// position it takes the same `.to_string()` ownership the
+/// typed emitter applies in expectation positions; every
+/// other operand shape (Var, Call, nested Concat, …)
+/// already evaluates to a String value and renders as
+/// usual.
+fn concat_owned_operand(node: &IRNode) -> String {
+    match node {
+        IRNode::Literal(IRLiteral::String(s)) => {
+            format!("\"{}\".to_string()", s)
+        }
+        _ => ir_to_rust_expr(node),
+    }
+}
+
 fn expr_block_stmt(node: &IRNode) -> String {
     let neutral = TypeRef::Unit;
     format!("{{ {} }}", ir_to_rust(node, 0, &neutral).trim_end())
@@ -630,6 +648,19 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 format!("{}.push({})", ir_to_rust_expr(lhs), ir_to_rust_expr(rhs))
             } else if *op == IRBinOp::Merge {
                 format!("{}.extend({})", ir_to_rust_expr(lhs), ir_to_rust_expr(rhs))
+            } else if *op == IRBinOp::Concat {
+                // Phase 29, defect 1 (E0369, user-approved
+                // unfreeze): `+` needs an owned left operand;
+                // a bare string literal is a &str and rustc
+                // rejects `&str + String`. The left operand
+                // goes through the ownership treatment the
+                // typed emitter applies in expectation
+                // positions (see concat_owned_operand).
+                format!(
+                    "({} + {})",
+                    concat_owned_operand(lhs),
+                    ir_to_rust_expr(rhs)
+                )
             } else {
                 format!("({} {} {})", ir_to_rust_expr(lhs), rust_op, ir_to_rust_expr(rhs))
             }
@@ -2243,12 +2274,80 @@ mod tests {
         compile_rust_lib(&generate(&mapped, "rust").unwrap());
     }
 
-    /// Compile a generated file with `rustc --edition 2021
-    /// --crate-type lib` (the probe's external check, in-process).
-    /// Skips silently only when no rustc is reachable at all.
-    fn compile_rust_lib(code: &str) {
-        use std::io::Write;
-        let rustc = std::process::Command::new("rustc")
+    // ── Phase 29: rendering fixes (user-approved unfreeze) ──
+    //
+    // The three defects measured in Phases 25/27/28, fixed
+    // under the re-pin inventory in ROAD_TO_SELF_HOSTING.md.
+    // Each test below renders a shape that previously failed
+    // rustc (or produced invalid Rust) and asserts the emitted
+    // code compiles AND behaves when executed.
+
+    #[test]
+    fn rust_concat_literal_first_assembly_compiles_and_runs() {
+        // Defect 1 (E0369): `"Vec<" ++ inner ++ ">"` rendered
+        // `(("Vec<" + inner) + ">")` — a &str literal as the
+        // left operand of `+`. The left operand of a Concat
+        // must be owned. (The Var RHS borrow is defect 2a,
+        // covered by its own test below.)
+        let body = IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(IRNode::Literal(IRLiteral::String("Vec<".into()))),
+                Box::new(IRNode::Var("inner".into())),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::String(">".into()))),
+        );
+        assert_eq!(
+            ir_to_rust_expr(&body),
+            "((\"Vec<\".to_string() + inner) + \">\")"
+        );
+        // The compile leg isolates defect 1: a literal pair
+        // (left owned, right a &str) through the full
+        // generator.
+        let pair_body = IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::Literal(IRLiteral::String("Vec<".into()))),
+            Box::new(IRNode::Literal(IRLiteral::String(">".into()))),
+        );
+        let cand = candidate_with("empty_vec", vec![], TypeRef::String, pair_body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("(\"Vec<\".to_string() + \">\")"),
+            "literal-pair concat not owned on the left:\n{}",
+            code
+        );
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(empty_vec(), \"Vec<>\");\nprintln!(\"empty_vec ok\");",
+        );
+        assert!(out.contains("empty_vec ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_concat_literal_pair_and_variable_first_compile() {
+        // Literal ++ literal: left owned, right stays a &str.
+        let pair = ir_to_rust_expr(&IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::Literal(IRLiteral::String("a".into()))),
+            Box::new(IRNode::Literal(IRLiteral::String("b".into()))),
+        ));
+        assert_eq!(pair, "(\"a\".to_string() + \"b\")");
+        // Variable-first (the Phase 25 exclaim shape): the Var
+        // already yields a String; the literal RHS stays bare,
+        // so this rendering is byte-identical to pre-fix.
+        let var_first = ir_to_rust_expr(&IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::Var("inner".into())),
+            Box::new(IRNode::Literal(IRLiteral::String("!".into()))),
+        ));
+        assert_eq!(var_first, "(inner + \"!\")");
+    }
+
+    /// Discover a reachable rustc (PATH first, then the cargo
+    /// home fallback), shared by the compile helpers.
+    fn rustc_path() -> Option<String> {
+        std::process::Command::new("rustc")
             .arg("--version")
             .output()
             .ok()
@@ -2263,8 +2362,66 @@ mod tests {
                     .ok()
                     .filter(|o| o.status.success())
                     .map(|_| path)
-            });
-        let Some(rustc) = rustc else {
+            })
+    }
+
+    /// Compile generated code as a binary with an appended
+    /// `main` and run it, returning stdout (Phase 29: the
+    /// fixed renderings must not only parse — the emitted
+    /// shapes must behave identically when executed). Panics
+    /// on any compile or run failure; skips only when no
+    /// rustc is reachable at all.
+    fn compile_and_run(code: &str, main_body: &str) -> String {
+        use std::io::Write;
+        let Some(rustc) = rustc_path() else {
+            eprintln!("rustc not reachable; skipping run check");
+            return String::new();
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_codegen_run_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("winner_main.rs");
+        let full = format!("{}\nfn main() {{\n{}\n}}\n", code, main_body);
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all(full.as_bytes()).unwrap();
+        drop(f);
+        let bin = dir.join("winner_main");
+        let out = std::process::Command::new(&rustc)
+            .args(["--edition", "2021"])
+            .arg(&file)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "generated code does not compile as a binary:\n{}\n--- code ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            full
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            run.status.success(),
+            "generated binary failed:\n{}\n--- code ---\n{}",
+            String::from_utf8_lossy(&run.stderr),
+            full
+        );
+        String::from_utf8_lossy(&run.stdout).into_owned()
+    }
+
+    /// Compile a generated file with `rustc --edition 2021
+    /// --crate-type lib` (the probe's external check, in-process).
+    /// Skips silently only when no rustc is reachable at all.
+    fn compile_rust_lib(code: &str) {
+        use std::io::Write;
+        let Some(rustc) = rustc_path() else {
             eprintln!("rustc not reachable; skipping compile check");
             return;
         };
