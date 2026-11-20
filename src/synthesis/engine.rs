@@ -453,6 +453,13 @@ pub struct SynthesisEngine {
     config: SynthesisConfig,
     candidates: Vec<CandidateImplementation>,
     next_id: AtomicU64,
+    /// The module the synthesized spec lives in, consulted when
+    /// admitting constraint seeds whose bodies call other specs.
+    /// Empty unless the engine was built with `with_module` —
+    /// a spec synthesized standalone behaves exactly as before
+    /// (composition equations simply do not resolve, hence do
+    /// not seed).
+    spec_index: SpecIndex,
 }
 
 impl SynthesisEngine {
@@ -461,7 +468,17 @@ impl SynthesisEngine {
             config,
             candidates: Vec::new(),
             next_id: AtomicU64::new(1),
+            spec_index: SpecIndex::empty(),
         }
+    }
+
+    /// An engine that knows the whole module the target spec
+    /// belongs to, so spec-to-spec calls in its constraints can
+    /// resolve (see `SpecIndex`).
+    pub fn with_module(config: SynthesisConfig, specs: &[FunctionSpec]) -> Self {
+        let mut engine = Self::new(config);
+        engine.spec_index = SpecIndex::from_specs(specs);
+        engine
     }
 
     fn new_id(&self) -> u64 {
@@ -632,10 +649,13 @@ impl SynthesisEngine {
     ///   the return type (the spec is silent off-table; the
     ///   default is a documented guess).
     ///
-    /// A spec whose constraints fit neither shape — including
-    /// equations whose bodies call other specs, which convert
-    /// but do not encode — gets no constraint seed and behaves
-    /// exactly as before.
+    /// A spec whose constraints fit neither shape gets no
+    /// constraint seed and behaves exactly as before. Equations
+    /// whose bodies call other specs are resolved against the
+    /// engine's module index first (see `SpecIndex`): with a
+    /// module they can seed like any other equation; without
+    /// one — or when the call cannot resolve — they are skipped
+    /// by the same admission rule.
     fn seed_from_constraints(&self, spec: &FunctionSpec) -> Vec<CandidateImplementation> {
         let mut seeds = Vec::new();
         let mut admit = |kind: &str, body: IRNode| {
@@ -652,10 +672,10 @@ impl SynthesisEngine {
                 verification_status: None,
             });
         };
-        if let Some(body) = equation_seed_body(spec) {
+        if let Some(body) = equation_seed_body(spec, &self.spec_index) {
             admit("equation", body);
         }
-        if let Some(body) = guard_table_seed_body(spec) {
+        if let Some(body) = guard_table_seed_body(spec, &self.spec_index) {
             admit("guard_table", body);
         }
         seeds
@@ -1249,6 +1269,20 @@ Write the code inside <code>...</code> tags."#,
 pub fn synthesize(spec: &FunctionSpec, opt_level: u8) -> Result<Vec<CandidateImplementation>, SynthesisError> {
     let config = SynthesisConfig::from_opt_level(opt_level);
     let mut engine = SynthesisEngine::new(config);
+    engine.run(spec)
+}
+
+/// Synthesize with the spec's whole module in scope, so
+/// constraints that call sibling specs can seed (and be
+/// judged) like any other constraint. `specs` is the module's
+/// full spec list, including `spec` itself.
+pub fn synthesize_with_module(
+    spec: &FunctionSpec,
+    opt_level: u8,
+    specs: &[FunctionSpec],
+) -> Result<Vec<CandidateImplementation>, SynthesisError> {
+    let config = SynthesisConfig::from_opt_level(opt_level);
+    let mut engine = SynthesisEngine::with_module(config, specs);
     engine.run(spec)
 }
 
@@ -2579,37 +2613,60 @@ fn parse_rust_into_ir(code: &str, _spec: &FunctionSpec) -> Result<Vec<CandidateI
 /// every spec in the tree writes it so.
 const OUTPUT_VAR: &str = "output";
 
-/// The equation seed's body: the right-hand side of the first
-/// postcondition of the form `output == <expr>` (either
-/// orientation), converted with the same `expr_to_ir` the
-/// test-induced seed uses. Admitted only when the conversion
-/// is whole — `expr_to_ir` drops subexpressions it cannot
-/// represent into Holes, and a holed body is not the spec's
-/// body — the body does not mention `output` itself, and the
-/// verifier can encode it (composition equations, whose
-/// bodies call other specs, fail here and are skipped).
-fn equation_seed_body(spec: &FunctionSpec) -> Option<IRNode> {
+/// One postcondition read as an equation body: if it has the
+/// form `output == <expr>` (either orientation), <expr> does
+/// not mention `output` itself, and the conversion via the
+/// same `expr_to_ir` the test-induced seed uses is whole
+/// (`expr_to_ir` drops subexpressions it cannot represent into
+/// Holes, and a holed body is not the spec's body), the
+/// converted body; otherwise None. Shared by the equation seed
+/// builder and by the resolver (`SpecIndex::callee_body`), so
+/// both read the same "first equation" of a spec.
+fn equation_rhs(c: &Constraint) -> Option<IRNode> {
+    let (lhs, rhs) = match c {
+        Constraint::Expr(Expr::BinOp(BinOp::Eq, l, r)) => (l.as_ref(), r.as_ref()),
+        Constraint::Eq(l, r) => (l, r),
+        _ => return None,
+    };
+    let body_expr = if matches!(lhs, Expr::Var(v) if v == OUTPUT_VAR) {
+        rhs
+    } else if matches!(rhs, Expr::Var(v) if v == OUTPUT_VAR) {
+        lhs
+    } else {
+        return None;
+    };
+    if expr_mentions_var(body_expr, OUTPUT_VAR) {
+        return None;
+    }
+    let body = expr_to_ir(body_expr);
+    if count_holes(&body) > 0 {
+        return None;
+    }
+    Some(body)
+}
+
+/// The first convertible equation body of a spec, if any —
+/// the resolver's view of "the spec's body" when the spec is
+/// stated as an equation.
+fn first_equation_body(spec: &FunctionSpec) -> Option<IRNode> {
+    spec.postconditions.iter().find_map(equation_rhs)
+}
+
+/// The equation seed's body: the first equation whose body —
+/// with any spec-to-spec calls resolved against the module
+/// (`SpecIndex::inline_calls`) — the verifier can encode.
+/// Resolution is what admits the composition specs: their
+/// equations are calls (`output == is_known_node_kind(kind)`),
+/// and the admitted seed body is the resolved callee body, so
+/// the interpreter can measure it, selection can crown it, and
+/// codegen can emit it standalone. An equation that does not
+/// resolve (unknown callee, cycle, depth) or does not encode
+/// is skipped like any other unusable shape.
+fn equation_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
     for c in &spec.postconditions {
-        let (lhs, rhs) = match c {
-            Constraint::Expr(Expr::BinOp(BinOp::Eq, l, r)) => (l.as_ref(), r.as_ref()),
-            Constraint::Eq(l, r) => (l, r),
-            _ => continue,
-        };
-        let body_expr = if matches!(lhs, Expr::Var(v) if v == OUTPUT_VAR) {
-            rhs
-        } else if matches!(rhs, Expr::Var(v) if v == OUTPUT_VAR) {
-            lhs
-        } else {
-            continue;
-        };
-        if expr_mentions_var(body_expr, OUTPUT_VAR) {
-            continue;
-        }
-        let body = expr_to_ir(body_expr);
-        if count_holes(&body) > 0 {
-            continue;
-        }
-        if crate::verify::verifier::body_is_encodable(spec, &body) {
+        let Some(raw) = equation_rhs(c) else { continue };
+        let Some(body) = index.inline_calls(&raw) else { continue };
+        if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
             return Some(body);
         }
     }
@@ -2635,7 +2692,7 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
     }
 }
 
-/// The guard-table seed's body: one match over the spec's
+/// The guard-table body: one match over the spec's
 /// single Int parameter, with one literal arm per usable
 /// guard row and a wildcard arm carrying the typed-literal
 /// default for the return type (the Phase 10 menu's first
@@ -2643,9 +2700,9 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
 /// documented guess; the Phase 15 classification showed the
 /// mirrors return exactly that default on unpinned cases).
 /// Rows pinning an already-pinned input are skipped (the
-/// first row wins). Admitted only when at least one row is
-/// usable and the verifier can encode the match.
-fn guard_table_seed_body(spec: &FunctionSpec) -> Option<IRNode> {
+/// first row wins). The raw builder stops at constructing the
+/// match; admission is the seed builder's step.
+fn guard_table_body(spec: &FunctionSpec) -> Option<IRNode> {
     if spec.params.len() != 1 {
         return None;
     }
@@ -2672,14 +2729,303 @@ fn guard_table_seed_body(spec: &FunctionSpec) -> Option<IRNode> {
         .into_iter()
         .next()?;
     cases.push((IRPattern::Wildcard, default));
-    let body = IRNode::Match {
+    Some(IRNode::Match {
         scrutinee: Box::new(IRNode::Var(param.name.clone())),
         cases,
-    };
-    if crate::verify::verifier::body_is_encodable(spec, &body) {
+    })
+}
+
+/// The guard-table seed's body: the guard-table match,
+/// admitted when the verifier can encode it in the module
+/// context.
+fn guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let body = guard_table_body(spec)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
         Some(body)
     } else {
         None
+    }
+}
+
+// ── Spec index: resolving spec-to-spec calls ──────────────
+
+/// How deep spec-call inlining may nest, on both resolution
+/// paths (IR substitution here, symbolic evaluation in the
+/// verifier). Composition in the M2 modules is one level deep;
+/// the cap exists so a pathological call graph — diamonds that
+/// duplicate a callee body at every level — stays bounded
+/// instead of expanding without limit. A call that would
+/// exceed the cap, or that closes a cycle, is unresolvable:
+/// callers treat the body containing it as unencodable
+/// (Inconclusive), never as a guessed value.
+pub(crate) const MAX_INLINE_DEPTH: usize = 8;
+
+/// The specs of one module, by name: the shared resolver for
+/// spec-to-spec calls. A spec's body, for resolution purposes,
+/// is exactly the body its constraint seed would be built
+/// from — the first convertible equation's right-hand side, or
+/// the guard-table match for a lookup spec with no equation —
+/// produced by the same builders the seed family uses, minus
+/// the encodability admission (admission is a property of a
+/// body in a caller's context, judged by the verifier; the
+/// resolver only answers "what does this name denote"). A
+/// spec with neither shape denotes nothing here and calls to
+/// it stay unresolvable.
+#[derive(Debug, Clone, Default)]
+pub struct SpecIndex {
+    by_name: HashMap<String, FunctionSpec>,
+}
+
+impl SpecIndex {
+    pub fn from_specs(specs: &[FunctionSpec]) -> Self {
+        Self {
+            by_name: specs
+                .iter()
+                .map(|s| (s.name.clone(), s.clone()))
+                .collect(),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&FunctionSpec> {
+        self.by_name.get(name)
+    }
+
+    /// The body a call to `name` denotes: the callee's first
+    /// equation body, or its guard-table body when it has no
+    /// equation. The body is NOT call-resolved — it may itself
+    /// contain calls; resolving those is the consumer's step,
+    /// under the consumer's cycle/depth guard.
+    pub fn callee_body(&self, name: &str) -> Option<IRNode> {
+        let spec = self.by_name.get(name)?;
+        first_equation_body(spec).or_else(|| guard_table_body(spec))
+    }
+
+    /// IR-level inlining: replace every call to an indexed
+    /// spec in `body` by the callee's body with the (already
+    /// inlined) arguments substituted for the callee's
+    /// parameters, transitively. Calls to names the index does
+    /// not hold — builtins like `len` and the `List` literal,
+    /// template pseudo-calls — pass through untouched; judging
+    /// them is the verifier's business, not the resolver's.
+    ///
+    /// Returns None when a call to an indexed spec cannot be
+    /// resolved: unknown to the index's body builders, arity
+    /// mismatch, a cycle or the depth cap, a capture risk in
+    /// substitution, or a tree shape outside the seed builders'
+    /// output set (the only inputs this is applied to are
+    /// equation bodies and resolved callees, so any other shape
+    /// means the body was never the resolver's to expand).
+    pub fn inline_calls(&self, body: &IRNode) -> Option<IRNode> {
+        self.inline_rec(body, &[], 0)
+    }
+
+    fn inline_rec(
+        &self,
+        node: &IRNode,
+        visiting: &[String],
+        depth: usize,
+    ) -> Option<IRNode> {
+        match node {
+            IRNode::Literal(_) | IRNode::Var(_) => Some(node.clone()),
+            IRNode::BinOp(op, l, r) => Some(IRNode::BinOp(
+                *op,
+                Box::new(self.inline_rec(l, visiting, depth)?),
+                Box::new(self.inline_rec(r, visiting, depth)?),
+            )),
+            IRNode::UnaryOp(op, inner) => Some(IRNode::UnaryOp(
+                *op,
+                Box::new(self.inline_rec(inner, visiting, depth)?),
+            )),
+            IRNode::Match { scrutinee, cases } => {
+                let scrutinee = Box::new(self.inline_rec(scrutinee, visiting, depth)?);
+                let mut out = Vec::with_capacity(cases.len());
+                for (pat, body) in cases {
+                    out.push((pat.clone(), self.inline_rec(body, visiting, depth)?));
+                }
+                Some(IRNode::Match {
+                    scrutinee,
+                    cases: out,
+                })
+            }
+            IRNode::Call { function, args } => {
+                // Arguments are caller-side expressions: any
+                // calls inside them resolve in the caller's own
+                // resolution context, before the callee is
+                // entered — so `f(f(x))` is not a cycle.
+                let mut inlined_args = Vec::with_capacity(args.len());
+                for a in args {
+                    inlined_args.push(self.inline_rec(a, visiting, depth)?);
+                }
+                if !self.by_name.contains_key(function) {
+                    return Some(IRNode::Call {
+                        function: function.clone(),
+                        args: inlined_args,
+                    });
+                }
+                if depth >= MAX_INLINE_DEPTH
+                    || visiting.iter().any(|v| v == function)
+                {
+                    return None;
+                }
+                let callee = &self.by_name[function];
+                if callee.params.len() != inlined_args.len() {
+                    return None;
+                }
+                let callee_body = self.callee_body(function)?;
+                let substituted =
+                    substitute_params(&callee_body, &callee.params, &inlined_args)?;
+                let mut visiting = visiting.to_vec();
+                visiting.push(function.clone());
+                self.inline_rec(&substituted, &visiting, depth + 1)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Substitute argument trees for a callee's parameters in its
+/// body. The bodies the resolver produces contain no binders
+/// except match variable patterns, and substitution respects
+/// them: a pattern-bound name shadows the parameter inside its
+/// arm, and if any argument mentions a pattern-bound name
+/// freely the substitution would capture it — refused (None)
+/// rather than renamed, as no M2 callee binds anything. Any
+/// shape outside the builders' output set is likewise refused.
+fn substitute_params(
+    node: &IRNode,
+    params: &[Param],
+    args: &[IRNode],
+) -> Option<IRNode> {
+    // Capture screen: names bound by patterns anywhere in the
+    // callee body vs names occurring free in the arguments.
+    let mut bound: Vec<&str> = Vec::new();
+    collect_pattern_binders(node, &mut bound);
+    if !bound.is_empty() {
+        let mut free: Vec<String> = Vec::new();
+        for a in args {
+            collect_free_vars(a, &mut free)?;
+        }
+        if bound.iter().any(|b| free.iter().any(|f| f == b)) {
+            return None;
+        }
+    }
+    substitute_rec(node, params, args, &[])
+}
+
+fn collect_pattern_binders<'a>(node: &'a IRNode, out: &mut Vec<&'a str>) {
+    match node {
+        IRNode::Match { scrutinee, cases } => {
+            collect_pattern_binders(scrutinee, out);
+            for (pat, body) in cases {
+                if let IRPattern::Variable(name) = pat {
+                    out.push(name.as_str());
+                }
+                collect_pattern_binders(body, out);
+            }
+        }
+        IRNode::BinOp(_, l, r) => {
+            collect_pattern_binders(l, out);
+            collect_pattern_binders(r, out);
+        }
+        IRNode::UnaryOp(_, inner) => collect_pattern_binders(inner, out),
+        IRNode::Call { args, .. } => {
+            for a in args {
+                collect_pattern_binders(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_free_vars(node: &IRNode, out: &mut Vec<String>) -> Option<()> {
+    match node {
+        IRNode::Var(name) => {
+            out.push(name.clone());
+            Some(())
+        }
+        IRNode::Literal(_) => Some(()),
+        IRNode::BinOp(_, l, r) => {
+            collect_free_vars(l, out)?;
+            collect_free_vars(r, out)
+        }
+        IRNode::UnaryOp(_, inner) => collect_free_vars(inner, out),
+        IRNode::Call { args, .. } => {
+            for a in args {
+                collect_free_vars(a, out)?;
+            }
+            Some(())
+        }
+        IRNode::Match { scrutinee, cases } => {
+            collect_free_vars(scrutinee, out)?;
+            for (_, body) in cases {
+                collect_free_vars(body, out)?;
+            }
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn substitute_rec(
+    node: &IRNode,
+    params: &[Param],
+    args: &[IRNode],
+    shadowed: &[&str],
+) -> Option<IRNode> {
+    match node {
+        IRNode::Var(name) => {
+            if shadowed.contains(&name.as_str()) {
+                return Some(node.clone());
+            }
+            match params.iter().position(|p| &p.name == name) {
+                Some(i) => Some(args[i].clone()),
+                None => Some(node.clone()),
+            }
+        }
+        IRNode::Literal(_) => Some(node.clone()),
+        IRNode::BinOp(op, l, r) => Some(IRNode::BinOp(
+            *op,
+            Box::new(substitute_rec(l, params, args, shadowed)?),
+            Box::new(substitute_rec(r, params, args, shadowed)?),
+        )),
+        IRNode::UnaryOp(op, inner) => Some(IRNode::UnaryOp(
+            *op,
+            Box::new(substitute_rec(inner, params, args, shadowed)?),
+        )),
+        IRNode::Call { function, args: call_args } => {
+            let mut out = Vec::with_capacity(call_args.len());
+            for a in call_args {
+                out.push(substitute_rec(a, params, args, shadowed)?);
+            }
+            Some(IRNode::Call {
+                function: function.clone(),
+                args: out,
+            })
+        }
+        IRNode::Match { scrutinee, cases } => {
+            let scrutinee = Box::new(substitute_rec(scrutinee, params, args, shadowed)?);
+            let mut out = Vec::with_capacity(cases.len());
+            for (pat, body) in cases {
+                let body = match pat {
+                    IRPattern::Variable(name) => {
+                        let mut shadowed = shadowed.to_vec();
+                        shadowed.push(name.as_str());
+                        substitute_rec(body, params, args, &shadowed)?
+                    }
+                    _ => substitute_rec(body, params, args, shadowed)?,
+                };
+                out.push((pat.clone(), body));
+            }
+            Some(IRNode::Match {
+                scrutinee,
+                cases: out,
+            })
+        }
+        _ => None,
     }
 }
 
