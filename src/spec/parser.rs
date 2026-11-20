@@ -339,7 +339,10 @@ impl<'a> Parser<'a> {
         if self.peek() == Some('(') {
             self.advance();
             let mut parts = vec![self.parse_constraint()?];
-            while self.peek() == Some('&') || self.peek() == Some('|') {
+            while {
+                self.skip_whitespace_and_comments();
+                self.peek() == Some('&') || self.peek() == Some('|')
+            } {
                 let is_and = self.peek() == Some('&');
                 self.advance();
                 if is_and { self.advance(); } // consume &&
@@ -451,7 +454,11 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_or(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_and()?;
-        while self.peek_n(2) == "||" {
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.peek_n(2) != "||" {
+                break;
+            }
             self.eat_str("||")?;
             let right = self.parse_expr_and()?;
             left = Expr::BinOp(BinOp::Or, Box::new(left), Box::new(right));
@@ -461,7 +468,11 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_and(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_compare()?;
-        while self.peek_n(2) == "&&" {
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.peek_n(2) != "&&" {
+                break;
+            }
             self.eat_str("&&")?;
             let right = self.parse_expr_compare()?;
             left = Expr::BinOp(BinOp::And, Box::new(left), Box::new(right));
@@ -471,6 +482,7 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_compare(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_add()?;
+        self.skip_whitespace_and_comments();
         if self.peek() == Some('<')
             || self.peek() == Some('>')
             || self.peek() == Some('=')
@@ -500,6 +512,7 @@ impl<'a> Parser<'a> {
     fn parse_expr_add(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_mul()?;
         loop {
+            self.skip_whitespace_and_comments();
             match self.peek() {
                 Some('+') => {
                     self.advance();
@@ -520,6 +533,7 @@ impl<'a> Parser<'a> {
     fn parse_expr_mul(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_atom()?;
         loop {
+            self.skip_whitespace_and_comments();
             match self.peek() {
                 Some('*') => {
                     self.advance();
@@ -1217,6 +1231,52 @@ mod tests {
             err.message.contains("bogus"),
             "unexpected error message: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn parse_spaced_binary_operators() {
+        // The reference writes operators with spaces (section 6:
+        // `x > 0 && y > 0`), but the expression operator loops never
+        // skipped whitespace before peeking, so a spaced operator only
+        // parsed when the left operand happened to be an identifier
+        // (whose atom consumes trailing whitespace). Literal operands
+        // and spaced && / || / arithmetic failed.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: x: Int, y: Int
+            output: Int
+
+            constraint: x > 0 && y > 0
+            constraint: output == len(list) - 1
+            constraint: 1 + 2 == 3
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let func = &spec.functions[0];
+        assert_eq!(func.postconditions.len(), 3);
+        assert!(
+            matches!(
+                func.postconditions[0],
+                Constraint::Expr(Expr::BinOp(BinOp::And, _, _))
+            ),
+            "expected And constraint, got: {:?}",
+            func.postconditions[0]
+        );
+        assert!(
+            matches!(
+                func.postconditions[1],
+                Constraint::Expr(Expr::BinOp(
+                    BinOp::Eq,
+                    _,
+                    _
+                )) | Constraint::Eq(_, _)
+            ),
+            "expected equality constraint, got: {:?}",
+            func.postconditions[1]
         );
     }
 
