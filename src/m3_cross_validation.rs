@@ -945,9 +945,29 @@ mod xval3 {
         // other seven) and the verifier can encode that body in
         // module context — the two mechanism steps a
         // ConstraintInduced seed needs before pool admission.
+        //
+        // Slice-1 scope, as the pin states: the module grows
+        // with slice 2 (Phase 22), and generalizing this pin to
+        // the new specs belongs to the slice-2 measurement
+        // phase. Two slice-2 shapes are already known to be
+        // unrecognized by the builders — rust_literal_bool's
+        // Bool-param guard rows (the guard-table builder reads
+        // Int params only) and rust_pattern_ctor_name's guarded
+        // identity (its output pin is a variable, not a literal)
+        // — see the ROAD M3 slice-2 notes.
+        let slice1 = [
+            "rust_type_name",
+            "rust_binop_symbol",
+            "rust_unaryop_symbol",
+            "rust_unaryop_method",
+            "rust_unaryop_form",
+            "rust_collection_form",
+            "rust_keyword",
+            "spec_binop_symbol",
+        ];
         let functions = load_codegen_module();
         let index = engine::SpecIndex::from_specs(&functions);
-        for func in &functions {
+        for func in functions.iter().filter(|f| slice1.contains(&f.name.as_str())) {
             let body = index
                 .callee_body(&func.name)
                 .unwrap_or_else(|| panic!("{}: no seed body recognized", func.name));
