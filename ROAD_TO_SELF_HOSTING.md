@@ -233,6 +233,42 @@ spec test_tokenizer_equivalence {
 - [ ] Ini komponen paling kompleks — perlu decomposition jadi sub-specs
 - [ ] **Gate**: Generated codegen produces byte-identical Rust output
 
+> **Audit + decomposition map (2026-11-21, branch `feat/m3-codegen-specs`):** `src/codegen/mod.rs` is 2,295 lines: ~1,246 lines of emitter/support code and ~1,049 lines of unit tests. The Rust target's emitter surface, audited function by function (shape: (a) leaf mapping, (b) string assembly/formatting, (c) recursive IR tree walk, (d) top-level driver):
+>
+> | Function | Lines | ~Size | Shape | Role |
+> |---|---|---|---|---|
+> | `generate` | 12 | 9 | (d) | Public dispatch on target name |
+> | `rust_ident` | 32 | 20 | (b) | Per-char identifier sanitization + keyword `_` suffix |
+> | `is_rust_keyword` | 53 | 13 | (a) | 51-word keyword set membership (String → Bool) |
+> | `generate_rust` | 66 | 92 | (d) | Whole-file assembly: doc header, signature, body, test module |
+> | `ir_to_rust` | 310 | 196 | (c) | Statement-position IR walker |
+> | `ir_to_rust_tail` | 507 | 33 | (c) | Tail-position dispatcher (classification + recursion) |
+> | `ir_to_rust_expr_typed` | 549 | 10 | (b) | Expectation dispatcher; holds the String-literal ownership rule |
+> | `expr_block_stmt` | 569 | 8 | (b) | Wraps statement rendering as a block expression |
+> | `unsupported_expr` | 578 | 3 | (a) | Constant `panic!` template by shape name |
+> | `expr_in_condition_position` | 587 | 15 | (a) | Wrap-in-parens classification over IRNode kind |
+> | `ir_to_rust_expr` | 603 | 208 | (c) | Expression IR walker; contains the BinOp/UnaryOp/Collection leaf tables |
+> | `ir_pattern_to_rust` | 813 | 25 | (c) | Pattern walker (small recursion, leaf literal subset) |
+> | `ty_to_rust` | 1093 | 31 | (c) | Type walker; scalar leaf table + composite templates |
+> | `constraint_to_rust` | 1162 | 14 | (c) | Constraint walker for precondition asserts (`"true"` catch-all) |
+> | `expr_to_rust` | 1177 | 25 | (c) | Spec-`Expr` walker for generated test emission; own BinOp leaf table |
+> | `debug_ir_string` | 1203 | 24 | (c) | Debug walker — serves the `"ir"` pseudo-target, not Rust output |
+>
+> Support, not emitters: `CodegenError` + impls (1228), `FunctionSpec::types()` (1084, stub returning an empty vec; its only caller is `generate_c`). Out of M3 scope (other targets only): `generate_c` (159), `generate_wasm` (197), `generate_python` (235), `generate_javascript` (268), `ir_to_c` / `ir_to_c_expr` (839/885), `ir_to_wasm` / `ir_to_wasm_expr` (910/929), `ir_to_python` / `ir_to_python_expr` (957/993), `ir_to_javascript` / `ir_to_js_expr` (1018/1055), `ty_to_c` (1125), `ty_to_wasm` (1140), `ty_to_python` (1150).
+>
+> **Slice plan** (dependency order — the walkers consult the tables, so tables come first; every slice lands specs + mirrors + golden tests before any synthesis run against it, and each ROAD anti-pattern holds: sub-functions ≤200 lines, tight specs with golden suites, no Z3 verdict trusted without cross-validation):
+>
+> 1. **Leaf mappings** — the (a) tables. **Slice 1 written this phase** (see below).
+> 2. **Small template families** — `ty_to_rust` composite forms, `ir_pattern_to_rust`, `expr_to_rust` + `constraint_to_rust` (the spec-AST emitters behind generated asserts/tests), literal rendering (`IRLiteral` → text, incl. `f64` Display semantics), and the wrap classification of `expr_in_condition_position` (needs an IRNode-kind coding).
+> 3. **Name/text assembly** — `rust_ident`'s per-char rule, the String-ownership rule of `ir_to_rust_expr_typed`, and `generate_rust`'s assembly pieces (doc header, generics/params joins, test-module emission).
+> 4. **Expression walker** — `ir_to_rust_expr`, sub-sliced by node family (operators; collections + iterator combinators; control forms; leaves/misc), each sub-slice ≤ ~200 lines of emitter.
+> 5. **Statement walker** — `ir_to_rust` + `ir_to_rust_tail` + `expr_block_stmt`: the statement/tail position discipline, including the Collection statement-position collapse pinned in slice 1.
+> 6. **Driver** — `generate_rust` whole-file assembly + `generate` dispatch; the byte-identical gate is judged here, over a corpus of candidates byte-compared against the original emitter.
+>
+> **Slice 1 (this branch):** `examples/self_host/codegen.morph` (module `Codegen`, 8 specs, 103 constraint rows) states each leaf table COMPLETELY — constraints carry the full mapping, in-spec tests stay representative (30 tests), mirrors + full-range golden tests live in `tests/m3_proof.rs` (13 tests: every row, off-range codes, keyword negative space, cross-table consistency). The specs: `rust_type_name` (guard table, 14 of 26 TypeRef codes pinned — the scalar rows of `ty_to_rust`; composite/named forms are slice 2), `rust_binop_symbol` (guard table, 17 of 19 IRBinOp codes; Append/Merge deliberately unpinned — they render as method calls), `rust_unaryop_symbol` (2 rows) + `rust_unaryop_method` (4 rows) + `rust_unaryop_form` (total 10-row family classification: prefix / method / list-part), `rust_collection_form` (total 5-row classification, expression position), `rust_keyword` (one equation over a String input: the exact 51-word set), `spec_binop_symbol` (total 14-row table incl. the `"?"` fallback rows). `morphic check` passes on the file; full suite 207 passed / 0 failed / 4 ignored. No synthesis has been run against these specs yet — that is the next phase, on the M2 pattern (probe → verifier → cross-validation against these mirrors).
+>
+> **Surprises found by the audit** (all behavior as-is; specs pin today's bytes, fixes are separate decisions): (1) there are TWO spec→Rust expression emitters with divergent operator tables — `ir_to_rust_expr` (IR, complete) vs `expr_to_rust` (spec `Expr`, only 8 BinOps mapped, the rest `"?"`, unhandled shapes `"??"`) — so the same operator renders correctly in a function body but as `?` inside the generated test assertions of the same file; (2) the IR BinOp table binds `".push"`/`".extend"` for Append/Merge into the operator variable, but those values are dead — the arms are special-cased first, so the table alone misleads; (3) collections are position-sensitive: Set/Map literals are fully-qualified `HashSet::from`/`HashMap::from` in expression position but collapse to `vec![..];` (element type silently dropped) in statement position; (4) qualification is inconsistent inside the Rust target — `ty_to_rust` renders `Set` as unqualified `HashSet<..>` while literals are fully qualified, and no import is ever generated, so a Set-typed signature would fail E0433; (5) `constraint_to_rust`'s catch-all renders `"true"` — Or constraints, GreaterThan orders and more are silently dropped from generated precondition asserts; (6) `ir_pattern_to_rust` renders only Int/Bool/String literal patterns — Float/Char/Unit patterns silently become the wildcard `"_"`, changing match semantics; (7) `FunctionSpec::types()` is a stub, so `generate_c`'s struct emission never fires (C-side, recorded for completeness); (8) float literals render through `f64` Display (`1` for 1.0) — deterministic, but the literal slice must copy Display semantics exactly or byte-identity fails on floats; (9) the 51-word keyword set matches no single Rust edition (has `try`/`async`, lacks `gen`), and `rust_ident` sanitization is applied by the Rust target only — C/Python/JS emit raw names.
+
 ### M4: Integration
 - [ ] Rangkai tokenizer + validator + codegen
 - [ ] Self-compile test: gunakan generated compiler untuk compile `sort.morph`
