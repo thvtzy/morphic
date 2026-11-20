@@ -1211,4 +1211,132 @@ spec rust_sort_text {
     optimize: time < O(n)
 }
 
+// -- Control forms ----------------------------------------------
+
+spec rust_call_text {
+    doc: "The Call rendering of ir_to_rust_expr (src/codegen/mod.rs:810-813): the rust_ident-rendered function name + '(' + the argument renderings joined ', ' + ')'. The name arrives rendered (slice 3 owns rust_ident) and the arguments pre-joined (the join is iteration, mirror-only); each argument is rendered by ir_to_rust_expr itself, UNTYPED -- a String argument renders as a bare &str literal even where the callee takes String (the same placement property as rust_test_case's, one walker down). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: func: String, args: String
+    output: String
+
+    constraint: output == func ++ "(" ++ args ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_condition_text {
+    doc: "expr_in_condition_position (src/codegen/mod.rs:734-740) assembled: a block-like node's rendering is wrapped in parentheses, every other rendering passes through bare -- stated as a composition over rust_condition_wrap (slice 2), the classification the original consults. Serves the If arm's condition and, as the base rendering, the Match arm's scrutinee (rust_match_scrutinee_text). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: kind: Int, rendered: String
+    output: String
+
+    constraint: rust_condition_wrap(kind)==false||output=="(" ++ rendered ++ ")"
+    constraint: rust_condition_wrap(kind)==true||output==rendered
+
+    optimize: time < O(n)
+}
+
+spec rust_if_text {
+    doc: "The If rendering of ir_to_rust_expr (src/codegen/mod.rs:814-822): 'if ' + condition + ' { ' + then + ' } else { ' + else + ' }'. The condition arrives condition-position-rendered (rust_condition_text); the branches are rendered by ir_to_rust_expr itself, UNTYPED -- the typed dispatcher's ownership rewrite does not reach them (slice 3's rust_typed_form owns that boundary). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: cond: String, then_text: String, else_text: String
+    output: String
+
+    constraint: output == "if " ++ cond ++ " { " ++ then_text ++ " } else { " ++ else_text ++ " }"
+
+    optimize: time < O(n)
+}
+
+spec rust_lambda_text {
+    doc: "The Lambda/Closure rendering of ir_to_rust_expr (src/codegen/mod.rs:823-832): '|' + the parameter names joined ', ' + '| { ' + body + ' }'. Lambda and Closure share ONE arm -- a Closure's captured environment is not rendered at all. The names arrive rust_ident-rendered and pre-joined (the join is iteration, mirror-only); the parameters' TYPES are dropped by the arm (the generated closure is unannotated). The body is rendered by ir_to_rust_expr itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: params: String, body: String
+    output: String
+
+    constraint: output == "|" ++ params ++ "| { " ++ body ++ " }"
+
+    optimize: time < O(n)
+}
+
+spec rust_match_arm_text {
+    doc: "One arm of the Match rendering (src/codegen/mod.rs:883-890): pattern + ' => ' + body. The pattern arrives rendered by ir_pattern_to_rust (slice 2 owns that walker) and the body by ir_to_rust_expr itself. The arms are joined ', ' by the Match template (the join is iteration, mirror-only). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: pat: String, body: String
+    output: String
+
+    constraint: output == pat ++ " => " ++ body
+
+    optimize: time < O(n)
+}
+
+spec rust_match_text {
+    doc: "The Match rendering of ir_to_rust_expr (src/codegen/mod.rs:883-898): 'match ' + scrutinee + ' { ' + arms + ' }'. The scrutinee arrives rendered by match_scrutinee_to_rust (rust_match_scrutinee_text over the rust_condition_text base) and the arms pre-joined ', ' (rust_match_arm_text each). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: scrutinee: String, arms: String
+    output: String
+
+    constraint: output == "match " ++ scrutinee ++ " { " ++ arms ++ " }"
+
+    optimize: time < O(n)
+}
+
+spec rust_match_scrutinee_bare {
+    doc: "Whether a match scrutinee is itself a bare String literal (is_bare_string_literal, src/codegen/mod.rs:708-714): directly a Literal node (kind 9) of literal kind String (3). The original recurses through Typed wrappers -- a Typed scrutinee's bareness is its inner node's, which the flat (kind, lit) codes do not carry -- so kind 22 (Typed) is deliberately unpinned here and decided by the mirror's recursion. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: kind: Int, lit: Int
+    output: Bool
+
+    constraint: kind<9||kind>9||lit<3||lit>3||output==true
+    constraint: kind==9||kind==22||output==false
+    constraint: lit==3||kind==22||output==false
+
+    optimize: time < O(n)
+}
+
+spec rust_match_scrutinee_form {
+    doc: "Whether match_scrutinee_to_rust (src/codegen/mod.rs:683-695; Phase 29 defect 2b) appends '.as_str()' to the scrutinee's condition-position rendering: 1 exactly when some case pattern is or contains a String literal (has_string_pat) AND the scrutinee is not itself a bare String literal (rust_match_scrutinee_bare) -- a literal scrutinee is already a &str, its patterns already match, and &str has no stable as_str() (E0658). 0 otherwise. has_string_pat is a property of the case patterns' TREE (pattern_has_string_literal recurses through Constructor and Guard patterns, src/codegen/mod.rs:697-706); patterns arrive pre-rendered in this slice's representation, so the Bool arrives precomputed -- the recursion is mirror-only (see the slice-4 notes). The rule is syntactic (the emitter carries no types); its recorded blind spot is a scrutinee variable let-bound to a bare literal. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: has_string_pat: Bool, bare: Bool
+    output: Int
+
+    constraint: has_string_pat==false||bare==true||output==1
+    constraint: has_string_pat==true||output==0
+    constraint: bare==false||output==0
+
+    optimize: time < O(n)
+}
+
+spec rust_match_scrutinee_text {
+    doc: "The match scrutinee's final text (match_scrutinee_to_rust, src/codegen/mod.rs:683-695): the condition-position rendering (rust_condition_text), with '.as_str()' appended exactly when rust_match_scrutinee_form is 1. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: form: Int, rendered: String
+    output: String
+
+    constraint: form<0||form>0||output==rendered
+    constraint: form<1||form>1||output==rendered ++ ".as_str()"
+
+    optimize: time < O(n)
+}
+
+spec rust_block_text {
+    doc: "The block-expression wrap shared by two sites with one outer form: the Block arm of ir_to_rust_expr (src/codegen/mod.rs:900-913) over the assembled statement renderings, and expr_block_stmt (src/codegen/mod.rs:716-719) wrapping a single statement rendering -- the form the Let/While/For arms of ir_to_rust_expr (src/codegen/mod.rs:914-916) take. '{ ' + inner + ' }' in both. The inner arrives rendered AND end-trimmed (both sites trim_end the statement rendering) in a neutral Unit return-type context; the statement rendering itself is the statement-walker slice (slice 5), whose only loss here is the String-ownership rewrite in nested return/tail positions. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: inner: String
+    output: String
+
+    constraint: output == "{ " ++ inner ++ " }"
+
+    optimize: time < O(n)
+}
+
+spec rust_loop_text {
+    doc: "The Loop rendering of ir_to_rust_expr (src/codegen/mod.rs:917-922): 'loop {' + a newline + the statement-rendered body + '}'. Note there is NO space before the closing brace and none after the newline -- the body's own indentation (or lack of it: the statement walker renders at indent 0 here) is entirely the body's. The body arrives rendered and end-trimmed by the statement walker (slice 5) in a neutral Unit return-type context."
+    input: body: String
+    output: String
+
+    constraint: output == "loop {\n" ++ body ++ "}"
+
+    optimize: time < O(n)
+}
+
+spec rust_struct_def_text {
+    doc: "The StructDef rendering of ir_to_rust_expr (src/codegen/mod.rs:923-935): '{ struct ' + name + ' { ' + fields + ' } ' + body + ' }' -- an item definition followed by the body that uses it, inside one block expression (Rust allows item declarations inside a block). The name arrives rust_ident-rendered; the fields pre-joined ', ', each field 'name: type' by the same template as rust_param_text (the original formats both with '{}: {}' over rust_ident and ty_to_rust); the body is rendered by ir_to_rust_expr itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: name: String, fields: String, body: String
+    output: String
+
+    constraint: output == "{ struct " ++ name ++ " { " ++ fields ++ " } " ++ body ++ " }"
+
+    optimize: time < O(n)
+}
+
 }
