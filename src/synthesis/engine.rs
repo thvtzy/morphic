@@ -4043,14 +4043,30 @@ mod tests {
 
     /// Phase 25 (finding F1): the parser now surfaces `++` as
     /// BinOp::Concat, so a spec can finally STATE a string
-    /// assembly. The fixture below — the M3 wrap-one template —
-    /// was impossible before this phase: `parse` rejected the
-    /// second `+` outright, so the spec could not even be
-    /// written. Its equation seed must exist (the postcondition
-    /// IS the body), be Z3-Verified, win selection, execute
-    /// through the IR interpreter at tpr 1.000, and generate
-    /// Rust that compiles — the full path every layer below the
-    /// parser already supported, exercised end to end.
+    /// assembly. The fixtures below were impossible before this
+    /// phase: `parse` rejected the second `+` outright, so the
+    /// specs could not even be written. Their equation seeds
+    /// must exist (the postcondition IS the body), be
+    /// Z3-Verified, win selection, and execute through the IR
+    /// interpreter at tpr 1.000 — the full path every layer
+    /// below the parser already supported.
+    ///
+    /// The two specs split the codegen leg between them, for a
+    /// reason that predates this phase and is recorded here
+    /// plainly: the frozen emitter renders IR Concat as Rust
+    /// `+`, and its string-ownership rewrite (`.to_string()`)
+    /// fires only on a bare literal in an expectation-carrying
+    /// position — never on a Concat operand. So a literal-first
+    /// assembly (wrap_vec) renders `(("Vec<" + inner) + ">")`,
+    /// which rustc rejects (E0369: a `&str` literal cannot be
+    /// the left operand of `+` with a String), while a
+    /// variable-first assembly (exclaim) renders
+    /// `(inner + "!")` — String + &str — and compiles.
+    /// Extending the ownership treatment to Concat operands is
+    /// emitter work for the M3 walker/driver slices; this
+    /// phase freezes the emitter, so wrap_vec's generated code
+    /// is asserted byte-for-byte and exclaim carries the
+    /// compile leg.
     #[test]
     fn concat_equation_seed_is_verified_and_wins() {
         let src = r#"
@@ -4066,15 +4082,28 @@ spec wrap_vec {
     test "empty" { input: "" expect: "Vec<>" }
     test "nested" { input: "Vec<u8>" expect: "Vec<Vec<u8>>" }
 }
+
+spec exclaim {
+    doc: "Append a fixed suffix to a String: the variable-first assembly shape."
+    input: inner: String
+    output: String
+
+    constraint: output == inner ++ "!"
+
+    test "plain" { input: "wow" expect: "wow!" }
+    test "empty" { input: "" expect: "!" }
+}
 }
 "#;
         let parsed = crate::spec::parser::parse(src).expect("concat fixture must parse");
         let checked =
             crate::spec::typeck::check(parsed).expect("concat fixture must typecheck");
         let module = checked.spec.functions;
-        let spec = module_spec(&module, "wrap_vec");
-
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+
+        // ── wrap_vec: seed, verdict, execution, selection ──
+        let spec = module_spec(&module, "wrap_vec");
         let seed = constraint_seed(&engine, &spec, "equation");
         assert_eq!(count_holes(&seed.body), 0);
         assert!(
@@ -4082,8 +4111,6 @@ spec wrap_vec {
             "the equation seed's body must be the concat assembly: {:?}",
             seed.body
         );
-
-        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
         let result = verifier.verify_one(&seed, &spec);
         assert_eq!(result.status, VerificationStatus::Verified);
 
@@ -4132,6 +4159,40 @@ spec wrap_vec {
             "the winning body must be the constraint's own expression"
         );
 
+        // The generated code is the emitter's current Concat
+        // rendering, byte-for-byte (see the doc comment above
+        // for why this shape is not the compile leg).
+        let code = crate::codegen::generate(&winner, "rust").expect("codegen");
+        assert!(
+            code.contains(r#"(("Vec<" + inner) + ">")"#),
+            "generated code must render the assembly with `+`:\n{}",
+            code
+        );
+
+        // ── exclaim: the full chain, compile included ──
+        let spec = module_spec(&module, "exclaim");
+        let seed = constraint_seed(&engine, &spec, "equation");
+        assert_eq!(count_holes(&seed.body), 0);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let pool = synthesize_with_module(&spec, 1, &module)
+            .expect("opt-1 synthesis must succeed");
+        let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the constraint's own expression"
+        );
+
         // The generated Rust must compile — the same standalone
         // check the synthesis probes run (rustc --crate-type
         // lib on the emitted file).
@@ -4141,13 +4202,13 @@ spec wrap_vec {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("wrap_vec.rs");
+        let file = dir.join("exclaim.rs");
         std::fs::write(&file, &code).unwrap();
         let out = std::process::Command::new("rustc")
             .args(["--edition", "2021", "--crate-type", "lib"])
             .arg(&file)
             .arg("-o")
-            .arg(dir.join("libwrap_vec.rlib"))
+            .arg(dir.join("libexclaim.rlib"))
             .output()
             .expect("failed to run rustc");
         assert!(
