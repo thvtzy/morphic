@@ -1,18 +1,23 @@
 // =================================================================
-//  M3: Codegen -- IR to Rust (slice 1: leaf mappings)
+//  M3: Codegen -- IR to Rust (slices 1-2: leaf mappings +
+//  small template families)
 //  Self-host spec for the Rust emitter in src/codegen/mod.rs.
 //
 //  The codegen is the biggest self-host component and is being
 //  decomposed into ordered slices (see the M3 notes in
 //  ROAD_TO_SELF_HOSTING.md): leaf mappings first, then the small
 //  template families, name assembly, the expression walker, the
-//  statement walker, and finally the driver. This file carries
-//  slice 1 only: the pure tag/kind -> string-or-form tables that
-//  the walkers consult. Every spec below states the COMPLETE
-//  mapping of its table as constraints -- the central M2 lesson
-//  is that specs pinning only tested rows crown memorizers --
-//  while the in-spec tests stay representative, not exhaustive.
-//  Mirrors + full-range golden tests live in tests/m3_proof.rs.
+//  statement walker, and finally the driver. Slice 1 is the
+//  pure tag/kind -> string-or-form tables that the walkers
+//  consult; slice 2 is the small template families (ty_to_rust
+//  composite forms, literal rendering, ir_pattern_to_rust,
+//  expr_to_rust + constraint_to_rust, and the wrap
+//  classification of expr_in_condition_position). Every spec
+//  below states the COMPLETE mapping of its table as
+//  constraints -- the central M2 lesson is that specs pinning
+//  only tested rows crown memorizers -- while the in-spec
+//  tests stay representative, not exhaustive. Mirrors +
+//  full-range golden tests live in tests/m3_proof.rs.
 //
 //  Enums are simulated with Int codes, as in M0/M1/M2, using
 //  declaration order in the Rust source.
@@ -25,6 +30,15 @@
 //  == %". String inputs, string-equality constraints, and
 //  string-literal test inputs were probed against the compiled
 //  binary before use here (spec rust_keyword depends on them).
+//  Slice-2 probes (2026-11-21) added: Bool inputs with Bool
+//  guard rows and Bool test inputs parse and check
+//  (rust_literal_bool); a multi-input identity guard parses
+//  (rust_pattern_ctor_name); string literals may contain
+//  escaped quotes. Char literals do NOT parse in expression
+//  position ('a' is a parse error), though Char-typed inputs
+//  declare fine -- so no spec below writes a Char value. And
+//  the spec language has no string concatenation (see the
+//  slice-2 representation note before rust_type_form).
 // =================================================================
 
 Codegen {
@@ -63,6 +77,46 @@ type CollectionKindCode = Int;
 // 0=Add, 1=Sub, 2=Mul, 3=Div, 4=Mod, 5=And, 6=Or, 7=Eq,
 // 8=Neq, 9=Lt, 10=Le, 11=Gt, 12=Ge, 13=Concat
 type SpecBinOpCode = Int;
+
+// IR node kind codes: declaration order of IRNode in
+// src/synthesis/engine.rs. Needed by the wrap classification
+// of expr_in_condition_position (slice 2).
+// 0=Hole, 1=Block, 2=Let, 3=If, 4=While, 5=For, 6=Match,
+// 7=Call, 8=Return, 9=Literal, 10=Var, 11=BinOp, 12=UnaryOp,
+// 13=Lambda, 14=Closure, 15=Collection, 16=Map, 17=Filter,
+// 18=Fold, 19=Sort, 20=Alloc, 21=Assign, 22=Typed, 23=Index,
+// 24=Loop, 25=Break, 26=StructDef, 27=TryPropagate
+type IRNodeKindCode = Int;
+
+// IR literal kind codes: declaration order of IRLiteral in
+// src/synthesis/engine.rs.
+// 0=Int, 1=Float, 2=Bool, 3=String, 4=Char, 5=Unit
+type IRLiteralKindCode = Int;
+
+// IR pattern kind codes: declaration order of IRPattern in
+// src/synthesis/engine.rs.
+// 0=Wildcard, 1=Variable, 2=Literal, 3=Constructor, 4=Guard
+type IRPatternKindCode = Int;
+
+// Spec-expression kind codes: declaration order of Expr in
+// src/spec/ast.rs (the spec AST that expr_to_rust walks).
+// 0=Var, 1=IntLit, 2=FloatLit, 3=BoolLit, 4=StringLit,
+// 5=Field, 6=Index, 7=Call, 8=BinOp, 9=UnaryOp, 10=Lambda,
+// 11=Length, 12=Comprehension
+type SpecExprKindCode = Int;
+
+// Constraint kind codes: declaration order of Constraint in
+// src/spec/ast.rs (the constraint AST constraint_to_rust
+// walks).
+// 0=True, 1=Expr, 2=Forall, 3=Exists, 4=Implies, 5=And,
+// 6=Or, 7=Not, 8=Eq, 9=Order, 10=Predicate
+type ConstraintKindCode = Int;
+
+// Order operator codes: declaration order of OrderOp in
+// src/spec/ast.rs.
+// 0=LessThan, 1=LessThanOrEqual, 2=GreaterThan,
+// 3=GreaterThanOrEqual
+type OrderOpCode = Int;
 
 // -- Type names ------------------------------------------------
 
@@ -249,6 +303,195 @@ spec spec_binop_symbol {
     test "neq-symbol" { input: 8 expect: "!=" }
     test "mod-fallback" { input: 4 expect: "?" }
     test "lt-fallback" { input: 9 expect: "?" }
+}
+
+// -- Slice 2: small template families -------------------------
+//
+//  Representation (the slice-2 design rule): the walkers render
+//  children first, so a composite form is a template over the
+//  children's ALREADY-RENDERED strings. Everything about a
+//  template that is fixed text -- which template applies to a
+//  kind, its prefix / separator / midfix / suffix, and every
+//  constant fallback -- is pinned below as classifications and
+//  guard tables. The assembly act itself (concatenating fixed
+//  text with rendered children) is NOT pinned anywhere in this
+//  slice: the spec language has no string concatenation.
+//  BinOp::Concat exists in the AST, the IR, the interpreter
+//  (eval.rs) and the verifier (String::concat), but the parser
+//  never produces it -- '+' parses to BinOp::Add, which the
+//  interpreter evaluates numerically only and the verifier
+//  cannot encode on strings. Recorded in the ROAD M3 notes as
+//  a language finding for the language owner.
+
+// -- Type templates (ty_to_rust composites) --------------------
+
+spec rust_type_form {
+    doc: "Template family of a TypeRef code in ty_to_rust (src/codegen/mod.rs:1093): 0 = scalar leaf (codes 0-13, named by rust_type_name), 1 = name-carrying (Generic 14, Named 15: the output is the rust_ident-rendered name itself -- slice 3 owns rust_ident), 2 = wrap-one (prefix + inner + suffix: List, Set, Option, Ref, Stream), 3 = wrap-two (prefix + first + separator + second + suffix: Map, Result), 4 = tuple join (prefix + parts joined by separator + suffix), 5 = array (prefix + element + separator + decimal size + suffix), 6 = function (prefix + args joined by separator + midfix + return type + suffix). Total over all 26 TypeRef codes. The fixed texts are pinned by rust_type_prefix / rust_type_separator / rust_type_midfix / rust_type_suffix; the concatenation itself is unpinned (no concat operator in the spec language -- see the slice-2 note)."
+    input: tag: Int
+    output: Int
+
+    constraint: tag<0||tag>0||output==0
+    constraint: tag<1||tag>1||output==0
+    constraint: tag<2||tag>2||output==0
+    constraint: tag<3||tag>3||output==0
+    constraint: tag<4||tag>4||output==0
+    constraint: tag<5||tag>5||output==0
+    constraint: tag<6||tag>6||output==0
+    constraint: tag<7||tag>7||output==0
+    constraint: tag<8||tag>8||output==0
+    constraint: tag<9||tag>9||output==0
+    constraint: tag<10||tag>10||output==0
+    constraint: tag<11||tag>11||output==0
+    constraint: tag<12||tag>12||output==0
+    constraint: tag<13||tag>13||output==0
+    constraint: tag<14||tag>14||output==1
+    constraint: tag<15||tag>15||output==1
+    constraint: tag<16||tag>16||output==2
+    constraint: tag<17||tag>17||output==2
+    constraint: tag<18||tag>18||output==3
+    constraint: tag<19||tag>19||output==2
+    constraint: tag<20||tag>20||output==3
+    constraint: tag<21||tag>21||output==4
+    constraint: tag<22||tag>22||output==5
+    constraint: tag<23||tag>23||output==6
+    constraint: tag<24||tag>24||output==2
+    constraint: tag<25||tag>25||output==2
+
+    optimize: time < O(n)
+
+    test "scalar-form" { input: 0 expect: 0 }
+    test "name-form" { input: 14 expect: 1 }
+    test "list-form" { input: 16 expect: 2 }
+    test "map-form" { input: 18 expect: 3 }
+    test "tuple-form" { input: 21 expect: 4 }
+    test "array-form" { input: 22 expect: 5 }
+    test "function-form" { input: 23 expect: 6 }
+}
+
+spec rust_type_prefix {
+    doc: "Fixed opening text of a composite type form in ty_to_rust (src/codegen/mod.rs:1107-1122), keyed by TypeRef code. Set (17) is UNQUALIFIED 'HashSet<' -- unlike the fully qualified Set literal in ir_to_rust_expr, and no import is ever generated, so a Set-typed signature fails E0433 in real output; pinned as-is: a synthesized replacement must reproduce today's bytes. Scalar and name codes have no prefix and are unpinned here."
+    input: tag: Int
+    output: String
+
+    constraint: tag<16||tag>16||output=="Vec<"
+    constraint: tag<17||tag>17||output=="HashSet<"
+    constraint: tag<18||tag>18||output=="HashMap<"
+    constraint: tag<19||tag>19||output=="Option<"
+    constraint: tag<20||tag>20||output=="Result<"
+    constraint: tag<21||tag>21||output=="("
+    constraint: tag<22||tag>22||output=="["
+    constraint: tag<23||tag>23||output=="fn("
+    constraint: tag<24||tag>24||output=="&"
+    constraint: tag<25||tag>25||output=="impl Iterator<Item = "
+
+    optimize: time < O(n)
+
+    test "vec-prefix" { input: 16 expect: "Vec<" }
+    test "set-prefix" { input: 17 expect: "HashSet<" }
+    test "ref-prefix" { input: 24 expect: "&" }
+    test "stream-prefix" { input: 25 expect: "impl Iterator<Item = " }
+}
+
+spec rust_type_suffix {
+    doc: "Fixed closing text of a composite type form in ty_to_rust (src/codegen/mod.rs:1107-1122), keyed by TypeRef code. Function (23) and Ref (24) close with the empty string: a function's return type follows its midfix directly, and a reference is prefix-only. Scalar and name codes have no suffix and are unpinned here."
+    input: tag: Int
+    output: String
+
+    constraint: tag<16||tag>16||output==">"
+    constraint: tag<17||tag>17||output==">"
+    constraint: tag<18||tag>18||output==">"
+    constraint: tag<19||tag>19||output==">"
+    constraint: tag<20||tag>20||output==">"
+    constraint: tag<21||tag>21||output==")"
+    constraint: tag<22||tag>22||output=="]"
+    constraint: tag<23||tag>23||output==""
+    constraint: tag<24||tag>24||output==""
+    constraint: tag<25||tag>25||output==">"
+
+    optimize: time < O(n)
+
+    test "vec-suffix" { input: 16 expect: ">" }
+    test "tuple-suffix" { input: 21 expect: ")" }
+    test "function-suffix" { input: 23 expect: "" }
+    test "ref-suffix" { input: 24 expect: "" }
+}
+
+spec rust_type_separator {
+    doc: "Fixed text between the rendered children of a composite type form in ty_to_rust: ', ' between Map/Result children, tuple parts and function arguments; '; ' between an array's element type and its size. The size itself is rendered by the Int -> decimal rule, which the spec language cannot express (see rust_literal_form). Wrap-one and name/scalar codes have no separator and are unpinned here."
+    input: tag: Int
+    output: String
+
+    constraint: tag<18||tag>18||output==", "
+    constraint: tag<20||tag>20||output==", "
+    constraint: tag<21||tag>21||output==", "
+    constraint: tag<22||tag>22||output=="; "
+    constraint: tag<23||tag>23||output==", "
+
+    optimize: time < O(n)
+
+    test "map-separator" { input: 18 expect: ", " }
+    test "array-separator" { input: 22 expect: "; " }
+    test "function-separator" { input: 23 expect: ", " }
+}
+
+spec rust_type_midfix {
+    doc: "Fixed text between the joined argument list and the return type of a function type in ty_to_rust: ') -> '. Only Function (23) has a midfix; every other code is unpinned here."
+    input: tag: Int
+    output: String
+
+    constraint: tag<23||tag>23||output==") -> "
+
+    optimize: time < O(n)
+
+    test "function-midfix" { input: 23 expect: ") -> " }
+}
+
+// -- Literal rendering ------------------------------------------
+
+spec rust_literal_form {
+    doc: "Rendering family of an IR literal in expression position (the Literal arm of ir_to_rust_expr, src/codegen/mod.rs:605-612); pattern position uses the same six kinds with its own fallback table (rust_pattern_literal_form). 0 = decimal text of the value (Int: n.to_string()), 1 = f64 Display text (Float: f.to_string() -- 1.0 renders '1', not '1.0'), 2 = value text (Bool, via rust_literal_bool), 3 = quoted-raw template (String: a quote, the contents with NO escaping, a quote -- a quote inside the string renders as-is and breaks the generated Rust), 4 = quoted template (Char: a single quote, the character, a single quote), 5 = fixed text (Unit, via rust_literal_fixed_text). Total over all six IRLiteral kinds. Families 0 and 1 are classifications only: turning a number into its decimal/Display text is not expressible in the spec language (no Int -> String conversion, no float formatting), and families 3 and 4 need the concatenation the language lacks -- all recorded in the ROAD M3 notes. What is pinned here is WHICH rule applies to each kind, completely."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<3||kind>3||output==3
+    constraint: kind<4||kind>4||output==4
+    constraint: kind<5||kind>5||output==5
+
+    optimize: time < O(n)
+
+    test "int-form" { input: 0 expect: 0 }
+    test "float-form" { input: 1 expect: 1 }
+    test "string-form" { input: 3 expect: 3 }
+    test "unit-form" { input: 5 expect: 5 }
+}
+
+spec rust_literal_bool {
+    doc: "Text of a Bool literal: IRLiteral::Bool rendered by b.to_string() in ir_to_rust_expr (src/codegen/mod.rs:607) and identically in ir_pattern_to_rust (src/codegen/mod.rs:818) -- 'true' for true, 'false' for false. Total over the Bool domain; serves both walkers."
+    input: value: Bool
+    output: String
+
+    constraint: value==false||output=="true"
+    constraint: value==true||output=="false"
+
+    optimize: time < O(n)
+
+    test "true-text" { input: true expect: "true" }
+    test "false-text" { input: false expect: "false" }
+}
+
+spec rust_literal_fixed_text {
+    doc: "Value-independent text of an IR literal kind in expression position: only Unit (5) has one -- '()' (src/codegen/mod.rs:611). Every other kind's text depends on the literal's value and is unpinned here."
+    input: kind: Int
+    output: String
+
+    constraint: kind<5||kind>5||output=="()"
+
+    optimize: time < O(n)
+
+    test "unit-text" { input: 5 expect: "()" }
 }
 
 }
