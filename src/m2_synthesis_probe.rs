@@ -144,7 +144,7 @@ mod probe {
                 let name = func.name.clone();
                 let started = Instant::now();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    engine::synthesize(func, 1)
+                    engine::synthesize_with_module(func, 1, &checked.spec.functions)
                 }));
                 let synth_ms = started.elapsed().as_millis();
 
@@ -172,8 +172,11 @@ mod probe {
                 );
                 let n_candidates = candidates.len();
 
-                // Phase 4 of the real pipeline: Z3 verification.
-                let verified = verify::verifier::verify_all(candidates, func)
+                // Phase 4 of the real pipeline: Z3 verification,
+                // with the whole module in scope so spec-to-spec
+                // calls resolve (Phase 18).
+                let verified = verify::verifier::Verifier::with_specs(&checked.spec.functions)
+                    .verify_all(candidates, func)
                     .expect("verify_all must not error");
                 let n_verified = verified.iter().filter(|c| c.verified).count();
                 // Refutation-gate instrumentation (Phase 16): how

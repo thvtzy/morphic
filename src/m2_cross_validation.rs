@@ -738,7 +738,7 @@ mod xval {
                     // `morphic build` (synthesize is wrapped: the
                     // randomized engine may panic on some draws).
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        engine::synthesize(func, 1)
+                        engine::synthesize_with_module(func, 1, functions)
                     }));
                     let candidates = match outcome {
                         Ok(Ok(c)) if !c.is_empty() => c,
@@ -755,7 +755,9 @@ mod xval {
                             continue;
                         }
                     };
-                    let verified = match verify::verifier::verify_all(candidates, func) {
+                    let verified = match verify::verifier::Verifier::with_specs(functions)
+                        .verify_all(candidates, func)
+                    {
                         Ok(v) => v,
                         Err(e) => {
                             record_failure(&mut md, &mut details, run, func, &format!("verify_all error: {}", e), golden_total, pinned_total, unpinned_total);
