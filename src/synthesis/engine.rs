@@ -664,30 +664,73 @@ impl SynthesisEngine {
         population: Vec<CandidateImplementation>,
         spec: &FunctionSpec,
     ) -> Result<Vec<CandidateImplementation>, SynthesisError> {
-        let mut tree: Vec<MCTSNode> = Vec::new();
         let mut population = population;
 
-        for _ in 0..self.config.max_iterations {
-            // Selection
-            let node_idx = self.mcts_select(&tree);
-            if node_idx.is_none() {
-                // Initialize from population member
-                let parent = population[rand::thread_rng().gen_range(0..population.len())].clone();
-                let node = MCTSNode {
-                    state: parent.body.clone(),
-                    parent: None,
-                    children: Vec::new(),
-                    visits: 0,
-                    total_reward: 0.0,
-                    is_terminal: count_holes(&parent.body) == 0,
-                    hole_count: count_holes(&parent.body),
-                };
-                let idx = tree.len();
-                tree.push(node);
-                continue;
-            }
+        // Pass 1: a tree rooted at one random population member —
+        // the historical behavior. It explores completions of that
+        // one body only: selection always descends from tree[0],
+        // so no other member's completions are ever harvested.
+        let root_body =
+            population[rand::thread_rng().gen_range(0..population.len())].body.clone();
+        let harvested = self.mcts_harvest_tree(&root_body, spec, "mcts_harvest");
+        population.extend(harvested);
 
-            let idx = node_idx.unwrap();
+        // Pass 2: one tree per test-induced seed, rooted at the
+        // seed itself. The seed is the only candidate whose shape
+        // is derived from the spec's measured behavior, yet under
+        // pass 1 alone it was expanded only when it happened to be
+        // the random root (~1 in population_size runs) — its
+        // completions (the wildcard hole filled → hole-free bodies
+        // passing every test the literal arms reach) never entered
+        // the pool, and the holed seed itself is barred from
+        // winning by the selector's completeness gate whenever any
+        // hole-free candidate exists. Rooting a tree at the seed
+        // guarantees its completions are harvested too; whether
+        // they WIN is still up to scoring and the gate.
+        let seed_bodies: Vec<IRNode> = population
+            .iter()
+            .filter(|c| matches!(c.provenance, Provenance::TestInduced { .. }))
+            .map(|c| c.body.clone())
+            .collect();
+        for seed_body in &seed_bodies {
+            if count_holes(seed_body) == 0 {
+                continue; // Already complete — nothing to harvest.
+            }
+            let harvested = self.mcts_harvest_tree(seed_body, spec, "mcts_seed_harvest");
+            population.extend(harvested);
+        }
+
+        Ok(population)
+    }
+
+    /// Run one MCTS tree rooted at `root_state` for the configured
+    /// iteration budget and harvest the terminal nodes the search
+    /// actually visited. `mutation_kind` labels the harvested
+    /// candidates' provenance so seed-rooted harvests stay
+    /// distinguishable from the general one.
+    fn mcts_harvest_tree(
+        &mut self,
+        root_state: &IRNode,
+        spec: &FunctionSpec,
+        mutation_kind: &str,
+    ) -> Vec<CandidateImplementation> {
+        let root_holes = count_holes(root_state);
+        let mut tree: Vec<MCTSNode> = vec![MCTSNode {
+            state: root_state.clone(),
+            parent: None,
+            children: Vec::new(),
+            visits: 0,
+            total_reward: 0.0,
+            is_terminal: root_holes == 0,
+            hole_count: root_holes,
+        }];
+
+        for _ in 0..self.config.max_iterations {
+            // Selection — the tree is never empty (the root is
+            // pushed before the loop), so this always finds a node.
+            let idx = self
+                .mcts_select(&tree)
+                .expect("a rooted MCTS tree is never empty");
 
             // Expansion
             if !tree[idx].is_terminal && tree[idx].children.is_empty() {
@@ -747,7 +790,7 @@ impl SynthesisEngine {
                         generation: 1,
                         provenance: Provenance::Mutation {
                             parent_id: 0,
-                            mutation_kind: "mcts_harvest".into(),
+                            mutation_kind: mutation_kind.into(),
                         },
                         verified: false,
                     });
@@ -755,8 +798,7 @@ impl SynthesisEngine {
             }
         }
 
-        population.extend(harvested);
-        Ok(population)
+        harvested
     }
 
     fn mcts_select(&self, tree: &[MCTSNode]) -> Option<usize> {
