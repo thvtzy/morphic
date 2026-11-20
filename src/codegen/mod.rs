@@ -373,7 +373,7 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
         }
 
         IRNode::Match { scrutinee, cases } => {
-            let mut out = format!("{}match {} {{\n", pad, expr_in_condition_position(scrutinee));
+            let mut out = format!("{}match {} {{\n", pad, match_scrutinee_to_rust(scrutinee, cases));
             for (pattern, body) in cases {
                 let pat = ir_pattern_to_rust(pattern);
                 out.push_str(&format!("{}{} => {{\n{}{}}},\n",
@@ -584,6 +584,91 @@ fn concat_owned_operand(node: &IRNode) -> String {
     }
 }
 
+/// Right operand of an IR Concat in `ir_to_rust_expr`
+/// (Phase 29, defect 2a). `String + String` is E0308 —
+/// the right operand must be borrowed. A string literal
+/// is already a &str and stays bare (borrowing it would
+/// produce a `&&str`, which has no `Add` impl); a nested
+/// Concat is borrowed as a unit (its rendering is already
+/// parenthesized); a block-like operand is parenthesized
+/// first, the same set `expr_in_condition_position`
+/// wraps.
+fn concat_borrowed_operand(node: &IRNode) -> String {
+    match node {
+        IRNode::Literal(IRLiteral::String(_)) => ir_to_rust_expr(node),
+        _ if is_block_like_expr(node) => {
+            format!("&({})", ir_to_rust_expr(node))
+        }
+        _ => format!("&{}", ir_to_rust_expr(node)),
+    }
+}
+
+/// The block-like node kinds whose renderings need
+/// parentheses when an operator or a borrow is prefixed
+/// (the set `expr_in_condition_position` wraps).
+fn is_block_like_expr(node: &IRNode) -> bool {
+    matches!(
+        node,
+        IRNode::Match { .. }
+            | IRNode::If { .. }
+            | IRNode::Loop { .. }
+            | IRNode::While { .. }
+            | IRNode::For { .. }
+            | IRNode::Let { .. }
+            | IRNode::Block(_)
+            | IRNode::StructDef { .. }
+            | IRNode::Lambda { .. }
+            | IRNode::Closure { .. }
+    )
+}
+
+/// Scrutinee rendering for both Match arms (Phase 29,
+/// defect 2b). When any case pattern is — or contains —
+/// a string literal, the patterns are `&str`, so a
+/// String-valued scrutinee must be viewed through
+/// `.as_str()`; without it the patterns mismatch the
+/// scrutinee (E0308). The emitter has no type
+/// information, so the rule is syntactic: it fires on
+/// every scrutinee shape except one that is itself a
+/// string literal — a literal scrutinee is already a
+/// &str, its patterns already match, and `&str` has no
+/// stable `as_str()` (E0658). A scrutinee variable
+/// let-bound to a bare literal is the known blind spot
+/// of the syntactic rule, the same class of limitation
+/// as the expectation-driven ownership treatment.
+fn match_scrutinee_to_rust(
+    scrutinee: &IRNode,
+    cases: &[(IRPattern, IRNode)],
+) -> String {
+    let rendered = expr_in_condition_position(scrutinee);
+    if cases.iter().any(|(pat, _)| pattern_has_string_literal(pat))
+        && !is_bare_string_literal(scrutinee)
+    {
+        format!("{}.as_str()", rendered)
+    } else {
+        rendered
+    }
+}
+
+fn pattern_has_string_literal(pat: &IRPattern) -> bool {
+    match pat {
+        IRPattern::Literal(IRLiteral::String(_)) => true,
+        IRPattern::Constructor(_, subs) => {
+            subs.iter().any(pattern_has_string_literal)
+        }
+        IRPattern::Guard(inner, _) => pattern_has_string_literal(inner),
+        _ => false,
+    }
+}
+
+fn is_bare_string_literal(node: &IRNode) -> bool {
+    match node {
+        IRNode::Literal(IRLiteral::String(_)) => true,
+        IRNode::Typed { node, .. } => is_bare_string_literal(node),
+        _ => false,
+    }
+}
+
 fn expr_block_stmt(node: &IRNode) -> String {
     let neutral = TypeRef::Unit;
     format!("{{ {} }}", ir_to_rust(node, 0, &neutral).trim_end())
@@ -603,18 +688,10 @@ fn unsupported_expr(shape: &str) -> String {
 /// Wrap those in parens; everything else renders exactly as
 /// before, so existing winners' bytes are unchanged.
 fn expr_in_condition_position(node: &IRNode) -> String {
-    match node {
-        IRNode::Match { .. }
-        | IRNode::If { .. }
-        | IRNode::Loop { .. }
-        | IRNode::While { .. }
-        | IRNode::For { .. }
-        | IRNode::Let { .. }
-        | IRNode::Block(_)
-        | IRNode::StructDef { .. }
-        | IRNode::Lambda { .. }
-        | IRNode::Closure { .. } => format!("({})", ir_to_rust_expr(node)),
-        _ => ir_to_rust_expr(node),
+    if is_block_like_expr(node) {
+        format!("({})", ir_to_rust_expr(node))
+    } else {
+        ir_to_rust_expr(node)
     }
 }
 
@@ -649,17 +726,17 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
             } else if *op == IRBinOp::Merge {
                 format!("{}.extend({})", ir_to_rust_expr(lhs), ir_to_rust_expr(rhs))
             } else if *op == IRBinOp::Concat {
-                // Phase 29, defect 1 (E0369, user-approved
-                // unfreeze): `+` needs an owned left operand;
-                // a bare string literal is a &str and rustc
-                // rejects `&str + String`. The left operand
-                // goes through the ownership treatment the
-                // typed emitter applies in expectation
-                // positions (see concat_owned_operand).
+                // Phase 29, defects 1+2a (E0369/E0308,
+                // user-approved unfreeze): `+` needs an owned
+                // left operand and a borrowed right one. The
+                // left operand goes through the ownership
+                // treatment (see concat_owned_operand), the
+                // right through the borrow treatment (see
+                // concat_borrowed_operand).
                 format!(
                     "({} + {})",
                     concat_owned_operand(lhs),
-                    ir_to_rust_expr(rhs)
+                    concat_borrowed_operand(rhs)
                 )
             } else {
                 format!("({} {} {})", ir_to_rust_expr(lhs), rust_op, ir_to_rust_expr(rhs))
@@ -765,7 +842,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 .collect();
             format!(
                 "match {} {{ {} }}",
-                expr_in_condition_position(scrutinee),
+                match_scrutinee_to_rust(scrutinee, cases),
                 arms.join(", ")
             )
         }
@@ -2298,9 +2375,13 @@ mod tests {
             )),
             Box::new(IRNode::Literal(IRLiteral::String(">".into()))),
         );
+        // The left-operand ownership is defect 1's part of
+        // this rendering; the `&inner` borrow is defect 2a's
+        // (its own test below asserts the full text again
+        // through the generator).
         assert_eq!(
             ir_to_rust_expr(&body),
-            "((\"Vec<\".to_string() + inner) + \">\")"
+            "((\"Vec<\".to_string() + &inner) + \">\")"
         );
         // The compile leg isolates defect 1: a literal pair
         // (left owned, right a &str) through the full
@@ -2414,6 +2495,215 @@ mod tests {
             full
         );
         String::from_utf8_lossy(&run.stdout).into_owned()
+    }
+
+    #[test]
+    fn rust_concat_string_rhs_is_borrowed_and_runs() {
+        // Defect 2a (E0308): the Concat RHS was never
+        // borrowed, so `String + String` failed — the
+        // rust_param_text shape (`name ++ ": " ++ ty`).
+        let body = IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(IRNode::Var("name".into())),
+                Box::new(IRNode::Literal(IRLiteral::String(": ".into()))),
+            )),
+            Box::new(IRNode::Var("ty".into())),
+        );
+        assert_eq!(
+            ir_to_rust_expr(&body),
+            "((name + \": \") + &ty)"
+        );
+        let cand = candidate_with(
+            "param_text",
+            vec![("name", TypeRef::String), ("ty", TypeRef::String)],
+            TypeRef::String,
+            body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(param_text(\"count\".to_string(), \"i64\".to_string()), \"count: i64\");\n\
+             println!(\"param_text ok\");",
+        );
+        assert!(out.contains("param_text ok"), "run output: {}", out);
+        // With defect 1, the full wrap_vec assembly now
+        // compiles and runs end to end.
+        let wrap_body = IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(IRNode::Literal(IRLiteral::String("Vec<".into()))),
+                Box::new(IRNode::Var("inner".into())),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::String(">".into()))),
+        );
+        let wrap = candidate_with(
+            "wrap_vec",
+            vec![("inner", TypeRef::String)],
+            TypeRef::String,
+            wrap_body,
+        );
+        let wrap_code = generate(&wrap, "rust").unwrap();
+        assert!(
+            wrap_code.contains(r#"(("Vec<".to_string() + &inner) + ">")"#),
+            "wrap_vec rendering:\n{}",
+            wrap_code
+        );
+        let out = compile_and_run(
+            &wrap_code,
+            "assert_eq!(wrap_vec(\"i64\".to_string()), \"Vec<i64>\");\n\
+             assert_eq!(wrap_vec(\"Vec<u8>\".to_string()), \"Vec<Vec<u8>>\");\n\
+             assert_eq!(wrap_vec(String::new()), \"Vec<>\");\n\
+             println!(\"wrap_vec ok\");",
+        );
+        assert!(out.contains("wrap_vec ok"), "run output: {}", out);
+        // A nested Concat on the right is borrowed as a unit.
+        let nested = ir_to_rust_expr(&IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::Literal(IRLiteral::String("x".into()))),
+            Box::new(IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(IRNode::Literal(IRLiteral::String("y".into()))),
+                Box::new(IRNode::Var("s".into())),
+            )),
+        ));
+        assert_eq!(nested, "(\"x\".to_string() + &(\"y\".to_string() + &s))");
+    }
+
+    #[test]
+    fn rust_match_over_string_scrutinee_uses_as_str() {
+        // Defect 2b (E0308): a Match whose scrutinee is a
+        // String and whose patterns are string literals
+        // rendered `match name { "type" => ... }` — &str
+        // patterns against a String scrutinee (the
+        // rust_ident_empty winner's shape).
+        let lit_str = |s: &str| IRNode::Literal(IRLiteral::String(s.into()));
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("name".into())),
+            cases: vec![
+                (
+                    IRPattern::Guard(
+                        Box::new(IRPattern::Literal(IRLiteral::String(
+                            "type".into(),
+                        ))),
+                        "flag".to_string(),
+                    ),
+                    lit_str("keyword"),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::String("fn".into())),
+                    lit_str("keyword"),
+                ),
+                (IRPattern::Wildcard, lit_str("plain")),
+            ],
+        };
+        let cand = candidate_with(
+            "classify",
+            vec![
+                ("name", TypeRef::String),
+                ("flag", TypeRef::Bool),
+            ],
+            TypeRef::String,
+            body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("match name.as_str()"),
+            "string-pattern match not rendered with .as_str():\n{}",
+            code
+        );
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(classify(\"type\".to_string(), true), \"keyword\");\n\
+             assert_eq!(classify(\"type\".to_string(), false), \"plain\");\n\
+             assert_eq!(classify(\"fn\".to_string(), false), \"keyword\");\n\
+             assert_eq!(classify(\"hello\".to_string(), true), \"plain\");\n\
+             println!(\"classify ok\");",
+        );
+        assert!(out.contains("classify ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_match_as_str_only_where_patterns_need_it() {
+        // A literal scrutinee is already a &str (and &str
+        // has no stable .as_str()): it must stay bare.
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Literal(IRLiteral::String(
+                "type".into(),
+            ))),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::String("type".into())),
+                    IRNode::Literal(IRLiteral::Int(1)),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Int(0)),
+                ),
+            ],
+        };
+        let rendered = ir_to_rust_expr(&body);
+        assert!(
+            rendered.contains("match \"type\" {"),
+            "literal scrutinee must stay bare:\n{}",
+            rendered
+        );
+        assert!(!rendered.contains(".as_str()"), "rendered: {}", rendered);
+        // Expression position (a Let value) gets the same
+        // treatment as statement position.
+        let expr_body = IRNode::Let {
+            name: "r".into(),
+            value: Box::new(IRNode::Match {
+                scrutinee: Box::new(IRNode::Var("name".into())),
+                cases: vec![
+                    (
+                        IRPattern::Literal(IRLiteral::String("a".into())),
+                        IRNode::Literal(IRLiteral::Int(1)),
+                    ),
+                    (
+                        IRPattern::Wildcard,
+                        IRNode::Literal(IRLiteral::Int(0)),
+                    ),
+                ],
+            }),
+            body: Box::new(IRNode::Var("r".into())),
+        };
+        let cand = candidate_with(
+            "score",
+            vec![("name", TypeRef::String)],
+            TypeRef::Int,
+            expr_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("match name.as_str()"),
+            "expression-position match not rendered with .as_str():\n{}",
+            code
+        );
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(score(\"a\".to_string()), 1);\n\
+             assert_eq!(score(\"b\".to_string()), 0);\n\
+             println!(\"score ok\");",
+        );
+        assert!(out.contains("score ok"), "run output: {}", out);
+        // Int patterns against an Int scrutinee: untouched.
+        let int_match = ir_to_rust_expr(&IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("n".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(3)),
+                    IRNode::Literal(IRLiteral::Int(1)),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Int(0)),
+                ),
+            ],
+        });
+        assert!(!int_match.contains(".as_str()"), "rendered: {}", int_match);
     }
 
     /// Compile a generated file with `rustc --edition 2021
