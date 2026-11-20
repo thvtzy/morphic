@@ -3006,6 +3006,223 @@ mod tests {
         );
     }
 
+    /// Load one of the real M2 specs (the same helper shape as
+    /// the verifier tests). Constraint seeds are derived from
+    /// spec text, so their tests must run against spec text —
+    /// hand-built ASTs would test the test, not the derivation.
+    fn load_m2_spec(file: &str, name: &str) -> FunctionSpec {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/self_host/{}.morph", root, file);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        let checked = crate::spec::typeck::check(parsed).unwrap();
+        checked
+            .spec
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .clone()
+    }
+
+    fn constraint_seed(
+        engine: &SynthesisEngine,
+        spec: &FunctionSpec,
+        kind: &str,
+    ) -> CandidateImplementation {
+        engine
+            .seed_from_constraints(spec)
+            .into_iter()
+            .find(|c| matches!(&c.provenance, Provenance::ConstraintInduced { kind: k } if k == kind))
+            .unwrap_or_else(|| panic!("{} must have a {} constraint seed", spec.name, kind))
+    }
+
+    fn eval_int_body(body: &IRNode, var: &str, value: i64) -> crate::synthesis::eval::Value {
+        let mut env = crate::synthesis::eval::Env::new();
+        env.insert(var.into(), crate::synthesis::eval::Value::Int(value));
+        crate::synthesis::eval::eval(body, &env).expect("seed body must evaluate")
+    }
+
+    /// Constraint seeds (i): a range spec's equation constraint
+    /// IS its body — `output == (tag>=0&&tag<=8)` — so the seed
+    /// built from it must be Verified by the candidate-encoding
+    /// verifier (the pool previously contained NO Verified
+    /// candidate for this spec in any measured draw), must
+    /// survive to the final pool under seed protection, and
+    /// must win selection once the gates can see it.
+    #[test]
+    fn constraint_equation_seed_is_verified_and_wins() {
+        let spec = load_m2_spec("validator", "is_known_type_tag");
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the equation seed");
+        let seed = constraint_seed(&engine, &spec, "equation");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let pool = synthesize(&spec, 1).expect("opt-1 synthesis must succeed");
+        assert!(
+            pool.iter()
+                .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+            "final pool must contain the constraint seed"
+        );
+        let verified = crate::verify::verifier::verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the constraint's own expression"
+        );
+    }
+
+    /// Constraint seeds (ii): a lookup spec's guard rows
+    /// enumerate the whole table, including rows no in-spec test
+    /// exercises (2 → "Float", 3 → "Bool", 7 → "Option" for
+    /// type_tag_name). The guard-table seed must return the
+    /// pinned output on EVERY row — evaluated here through the
+    /// IR interpreter — and be Verified.
+    #[test]
+    fn constraint_guard_table_seed_covers_every_row() {
+        let spec = load_m2_spec("printer", "type_tag_name");
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let rows = [
+            (1, "Int"),
+            (2, "Float"),
+            (3, "Bool"),
+            (4, "String"),
+            (6, "List"),
+            (7, "Option"),
+        ];
+        for (tag, name) in rows {
+            let v = eval_int_body(&seed.body, "tag", tag);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(name.into()),
+                "tag {} must print as {}",
+                tag,
+                name
+            );
+        }
+        // Off-table the spec is silent; the wildcard arm carries
+        // the typed default for String (Phase 15: the mirrors
+        // abstain there and the recorded winner value was "").
+        let v = eval_int_body(&seed.body, "tag", 0);
+        assert_eq!(v, crate::synthesis::eval::Value::Str(String::new()));
+
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Constraint seeds (ii, Int table): node_arity's rows pin
+    /// six kinds; its seventh constraint (`output >= 0`) is not
+    /// a guard row and must be skipped as one — yet still be
+    /// PROVEN of the seed (every row value and the Int default
+    /// satisfy the floor), so the seed is Verified whole.
+    #[test]
+    fn constraint_guard_table_seed_for_node_arity() {
+        let spec = load_m2_spec("validator", "node_arity");
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the guard-table seed");
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+
+        let rows = [(0, 0), (1, 0), (2, 2), (3, 1), (5, 2), (6, 1)];
+        for (kind, arity) in rows {
+            let v = eval_int_body(&seed.body, "kind", kind);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(arity),
+                "kind {} must have arity {}",
+                kind,
+                arity
+            );
+        }
+        // Unpinned kinds (Call=4, ListLiteral=8) get the typed
+        // Int default, which satisfies the spec's floor.
+        let v = eval_int_body(&seed.body, "kind", 4);
+        assert_eq!(v, crate::synthesis::eval::Value::Int(0));
+
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Constraint seeds (iii): the two test-less specs have
+    /// never had a truth signal of any kind — no tests, hence no
+    /// TestInduced seed, and no Verified pool candidate in any
+    /// measured draw. Their constraints are equations, so the
+    /// equation seed must exist, be Verified, and reach the
+    /// final pool under protection.
+    #[test]
+    fn constraint_equation_seeds_give_testless_specs_verified_candidates() {
+        for (file, name) in [("validator", "tags_compatible"), ("printer", "needs_parens")] {
+            let spec = load_m2_spec(file, name);
+            let engine = SynthesisEngine::new(SynthesisConfig::default());
+            let seed = constraint_seed(&engine, &spec, "equation");
+            let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+            assert_eq!(
+                result.status,
+                VerificationStatus::Verified,
+                "{}'s equation seed must verify",
+                name
+            );
+            let pool = synthesize(&spec, 1).expect("opt-1 synthesis must succeed");
+            assert!(
+                pool.iter()
+                    .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+                "{}'s final pool must contain the constraint seed",
+                name
+            );
+        }
+    }
+
+    /// Constraint seeds (iv): the composition specs' equations
+    /// call other specs — the body converts to IR but lies
+    /// outside the verifier's encodable subset, so NO seed is
+    /// admitted (an unverifiable seed would be exactly the
+    /// Inconclusive filler this phase exists to displace). A
+    /// spec whose only constraint fits neither pattern (a bare
+    /// ordering on output) likewise gets no seed.
+    #[test]
+    fn constraint_seeds_absent_where_constraints_fit_neither_pattern() {
+        for (file, name) in [("validator", "validate_kind_tag"), ("printer", "print_node_kind")] {
+            let spec = load_m2_spec(file, name);
+            let engine = SynthesisEngine::new(SynthesisConfig::default());
+            assert!(
+                engine.seed_from_constraints(&spec).is_empty(),
+                "{} must not get a constraint seed",
+                name
+            );
+        }
+
+        let mut spec = dummy_spec();
+        spec.name = "floor_only".into();
+        spec.params = vec![Param {
+            name: "x".into(),
+            ty: TypeRef::Int,
+            annotations: HashMap::new(),
+        }];
+        spec.return_type = TypeRef::Int;
+        spec.postconditions = vec![Constraint::Expr(Expr::BinOp(
+            BinOp::Ge,
+            Box::new(Expr::Var("output".into())),
+            Box::new(Expr::IntLit(0)),
+        ))];
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        assert!(engine.seed_from_constraints(&spec).is_empty());
+    }
+
     /// replace_hole must actually substitute the hole wherever
     /// find_hole_positions found it. The path walker behind it
     /// used to implement only the Block step — every other
