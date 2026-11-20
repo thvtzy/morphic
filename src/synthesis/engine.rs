@@ -656,6 +656,17 @@ impl SynthesisEngine {
     ///   over the guard parameter returning that parameter on
     ///   the pinned arms, with the same typed-literal wildcard
     ///   for the combinations no row pins.
+    /// - **composition guard**: rows guarded by ONE shared
+    ///   Bool-valued expression — a Bool parameter or a call
+    ///   to another spec of the module — pinning the output to
+    ///   an arbitrary expression over the parameters
+    ///   (`rust_keyword(name)==true || output == name`) become
+    ///   one match over that guard expression, with the call
+    ///   resolved before admission like an equation's. The
+    ///   guarded-identity shape generalized: it claims only
+    ///   shapes the earlier families cannot state (a call
+    ///   guard, or a compound pin), so the families never
+    ///   produce two seeds for one spec.
     ///
     /// A spec whose constraints fit neither shape gets no
     /// constraint seed and behaves exactly as before. Equations
@@ -688,6 +699,9 @@ impl SynthesisEngine {
         }
         if let Some(body) = guarded_identity_seed_body(spec, &self.spec_index) {
             admit("guarded_identity", body);
+        }
+        if let Some(body) = composition_guard_seed_body(spec, &self.spec_index) {
+            admit("composition_guard", body);
         }
         seeds
     }
@@ -2869,6 +2883,309 @@ fn guarded_identity_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<
     }
 }
 
+/// The composition-guard body: the guarded-identity shape
+/// generalized along both of its axes. The guard is ONE
+/// expression shared by every row, valued in the finite
+/// Bool domain: a Bool parameter, or a call to another spec
+/// of the module whose return is Bool (the guard in
+/// `rust_ident_suffix` is `rust_keyword(name)` — a
+/// composition, which is where the family gets its name).
+/// The output pin is any expression over the parameters —
+/// a literal, a variable, a concatenation — where the
+/// earlier families admitted only a literal (guard table)
+/// or the one identity variable (guarded identity).
+///
+/// Rows are recognized exactly as the guard family's rows
+/// are (see `guard_row_parts`): an Or of guard leaves plus
+/// one output pin, the pinned guard value being the unique
+/// domain value falsifying every leaf — here the leaves
+/// compare the guard EXPRESSION against BoolLit constants
+/// (`guard_leaf_on_expr`), so a call guard is pinned by
+/// evaluating its leaves over {false, true} without ever
+/// executing the call. A row-shaped postcondition that
+/// deviates — a pin mentioning `output`, a pin or guard
+/// calling a spec the index does not hold, leaves comparing
+/// two different guard expressions, a guard whose value is
+/// not Bool — yields no seed at all (all rows or none, the
+/// guarded-identity rule); non-row postconditions are
+/// skipped as in the guard-table builder.
+///
+/// Territory: the earlier families keep their shapes. A
+/// Bool-parameter guard whose pins are all literals or bare
+/// variables is a guard table or a guarded identity and is
+/// NOT claimed here — this builder fires only where they
+/// cannot state the spec at all: the guard is a call, or
+/// some pin is a compound expression. (That is also what
+/// keeps the families from ever producing two seeds for one
+/// spec.)
+///
+/// The emitted body is one match over the guard expression
+/// — a call guard is evaluated once, as the scrutinee — with
+/// one arm per pinned guard value returning the row's pin
+/// expression, and the typed-literal wildcard for guard
+/// values no row pins: the guard-table stance, a documented
+/// guess the spec is silent about. (Both measured specs pin
+/// the whole domain, so their wildcards are unreachable.)
+fn composition_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let mut guard_expr: Option<Expr> = None;
+    let mut rows: Vec<(bool, IRNode, Expr)> = Vec::new();
+    let mut seen: Vec<bool> = Vec::new();
+    for c in &spec.postconditions {
+        if guard_row_parts(c).is_none() {
+            continue; // not a row: skipped, as in guard_table_body
+        }
+        // Row-shaped: it must be a composition row for the
+        // one shared guard expression, or the spec states a
+        // row this body would not honor — a deviation, so
+        // no seed.
+        let (target, pinned, pin, pin_side) = composition_guard_row(c, index)?;
+        match &guard_expr {
+            None => guard_expr = Some(target),
+            Some(g) if expr_same(g, &target) => {}
+            Some(_) => return None, // two guard expressions: not one guard
+        }
+        if seen.contains(&pinned) {
+            continue; // first row wins, as in the guard tables
+        }
+        seen.push(pinned);
+        rows.push((pinned, pin, pin_side));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let guard_expr = guard_expr?;
+    let scrutinee = composition_scrutinee(spec, &guard_expr, index)?;
+    // Territory (see the doc comment): a plain-variable
+    // guard with only literal/bare-variable pins belongs to
+    // the earlier families.
+    let guard_is_call = matches!(guard_expr, Expr::Call(..));
+    let any_compound_pin = rows.iter().any(|(_, _, side)| {
+        !matches!(
+            side,
+            Expr::Var(_)
+                | Expr::IntLit(_)
+                | Expr::FloatLit(_)
+                | Expr::BoolLit(_)
+                | Expr::StringLit(_)
+        )
+    });
+    if !guard_is_call && !any_compound_pin {
+        return None;
+    }
+    let mut cases: Vec<(IRPattern, IRNode)> = rows
+        .into_iter()
+        .map(|(pinned, pin, _)| (IRPattern::Literal(IRLiteral::Bool(pinned)), pin))
+        .collect();
+    let default = typed_literal_fillings(&spec.return_type)?
+        .into_iter()
+        .next()?;
+    cases.push((IRPattern::Wildcard, default));
+    Some(IRNode::Match {
+        scrutinee: Box::new(scrutinee),
+        cases,
+    })
+}
+
+/// The composition-guard seed's body: the composition match
+/// with any spec-to-spec calls resolved against the module
+/// (the equation seed's admission precedent — a raw call
+/// body could not be executed by the interpreter or emitted
+/// standalone), admitted when the verifier can encode the
+/// resolved body in the module context.
+fn composition_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = composition_guard_body(spec, index)?;
+    let body = index.inline_calls(&raw)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+/// One composition-guard row: row-shaped (see
+/// `guard_row_parts`), its guard leaves all comparing ONE
+/// guard expression against BoolLit constants and pinning a
+/// single value of the {false, true} domain, and its output
+/// pin an admissible expression (see `composition_pin`).
+/// Returns the guard expression, the pinned guard value,
+/// the pin as IR, and the pin's source expression (the
+/// builder's territory rule reads it). Any deviation is
+/// None; the builder treats a row-shaped postcondition
+/// failing here as a shape deviation, not a skippable
+/// non-row.
+fn composition_guard_row(
+    c: &Constraint,
+    index: &SpecIndex,
+) -> Option<(Expr, bool, IRNode, Expr)> {
+    let (pin_side, guard_leaves) = guard_row_parts(c)?;
+    let pin = composition_pin(pin_side, index)?;
+    let mut target: Option<Expr> = None;
+    let mut guards: Vec<(BinOp, bool, bool)> = Vec::new();
+    for leaf in guard_leaves {
+        let (leaf_target, normalized) = guard_leaf_on_expr(leaf)?;
+        match &target {
+            None => target = Some(leaf_target),
+            Some(t) if expr_same(t, &leaf_target) => {}
+            Some(_) => return None, // one row, two guard expressions
+        }
+        guards.push(normalized);
+    }
+    Some((target?, pin_bool_value(&guards)?, pin, pin_side.clone()))
+}
+
+/// An admissible composition pin: the pin expression
+/// converted whole via `expr_to_ir` (a dropped subexpression
+/// would surface as a Hole), never mentioning `output`
+/// itself, and calling only specs the module index holds —
+/// an unindexed call in a pin could neither be resolved for
+/// execution nor judged, so it is a deviation, as an
+/// unindexed guard call is.
+fn composition_pin(pin_side: &Expr, index: &SpecIndex) -> Option<IRNode> {
+    if expr_mentions_var(pin_side, OUTPUT_VAR) {
+        return None;
+    }
+    if !expr_calls_indexed(pin_side, index) {
+        return None;
+    }
+    let pin = expr_to_ir(pin_side);
+    if count_holes(&pin) > 0 {
+        return None;
+    }
+    Some(pin)
+}
+
+/// The composition guard's scrutinee: the guard expression
+/// as IR, when the expression is one whose value ranges
+/// over the Bool domain — a Bool parameter of the spec, or
+/// a call to an indexed spec returning Bool with matching
+/// arity and only indexed calls inside its arguments.
+/// Anything else (an Int or String variable, a compound
+/// expression, an unknown or non-Bool callee) is not a
+/// composition guard: the Int domain stays with the
+/// guard-table family's interval machinery, and a String
+/// guard's equality leaves are a separate, unadmitted
+/// family (rust_ident_empty's shape).
+fn composition_scrutinee(
+    spec: &FunctionSpec,
+    guard_expr: &Expr,
+    index: &SpecIndex,
+) -> Option<IRNode> {
+    if expr_mentions_var(guard_expr, OUTPUT_VAR) {
+        return None;
+    }
+    match guard_expr {
+        Expr::Var(v) => {
+            let param = spec.params.iter().find(|p| &p.name == v)?;
+            if !matches!(param.ty, TypeRef::Bool) {
+                return None;
+            }
+            Some(IRNode::Var(v.clone()))
+        }
+        Expr::Call(name, args) => {
+            let callee = index.get(name)?;
+            if callee.return_type != TypeRef::Bool || callee.params.len() != args.len() {
+                return None;
+            }
+            if !expr_calls_indexed(guard_expr, index) {
+                return None;
+            }
+            let scrutinee = expr_to_ir(guard_expr);
+            if count_holes(&scrutinee) > 0 {
+                return None;
+            }
+            Some(scrutinee)
+        }
+        _ => None,
+    }
+}
+
+/// A composition guard leaf normalized to the guard
+/// expression it constrains and (operator, constant_on_left,
+/// constant): an Eq/Neq between some expression and a
+/// BoolLit constant, in either operand order — the
+/// `guard_leaf_bool` normalization with the parameter
+/// variable replaced by an arbitrary expression. A leaf
+/// between two BoolLits constrains no expression and is not
+/// a guard leaf; ordering comparisons and anything else are
+/// not Bool guard leaves either.
+fn guard_leaf_on_expr(leaf: &Expr) -> Option<(Expr, (BinOp, bool, bool))> {
+    let Expr::BinOp(op, l, r) = leaf else {
+        return None;
+    };
+    if !matches!(op, BinOp::Eq | BinOp::Neq) {
+        return None;
+    }
+    match (l.as_ref(), r.as_ref()) {
+        (Expr::BoolLit(b), target) if !matches!(target, Expr::BoolLit(_)) => {
+            Some((target.clone(), (*op, true, *b)))
+        }
+        (target, Expr::BoolLit(b)) if !matches!(target, Expr::BoolLit(_)) => {
+            Some((target.clone(), (*op, false, *b)))
+        }
+        _ => None,
+    }
+}
+
+/// Does every call in the expression target a spec the
+/// module index holds? The walk `expr_mentions_var` makes,
+/// judging call targets instead of variable mentions.
+fn expr_calls_indexed(expr: &Expr, index: &SpecIndex) -> bool {
+    match expr {
+        Expr::Call(name, args) => {
+            index.get(name).is_some() && args.iter().all(|a| expr_calls_indexed(a, index))
+        }
+        Expr::Var(_)
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_) => true,
+        Expr::Field(inner, _) => expr_calls_indexed(inner, index),
+        Expr::Index(coll, idx) => {
+            expr_calls_indexed(coll, index) && expr_calls_indexed(idx, index)
+        }
+        Expr::BinOp(_, l, r) => {
+            expr_calls_indexed(l, index) && expr_calls_indexed(r, index)
+        }
+        Expr::UnaryOp(_, inner) => expr_calls_indexed(inner, index),
+        Expr::Lambda(_, body) => expr_calls_indexed(body, index),
+        Expr::Length(inner) => expr_calls_indexed(inner, index),
+        Expr::Comprehension {
+            collection, body, ..
+        } => expr_calls_indexed(collection, index) && expr_calls_indexed(body, index),
+    }
+}
+
+/// Structural equality of two spec expressions — the
+/// composition builder's test that every row constrains the
+/// SAME guard expression. (The spec AST derives no PartialEq;
+/// binders — lambdas, comprehensions — never compare equal:
+/// they are not guard expressions, and refusing them is the
+/// conservative direction.)
+fn expr_same(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::Var(x), Expr::Var(y)) => x == y,
+        (Expr::IntLit(x), Expr::IntLit(y)) => x == y,
+        (Expr::FloatLit(x), Expr::FloatLit(y)) => x.to_bits() == y.to_bits(),
+        (Expr::BoolLit(x), Expr::BoolLit(y)) => x == y,
+        (Expr::StringLit(x), Expr::StringLit(y)) => x == y,
+        (Expr::Field(x, f), Expr::Field(y, g)) => f == g && expr_same(x, y),
+        (Expr::Index(c1, i1), Expr::Index(c2, i2)) => {
+            expr_same(c1, c2) && expr_same(i1, i2)
+        }
+        (Expr::Call(n1, a1), Expr::Call(n2, a2)) => {
+            n1 == n2
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2.iter()).all(|(x, y)| expr_same(x, y))
+        }
+        (Expr::BinOp(o1, l1, r1), Expr::BinOp(o2, l2, r2)) => {
+            o1 == o2 && expr_same(l1, l2) && expr_same(r1, r2)
+        }
+        (Expr::UnaryOp(o1, x), Expr::UnaryOp(o2, y)) => o1 == o2 && expr_same(x, y),
+        (Expr::Length(x), Expr::Length(y)) => expr_same(x, y),
+        _ => false,
+    }
+}
+
 // ── Spec index: resolving spec-to-spec calls ──────────────
 
 /// How deep spec-call inlining may nest, on both resolution
@@ -2887,8 +3204,11 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 8;
 /// is exactly the body its constraint seed would be built
 /// from — the first convertible equation's right-hand side,
 /// the guard-table match for a lookup spec with no equation,
-/// or the guarded-identity match for a two-parameter spec
-/// whose rows pin the output to a parameter — produced by
+/// the guarded-identity match for a two-parameter spec
+/// whose rows pin the output to a parameter, or the
+/// composition-guard match for a spec whose rows are
+/// guarded by a shared Bool expression (a call, or a Bool
+/// parameter with expression pins) — produced by
 /// the same builders the seed family uses, minus the
 /// encodability admission (admission is a property of a
 /// body in a caller's context, judged by the verifier; the
@@ -2920,15 +3240,17 @@ impl SpecIndex {
 
     /// The body a call to `name` denotes: the callee's first
     /// equation body, its guard-table body when it has no
-    /// equation, or its guarded-identity body when it has
-    /// neither. The body is NOT call-resolved — it may itself
-    /// contain calls; resolving those is the consumer's step,
-    /// under the consumer's cycle/depth guard.
+    /// equation, its guarded-identity body when it has
+    /// neither, or its composition-guard body when it has
+    /// none of those. The body is NOT call-resolved — it may
+    /// itself contain calls; resolving those is the consumer's
+    /// step, under the consumer's cycle/depth guard.
     pub fn callee_body(&self, name: &str) -> Option<IRNode> {
         let spec = self.by_name.get(name)?;
         first_equation_body(spec)
             .or_else(|| guard_table_body(spec))
             .or_else(|| guarded_identity_body(spec))
+            .or_else(|| composition_guard_body(spec, self))
     }
 
     /// IR-level inlining: replace every call to an indexed
