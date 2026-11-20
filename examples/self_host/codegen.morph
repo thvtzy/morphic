@@ -1,6 +1,7 @@
 // =================================================================
-//  M3: Codegen -- IR to Rust (slices 1-3: leaf mappings +
-//  small template families + name/text assembly)
+//  M3: Codegen -- IR to Rust (slices 1-4: leaf mappings +
+//  small template families + name/text assembly + the
+//  expression walker)
 //  Self-host spec for the Rust emitter in src/codegen/mod.rs.
 //
 //  The codegen is the biggest self-host component and is being
@@ -957,6 +958,257 @@ spec rust_file_fixed_text {
 
     test "fn-close" { input: 0 expect: "}\n" }
     test "doc-blank" { input: 1 expect: "\n" }
+}
+
+// -- Slice 4: the expression walker (ir_to_rust_expr) --------
+//
+//  ir_to_rust_expr (src/codegen/mod.rs:742) is the recursive
+//  heart of the Rust emitter. This slice specs it arm by
+//  arm, in the ROAD's sub-slices: operators; collections +
+//  iterator combinators; control forms; leaves/misc. The
+//  representation rule is slices 2/3's: children arrive
+//  PRE-RENDERED (rendered by this same walker, recursively
+//  -- the assembly mirror in tests/m3_proof.rs performs
+//  the recursion), and each spec pins its arm's template
+//  over those parts, composing slice 1-3 specs by call
+//  where the walker consults them (rust_binop_symbol for
+//  the infix symbol, rust_condition_wrap for the
+//  condition wrap). Three arms need no new spec: Literal
+//  (slice 1/2's rust_literal_form family +
+//  rust_string_literal_text), Var (slice 3's rust_ident
+//  composition) and Typed (slice 3's rust_typed_form
+//  dispatch back into ir_to_rust_expr_typed).
+
+// -- Operators: the BinOp arm ---------------------------------
+
+spec rust_expr_binop_form {
+    doc: "Emission family of an IR binary operator in ir_to_rust_expr (src/codegen/mod.rs:753-781): 0 = general infix ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from rust_binop_symbol), 1 = Concat (the owned/borrowed '+' form -- rust_binop_concat_text over the two operand treatments), 2 = Append (the '.push' method form), 3 = Merge (the '.extend' method form). Total over all nineteen IRBinOp codes. The branch is taken BEFORE the operator table is consulted for families 1/2/3: the table's '.push'/'.extend' bindings for Append/Merge are dead values (see rust_binop_symbol), and Concat's '+' symbol row is used by no template -- family 1 has its own operand treatments (Phase 29)."
+    input: op: Int
+    output: Int
+
+    constraint: op<0||op>0||output==0
+    constraint: op<1||op>1||output==0
+    constraint: op<2||op>2||output==0
+    constraint: op<3||op>3||output==0
+    constraint: op<4||op>4||output==0
+    constraint: op<5||op>5||output==0
+    constraint: op<6||op>6||output==0
+    constraint: op<7||op>7||output==0
+    constraint: op<8||op>8||output==0
+    constraint: op<9||op>9||output==0
+    constraint: op<10||op>10||output==0
+    constraint: op<11||op>11||output==0
+    constraint: op<12||op>12||output==0
+    constraint: op<13||op>13||output==0
+    constraint: op<14||op>14||output==0
+    constraint: op<15||op>15||output==0
+    constraint: op<16||op>16||output==1
+    constraint: op<17||op>17||output==2
+    constraint: op<18||op>18||output==3
+
+    optimize: time < O(n)
+
+    test "add-form" { input: 0 expect: 0 }
+    test "shr-form" { input: 15 expect: 0 }
+    test "concat-form" { input: 16 expect: 1 }
+    test "append-form" { input: 17 expect: 2 }
+    test "merge-form" { input: 18 expect: 3 }
+}
+
+spec rust_binop_infix_text {
+    doc: "The general infix rendering of a BinOp node (src/codegen/mod.rs:778): '(' + left + ' ' + symbol + ' ' + right + ')' with the symbol looked up in rust_binop_symbol -- stated as a composition over that call, the way the walker consults the table. The operands arrive rendered by ir_to_rust_expr itself (bare: whatever parenthesization exists comes from the operands' own templates). Contract: op is a general operator (rust_expr_binop_form family 0); Concat/Append/Merge branch away before this template. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: op: Int, l: String, r: String
+    output: String
+
+    constraint: output == "(" ++ l ++ " " ++ rust_binop_symbol(op) ++ " " ++ r ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_binop_append_text {
+    doc: "The Append rendering of a BinOp node (src/codegen/mod.rs:762-763): left + '.push(' + right + ')'. The left operand is interpolated BARE (no added parentheses -- a block-like left operand would not parse, a pre-existing property of the arm, pinned as-is); the symbol table's '.push' binding for Append is a dead value and plays no part here. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: l: String, r: String
+    output: String
+
+    constraint: output == l ++ ".push(" ++ r ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_binop_merge_text {
+    doc: "The Merge rendering of a BinOp node (src/codegen/mod.rs:764-765): left + '.extend(' + right + ')'. As with Append, the left operand is interpolated bare and the table's '.extend' binding is dead. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: l: String, r: String
+    output: String
+
+    constraint: output == l ++ ".extend(" ++ r ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_binop_concat_text {
+    doc: "The Concat rendering of a BinOp node (src/codegen/mod.rs:766-777, as amended by Phase 29): '(' + owned-left + ' + ' + borrowed-right + ')'. The two operands do NOT arrive as their plain renderings: the left arrives treated by concat_owned_operand (rust_concat_left_owned decides, rust_concat_left_text renders) and the right by concat_borrowed_operand (rust_concat_right_form decides, rust_concat_right_text renders), because Rust's Add for text is String + &str -- an owned left operand and a borrowed right one. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: owned: String, borrowed: String
+    output: String
+
+    constraint: output == "(" ++ owned ++ " + " ++ borrowed ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_concat_left_owned {
+    doc: "Whether the LEFT operand of a Concat renders owned (concat_owned_operand, src/codegen/mod.rs:622-628; Phase 29 defect 1): exactly when the operand node is directly a String literal -- node kind Literal (9) with literal kind String (3). A bare literal in left position is a &str, and &str + &str has no Add impl (E0369); it takes the same .to_string() ownership ir_to_rust_expr_typed applies in expectation positions. Every other operand shape already evaluates to a String and renders as usual. The match is on the DIRECT node only: a Typed node wrapping a string literal is not this rule -- the Typed arm delegates to the typed emitter, whose own ownership rule (slice 3) decides. 'kind' is an IRNodeKindCode, 'lit' an IRLiteralKindCode (meaningful only when kind is 9). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: kind: Int, lit: Int
+    output: Bool
+
+    constraint: kind<9||kind>9||lit<3||lit>3||output==true
+    constraint: kind==9||output==false
+    constraint: lit==3||output==false
+
+    optimize: time < O(n)
+}
+
+spec rust_concat_left_text {
+    doc: "The left Concat operand's final text (concat_owned_operand, src/codegen/mod.rs:622-628): when rust_concat_left_owned fires, the owned literal template (rust_string_literal_owned_text, arriving pre-rendered as 'owned_text'); otherwise the operand's own rendering, unchanged. Both parts arrive pre-rendered; which applies is the leaf check's Bool. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: owned: Bool, rendered: String, owned_text: String
+    output: String
+
+    constraint: owned==false||output==owned_text
+    constraint: owned==true||output==rendered
+
+    optimize: time < O(n)
+}
+
+spec rust_concat_right_form {
+    doc: "Emission family of the RIGHT operand of a Concat (concat_borrowed_operand, src/codegen/mod.rs:640-651; Phase 29 defect 2a -- String + String is E0308, so the right operand is borrowed): 0 = bare (the operand is a String literal: already a &str; borrowing it would produce a &&str, which has no Add impl), 1 = parenthesized borrow (the block-like kinds -- the is_block_like_expr set, src/codegen/mod.rs:653-666: Block (1), Let (2), If (3), While (4), For (5), Match (6), Lambda (13), Closure (14), Loop (24), StructDef (26)), 2 = plain borrow (every other kind). 'kind' is an IRNodeKindCode, 'lit' an IRLiteralKindCode (meaningful only when kind is 9: kind 9 with lit 3 is family 0, kind 9 with any other lit is family 2). Total over all 28 kinds x 6 literal kinds. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: kind: Int, lit: Int
+    output: Int
+
+    constraint: kind<9||kind>9||lit<3||lit>3||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==1
+    constraint: kind<3||kind>3||output==1
+    constraint: kind<4||kind>4||output==1
+    constraint: kind<5||kind>5||output==1
+    constraint: kind<6||kind>6||output==1
+    constraint: kind<13||kind>13||output==1
+    constraint: kind<14||kind>14||output==1
+    constraint: kind<24||kind>24||output==1
+    constraint: kind<26||kind>26||output==1
+    constraint: kind==1||kind==2||kind==3||kind==4||kind==5||kind==6||kind==9||kind==13||kind==14||kind==24||kind==26||output==2
+    constraint: kind<9||kind>9||lit==3||output==2
+
+    optimize: time < O(n)
+}
+
+spec rust_concat_right_text {
+    doc: "The right Concat operand's final text, by rust_concat_right_form: family 0 renders bare (the operand's own rendering), family 1 renders '&(' + rendering + ')', family 2 renders '&' + rendering. A nested Concat operand (kind 11, family 2) renders '&' + its already-parenthesized template -- textually equal to family 1's form for that operand; the families are the emitter's decision procedure (concat_borrowed_operand's match order), not distinct texts. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: form: Int, rendered: String
+    output: String
+
+    constraint: form<0||form>0||output==rendered
+    constraint: form<1||form>1||output=="&(" ++ rendered ++ ")"
+    constraint: form<2||form>2||output=="&" ++ rendered
+
+    optimize: time < O(n)
+}
+
+// -- Operators: the UnaryOp arm --------------------------------
+
+spec rust_unary_text {
+    doc: "The full rendering of a UnaryOp node (src/codegen/mod.rs:789-809) over the operand's own rendering: Neg '(- x)' and Not '(! x)' (the prefix family of rust_unaryop_form, symbols from rust_unaryop_symbol); Abs/Len/Reverse/Clone 'x.m()' (the method family, names from rust_unaryop_method -- Reverse's call returns () in Rust: a defect of this template, pinned as-is, not of the classification); Head '(x)[0]', Tail '(x)[1..].to_vec()', Init '(x)[..(x).len() - 1].to_vec()', Last '(x)[(x).len() - 1]' (the list-part family: indexing/slicing lowerings whose operand text is emitted TWICE for Init and Last, sound for the IR's pure expression forms). Total over all ten IRUnaryOp codes. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: op: Int, inner: String
+    output: String
+
+    constraint: op<0||op>0||output=="(- " ++ inner ++ ")"
+    constraint: op<1||op>1||output=="(! " ++ inner ++ ")"
+    constraint: op<2||op>2||output==inner ++ ".abs()"
+    constraint: op<3||op>3||output==inner ++ ".len()"
+    constraint: op<4||op>4||output=="(" ++ inner ++ ")[0]"
+    constraint: op<5||op>5||output=="(" ++ inner ++ ")[1..].to_vec()"
+    constraint: op<6||op>6||output=="(" ++ inner ++ ")[..(" ++ inner ++ ").len() - 1].to_vec()"
+    constraint: op<7||op>7||output=="(" ++ inner ++ ")[(" ++ inner ++ ").len() - 1]"
+    constraint: op<8||op>8||output==inner ++ ".reverse()"
+    constraint: op<9||op>9||output==inner ++ ".clone()"
+
+    optimize: time < O(n)
+}
+
+// -- Collections + iterator combinators -------------------------
+
+spec rust_collection_prefix {
+    doc: "Fixed opening text of a collection literal in EXPRESSION position (the Collection arm of ir_to_rust_expr, src/codegen/mod.rs:838-852), keyed by CollectionKind code: List 'vec![', Set 'std::collections::HashSet::from([', Map 'std::collections::HashMap::from([', Array '[', Tuple '('. Set and Map are FULLY QUALIFIED -- no import is generated for winner files, so the bare paths would fail E0433 (contrast ty_to_rust's unqualified 'HashSet<' in type position, rust_type_prefix). The family classification is rust_collection_form (slice 1); the elements arrive pre-joined with ', ' (the join is iteration, mirror-only) and the closing text is rust_collection_suffix. Statement position is a different rule (slice 5): List, Set and Map all collapse to the vec![..] form there."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="vec!["
+    constraint: kind<1||kind>1||output=="std::collections::HashSet::from(["
+    constraint: kind<2||kind>2||output=="std::collections::HashMap::from(["
+    constraint: kind<3||kind>3||output=="["
+    constraint: kind<4||kind>4||output=="("
+
+    optimize: time < O(n)
+
+    test "list-prefix" { input: 0 expect: "vec![" }
+    test "set-prefix" { input: 1 expect: "std::collections::HashSet::from([" }
+    test "tuple-prefix" { input: 4 expect: "(" }
+}
+
+spec rust_collection_suffix {
+    doc: "Fixed closing text of a collection literal in expression position (src/codegen/mod.rs:838-852), keyed by CollectionKind code: List ']', Set '])', Map '])', Array ']', Tuple ')'. Pairs with rust_collection_prefix."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="]"
+    constraint: kind<1||kind>1||output=="])"
+    constraint: kind<2||kind>2||output=="])"
+    constraint: kind<3||kind>3||output=="]"
+    constraint: kind<4||kind>4||output==")"
+
+    optimize: time < O(n)
+
+    test "list-suffix" { input: 0 expect: "]" }
+    test "set-suffix" { input: 1 expect: "])" }
+    test "tuple-suffix" { input: 4 expect: ")" }
+}
+
+spec rust_map_text {
+    doc: "The Map rendering of ir_to_rust_expr (src/codegen/mod.rs:853-859): '(' + over + ').iter().map(' + function + ').collect()'. Both children arrive rendered by ir_to_rust_expr itself. Note the collect has no type annotation, so the result type is inferred at the use site. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: over: String, func: String
+    output: String
+
+    constraint: output == "(" ++ over ++ ").iter().map(" ++ func ++ ").collect()"
+
+    optimize: time < O(n)
+}
+
+spec rust_filter_text {
+    doc: "The Filter rendering of ir_to_rust_expr (src/codegen/mod.rs:860-866): '(' + over + ').iter().filter(' + predicate + ').collect()'. The predicate is rendered by ir_to_rust_expr and passed as the closure value; filter hands it &Self::Item, so the emitted predicate receives a reference -- the known Vec<&T> flavor of this template's output (pinned as-is; the template is what this spec states). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: over: String, pred: String
+    output: String
+
+    constraint: output == "(" ++ over ++ ").iter().filter(" ++ pred ++ ").collect()"
+
+    optimize: time < O(n)
+}
+
+spec rust_fold_text {
+    doc: "The Fold rendering of ir_to_rust_expr (src/codegen/mod.rs:867-873): '(' + over + ').iter().fold(' + initial + ', ' + operation + ')'. All three children arrive rendered by ir_to_rust_expr itself; note the fold argument order in the text is (initial, operation) although the IR node fields are declared (operation, initial, over). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: over: String, initial: String, operation: String
+    output: String
+
+    constraint: output == "(" ++ over ++ ").iter().fold(" ++ initial ++ ", " ++ operation ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_sort_text {
+    doc: "The Sort rendering of ir_to_rust_expr (src/codegen/mod.rs:874-882): the statement form (bind, sort, yield) wrapped as a block expression so the sorted value is the value -- '{ let mut sorted = ' + collection + '; sorted.sort_by(' + comparator + '); sorted }'. Both children arrive rendered by ir_to_rust_expr itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: coll: String, cmp: String
+    output: String
+
+    constraint: output == "{ let mut sorted = " ++ coll ++ "; sorted.sort_by(" ++ cmp ++ "); sorted }"
+
+    optimize: time < O(n)
 }
 
 }
