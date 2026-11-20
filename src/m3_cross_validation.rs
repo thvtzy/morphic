@@ -1419,10 +1419,40 @@ mod xval3 {
         // remaining parameter) — so the exceptions are gone
         // and this test now asserts recognition for the whole
         // module.
+        //
+        // Phase 26 scoping (the Phase 22 precedent): slice 3
+        // added 16 specs to the module (44 total). Several
+        // slice-3 shapes are EXPECTED to have no recognized
+        // seed body — the call-guarded composition
+        // (rust_ident_suffix), the mixed literal/concat rows
+        // (rust_generics_text), the two-parameter leaf check
+        // (rust_string_ownership) — and whether the `++`
+        // equation templates seed is the next phase's
+        // measurement question, not something to assert ahead
+        // of the evidence. The recognition assertions below
+        // therefore iterate the 28 slice-1+2 specs by name,
+        // with their assertions unchanged; the module count
+        // assertion moves to 44.
+        const SLICE_1_2: [&str; 28] = [
+            "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
+            "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
+            "rust_keyword", "spec_binop_symbol", "rust_type_form",
+            "rust_type_prefix", "rust_type_suffix", "rust_type_separator",
+            "rust_type_midfix", "rust_literal_form", "rust_literal_bool",
+            "rust_literal_fixed_text", "rust_pattern_form",
+            "rust_pattern_fixed_text", "rust_pattern_literal_form",
+            "rust_pattern_literal_text", "rust_pattern_ctor_name",
+            "rust_expr_form", "rust_expr_fixed_text", "rust_constraint_form",
+            "rust_constraint_fixed_text", "rust_order_form",
+            "rust_order_separator", "rust_condition_wrap",
+        ];
         let functions = load_codegen_module();
-        assert_eq!(functions.len(), 28, "module spec count");
+        assert_eq!(functions.len(), 44, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
+            if !SLICE_1_2.contains(&func.name.as_str()) {
+                continue;
+            }
             let body = index.callee_body(&func.name).unwrap_or_else(|| {
                 panic!("{}: no seed body recognized", func.name)
             });
