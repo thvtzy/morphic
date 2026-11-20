@@ -660,7 +660,11 @@ impl<'a> Parser<'a> {
             }
             self.expect_char('|')?;
             self.skip_whitespace_and_comments();
-            self.eat_str("->")?;
+            // The arrow is optional: LANGUAGE_REFERENCE section 11
+            // documents both `|x, y| x + y` and `|a, b| -> a > b`.
+            if self.peek_n(2) == "->" {
+                self.eat_str("->")?;
+            }
             let body = self.parse_expr()?;
             return Ok(Expr::Lambda(params, Box::new(body)));
         }
@@ -1249,6 +1253,35 @@ mod tests {
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn parse_lambda_with_and_without_arrow() {
+        // LANGUAGE_REFERENCE section 11 documents both lambda forms:
+        // `|x, y| x + y` and `|a, b| -> a > b`. The parser required
+        // the arrow, so the arrow-less form used by the bundled
+        // examples (sort, binary_search) failed to parse.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>
+            output: List<Int>
+
+            test "no arrow" {
+                input: ([3, 1, 2], |a, b| a < b)
+                expect: [1, 2, 3]
+            }
+
+            test "with arrow" {
+                input: ([3, 1, 2], |a, b| -> a < b)
+                expect: [1, 2, 3]
+            }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert_eq!(spec.functions[0].tests.len(), 2);
     }
 
     #[test]
