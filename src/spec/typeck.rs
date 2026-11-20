@@ -214,8 +214,19 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
             Ok(TypeRef::Named("_".into()))
         }
         Expr::Call(name, args) => {
+            let mut arg_tys = Vec::new();
             for arg in args {
-                check_expr(arg, env)?;
+                arg_tys.push(check_expr(arg, env)?);
+            }
+            // Constructors the parser itself generates for literals:
+            // "List" for [a, b, c] and "__tuple__" for (a, b, ...).
+            // These are not user-called functions.
+            match name.as_str() {
+                "List" => {
+                    return Ok(TypeRef::List(Box::new(TypeRef::Named("_".into()))));
+                }
+                "__tuple__" => return Ok(TypeRef::Tuple(arg_tys)),
+                _ => {}
             }
             // A spec defined in this module wins over the standard
             // library fallback below.
@@ -323,6 +334,35 @@ mod tests {
         assert!(
             result.is_ok(),
             "stdlib calls must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn list_and_tuple_test_inputs_typecheck() {
+        // The parser lowers list literals to Call("List", ...) and
+        // tuples to Call("__tuple__", ...). The checker rejected its
+        // own parser's output as undefined functions, so any spec
+        // with a list or tuple test input failed `check`.
+        let src = r#"
+        T {
+        spec f {
+            input: list: List<Int>, threshold: Int
+            output: Int
+
+            constraint: output >= 0
+
+            test "a" { input: ([10, 20, 30], 5); expect: 3 }
+            test "b" { input: []; expect: 0 }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "list/tuple test inputs must typecheck, got: {:?}",
             result.err().map(|e| e.message)
         );
     }
