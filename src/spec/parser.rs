@@ -906,6 +906,9 @@ impl<'a> Parser<'a> {
         while !self.is_eof() {
             self.skip_whitespace_and_comments();
             if self.peek() == Some('}') { self.advance(); break; }
+            // Optional ';' field separator, as used in the
+            // LANGUAGE_REFERENCE examples (section 2 and 3).
+            if self.peek() == Some(';') { self.advance(); continue; }
 
             let key = self.parse_identifier()?;
             self.expect_char(':')?;
@@ -1299,6 +1302,31 @@ mod tests {
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn parse_test_with_semicolon_separators() {
+        // The reference's own examples write test fields separated by
+        // ';' (section 2: `test { input: (2, 3); expect: 5 }`), and
+        // count_matching.morph does the same, but parse_test rejected
+        // the separator. Accept it as optional.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: x: Int
+            output: Int
+
+            test "one" { input: 1; expect: 1 }
+            test "two" {
+                input: 2;
+                expect: 2
+            }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert_eq!(spec.functions[0].tests.len(), 2);
     }
 
     #[test]
