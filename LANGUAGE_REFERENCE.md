@@ -408,10 +408,13 @@ Expressions appear in constraints, tests, and type annotations.
 |---|---|---|
 | `*` `/` `%` | 7 | Multiplication, division, modulo |
 | `+` `-` | 6 | Addition, subtraction |
+| `++` | 6 | Concatenation (strings, lists) |
 | `<` `<=` `>` `>=` | 4 | Comparison |
 | `==` `!=` | 4 | Equality |
 | `&&` | 3 | Logical AND |
 | `\|\|` | 2 | Logical OR |
+
+`++` concatenates two strings or two lists and shares the additive level: it is left-associative and binds tighter than the comparisons, so `"Vec<" ++ inner ++ ">"` groups as `("Vec<" ++ inner) ++ ">"`. Its operands must both be `String` or both be `List` with compatible element types — anything else (numbers, mixed operands, mismatched lists) is a type error. Unlike `+`, it is never arithmetic.
 
 ### Unary Operations
 
