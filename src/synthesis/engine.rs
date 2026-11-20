@@ -825,11 +825,10 @@ impl SynthesisEngine {
         };
 
         let scores = evaluate_candidate(&candidate, spec);
-        // Weighted composite score
-        0.4 * scores.test_pass_ratio
-            + 0.3 * scores.constraint_score
-            + 0.2 * scores.complexity_score
-            + 0.1 * scores.quality_score
+        // The MCTS reward is the same composite used everywhere
+        // else, so the search is steered by measured test
+        // behavior with the same dominance invariant.
+        composite_score(&scores)
     }
 
     fn mcts_backpropagate(&self, tree: &mut Vec<MCTSNode>, leaf_idx: usize, reward: f64) {
@@ -1135,11 +1134,26 @@ fn empty_scores() -> ScoreBreakdown {
     }
 }
 
+/// Composite fitness/selection score.
+///
+/// Measured test behavior dominates by construction: with
+/// test_pass_ratio weighted 0.85 and every other dimension 0.05,
+/// a tpr gap of 0.25 contributes 0.2125 while the other three
+/// dimensions together can swing at most 0.15 (each is bounded
+/// by 1.0) — so a ≥0.25 tpr gap ALWAYS decides the ranking, and
+/// the remaining dimensions act only as tie-breakers. The old
+/// weights (0.4/0.3/0.2/0.1) let the flat placeholder constraint
+/// score (0.7 for every hole-free body) plus shape heuristics
+/// crown candidates that pass no test at all; the probe measured
+/// exactly that (winner tpr 0.000 in 34/42 runs). Every consumer
+/// — score_and_rank, the GA, verify_all's re-scoring, and the
+/// MCTS reward — goes through this one function so the invariant
+/// holds across the whole pipeline.
 pub fn composite_score(scores: &ScoreBreakdown) -> f64 {
-    0.4 * scores.test_pass_ratio
-        + 0.3 * scores.constraint_score
-        + 0.2 * scores.complexity_score
-        + 0.1 * scores.quality_score
+    0.85 * scores.test_pass_ratio
+        + 0.05 * scores.constraint_score
+        + 0.05 * scores.complexity_score
+        + 0.05 * scores.quality_score
 }
 
 pub(crate) fn count_holes(node: &IRNode) -> usize {
@@ -2081,6 +2095,43 @@ mod tests {
             provenance: Provenance::Template { template_name: "test".into() },
             verified: false,
         }
+    }
+
+    /// Measured truth must dominate the composite score. With
+    /// the old weights (0.4 tpr / 0.3 constraint / 0.2 complexity
+    /// / 0.1 quality) a candidate passing NO test could outscore
+    /// one passing ALL of them on the flat placeholder constraint
+    /// score (0.7 for every hole-free body) plus shape heuristics
+    /// — measured probe winners were exactly that: tpr 0.000.
+    /// Invariant: a test_pass_ratio gap of ≥ 0.25 always decides,
+    /// no matter what the other dimensions say.
+    #[test]
+    fn composite_score_lets_measured_truth_dominate() {
+        let breakdown = |tpr: f64, constraint: f64, complexity: f64, quality: f64| {
+            ScoreBreakdown {
+                test_pass_ratio: tpr,
+                constraint_score: constraint,
+                complexity_score: complexity,
+                quality_score: quality,
+                synthesis_time_us: 0,
+            }
+        };
+        // Passes every measured test, gets nothing else — must
+        // beat a candidate that passes none and maxes the rest.
+        let truthful = breakdown(1.0, 0.0, 0.0, 0.0);
+        let fancy = breakdown(0.0, 1.0, 1.0, 1.0);
+        assert!(
+            composite_score(&truthful) > composite_score(&fancy),
+            "truthful {} vs fancy {}",
+            composite_score(&truthful),
+            composite_score(&fancy)
+        );
+        // The 0.25-gap invariant against the worst case: the
+        // ahead candidate gets zero from every other dimension,
+        // the behind candidate gets the maximum.
+        let ahead = breakdown(0.25, 0.0, 0.0, 0.0);
+        let behind = breakdown(0.0, 1.0, 1.0, 1.0);
+        assert!(composite_score(&ahead) > composite_score(&behind));
     }
 
     /// Hole penalty: correctness credit halves per unfilled hole,

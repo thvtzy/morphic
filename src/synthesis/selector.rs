@@ -385,6 +385,35 @@ mod tests {
     }
 
     #[test]
+    fn select_best_crowns_measured_truth_over_shape() {
+        // A plain candidate that passes every measured test must
+        // beat a "fancy" one that passes none — even when the
+        // fancy one maxes constraint/complexity/quality and the
+        // plain one gets nothing from them. Candidate scores are
+        // stamped with the engine's composite, exactly as
+        // score_and_rank leaves them in the real pipeline.
+        use crate::synthesis::engine::composite_score;
+        let breakdown = |tpr: f64, constraint: f64, complexity: f64, quality: f64| {
+            ScoreBreakdown {
+                test_pass_ratio: tpr,
+                constraint_score: constraint,
+                complexity_score: complexity,
+                quality_score: quality,
+                synthesis_time_us: 0,
+            }
+        };
+        let mut truthful = make_candidate(1, 0.0, 1.0, 0.0);
+        truthful.scores = breakdown(1.0, 0.0, 0.0, 0.0);
+        truthful.score = composite_score(&truthful.scores);
+        let mut fancy = make_candidate(2, 0.0, 0.0, 1.0);
+        fancy.scores = breakdown(0.0, 1.0, 1.0, 1.0);
+        fancy.score = composite_score(&fancy.scores);
+        let spec = truthful.spec.clone();
+        let best = select_best(vec![fancy, truthful], &spec).unwrap();
+        assert_eq!(best.id, 1);
+    }
+
+    #[test]
     fn pareto_frontier_filters_dominated() {
         let candidates = vec![
             make_candidate(1, 0.9, 0.95, 0.85), // Dominates 2
