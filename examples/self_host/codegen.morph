@@ -1,0 +1,254 @@
+// =================================================================
+//  M3: Codegen -- IR to Rust (slice 1: leaf mappings)
+//  Self-host spec for the Rust emitter in src/codegen/mod.rs.
+//
+//  The codegen is the biggest self-host component and is being
+//  decomposed into ordered slices (see the M3 notes in
+//  ROAD_TO_SELF_HOSTING.md): leaf mappings first, then the small
+//  template families, name assembly, the expression walker, the
+//  statement walker, and finally the driver. This file carries
+//  slice 1 only: the pure tag/kind -> string-or-form tables that
+//  the walkers consult. Every spec below states the COMPLETE
+//  mapping of its table as constraints -- the central M2 lesson
+//  is that specs pinning only tested rows crown memorizers --
+//  while the in-spec tests stay representative, not exhaustive.
+//  Mirrors + full-range golden tests live in tests/m3_proof.rs.
+//
+//  Enums are simulated with Int codes, as in M0/M1/M2, using
+//  declaration order in the Rust source.
+//
+//  DIALECT NOTE (verified against the real parser, 2026-11-21):
+//  same dialect as validator.morph / printer.morph -- operators
+//  inside expressions are written tight, constraints may not
+//  start with '(', and lookup tables are per-row guards:
+//  op<4||op>4||output=="%" reads as "op == 4 implies output
+//  == %". String inputs, string-equality constraints, and
+//  string-literal test inputs were probed against the compiled
+//  binary before use here (spec rust_keyword depends on them).
+// =================================================================
+
+Codegen {
+
+// -- Types ---------------------------------------------------
+
+// Type codes: declaration order of TypeRef in src/spec/ast.rs.
+// 0=Int, 1=Float, 2=Bool, 3=String, 4=Char, 5=Unit,
+// 6=I8, 7=I16, 8=I32, 9=I64, 10=U8, 11=U16, 12=U32, 13=U64,
+// 14=Generic, 15=Named, 16=List, 17=Set, 18=Map, 19=Option,
+// 20=Result, 21=Tuple, 22=Array, 23=Function, 24=Ref, 25=Stream
+type TypeCode = Int;
+
+// IR binary operator codes: declaration order of IRBinOp in
+// src/synthesis/engine.rs.
+// 0=Add, 1=Sub, 2=Mul, 3=Div, 4=Mod, 5=And, 6=Or, 7=Xor,
+// 8=Eq, 9=Neq, 10=Lt, 11=Le, 12=Gt, 13=Ge, 14=Shl, 15=Shr,
+// 16=Concat, 17=Append, 18=Merge
+type IRBinOpCode = Int;
+
+// IR unary operator codes: declaration order of IRUnaryOp in
+// src/synthesis/engine.rs.
+// 0=Neg, 1=Not, 2=Abs, 3=Len, 4=Head, 5=Tail, 6=Init, 7=Last,
+// 8=Reverse, 9=Clone
+type IRUnaryOpCode = Int;
+
+// Collection kind codes: declaration order of CollectionKind in
+// src/synthesis/engine.rs.
+// 0=List, 1=Set, 2=Map, 3=Array, 4=Tuple
+type CollectionKindCode = Int;
+
+// Spec-expression binary operator codes: declaration order of
+// BinOp in src/spec/ast.rs. These are the operators of spec
+// expressions (emitted by expr_to_rust into generated test
+// code), NOT the IR operators above -- the two tables differ.
+// 0=Add, 1=Sub, 2=Mul, 3=Div, 4=Mod, 5=And, 6=Or, 7=Eq,
+// 8=Neq, 9=Lt, 10=Le, 11=Gt, 12=Ge, 13=Concat
+type SpecBinOpCode = Int;
+
+// -- Type names ------------------------------------------------
+
+spec rust_type_name {
+    doc: "Rust name of a scalar TypeRef: the leaf table of ty_to_rust. Composite types (List..Stream) and Named/Generic are recursive or name-carrying forms, specified in a later slice and deliberately unpinned here. The table is not injective: Int (0) and I64 (9) both name i64."
+    input: tag: Int
+    output: String
+
+    constraint: tag<0||tag>0||output=="i64"
+    constraint: tag<1||tag>1||output=="f64"
+    constraint: tag<2||tag>2||output=="bool"
+    constraint: tag<3||tag>3||output=="String"
+    constraint: tag<4||tag>4||output=="char"
+    constraint: tag<5||tag>5||output=="()"
+    constraint: tag<6||tag>6||output=="i8"
+    constraint: tag<7||tag>7||output=="i16"
+    constraint: tag<8||tag>8||output=="i32"
+    constraint: tag<9||tag>9||output=="i64"
+    constraint: tag<10||tag>10||output=="u8"
+    constraint: tag<11||tag>11||output=="u16"
+    constraint: tag<12||tag>12||output=="u32"
+    constraint: tag<13||tag>13||output=="u64"
+
+    optimize: time < O(n)
+
+    test "int-name" { input: 0 expect: "i64" }
+    test "string-name" { input: 3 expect: "String" }
+    test "unit-name" { input: 5 expect: "()" }
+    test "u64-name" { input: 13 expect: "u64" }
+}
+
+// -- IR operator tables -----------------------------------------
+
+spec rust_binop_symbol {
+    doc: "Infix symbol of an IR binary operator in Rust output (the operator table of ir_to_rust_expr). Append (17) and Merge (18) have no infix symbol -- they render as method calls -- and are deliberately unpinned: the emitter's own table binds '.push'/'.extend' for them, but those values are dead because the arms are special-cased first. Concat (16) shares Add's '+'."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output=="+"
+    constraint: op<1||op>1||output=="-"
+    constraint: op<2||op>2||output=="*"
+    constraint: op<3||op>3||output=="/"
+    constraint: op<4||op>4||output=="%"
+    constraint: op<5||op>5||output=="&&"
+    constraint: op<6||op>6||output=="||"
+    constraint: op<7||op>7||output=="^"
+    constraint: op<8||op>8||output=="=="
+    constraint: op<9||op>9||output=="!="
+    constraint: op<10||op>10||output=="<"
+    constraint: op<11||op>11||output=="<="
+    constraint: op<12||op>12||output==">"
+    constraint: op<13||op>13||output==">="
+    constraint: op<14||op>14||output=="<<"
+    constraint: op<15||op>15||output==">>"
+    constraint: op<16||op>16||output=="+"
+
+    optimize: time < O(n)
+
+    test "add-symbol" { input: 0 expect: "+" }
+    test "mod-symbol" { input: 4 expect: "%" }
+    test "xor-symbol" { input: 7 expect: "^" }
+    test "shl-symbol" { input: 14 expect: "<<" }
+    test "concat-symbol" { input: 16 expect: "+" }
+}
+
+spec rust_unaryop_symbol {
+    doc: "Prefix symbol of an IR unary operator: only Neg and Not have one (emitted parenthesized, as (- x) and (! x)). All other unary operators are unpinned here; they render as method calls or index forms (see rust_unaryop_form)."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output=="-"
+    constraint: op<1||op>1||output=="!"
+
+    optimize: time < O(n)
+
+    test "neg-symbol" { input: 0 expect: "-" }
+    test "not-symbol" { input: 1 expect: "!" }
+}
+
+spec rust_unaryop_method {
+    doc: "Method name of an IR unary operator rendered as a zero-argument method call (x.abs(), x.len(), x.reverse(), x.clone()). The remaining operators are unpinned here: Neg/Not are prefix forms and Head/Tail/Init/Last are index forms (see rust_unaryop_form)."
+    input: op: Int
+    output: String
+
+    constraint: op<2||op>2||output=="abs"
+    constraint: op<3||op>3||output=="len"
+    constraint: op<8||op>8||output=="reverse"
+    constraint: op<9||op>9||output=="clone"
+
+    optimize: time < O(n)
+
+    test "abs-method" { input: 2 expect: "abs" }
+    test "len-method" { input: 3 expect: "len" }
+    test "clone-method" { input: 9 expect: "clone" }
+}
+
+spec rust_unaryop_form {
+    doc: "Emission family of an IR unary operator: 0 = prefix symbol ((- x), (! x)), 1 = method call (x.m()), 2 = list-part index/slice form (Head, Tail, Init, Last, whose bespoke templates belong to the expression-walker slice). Total over all ten operators. Note: the method family includes Reverse, whose emitted call returns () in today's emitter -- a defect of the walker slice's template, not of this classification."
+    input: op: Int
+    output: Int
+
+    constraint: op<0||op>0||output==0
+    constraint: op<1||op>1||output==0
+    constraint: op<2||op>2||output==1
+    constraint: op<3||op>3||output==1
+    constraint: op<4||op>4||output==2
+    constraint: op<5||op>5||output==2
+    constraint: op<6||op>6||output==2
+    constraint: op<7||op>7||output==2
+    constraint: op<8||op>8||output==1
+    constraint: op<9||op>9||output==1
+
+    optimize: time < O(n)
+
+    test "neg-form" { input: 0 expect: 0 }
+    test "abs-form" { input: 2 expect: 1 }
+    test "head-form" { input: 4 expect: 2 }
+    test "clone-form" { input: 9 expect: 1 }
+}
+
+// -- Collection forms -------------------------------------------
+
+spec rust_collection_form {
+    doc: "Emission form of a collection literal in EXPRESSION position: 0 = vec![..] macro (List), 1 = std::collections::HashSet::from([..]) (Set), 2 = std::collections::HashMap::from([..]) (Map), 3 = array literal [..] (Array), 4 = tuple literal (..) (Tuple). Total over all five kinds. Statement position is a different, position-dependent rule -- List, Set and Map all collapse to the vec![..]; form there -- and belongs to the statement-walker slice."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<3||kind>3||output==3
+    constraint: kind<4||kind>4||output==4
+
+    optimize: time < O(n)
+
+    test "list-form" { input: 0 expect: 0 }
+    test "set-form" { input: 1 expect: 1 }
+    test "tuple-form" { input: 4 expect: 4 }
+}
+
+// -- Identifier rules -------------------------------------------
+
+spec rust_keyword {
+    doc: "Whether a name is a Rust keyword for the emitter (is_rust_keyword): the exact 51-word set the emitter lists -- strict, reserved and weak keywords mixed, not any single Rust edition's set (for example it has no 'gen'). Matching is exact and case-sensitive: 'Self' is a keyword, 'SELF' and 'selfish' are not. rust_ident appends '_' to a name exactly when this holds."
+    input: name: String
+    output: Bool
+
+    constraint: output == (name=="as"||name=="break"||name=="const"||name=="continue"||name=="crate"||name=="else"||name=="enum"||name=="extern"||name=="false"||name=="fn"||name=="for"||name=="if"||name=="impl"||name=="in"||name=="let"||name=="loop"||name=="match"||name=="mod"||name=="move"||name=="mut"||name=="pub"||name=="ref"||name=="return"||name=="self"||name=="Self"||name=="static"||name=="struct"||name=="super"||name=="trait"||name=="true"||name=="type"||name=="unsafe"||name=="use"||name=="where"||name=="while"||name=="async"||name=="await"||name=="dyn"||name=="abstract"||name=="become"||name=="box"||name=="do"||name=="final"||name=="macro"||name=="override"||name=="priv"||name=="typeof"||name=="unsized"||name=="virtual"||name=="yield"||name=="try")
+
+    optimize: time < O(n)
+
+    test "fn-keyword" { input: "fn" expect: true }
+    test "self-keyword" { input: "Self" expect: true }
+    test "plain-name" { input: "sort" expect: false }
+    test "prefix-name" { input: "selfish" expect: false }
+    test "case-name" { input: "Fn" expect: false }
+}
+
+// -- Spec-expression operator table ------------------------------
+
+spec spec_binop_symbol {
+    doc: "Operator symbol expr_to_rust uses when emitting a spec expression into generated Rust (test assertions in generate_rust's output) -- a SEPARATE, weaker table than rust_binop_symbol. The '?' rows are the emitter's real fallback for the operators it does not map (Mod, Lt, Le, Gt, Ge, Concat) and are pinned deliberately: a synthesized replacement must reproduce today's bytes, fallback included. Fixing the fallback is a separate later decision. Total over all fourteen operators."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output=="+"
+    constraint: op<1||op>1||output=="-"
+    constraint: op<2||op>2||output=="*"
+    constraint: op<3||op>3||output=="/"
+    constraint: op<4||op>4||output=="?"
+    constraint: op<5||op>5||output=="&&"
+    constraint: op<6||op>6||output=="||"
+    constraint: op<7||op>7||output=="=="
+    constraint: op<8||op>8||output=="!="
+    constraint: op<9||op>9||output=="?"
+    constraint: op<10||op>10||output=="?"
+    constraint: op<11||op>11||output=="?"
+    constraint: op<12||op>12||output=="?"
+    constraint: op<13||op>13||output=="?"
+
+    optimize: time < O(n)
+
+    test "add-symbol" { input: 0 expect: "+" }
+    test "neq-symbol" { input: 8 expect: "!=" }
+    test "mod-fallback" { input: 4 expect: "?" }
+    test "lt-fallback" { input: 9 expect: "?" }
+}
+
+}
