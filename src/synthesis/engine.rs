@@ -2853,6 +2853,195 @@ mod tests {
         }
     }
 
+    fn mcts_node_with(state: IRNode) -> MCTSNode {
+        let hole_count = count_holes(&state);
+        MCTSNode {
+            state,
+            parent: None,
+            children: Vec::new(),
+            visits: 0,
+            total_reward: 0.0,
+            is_terminal: false,
+            hole_count,
+        }
+    }
+
+    /// Every filling must evaluate (in an empty environment —
+    /// typed fillings are literals, so nothing may be unbound)
+    /// to a value of the hole's type.
+    fn assert_fillings_eval_to(fillings: &[IRNode], what: &str, ok: impl Fn(&crate::synthesis::eval::Value) -> bool) {
+        assert!(!fillings.is_empty(), "no fillings generated for {}", what);
+        for filling in fillings {
+            let value = crate::synthesis::eval::eval(filling, &HashMap::new()).unwrap_or_else(|e| {
+                panic!("filling {:?} for {} must evaluate: {:?}", filling, what, e)
+            });
+            assert!(
+                ok(&value),
+                "filling {:?} for {} evaluated to {:?} — wrong type",
+                filling, what, value
+            );
+        }
+    }
+
+    /// Type-directed expansion: a hole that carries an expected
+    /// type (the TestInduced seed's wildcard hole carries the
+    /// spec's return type) must only be filled with expressions
+    /// of that type. The legacy menu always led with Int(0) —
+    /// which is why winning seed completions put `_ => 0` in
+    /// String and Bool functions and never compiled (E0308).
+    #[test]
+    fn generate_hole_fillings_respect_bool_hole_type() {
+        let spec = is_literal_kind_spec(); // returns Bool
+        let node = mcts_node_with(IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![(
+                IRPattern::Wildcard,
+                IRNode::Hole { id: 7, expected_type: Some(TypeRef::Bool) },
+            )],
+        });
+        let holes = find_hole_positions(&node.state);
+        assert_eq!(holes.len(), 1);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert_fillings_eval_to(&fillings, "Bool hole", |v| {
+            matches!(v, crate::synthesis::eval::Value::Bool(_))
+        });
+    }
+
+    #[test]
+    fn generate_hole_fillings_respect_string_hole_type() {
+        let mut spec = dummy_spec();
+        spec.name = "name_of".into();
+        spec.params = vec![Param {
+            name: "kind".into(),
+            ty: TypeRef::Int,
+            annotations: HashMap::new(),
+        }];
+        spec.return_type = TypeRef::String;
+        spec.tests = vec![Test {
+            name: None,
+            input: Expr::IntLit(0),
+            expected_output: Expr::StringLit("Literal".into()),
+            timeout_ms: None,
+            property: false,
+        }];
+        let node = mcts_node_with(IRNode::Hole {
+            id: 1,
+            expected_type: Some(TypeRef::String),
+        });
+        let holes = find_hole_positions(&node.state);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert_fillings_eval_to(&fillings, "String hole", |v| {
+            matches!(v, crate::synthesis::eval::Value::Str(_))
+        });
+        // Values the spec's tests expect are return-typed by
+        // construction, so they belong in the menu too.
+        assert!(
+            fillings.iter().any(|f| matches!(
+                f,
+                IRNode::Literal(IRLiteral::String(s)) if s == "Literal"
+            )),
+            "test output \"Literal\" missing from String fillings: {:?}",
+            fillings
+        );
+    }
+
+    #[test]
+    fn generate_hole_fillings_respect_int_hole_type() {
+        let mut spec = dummy_spec();
+        spec.name = "arity_of".into();
+        spec.return_type = TypeRef::Int;
+        spec.tests = vec![Test {
+            name: None,
+            input: Expr::IntLit(0),
+            expected_output: Expr::IntLit(2),
+            timeout_ms: None,
+            property: false,
+        }];
+        let node = mcts_node_with(IRNode::Hole {
+            id: 1,
+            expected_type: Some(TypeRef::Int),
+        });
+        let holes = find_hole_positions(&node.state);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert_fillings_eval_to(&fillings, "Int hole", |v| {
+            matches!(v, crate::synthesis::eval::Value::Int(_))
+        });
+        assert!(
+            fillings
+                .iter()
+                .any(|f| matches!(f, IRNode::Literal(IRLiteral::Int(2)))),
+            "test output 2 missing from Int fillings: {:?}",
+            fillings
+        );
+    }
+
+    #[test]
+    fn generate_hole_fillings_respect_list_hole_type() {
+        let mut spec = dummy_spec();
+        spec.return_type = TypeRef::List(Box::new(TypeRef::Int));
+        let node = mcts_node_with(IRNode::Hole {
+            id: 1,
+            expected_type: Some(TypeRef::List(Box::new(TypeRef::Int))),
+        });
+        let holes = find_hole_positions(&node.state);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert_fillings_eval_to(&fillings, "List hole", |v| {
+            matches!(v, crate::synthesis::eval::Value::List(_))
+        });
+    }
+
+    /// Regression guard: a hole with NO expected type keeps the
+    /// legacy type-blind menu exactly — typed fillings are an
+    /// addition for typed holes, not a behavior change for the
+    /// untyped majority (random trees, templates).
+    #[test]
+    fn generate_hole_fillings_untyped_hole_keeps_legacy_menu() {
+        let spec = is_literal_kind_spec();
+        let node = mcts_node_with(IRNode::Hole { id: 3, expected_type: None });
+        let holes = find_hole_positions(&node.state);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert!(
+            fillings
+                .iter()
+                .any(|f| matches!(f, IRNode::Literal(IRLiteral::Int(0)))),
+            "legacy menu lost its Int(0) filling: {:?}",
+            fillings
+        );
+        assert!(
+            fillings
+                .iter()
+                .any(|f| matches!(f, IRNode::Literal(IRLiteral::Bool(true)))),
+            "legacy menu lost its Bool(true) filling: {:?}",
+            fillings
+        );
+    }
+
+    /// Rollout fillings obey the same type discipline as the
+    /// expansion menu: a draw for a Bool-typed hole is always a
+    /// Bool literal, never Int(0) / a Return wrapper / a fresh
+    /// Hole (the legacy arms).
+    #[test]
+    fn random_filling_respects_hole_type() {
+        let tree = IRNode::Hole {
+            id: 5,
+            expected_type: Some(TypeRef::Bool),
+        };
+        let holes = find_hole_positions(&tree);
+        assert_eq!(holes.len(), 1);
+        let scope = vec!["kind".to_string()];
+        for _ in 0..500 {
+            let filling = random_filling(&holes[0], &scope);
+            let value = crate::synthesis::eval::eval(&filling, &HashMap::new()).unwrap_or_else(|e| {
+                panic!("rollout filling {:?} must evaluate: {:?}", filling, e)
+            });
+            assert!(
+                matches!(value, crate::synthesis::eval::Value::Bool(_)),
+                "rollout filling {:?} evaluated to {:?} — wrong type for a Bool hole",
+                filling, value
+            );
+        }
+    }
+
     /// Regression: `random_ir_tree` used to emit
     /// `Call { function: "_", args: [] }` as a leaf — a call to a
     /// nonexistent function that codegen happily emitted. An
