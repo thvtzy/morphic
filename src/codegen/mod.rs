@@ -1164,6 +1164,82 @@ mod tests {
         assert!(!code.contains("7;"), "Block arm value discarded:\n{}", code);
     }
 
+    // Regression (Phase 11 probe, runs 2–3): a Collection in
+    // STATEMENT position was emitted tail-shaped (`vec![]` with
+    // no `;`), so a winner whose body was Block([Collection,
+    // Return, …]) — the exact `needs_parens` winner shape in two
+    // of three runs — was a syntax error: "expected `;`, found
+    // keyword `return`". A collection used as a statement must be
+    // terminated like any other expression statement.
+    #[test]
+    fn rust_codegen_collection_statement_is_terminated() {
+        let body = IRNode::Block(vec![
+            IRNode::Collection {
+                kind: CollectionKind::List,
+                elements: vec![],
+            },
+            IRNode::Return(Box::new(IRNode::Var("kind".into()))),
+        ]);
+        let cand = candidate("needs_parens", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("vec![];"),
+            "collection statement not terminated:\n{}",
+            code
+        );
+    }
+
+    // The other half of the same defect family: a function BODY
+    // is a tail position — its value is the return value. A bare
+    // Collection body must keep its tail shape (no `;`), or a
+    // List-returning winner stops compiling.
+    #[test]
+    fn rust_codegen_bare_collection_body_stays_tail() {
+        let body = IRNode::Collection {
+            kind: CollectionKind::List,
+            elements: vec![IRNode::Literal(IRLiteral::Int(1))],
+        };
+        let mut cand = candidate("singleton", body);
+        cand.spec.return_type = TypeRef::List(Box::new(TypeRef::Int));
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("vec![1]\n}"),
+            "bare collection body not a tail expression:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("vec![1];"),
+            "bare collection body discarded as statement:\n{}",
+            code
+        );
+    }
+
+    // Same tail defect for a bare expression body (the Phase 10
+    // `tags_compatible` winner shape, generalized): a BinOp body
+    // was emitted `(actual + expected);` — a discarded statement,
+    // so the function returned () and failed E0308. As the body
+    // it must be the tail expression.
+    #[test]
+    fn rust_codegen_bare_expression_body_stays_tail() {
+        let body = IRNode::BinOp(
+            IRBinOp::Eq,
+            Box::new(IRNode::Var("kind".into())),
+            Box::new(IRNode::Literal(IRLiteral::Int(0))),
+        );
+        let cand = candidate("is_zero", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("(kind == 0)\n"),
+            "bare expression body not a tail expression:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("(kind == 0);"),
+            "bare expression body discarded as statement:\n{}",
+            code
+        );
+    }
+
     // Regression (M2 synthesis run, defect 4d): `IRLiteral::String` was
     // emitted as a bare `&str` literal in tail position of functions
     // whose spec return type is `String` — E0308 in 4/14 winner files
