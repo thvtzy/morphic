@@ -459,6 +459,21 @@ impl SynthesisEngine {
         // Phase 1: Seed the population
         let mut population = self.seed_population(spec)?;
 
+        // Protect the test-induced seeds. They are the only
+        // candidates whose shape is derived from the spec's
+        // measured behavior, and the search phases are free to
+        // lose them: the GA's elitism keeps only the top 10% by
+        // composite score per generation, and nothing else in
+        // Phases 2–3 guarantees their survival. They are re-admitted
+        // just before final scoring (Phase 4), so selection always
+        // sees them; whether they WIN is still up to their scores
+        // and the selector's completeness gate.
+        let protected_seeds: Vec<CandidateImplementation> = population
+            .iter()
+            .filter(|c| matches!(c.provenance, Provenance::TestInduced { .. }))
+            .cloned()
+            .collect();
+
         // Phase 2: MCTS-guided exploration
         population = self.mcts_search(population, spec)?;
 
@@ -466,6 +481,10 @@ impl SynthesisEngine {
         if self.config.opt_level >= 3 {
             population = self.genetic_refine(population, spec)?;
         }
+
+        // Re-admit any protected seed the search dropped, then
+        // Phase 4 scores it on the same footing as everyone else.
+        readmit_protected_seeds(&mut population, &protected_seeds);
 
         // Phase 4: Scoring & ranking
         self.score_and_rank(&mut population, spec);
@@ -1093,6 +1112,26 @@ pub fn synthesize(spec: &FunctionSpec, opt_level: u8) -> Result<Vec<CandidateImp
     let config = SynthesisConfig::from_opt_level(opt_level);
     let mut engine = SynthesisEngine::new(config);
     engine.run(spec)
+}
+
+/// Re-admit protected seeds that the search phases dropped, so
+/// the final pool always contains them (they are re-scored by
+/// the caller's scoring phase like every other candidate).
+/// Presence is judged by structural body equality: `IRNode`
+/// has no `PartialEq`, so the `Debug` representation serves as
+/// the fingerprint — it is structural and deterministic, hole
+/// ids included, so a surviving clone of a seed matches exactly
+/// and is not duplicated.
+fn readmit_protected_seeds(
+    population: &mut Vec<CandidateImplementation>,
+    seeds: &[CandidateImplementation],
+) {
+    for seed in seeds {
+        let fingerprint = format!("{:?}", seed.body);
+        if !population.iter().any(|c| format!("{:?}", c.body) == fingerprint) {
+            population.push(seed.clone());
+        }
+    }
 }
 
 // ── Error Types ───────────────────────────────────────────
@@ -2132,6 +2171,71 @@ mod tests {
         let ahead = breakdown(0.25, 0.0, 0.0, 0.0);
         let behind = breakdown(0.0, 1.0, 1.0, 1.0);
         assert!(composite_score(&ahead) > composite_score(&behind));
+    }
+
+    fn test_induced_candidate(spec: &FunctionSpec) -> CandidateImplementation {
+        let mut c = make_candidate(
+            IRNode::Match {
+                scrutinee: Box::new(IRNode::Var("kind".into())),
+                cases: vec![(
+                    IRPattern::Wildcard,
+                    IRNode::Hole { id: 42, expected_type: None },
+                )],
+            },
+            spec,
+        );
+        c.provenance = Provenance::TestInduced { num_tests: 3 };
+        c
+    }
+
+    /// Seed protection, unit level: a protected seed missing
+    /// from the population is re-admitted; one whose body already
+    /// survived is not duplicated; no seeds is a no-op.
+    #[test]
+    fn readmit_protected_seeds_restores_dropped_seed() {
+        let spec = is_literal_kind_spec();
+        let seed = test_induced_candidate(&spec);
+        let other = make_candidate(IRNode::Literal(IRLiteral::Bool(true)), &spec);
+
+        let mut pop = vec![other.clone()];
+        readmit_protected_seeds(&mut pop, &[seed.clone()]);
+        assert_eq!(pop.len(), 2);
+        assert!(matches!(
+            pop[1].provenance,
+            Provenance::TestInduced { .. }
+        ));
+
+        // Already present (same body): no duplicate.
+        let mut pop = vec![seed.clone(), other];
+        readmit_protected_seeds(&mut pop, &[seed]);
+        assert_eq!(pop.len(), 2);
+
+        // Nothing protected: population untouched.
+        let mut pop = vec![make_candidate(IRNode::Literal(IRLiteral::Int(1)), &spec)];
+        readmit_protected_seeds(&mut pop, &[]);
+        assert_eq!(pop.len(), 1);
+    }
+
+    /// Seed protection, pipeline level: the final pool returned
+    /// by `synthesize` for is_literal_kind contains the
+    /// TestInduced seed, carrying its measured score — every test
+    /// passed (1.0) times the one-hole decay (×0.5) = 0.5. The
+    /// search phases may do what they like; the seed's presence
+    /// in the pool selection sees is guaranteed by re-admission
+    /// in `run`, not by luck.
+    #[test]
+    fn synthesized_pool_keeps_test_induced_seed() {
+        let spec = is_literal_kind_spec();
+        let pool = synthesize(&spec, 1).expect("opt-1 synthesis must succeed");
+        let seed = pool
+            .iter()
+            .find(|c| matches!(c.provenance, Provenance::TestInduced { .. }))
+            .expect("final pool must contain the TestInduced seed");
+        assert!(
+            (seed.scores.test_pass_ratio - 0.5).abs() < 1e-9,
+            "seed tpr was {}",
+            seed.scores.test_pass_ratio
+        );
     }
 
     /// Hole penalty: correctness credit halves per unfilled hole,
