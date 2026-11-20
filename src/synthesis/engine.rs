@@ -2238,6 +2238,52 @@ mod tests {
         );
     }
 
+    /// Seed-root harvest, pipeline level: the final pool contains
+    /// a HOLE-FREE completion of the TestInduced seed — the seed's
+    /// own match shape (one literal arm per test, wildcard arm
+    /// last) with the wildcard hole filled — measuring the full
+    /// 1.0 test pass ratio with no hole decay. The spec's tests
+    /// only reach the literal arms, so ANY filling of the wildcard
+    /// completes a body that passes every test. Before the
+    /// seed-rooted MCTS pass existed, the single MCTS tree was
+    /// rooted at one random population member, so seed completions
+    /// reached the pool only when the seed itself happened to be
+    /// picked as that root — the holed original (tpr 0.5, see the
+    /// test above) was otherwise the seed's only presence.
+    #[test]
+    fn synthesized_pool_contains_hole_free_seed_completion() {
+        let spec = is_literal_kind_spec();
+        let pool = synthesize(&spec, 1).expect("opt-1 synthesis must succeed");
+        let completion = pool.iter().find(|c| {
+            if count_holes(&c.body) != 0
+                || (c.scores.test_pass_ratio - 1.0).abs() >= 1e-9
+            {
+                return false;
+            }
+            // The seed's shape: a match whose leading arms are the
+            // per-test literal arms and whose last arm is the
+            // (now filled) wildcard.
+            match &c.body {
+                IRNode::Match { cases, .. } => {
+                    cases.len() == spec.tests.len() + 1
+                        && cases[..spec.tests.len()]
+                            .iter()
+                            .all(|(p, _)| matches!(p, IRPattern::Literal(_)))
+                        && matches!(cases[spec.tests.len()].0, IRPattern::Wildcard)
+                }
+                _ => false,
+            }
+        });
+        assert!(
+            completion.is_some(),
+            "pool must contain a hole-free completion of the test-induced seed; \
+             pool (holes, tpr): {:?}",
+            pool.iter()
+                .map(|c| (count_holes(&c.body), c.scores.test_pass_ratio))
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// Hole penalty: correctness credit halves per unfilled hole,
     /// so a holed candidate ranks strictly below an otherwise-equal
     /// hole-free one. The dummy spec has no tests, so the neutral
