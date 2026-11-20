@@ -81,6 +81,18 @@ mod xval {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
+    fn provenance_name(p: &engine::Provenance) -> &'static str {
+        match p {
+            engine::Provenance::LLMGenerated { .. } => "LLMGenerated",
+            engine::Provenance::Mutation { .. } => "Mutation",
+            engine::Provenance::Crossover { .. } => "Crossover",
+            engine::Provenance::TestInduced { .. } => "TestInduced",
+            engine::Provenance::ConstraintInduced { .. } => "ConstraintInduced",
+            engine::Provenance::Template { .. } => "Template",
+            engine::Provenance::HumanGuided => "HumanGuided",
+        }
+    }
+
     // ─────────────────────────────────────────────────────────
     //  Value model
     // ─────────────────────────────────────────────────────────
@@ -709,8 +721,8 @@ mod xval {
         let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize (opt 1) → Z3 verify_all → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the spec's golden cases + input sweep (see src/m2_cross_validation.rs for sweep definitions and mirror semantics).");
         let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL).");
         let _ = writeln!(md);
-        let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 verified | Golden agree | Sweep pinned agree | Unpinned cases | Exec |");
-        let _ = writeln!(md, "|---|---|---|---|---|---|---|---|");
+        let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 verified | Winner prov | Golden agree | Sweep pinned agree | Unpinned cases | Exec |");
+        let _ = writeln!(md, "|---|---|---|---|---|---|---|---|---|");
 
         let mut details = String::new();
         let _ = writeln!(details, "\n## Disagreements (pinned cases only, first 5 per spec per run)\n");
@@ -773,8 +785,9 @@ mod xval {
                         Ok(outs) => {
                             let ag = compare(&name, &inputs, &outs);
                             println!(
-                                "XVAL|run={}|spec={}|tpr={:.3}|verified={}|golden={}/{}|sweep_pinned={}/{}|unpinned={}|exec=ok",
+                                "XVAL|run={}|spec={}|tpr={:.3}|verified={}|prov={}|golden={}/{}|sweep_pinned={}/{}|unpinned={}|exec=ok",
                                 run, name, winner.scores.test_pass_ratio, winner.verified,
+                                provenance_name(&winner.provenance),
                                 ag.golden_agree, ag.golden_total,
                                 ag.sweep_pinned_agree, ag.sweep_pinned_total,
                                 ag.unpinned
@@ -787,8 +800,9 @@ mod xval {
                             }
                             let _ = writeln!(
                                 md,
-                                "| {} | {} | {:.3} | {} | {}/{} | {}/{} | {} | ok |",
+                                "| {} | {} | {:.3} | {} | {} | {}/{} | {}/{} | {} | ok |",
                                 run, name, winner.scores.test_pass_ratio, winner.verified,
+                                provenance_name(&winner.provenance),
                                 ag.golden_agree, ag.golden_total,
                                 ag.sweep_pinned_agree, ag.sweep_pinned_total,
                                 ag.unpinned
@@ -856,7 +870,7 @@ mod xval {
         );
         let _ = writeln!(
             md,
-            "| {} | {} | - | - | 0/{} | 0/{} | {} | FAIL: {} |",
+            "| {} | {} | - | - | - | 0/{} | 0/{} | {} | FAIL: {} |",
             run, func.name, golden_total, pinned_total, unpinned_total, why
         );
         let _ = writeln!(
