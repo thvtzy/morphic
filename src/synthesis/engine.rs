@@ -1548,7 +1548,7 @@ pub fn expr_to_pattern(expr: &Expr) -> IRPattern {
     }
 }
 
-fn expr_to_ir(expr: &Expr) -> IRNode {
+pub(crate) fn expr_to_ir(expr: &Expr) -> IRNode {
     match expr {
         Expr::IntLit(n) => IRNode::Literal(IRLiteral::Int(*n)),
         Expr::FloatLit(f) => IRNode::Literal(IRLiteral::Float(*f)),

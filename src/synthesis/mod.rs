@@ -4,6 +4,7 @@
 // └──────────────────────────────────────────────────────────┘
 
 pub mod engine;
+pub mod eval;
 pub mod selector;
 pub mod interactive;
 pub mod templates;
