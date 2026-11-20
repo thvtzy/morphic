@@ -234,16 +234,45 @@ impl<'a> Parser<'a> {
                 }
 
                 "resource" => {
+                    self.expect_char(':')?;
                     let res_name = self.parse_identifier()?;
-                    let max = if self.peek() == Some('<') {
+                    self.skip_whitespace_and_comments();
+                    let mut max = None;
+                    let mut predicate = None;
+                    if self.peek() == Some('<') {
                         self.advance();
-                        let n = self.parse_integer()?;
                         self.skip_whitespace_and_comments();
-                        self.expect_char('>')?;
-                        Some(n as u64)
-                    } else {
-                        None
-                    };
+                        if self.peek() == Some('O') && self.peek_ahead() == Some('(') {
+                            // Big-O bound, e.g. `allocations < O(n)`
+                            // (LANGUAGE_REFERENCE section 8). Not a
+                            // plain amount, so keep it as the predicate.
+                            let bound = self.parse_big_o()?;
+                            predicate = Some(bound.to_string());
+                        } else {
+                            let n = self.parse_integer()?;
+                            // Optional unit suffix (section 8):
+                            // KB / MB / GB scale the amount.
+                            self.skip_whitespace_and_comments();
+                            let multiplier = if self.is_ident_start(self.peek()) {
+                                match self.parse_identifier()?.as_str() {
+                                    "KB" => 1024u64,
+                                    "MB" => 1024 * 1024,
+                                    "GB" => 1024 * 1024 * 1024,
+                                    u => {
+                                        return self.error(format!(
+                                            "Unknown resource unit: {}. Use KB/MB/GB.",
+                                            u
+                                        ))
+                                    }
+                                }
+                            } else {
+                                1
+                            };
+                            max = Some((n as u64) * multiplier);
+                        }
+                        // No closing '>': in the section 8 grammar the
+                        // '<' is a comparison, not a bracket.
+                    }
 
                     let resource_kind = match res_name.as_str() {
                         "memory" => Resource::MemoryBytes,
@@ -257,7 +286,7 @@ impl<'a> Parser<'a> {
                     resource = Some(ResourceBound {
                         resource: resource_kind,
                         max_amount: max,
-                        predicate: None,
+                        predicate,
                     });
                 }
 
@@ -1270,6 +1299,48 @@ mod tests {
             "unexpected error message: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn parse_resource_bounds() {
+        // Documented forms (LANGUAGE_REFERENCE section 8):
+        // `resource: memory < 10MB` and `resource: allocations < O(n)`.
+        // The parser expected neither the ':' after `resource`, nor a
+        // unit suffix, nor a Big-O amount, so both forms failed.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>
+            output: List<Int>
+
+            constraint: true
+            resource: memory < 10MB
+        }
+
+        spec g {
+            input: list: List<Int>
+            output: List<Int>
+
+            constraint: true
+            resource: allocations < O(n)
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let mem = spec.functions[0]
+            .resource
+            .as_ref()
+            .expect("memory resource bound");
+        assert_eq!(mem.max_amount, Some(10 * 1024 * 1024));
+        assert_eq!(mem.predicate, None);
+
+        let alloc = spec.functions[1]
+            .resource
+            .as_ref()
+            .expect("allocations resource bound");
+        assert_eq!(alloc.max_amount, None);
+        assert_eq!(alloc.predicate.as_deref(), Some("O(n)"));
     }
 
     #[test]
