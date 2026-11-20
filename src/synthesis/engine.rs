@@ -3191,4 +3191,116 @@ mod tests {
             }
         }
     }
+
+    // ── Generation-side type discipline (Phase 12) ─────────
+    //
+    // The Phase 11 return-type gate can only crown what the
+    // pool contains: in roughly half of draws a test-less
+    // spec's hole-free pool was uniformly mistyped, because
+    // random seed bodies were generated type-blind — `(actual
+    // + expected)` or `return actual;` as a Bool body, a bare
+    // `for` loop as a Bool body. The seeds are the pool's
+    // foundation (MCTS completions inherit their root shape),
+    // so generation itself must be type-aware: a body drawn
+    // for a typed spec must never be PROVABLY mistyped under
+    // selector::return_type_verdict.
+
+    fn gen_spec(
+        name: &str,
+        params: Vec<(&str, TypeRef)>,
+        return_type: TypeRef,
+    ) -> FunctionSpec {
+        let mut spec = dummy_spec();
+        spec.name = name.into();
+        spec.params = params
+            .into_iter()
+            .map(|(n, ty)| Param {
+                name: n.into(),
+                ty,
+                annotations: HashMap::new(),
+            })
+            .collect();
+        spec.return_type = return_type;
+        spec
+    }
+
+    /// Mirrors the M2 self-host specs' signatures (all-Int
+    /// params; Bool/Int/String returns), including both
+    /// test-less multi-param specs (tags_compatible,
+    /// needs_parens).
+    fn m2_signature_specs() -> Vec<FunctionSpec> {
+        vec![
+            gen_spec("is_known_type_tag", vec![("tag", TypeRef::Int)], TypeRef::Bool),
+            gen_spec("node_arity", vec![("kind", TypeRef::Int)], TypeRef::Int),
+            gen_spec("type_tag_name", vec![("tag", TypeRef::Int)], TypeRef::String),
+            gen_spec(
+                "tags_compatible",
+                vec![("expected", TypeRef::Int), ("actual", TypeRef::Int)],
+                TypeRef::Bool,
+            ),
+            gen_spec(
+                "needs_parens",
+                vec![("op", TypeRef::Int), ("parent_op", TypeRef::Int)],
+                TypeRef::Bool,
+            ),
+        ]
+    }
+
+    /// Property: random seed bodies (the production seeding
+    /// path, `seed_random`) are never provably mistyped for
+    /// their spec — and generation has not degenerated to
+    /// only-unprovable shapes: some draws are provably right.
+    #[test]
+    fn random_seed_bodies_are_never_provably_mistyped() {
+        use crate::synthesis::selector::{return_type_verdict, TypeVerdict};
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        for spec in m2_signature_specs() {
+            let (mut mismatched, mut matches_ct, mut unknown) = (0usize, 0usize, 0usize);
+            const N: usize = 200;
+            for _ in 0..N {
+                let candidate = engine.seed_random(&spec);
+                match return_type_verdict(&candidate.body, &spec) {
+                    TypeVerdict::Mismatched => mismatched += 1,
+                    TypeVerdict::Matches => matches_ct += 1,
+                    TypeVerdict::Unknown => unknown += 1,
+                }
+            }
+            assert_eq!(
+                mismatched, 0,
+                "{}: {}/{} random seed bodies provably mistyped ({} Matches, {} Unknown)",
+                spec.name, mismatched, N, matches_ct, unknown
+            );
+            assert!(
+                matches_ct > 0,
+                "{}: no provably-matching seed body in {} draws — generation degenerated to unprovable shapes",
+                spec.name, N
+            );
+        }
+    }
+
+    /// Regression: the legacy untyped generator keeps its
+    /// historical behavior — it is type-blind, so over many
+    /// draws it still produces the shapes the typed path
+    /// forbids as bodies for a non-Unit spec (statement-only
+    /// roots, provably mistyped bodies). Callers without a
+    /// type context are untouched by the typed path.
+    #[test]
+    fn random_ir_tree_legacy_path_stays_type_blind() {
+        use crate::synthesis::selector::{return_type_verdict, TypeVerdict};
+        let spec = gen_spec("legacy_bool", vec![("tag", TypeRef::Int)], TypeRef::Bool);
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let mut legacy_shapes = 0usize;
+        for _ in 0..200 {
+            let tree = random_ir_tree(&spec, 3, &engine);
+            if matches!(tree, IRNode::For { .. } | IRNode::While { .. })
+                || return_type_verdict(&tree, &spec) == TypeVerdict::Mismatched
+            {
+                legacy_shapes += 1;
+            }
+        }
+        assert!(
+            legacy_shapes > 0,
+            "legacy generator produced no type-blind shapes in 200 draws — the untyped path changed"
+        );
+    }
 }
