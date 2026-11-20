@@ -9,6 +9,7 @@ use super::engine::{
     IRUnaryOp, ScoreBreakdown,
 };
 use crate::spec::ast::{FunctionSpec, TypeRef};
+use crate::verify::verifier::VerificationStatus;
 
 /// Selection criteria for choosing among candidates
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -700,6 +701,39 @@ pub fn select_best(
         .collect();
     if !type_sound.is_empty() {
         pool = type_sound;
+    }
+
+    // Refutation gate (third gate, after completeness and
+    // return-type): a candidate the verifier REFUTED — its
+    // recorded verdict (verification_status, stamped by
+    // verify_all; never recomputed here) is VerificationFailed
+    // — is PROVABLY not an implementation of the spec: Z3
+    // produced a counterexample input on which this body
+    // violates a postcondition. Measured test_pass_ratio cannot
+    // see that (it reads only the in-spec tests; a refuted
+    // per-test match measures tpr 1.000), and in the composite
+    // score a refutation costs only the 0.05 constraint weight,
+    // so before this gate refuted winners were the norm for the
+    // range/lookup specs (Phase 15 cross-validation). If any
+    // candidate surviving the earlier gates is NOT refuted —
+    // Verified, Inconclusive (the verifier could not judge,
+    // e.g. constraints calling other specs; "couldn't judge"
+    // is not "judged wrong"), Malformed, or carrying no
+    // recorded verdict — the refuted ones are excluded from
+    // winning. Only when EVERY survivor is refuted does
+    // selection fall back to ranking the refuted pool
+    // unchanged. The gate deliberately does NOT prefer
+    // Verified over Inconclusive beyond excluding the refuted;
+    // that preference is a separate decision.
+    let unrefuted: Vec<CandidateImplementation> = pool
+        .iter()
+        .filter(|c| {
+            c.verification_status != Some(VerificationStatus::VerificationFailed)
+        })
+        .cloned()
+        .collect();
+    if !unrefuted.is_empty() {
+        pool = unrefuted;
     }
 
     // Apply multiple criteria in priority order
