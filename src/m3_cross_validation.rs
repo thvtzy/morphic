@@ -1392,47 +1392,38 @@ mod xval3 {
     #[test]
     fn xval3_seed_shapes_recognized_and_encodable() {
         // Diagnostic pin, generalized to the whole module
-        // (Phase 23): for 26 of the 28 specs, the shared
-        // resolver's body builders recognize a body (an
-        // equation RHS for rust_keyword / rust_condition_wrap,
-        // a guard-table match for the other 24) and the
-        // verifier can encode that body in module context —
-        // the two mechanism steps a ConstraintInduced seed
-        // needs before pool admission.
+        // (Phase 23) and flipped by Phase 24: for ALL 28 specs,
+        // the shared resolver's body builders recognize a body
+        // (an equation RHS for rust_keyword /
+        // rust_condition_wrap, a guard-table match for the
+        // Int/Bool tables, the guarded-identity match for
+        // rust_pattern_ctor_name) and the verifier can encode
+        // that body in module context — the two mechanism steps
+        // a ConstraintInduced seed needs before pool admission.
         //
-        // The two exceptions are asserted UNRECOGNIZED, as
-        // the Phase 22 prediction states — this test is the
-        // standing diagnosis a future builder-generalization
-        // phase must flip:
+        // Phase 23 asserted two exceptions UNRECOGNIZED, on
+        // exact predicates:
         //  - rust_literal_bool: guard rows over a Bool param;
-        //    guard_table_body admits a single param only when
-        //    is_int_family holds, and guard_leaf/guard_row
-        //    read Int constants and scan an integer range for
-        //    the pinned value. Its rows are Or-guards, not a
-        //    top-level `output == …`, so no equation either.
-        //  - rust_pattern_ctor_name: two params (the builder
-        //    admits exactly one), and independently its only
-        //    row's output pin is a VARIABLE (output == name) —
-        //    guard_row requires the pin to convert to an
-        //    IRNode::Literal — and its guard leaf
-        //    (has_subs == true) is a Bool equality, not an
-        //    Int comparison. Its constraint is an Or, not a
-        //    top-level equation.
-        const SEEDLESS: [&str; 2] = ["rust_literal_bool", "rust_pattern_ctor_name"];
+        //    guard_table_body admitted Int params only,
+        //    guard_leaf/guard_row read Int constants and
+        //    scanned an integer range for the pinned value.
+        //  - rust_pattern_ctor_name: two params, a
+        //    Bool-equality guard leaf, and an output pin that
+        //    is a VARIABLE (output == name), where guard_row
+        //    required the pin to convert to an IRNode::Literal.
+        // Phase 24 generalized the builders — finite-domain
+        // Bool guard tables (domain {false, true} enumerated
+        // instead of an integer-interval scan) and
+        // guarded-identity seeds (one guard param pinned by
+        // literal-guard rows, the output pin exactly the
+        // remaining parameter) — so the exceptions are gone
+        // and this test now asserts recognition for the whole
+        // module.
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 28, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
-            let body = index.callee_body(&func.name);
-            if SEEDLESS.contains(&func.name.as_str()) {
-                assert!(
-                    body.is_none(),
-                    "{}: predicted seedless, but the builders recognized a body",
-                    func.name
-                );
-                continue;
-            }
-            let body = body.unwrap_or_else(|| {
+            let body = index.callee_body(&func.name).unwrap_or_else(|| {
                 panic!("{}: no seed body recognized", func.name)
             });
             assert!(

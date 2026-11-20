@@ -4080,6 +4080,484 @@ mod tests {
         assert!(engine.seed_from_constraints(&module[1]).is_empty());
     }
 
+    // ── Phase 24: guard-table generalizations ─────────────
+    //
+    // The two seedless shapes of the Phase 23 measurement.
+    // Both were already verifier-encodable (their pools held
+    // Verified candidates in every run); only the builders
+    // refused them: guard rows over a finite Bool domain
+    // (rust_literal_bool — guard_table_body admitted Int
+    // params only, guard_leaf read IntLit constants, and the
+    // pinned value came from an integer-interval scan) and a
+    // guarded identity (rust_pattern_ctor_name — two params,
+    // a Bool-equality guard leaf, and an output pin that is a
+    // parameter Var where guard_row required a literal).
+
+    fn load_codegen_module() -> Vec<FunctionSpec> {
+        load_m2_module("codegen")
+    }
+
+    fn eval_seed_body(
+        body: &IRNode,
+        bindings: &[(&str, crate::synthesis::eval::Value)],
+    ) -> crate::synthesis::eval::Value {
+        let mut env = crate::synthesis::eval::Env::new();
+        for (name, value) in bindings {
+            env.insert((*name).into(), value.clone());
+        }
+        crate::synthesis::eval::eval(body, &env).expect("seed body must evaluate")
+    }
+
+    /// Guard generalizations (i): rust_literal_bool's rows pin
+    /// the whole finite Bool domain. The guard-table seed must
+    /// now exist — one arm per pinned row in spec order, then
+    /// the typed-literal wildcard (unreachable on a total Bool
+    /// table, retained by the match convention the verifier's
+    /// fall-through rule requires) — be Verified in module
+    /// context, and win module-aware synthesis with its own
+    /// body: the same shape its Phase 23 pool winner took, now
+    /// structural instead of drawn.
+    #[test]
+    fn constraint_guard_table_seed_for_bool_param() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_literal_bool");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the guard-table seed");
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("value".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Bool(true)),
+                    IRNode::Literal(IRLiteral::String("true".into())),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Bool(false)),
+                    IRNode::Literal(IRLiteral::String("false".into())),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::String(String::new())),
+                ),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+
+        // Executed over the whole finite domain.
+        for (value, text) in [(true, "true"), (false, "false")] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[("value", crate::synthesis::eval::Value::Bool(value))],
+            );
+            assert_eq!(v, crate::synthesis::eval::Value::Str(text.into()));
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let pool = synthesize_with_module(&spec, 1, &module)
+            .expect("opt-1 synthesis must succeed");
+        let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the guard table itself"
+        );
+    }
+
+    fn var_expr(name: &str) -> Expr {
+        Expr::Var(name.into())
+    }
+
+    fn eq_expr(l: Expr, r: Expr) -> Expr {
+        Expr::BinOp(BinOp::Eq, Box::new(l), Box::new(r))
+    }
+
+    /// One guard-row constraint: the Or of the given leaves.
+    fn or_row(leaves: Vec<Expr>) -> Constraint {
+        let mut it = leaves.into_iter();
+        let first = it.next().expect("a row needs at least one leaf");
+        Constraint::Expr(it.fold(first, |acc, leaf| {
+            Expr::BinOp(BinOp::Or, Box::new(acc), Box::new(leaf))
+        }))
+    }
+
+    fn guard_spec(
+        name: &str,
+        params: Vec<(&str, TypeRef)>,
+        return_type: TypeRef,
+        postconditions: Vec<Constraint>,
+    ) -> FunctionSpec {
+        let mut spec = dummy_spec();
+        spec.name = name.into();
+        spec.params = params
+            .into_iter()
+            .map(|(n, ty)| Param {
+                name: n.into(),
+                ty,
+                annotations: HashMap::new(),
+            })
+            .collect();
+        spec.return_type = return_type;
+        spec.postconditions = postconditions;
+        spec
+    }
+
+    /// Guard generalizations (i, partial): a Bool table with a
+    /// single row pins one domain value; the other falls to
+    /// the wildcard — the typed-literal default decides it,
+    /// exactly as an Int table's unpinned inputs are decided.
+    #[test]
+    fn constraint_guard_table_seed_for_partial_bool_table() {
+        // `value==true||output=="false"` pins value == false.
+        let spec = guard_spec(
+            "bool_partial",
+            vec![("value", TypeRef::Bool)],
+            TypeRef::String,
+            vec![or_row(vec![
+                eq_expr(var_expr("value"), Expr::BoolLit(true)),
+                eq_expr(var_expr("output"), Expr::StringLit("false".into())),
+            ])],
+        );
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("value".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Bool(false)),
+                    IRNode::Literal(IRLiteral::String("false".into())),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::String(String::new())),
+                ),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+        let v = eval_seed_body(
+            &seed.body,
+            &[("value", crate::synthesis::eval::Value::Bool(false))],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Str("false".into()));
+        let v = eval_seed_body(
+            &seed.body,
+            &[("value", crate::synthesis::eval::Value::Bool(true))],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Str(String::new()));
+
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Guard generalizations (ii): rust_pattern_ctor_name's
+    /// single row pins output to the `name` parameter where
+    /// `has_subs` is false; the complementary branch is
+    /// honestly unpinned and falls to the wildcard. The seed
+    /// must exist (kind `guarded_identity`), be Verified in
+    /// module context, and win module-aware synthesis
+    /// deterministically — Phase 23 drew a different body per
+    /// run, with the silent branch returning "" or the name by
+    /// luck; the seed fixes it to the wildcard "".
+    #[test]
+    fn constraint_guarded_identity_seed_for_ctor_name() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_pattern_ctor_name");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the guarded-identity seed");
+        let seed = constraint_seed(&engine, &spec, "guarded_identity");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("has_subs".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Bool(false)),
+                    IRNode::Var("name".into()),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::String(String::new())),
+                ),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+
+        // The pinned branch returns the name itself; the
+        // spec-silent branch returns the wildcard default.
+        let v = eval_seed_body(
+            &seed.body,
+            &[
+                ("name", crate::synthesis::eval::Value::Str("Some".into())),
+                ("has_subs", crate::synthesis::eval::Value::Bool(false)),
+            ],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Str("Some".into()));
+        let v = eval_seed_body(
+            &seed.body,
+            &[
+                ("name", crate::synthesis::eval::Value::Str("Some".into())),
+                ("has_subs", crate::synthesis::eval::Value::Bool(true)),
+            ],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Str(String::new()));
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        // Deterministic across draws: the same winning body in
+        // three independent synthesis runs.
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the identity seed must win verified");
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the identity seed in every draw"
+            );
+        }
+    }
+
+    /// Guard generalizations (ii, Int guards): the identity
+    /// builder reuses the Int row recognition too — a row
+    /// pinning an Int guard parameter by comparisons and the
+    /// output to the remaining parameter.
+    #[test]
+    fn constraint_guarded_identity_seed_with_int_guard() {
+        // `kind<0||kind>0||output==name` pins kind == 0.
+        let spec = guard_spec(
+            "int_guarded_identity",
+            vec![("name", TypeRef::String), ("kind", TypeRef::Int)],
+            TypeRef::String,
+            vec![or_row(vec![
+                Expr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var_expr("kind")),
+                    Box::new(Expr::IntLit(0)),
+                ),
+                Expr::BinOp(
+                    BinOp::Gt,
+                    Box::new(var_expr("kind")),
+                    Box::new(Expr::IntLit(0)),
+                ),
+                eq_expr(var_expr("output"), var_expr("name")),
+            ])],
+        );
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seed = constraint_seed(&engine, &spec, "guarded_identity");
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::Var("name".into()),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::String(String::new())),
+                ),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+        let v = eval_seed_body(
+            &seed.body,
+            &[
+                ("name", crate::synthesis::eval::Value::Str("Unit".into())),
+                ("kind", crate::synthesis::eval::Value::Int(0)),
+            ],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Str("Unit".into()));
+        let v = eval_seed_body(
+            &seed.body,
+            &[
+                ("name", crate::synthesis::eval::Value::Str("Unit".into())),
+                ("kind", crate::synthesis::eval::Value::Int(3)),
+            ],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Str(String::new()));
+
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Guard generalizations (negatives): near-miss shapes
+    /// still get NO constraint seed — the generalizations stay
+    /// as conservative as the builders they extend. Each spec
+    /// below deviates in exactly one way.
+    #[test]
+    fn constraint_seed_near_misses_get_no_seed() {
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let mut cases: Vec<FunctionSpec> = Vec::new();
+
+        // Bool table whose pin is not a literal (output == the
+        // parameter itself): not a table row, and a single
+        // param cannot be a guarded identity.
+        cases.push(guard_spec(
+            "bool_pin_not_literal",
+            vec![("value", TypeRef::Bool)],
+            TypeRef::String,
+            vec![or_row(vec![
+                eq_expr(var_expr("value"), Expr::BoolLit(false)),
+                eq_expr(var_expr("output"), var_expr("value")),
+            ])],
+        ));
+
+        // Bool row whose guards falsify nowhere (both domain
+        // values satisfy some leaf): pins no single value.
+        cases.push(guard_spec(
+            "bool_row_pins_nothing",
+            vec![("value", TypeRef::Bool)],
+            TypeRef::String,
+            vec![or_row(vec![
+                eq_expr(var_expr("value"), Expr::BoolLit(true)),
+                eq_expr(var_expr("value"), Expr::BoolLit(false)),
+                eq_expr(var_expr("output"), Expr::StringLit("x".into())),
+            ])],
+        ));
+
+        // Guarded identity with a second row pinning a LITERAL:
+        // the spec states a row the identity body would not
+        // honor, so the shape deviates and no seed is built.
+        cases.push(guard_spec(
+            "identity_mixed_literal_row",
+            vec![("name", TypeRef::String), ("has_subs", TypeRef::Bool)],
+            TypeRef::String,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("has_subs"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), var_expr("name")),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("has_subs"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), Expr::StringLit("bare".into())),
+                ]),
+            ],
+        ));
+
+        // The output pin is the GUARD parameter itself, not
+        // the remaining one.
+        cases.push(guard_spec(
+            "identity_pin_is_guard_param",
+            vec![("flag", TypeRef::Bool), ("name", TypeRef::String)],
+            TypeRef::Bool,
+            vec![or_row(vec![
+                eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                eq_expr(var_expr("output"), var_expr("flag")),
+            ])],
+        ));
+
+        // The output pin is a compound expression (a call), not
+        // exactly the remaining parameter.
+        cases.push(guard_spec(
+            "identity_pin_compound",
+            vec![("name", TypeRef::String), ("has_subs", TypeRef::Bool)],
+            TypeRef::String,
+            vec![or_row(vec![
+                eq_expr(var_expr("has_subs"), Expr::BoolLit(true)),
+                eq_expr(
+                    var_expr("output"),
+                    Expr::Call("render".into(), vec![var_expr("name")]),
+                ),
+            ])],
+        ));
+
+        // A guard leaf that is not a literal comparison
+        // (parameter against parameter).
+        cases.push(guard_spec(
+            "identity_guard_not_literal",
+            vec![("name", TypeRef::String), ("has_subs", TypeRef::Bool)],
+            TypeRef::String,
+            vec![or_row(vec![
+                eq_expr(var_expr("has_subs"), var_expr("name")),
+                eq_expr(var_expr("output"), var_expr("name")),
+            ])],
+        ));
+
+        // Three parameters: more than one non-identity
+        // parameter would have to be pinned — not admitted.
+        cases.push(guard_spec(
+            "identity_two_extra_params",
+            vec![
+                ("a", TypeRef::String),
+                ("b", TypeRef::String),
+                ("flag", TypeRef::Bool),
+            ],
+            TypeRef::String,
+            vec![or_row(vec![
+                eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                eq_expr(var_expr("output"), var_expr("a")),
+            ])],
+        ));
+
+        for spec in &cases {
+            assert!(
+                engine.seed_from_constraints(spec).is_empty(),
+                "{}: near-miss shape must get no constraint seed",
+                spec.name
+            );
+        }
+    }
+
+    /// Guard generalizations (regression): the generalizations
+    /// must not move any body the builders already produced.
+    /// The golden fixture (tests/seed_body_golden.txt) was
+    /// captured from the builders BEFORE the generalizations —
+    /// the resolver-visible body (SpecIndex::callee_body) of
+    /// every previously recognized spec: the 26 seeded Codegen
+    /// specs and all 14 M2 specs. Byte-identical means the
+    /// Debug rendering matches exactly.
+    #[test]
+    fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let golden = std::fs::read_to_string(format!("{}/tests/seed_body_golden.txt", root))
+            .expect("golden fixture must exist");
+        let mut expected: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        for line in golden.lines() {
+            let (key, body) = line.split_once('\t').expect("golden line shape");
+            let (file, name) = key.split_once("::").expect("golden key shape");
+            expected.insert((file.to_string(), name.to_string()), body.to_string());
+        }
+        assert_eq!(expected.len(), 40, "26 Codegen + 14 M2 golden bodies");
+        for file in ["validator", "printer", "codegen"] {
+            let module = load_m2_module(file);
+            let index = SpecIndex::from_specs(&module);
+            for func in &module {
+                let Some(want) = expected.get(&(file.to_string(), func.name.clone())) else {
+                    continue;
+                };
+                let body = index
+                    .callee_body(&func.name)
+                    .unwrap_or_else(|| panic!("{}::{}: body no longer recognized", file, func.name));
+                assert_eq!(
+                    format!("{:?}", body),
+                    *want,
+                    "{}::{}: seed body changed",
+                    file,
+                    func.name
+                );
+            }
+        }
+    }
+
     /// replace_hole must actually substitute the hole wherever
     /// find_hole_positions found it. The path walker behind it
     /// used to implement only the Block step — every other
