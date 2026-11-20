@@ -1599,15 +1599,30 @@ fn unaryop_to_ir(op: UnaryOp) -> IRUnaryOp {
 }
 
 fn evaluate_candidate(candidate: &CandidateImplementation, spec: &FunctionSpec) -> ScoreBreakdown {
-    // Test pass ratio
+    // Test pass ratio — REAL execution via the IR interpreter
+    // (synthesis::eval): the candidate body is run against every
+    // spec test whose input/expected values can be mapped to
+    // evaluator values, and the ratio is passed / evaluable.
+    // A candidate that cannot be evaluated on a test (holes,
+    // unbound variables, unknown calls, …) FAILS that test —
+    // it does not get the benefit of the doubt.
+    //
+    // FALLBACK: if a spec has tests but NONE of them can be
+    // mapped (e.g. multi-param specs, whose tuple test inputs
+    // the current spec syntax cannot bind), there is no truth
+    // signal to measure. Keep the previous structural behavior
+    // (tests assumed passed) rather than punishing every
+    // candidate for an encoding limitation. Specs with no tests
+    // at all keep the neutral 0.5.
     let test_score = if spec.tests.is_empty() {
         0.5 // No tests: neutral score
     } else {
-        let passed = spec.tests.iter().filter(|_test| {
-            // Execute test logic (simplified)
-            true
-        }).count();
-        passed as f64 / spec.tests.len() as f64
+        let run = super::eval::run_spec_tests(&candidate.body, spec);
+        if run.evaluable == 0 {
+            1.0 // FALLBACK (see above): no mappable tests — legacy structural score
+        } else {
+            run.passed as f64 / run.evaluable as f64
+        }
     };
 
     // Constraint score: structural similarity to constraint shape
@@ -1965,6 +1980,96 @@ mod tests {
         let two_scores = evaluate_candidate(&two_holes, &spec);
         assert!((two_scores.test_pass_ratio - 0.125).abs() < 1e-9);
         assert!(two_scores.test_pass_ratio < one_scores.test_pass_ratio);
+    }
+
+    /// A spec with real, mappable tests — mirrors
+    /// examples/self_host/validator.morph `is_literal_kind`
+    /// (input kind: Int, output Bool, output == (kind == 0)).
+    fn is_literal_kind_spec() -> FunctionSpec {
+        let mut spec = dummy_spec();
+        spec.name = "is_literal_kind".into();
+        spec.params = vec![Param {
+            name: "kind".into(),
+            ty: TypeRef::Int,
+            annotations: HashMap::new(),
+        }];
+        spec.return_type = TypeRef::Bool;
+        let test = |input: i64, expected: bool| Test {
+            name: None,
+            input: Expr::IntLit(input),
+            expected_output: Expr::BoolLit(expected),
+            timeout_ms: None,
+            property: false,
+        };
+        spec.tests = vec![test(0, true), test(2, false), test(4, false)];
+        spec
+    }
+
+    /// Truth signal: a candidate that actually implements the
+    /// spec scores a measured 1.0 — and a wrong one scores
+    /// strictly less, by exactly the tests it fails. Before the
+    /// IR interpreter landed, both scored 1.0 (the filter in
+    /// evaluate_candidate unconditionally returned true).
+    #[test]
+    fn evaluate_candidate_measures_real_test_pass_ratio() {
+        let spec = is_literal_kind_spec();
+
+        // Correct: kind == 0.
+        let correct = make_candidate(
+            IRNode::BinOp(
+                IRBinOp::Eq,
+                Box::new(IRNode::Var("kind".into())),
+                Box::new(IRNode::Literal(IRLiteral::Int(0))),
+            ),
+            &spec,
+        );
+        let scores = evaluate_candidate(&correct, &spec);
+        assert!((scores.test_pass_ratio - 1.0).abs() < 1e-9);
+
+        // Wrong: always false — passes exactly 2 of 3 tests.
+        let wrong = make_candidate(IRNode::Literal(IRLiteral::Bool(false)), &spec);
+        let scores = evaluate_candidate(&wrong, &spec);
+        assert!((scores.test_pass_ratio - 2.0 / 3.0).abs() < 1e-9);
+
+        // The classic random-tree failure mode: an unbound
+        // Var("result") body. It never compiled — and now it
+        // also measures 0 instead of a free 1.0.
+        let unbound = make_candidate(IRNode::Var("result".into()), &spec);
+        let scores = evaluate_candidate(&unbound, &spec);
+        assert_eq!(scores.test_pass_ratio, 0.0);
+    }
+
+    /// The TestInduced shape — a match on the input with one
+    /// literal arm per test plus exactly one wildcard Hole —
+    /// passes every test its arms reach, then the hole decay
+    /// halves its credit: measured 1.0 × 0.5 decay = 0.5.
+    #[test]
+    fn evaluate_candidate_test_induced_shape_scores_measured_ratio_times_hole_decay() {
+        let spec = is_literal_kind_spec();
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::Literal(IRLiteral::Bool(true)),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Int(2)),
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Int(4)),
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Hole { id: 99, expected_type: None },
+                ),
+            ],
+        };
+        let candidate = make_candidate(body, &spec);
+        let scores = evaluate_candidate(&candidate, &spec);
+        assert!((scores.test_pass_ratio - 0.5).abs() < 1e-9);
     }
 
     /// Regression: `random_ir_tree` used to emit

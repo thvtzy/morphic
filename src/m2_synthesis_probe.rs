@@ -192,7 +192,7 @@ mod probe {
                 };
 
                 println!(
-                    "PROBE|{}|{}|synth=ok(n={})|ms={}|verified={}/{}|winner_verified={}|winner_prov={}|winner_holes={}|winner_score={:.3}|codegen={}",
+                    "PROBE|{}|{}|synth=ok(n={})|ms={}|verified={}/{}|winner_verified={}|winner_prov={}|winner_holes={}|winner_score={:.3}|winner_tpr={:.3}|codegen={}",
                     file,
                     name,
                     n_candidates,
@@ -203,6 +203,7 @@ mod probe {
                     provenance_name(&winner.provenance),
                     holes,
                     winner.score,
+                    winner.scores.test_pass_ratio,
                     codegen_status
                 );
             }
