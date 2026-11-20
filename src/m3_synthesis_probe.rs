@@ -23,11 +23,13 @@
 //  (rustc --crate-type lib on the emitted file — the same check
 //  the M2 phases applied to target/m2-synthesis winners). For
 //  slice-3 `++` template winners the compile verdict is
-//  recorded factually: the frozen emitter renders Concat as
-//  Rust `+` without the string-ownership rewrite on Concat
-//  operands (the Phase 25 edge), so literal-first assemblies
-//  fail E0369 while variable-first ones compile — the probe
-//  reports the rustc verdict, never a judgment.
+//  recorded factually: before Phase 29 the emitter rendered
+//  Concat as Rust `+` without the string-ownership rewrite on
+//  Concat operands (the Phase 25 edge), so literal-first
+//  assemblies failed E0369 while variable-first ones
+//  compiled; Phase 29 fixed that rendering family under the
+//  user's unfreeze, and the probe now records 44/44 compiles
+//  per run — it reports the rustc verdict, never a judgment.
 //
 //  For the four slice-3 specs Phase 26 predicted seedless
 //  (rust_ident_suffix, rust_ident_empty, rust_string_ownership,

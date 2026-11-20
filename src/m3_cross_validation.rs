@@ -103,21 +103,25 @@
 //  harness). A winner that fails to compile, run, or produce
 //  exactly one parseable output per input counts as TOTAL
 //  disagreement for that run — never silently dropped — with
-//  ONE classified exception: a rustc failure at the frozen
-//  emitter's RENDERING layer (compile_edge_kind, below).
-//  The measured family: E0369 (Concat renders as Rust `+`
-//  and the string-ownership rewrite never fires on Concat
-//  operands — Phase 25 — so literal-first assemblies do not
+//  ONE classified exception: a rustc failure at the emitter's
+//  RENDERING layer (compile_edge_kind, below).
+//  The measured family (Phases 25/27/28; FIXED in Phase 29
+//  under the user's unfreeze of exactly those three
+//  defects): E0369 (Concat rendered as Rust `+`
+//  and the string-ownership rewrite never fired on Concat
+//  operands, so literal-first assemblies did not
 //  compile), E0308 (the same bare-operand rendering for
 //  `String + String`, and String-scrutinee matches rendered
 //  without `.as_str()`), and parse-level failures (string
-//  literals are emitted raw, contents unescaped, so a
-//  literal containing `"` breaks the file's syntax). Such a
+//  literals were emitted raw, contents unescaped, so a
+//  literal containing `"` broke the file's syntax). The
+//  classification is retained as a guard: such a
 //  failure is recorded as COMPILE_EDGE — the winner was not
 //  executed, its pinned agreement is not measurable this
 //  run, and it is NOT a behavioral disagreement; the probe's
 //  standalone winner-body compile check records the same
-//  facts independently.
+//  facts independently. Phase 29's re-measurement recorded
+//  zero COMPILE_EDGE rows.
 //
 //  The harness asserts nothing about agreement — winners are
 //  draw-dependent and disagreement is a measurement, not a
@@ -1701,7 +1705,7 @@ mod xval3 {
         let _ = writeln!(md, "# M3 cross-validation (slices 1–3): synthesized winners vs tests/m3_proof.rs mirrors");
         let _ = writeln!(md);
         let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the complete finite domain (Int codes -2..=30 for the 27 Int-code specs; rust_keyword: 51 positives + 24 near-miss negatives; rust_literal_bool and rust_test_name_form: the full Bool domain; rust_pattern_ctor_name: 7 names × has_subs; slice 3: rust_string_ownership over the full -2..=30 × -2..=30 cross product, the `++` equation templates over string batteries, rust_ident_suffix over its sanitized-string contract domain plus out-of-contract names reported separately). See src/m3_cross_validation.rs for sweep definitions and mirror semantics: a case is pinned exactly where the spec's constraints decide it.");
-        let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL) — except a rustc failure at the frozen emitter's rendering layer (E0369 Concat-operand ownership, Phase 25; E0308 string-boundary rendering; parse-level unescaped-literal failures), which is recorded as COMPILE_EDGE: not executed, not a behavioral disagreement. Spec-silent (unpinned) cases are reported separately and never counted as disagreements; out-of-contract cases (rust_ident_suffix) are reported separately and counted in no bucket.");
+        let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL) — except a rustc failure at the emitter's rendering layer (the family measured in Phases 25/27/28 and fixed in Phase 29: E0369 Concat-operand ownership; E0308 string-boundary rendering; parse-level unescaped-literal failures), which is recorded as COMPILE_EDGE: not executed, not a behavioral disagreement. Spec-silent (unpinned) cases are reported separately and never counted as disagreements; out-of-contract cases (rust_ident_suffix) are reported separately and counted in no bucket.");
         let _ = writeln!(md);
         let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 verified | Winner prov | Golden agree | Sweep pinned agree | Unpinned cases | Exec |");
         let _ = writeln!(md, "|---|---|---|---|---|---|---|---|---|");
