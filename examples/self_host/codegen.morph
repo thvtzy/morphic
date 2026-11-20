@@ -1339,4 +1339,81 @@ spec rust_struct_def_text {
     optimize: time < O(n)
 }
 
+// -- Leaves / misc ----------------------------------------------
+
+spec rust_index_text {
+    doc: "The Index rendering of ir_to_rust_expr (src/codegen/mod.rs:936-938): '(' + collection + ')[' + index + ']'. The collection is parenthesized, the index is not. Both children arrive rendered by ir_to_rust_expr itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: coll: String, idx: String
+    output: String
+
+    constraint: output == "(" ++ coll ++ ")[" ++ idx ++ "]"
+
+    optimize: time < O(n)
+}
+
+spec rust_try_text {
+    doc: "The TryPropagate rendering of ir_to_rust_expr (src/codegen/mod.rs:939-941): '(' + inner + ')?'. The operand is parenthesized before the '?' so a composite operand's boundary survives. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: inner: String
+    output: String
+
+    constraint: output == "(" ++ inner ++ ")?"
+
+    optimize: time < O(n)
+}
+
+spec rust_assign_text {
+    doc: "The Assign rendering of ir_to_rust_expr (src/codegen/mod.rs:942-948): '(' + target + ' = ' + value + ')'. Both children arrive rendered by ir_to_rust_expr itself; the whole assignment is parenthesized because an assignment expression's value is () and its boundary must survive embedding. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: target: String, value: String
+    output: String
+
+    constraint: output == "(" ++ target ++ " = " ++ value ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_return_text {
+    doc: "The Return rendering of ir_to_rust_expr (src/codegen/mod.rs:949-954): '(return ' + inner + ')'. Parenthesized because return greedily consumes a following expression -- '(return 5) + 1' must not become 'return (5 + 1)'. The operand is rendered by ir_to_rust_expr itself, UNTYPED: a returned String literal stays bare here; the ownership rewrite for return positions lives in the statement walker (ir_to_rust's Return arm consults fn_ret, slice 5). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: inner: String
+    output: String
+
+    constraint: output == "(return " ++ inner ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_break_text {
+    doc: "The Break rendering of ir_to_rust_expr (src/codegen/mod.rs:955-958): with a value, '(break ' + value + ')'; without, the fixed text '(break)'. Parenthesized for the same greedy-consumption reason as rust_return_text. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: has_value: Bool, value: String
+    output: String
+
+    constraint: has_value==true||output=="(break)"
+    constraint: has_value==false||output=="(break " ++ value ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_hole_text {
+    doc: "The fixed text of the Hole arm of ir_to_rust_expr (src/codegen/mod.rs:959): 'panic!(\"Hole not filled\")'. panic! has type ! and coerces anywhere, so the generated file still parses and compiles with the gap loud instead of silent (the Phase 13 convention). Keyed by IRNode kind like the other fixed-text tables: only Hole (0) has this text."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="panic!(\"Hole not filled\")"
+
+    optimize: time < O(n)
+
+    test "hole-text" { input: 0 expect: "panic!(\"Hole not filled\")" }
+}
+
+spec rust_unsupported_text {
+    doc: "The loud fallback for a shape with no honest expression form (unsupported_expr, src/codegen/mod.rs:725-727): 'panic!(\"unsupported IR in expression position: ' + shape + '\")'. In THIS walker exactly one arm uses it -- Alloc (an Alloc binds a name for later statements and has no value of its own), with shape 'Alloc'; the statement walker has further call sites (slice 5). Following the Hole convention, the panic! keeps the generated file parseable with the gap named."
+    input: shape: String
+    output: String
+
+    constraint: output == "panic!(\"unsupported IR in expression position: " ++ shape ++ "\")"
+
+    optimize: time < O(n)
+
+    test "alloc-text" { input: "Alloc" expect: "panic!(\"unsupported IR in expression position: Alloc\")" }
+}
+
 }
