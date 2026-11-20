@@ -1089,9 +1089,13 @@ impl<'a> Parser<'a> {
     }
 
     fn context_snippet(&self) -> String {
+        // `pos` is a char index into `chars`, not a byte index into
+        // `source`. Slicing `source` with it panics whenever a
+        // multi-byte character straddles the window edge, so build
+        // the snippet from `chars` instead.
         let start = self.pos.saturating_sub(20);
-        let end = (self.pos + 20).min(self.source.len());
-        let snippet = &self.source[start..end];
+        let end = (self.pos + 20).min(self.chars.len());
+        let snippet: String = self.chars[start..end].iter().collect();
         let marker = " ".repeat(self.pos - start) + "^";
         format!("{}\n{}", snippet, marker)
     }
@@ -1169,5 +1173,38 @@ mod tests {
 
         let spec = parse(src).unwrap();
         assert_eq!(spec.functions[0].invariants.len(), 2);
+    }
+
+    #[test]
+    fn error_snippet_survives_unicode_before_error() {
+        // Regression: context_snippet() used the char index `pos` as a
+        // byte index into the source. With multi-byte characters (the
+        // box-drawing comment art in the bundled examples) before the
+        // error position, building the error snippet panicked with
+        // "byte index is not a char boundary" instead of returning
+        // the parse error.
+        let dashes = "─".repeat(40);
+        let src = format!(
+            "// {}\nTestModule {{\n  spec f {{\n    input: x: Int\n    output: Int\n    bogus: true\n  }}\n}}\n",
+            dashes
+        );
+        let result = parse(&src);
+        assert!(result.is_err(), "expected a parse error for 'bogus'");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("bogus"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn error_snippet_survives_unicode_after_error() {
+        // Same regression, opposite direction: the error is at the very
+        // start of the file and the multi-byte characters fall inside
+        // the forward-looking half of the snippet window.
+        let src = format!("{} garbage", "─".repeat(10));
+        let result = parse(&src);
+        assert!(result.is_err(), "expected a parse error");
     }
 }
