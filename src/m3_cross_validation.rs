@@ -1,11 +1,12 @@
 // ─────────────────────────────────────────────────────────────
-//  M3 CROSS-VALIDATION HARNESS (test-only) — slices 1–2
+//  M3 CROSS-VALIDATION HARNESS (test-only) — slices 1–3
 //
 //  Generalizes the M2 cross-validation harness
 //  (src/m2_cross_validation.rs) to the Codegen module. For
-//  every one of the 28 specs in
+//  every one of the 44 specs in
 //  examples/self_host/codegen.morph (slice 1: 8 leaf mappings;
-//  slice 2: 20 small template families) this harness runs the
+//  slice 2: 20 small template families; slice 3: 16 name/text
+//  assembly specs) this harness runs the
 //  real pipeline at opt level 1 — parse → typecheck →
 //  synthesize_with_module → Z3 verify_all (module-aware) →
 //  select_best → codegen, exactly as `morphic build` and the
@@ -17,11 +18,12 @@
 //         codegen.morph (the case list is in GOLDEN below;
 //         every golden input is asserted to lie inside the
 //         sweep, so golden results are read off the same
-//         single execution). rust_pattern_ctor_name has no
-//         in-spec tests (the test syntax cannot bind tuple
-//         inputs); its golden cases are the proof file's
-//         pinned assertions ("Some" and "" with no
-//         sub-patterns).
+//         single execution). Specs whose test syntax cannot
+//         bind their inputs (rust_pattern_ctor_name,
+//         rust_string_ownership, rust_param_text,
+//         rust_generics_text, rust_signature, rust_test_case)
+//         have no in-spec tests; their golden cases are the
+//         proof file's pinned assertions for the same specs.
 //
 //    (ii) the COMPLETE finite domains: for the Int-code specs,
 //         every code -2..=30 — the full meaningful domain of
@@ -34,7 +36,15 @@
 //         common non-keywords); for rust_literal_bool, the
 //         complete Bool domain (false, true); for
 //         rust_pattern_ctor_name, a grid of representative
-//         names × has_subs ∈ {false, true}.
+//         names × has_subs ∈ {false, true}; for slice 3:
+//         rust_string_ownership over the full Int-code cross
+//         product (-2..=30 × -2..=30 — its spec decides every
+//         pair); the `++` equation templates over batteries
+//         of representative strings / string tuples (the
+//         equations are total, so every case is pinned);
+//         rust_ident_suffix over its contract domain (the 51
+//         keywords, which pin name++"_", plus already-
+//         sanitized non-keyword names, which pin identity).
 //
 //  Pinned vs spec-silent is defined by the SPEC's constraints
 //  (the Phase 23 rule, generalizing slice 1's partial-table
@@ -46,25 +56,42 @@
 //  the unpinned rows of every partial guard table and every
 //  off-range code. Those cases are reported as "unpinned"
 //  (winner output recorded) and NEVER counted as
-//  disagreements. Two specs are total by a single equation
-//  and therefore pinned on EVERY input: rust_keyword (every
-//  string decided) and rust_condition_wrap (its equation
-//  decides every Int; the proof mirror states the 28 real
-//  IRNode kinds and the equation extends it — false — to
-//  every other code, so the whole -2..=30 band is pinned).
-//  rust_literal_bool is total over its finite Bool domain.
-//  For rust_pattern_ctor_name the spec pins exactly the
-//  has_subs == false branch (output == name, for every
-//  name); the has_subs == true branch is template assembly
-//  the spec deliberately does not state, so those cases are
-//  spec-silent and the winner's actual outputs are sampled
-//  in the report. The assembly mirrors of tests/m3_proof.rs
+//  disagreements. Total specs are pinned on EVERY input of
+//  their sweep: rust_keyword (every string decided),
+//  rust_condition_wrap (its equation decides every Int; the
+//  proof mirror states the 28 real IRNode kinds and the
+//  equation extends it — false — to every other code, so
+//  the whole -2..=30 band is pinned), rust_typed_form (same
+//  shape: the proof mirror's domain is the 28 kinds, the
+//  spec's third constraint extends 0 — delegate — to every
+//  other code), rust_literal_bool and rust_test_name_form
+//  (total over the finite Bool domain), rust_string_ownership
+//  (total over Int × Int), and every `++` equation template
+//  (total over its string inputs). For rust_pattern_ctor_name
+//  the spec pins exactly the has_subs == false branch
+//  (output == name, for every name); the has_subs == true
+//  branch is template assembly the spec deliberately does
+//  not state, so those cases are spec-silent and the
+//  winner's actual outputs are sampled in the report.
+//
+//  rust_ident_suffix has a third case class. Its spec's
+//  input contract is the SANITIZED string (the per-char
+//  step's output: never empty, never containing a char the
+//  step replaces, never starting with an ASCII digit).
+//  Names needing char surgery (finding F5 — "empty-list",
+//  "type ", "9lives", "a.b", "---", "ma tch", and the empty
+//  string) are OUT OF CONTRACT for this spec: the suffix
+//  step is not what decides them (sanitization is), so they
+//  are executed and reported separately, and NEVER counted
+//  as disagreements or as spec-silent cases.
+//
+//  The assembly mirrors of tests/m3_proof.rs
 //  (composed behavior: nested types, joined patterns,
-//  assembled constraints) are golden-tested in Rust there;
-//  no synthesized winner in this slice IS an assembly — the
-//  winners are the classification/affix/fixed-text functions
-//  themselves — so cross-validation here judges exactly the
-//  pinned aspects the specs claim, per spec, per row.
+//  assembled constraints, the whole generate_rust output)
+//  are golden-tested in Rust there; cross-validation here
+//  judges exactly the pinned aspects the specs claim, per
+//  spec, per row — for slice 3 that includes the template
+//  equations themselves, whose winners ARE assemblies.
 //
 //  Execution mechanics mirror M2: the winner's generated Rust
 //  (verbatim) is placed in a small runner binary whose main()
@@ -75,7 +102,22 @@
 //  winner counts as total disagreement, never a hung
 //  harness). A winner that fails to compile, run, or produce
 //  exactly one parseable output per input counts as TOTAL
-//  disagreement for that run — never silently dropped.
+//  disagreement for that run — never silently dropped — with
+//  ONE classified exception: a rustc failure at the frozen
+//  emitter's RENDERING layer (compile_edge_kind, below).
+//  The measured family: E0369 (Concat renders as Rust `+`
+//  and the string-ownership rewrite never fires on Concat
+//  operands — Phase 25 — so literal-first assemblies do not
+//  compile), E0308 (the same bare-operand rendering for
+//  `String + String`, and String-scrutinee matches rendered
+//  without `.as_str()`), and parse-level failures (string
+//  literals are emitted raw, contents unescaped, so a
+//  literal containing `"` breaks the file's syntax). Such a
+//  failure is recorded as COMPILE_EDGE — the winner was not
+//  executed, its pinned agreement is not measurable this
+//  run, and it is NOT a behavioral disagreement; the probe's
+//  standalone winner-body compile check records the same
+//  facts independently.
 //
 //  The harness asserts nothing about agreement — winners are
 //  draw-dependent and disagreement is a measurement, not a
@@ -117,15 +159,23 @@ mod xval3 {
     // ─────────────────────────────────────────────────────────
 
     /// One sweep input: an Int code; a Bool (rust_literal_bool's
-    /// complete domain); a string (rust_keyword); or a
-    /// (name, has_subs) pair (rust_pattern_ctor_name, the
-    /// module's one multi-input spec).
+    /// and rust_test_name_form's complete domain); a string
+    /// (rust_keyword and the single-String slice-3 templates);
+    /// a (name, has_subs) pair (rust_pattern_ctor_name); an
+    /// Int-code pair (rust_string_ownership); a String pair
+    /// (rust_param_text); a (String, Bool) pair
+    /// (rust_generics_text); or a String 4-tuple
+    /// (rust_signature, rust_test_case).
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     enum In {
         Int(i64),
         Bool(bool),
         Text(&'static str),
         Pair(&'static str, bool),
+        IntPair(i64, i64),
+        StrPair(&'static str, &'static str),
+        StrBool(&'static str, bool),
+        Str4(&'static str, &'static str, &'static str, &'static str),
     }
 
     impl In {
@@ -135,6 +185,12 @@ mod xval3 {
                 In::Bool(b) => b.to_string(),
                 In::Text(s) => format!("\"{}\"", s),
                 In::Pair(n, h) => format!("(\"{}\", {})", n, h),
+                In::IntPair(a, b) => format!("({}, {})", a, b),
+                In::StrPair(a, b) => format!("(\"{}\", \"{}\")", a, b),
+                In::StrBool(s, b) => format!("(\"{}\", {})", s, b),
+                In::Str4(a, b, c, d) => {
+                    format!("(\"{}\", \"{}\", \"{}\", \"{}\")", a, b, c, d)
+                }
             }
         }
     }
@@ -163,14 +219,28 @@ mod xval3 {
         Bool(bool),
         Int(i64),
         Text(&'static str),
+        /// A computed expectation (the slice-3 template
+        /// mirrors build their outputs: quoted contents,
+        /// suffixed names, assembled lines).
+        Owned(String),
         /// Mirror abstains and the spec pins nothing: any winner
         /// output is spec-legal; recorded, never a disagreement.
         Unpinned,
+        /// The input lies outside the spec's input contract
+        /// (rust_ident_suffix on names needing char surgery —
+        /// finding F5): the winner's output is recorded with
+        /// the input, and the case counts in NO agreement
+        /// bucket — not pinned, not spec-silent.
+        OutOfContract,
     }
 
     impl Mirror {
         fn is_pinned(&self) -> bool {
-            !matches!(self, Mirror::Unpinned)
+            !matches!(self, Mirror::Unpinned | Mirror::OutOfContract)
+        }
+
+        fn is_out_of_contract(&self) -> bool {
+            matches!(self, Mirror::OutOfContract)
         }
 
         fn agrees(&self, out: &Out) -> bool {
@@ -178,6 +248,7 @@ mod xval3 {
                 (Mirror::Bool(b), Out::Bool(o)) => b == o,
                 (Mirror::Int(i), Out::Int(o)) => i == o,
                 (Mirror::Text(s), Out::Text(o)) => s == o,
+                (Mirror::Owned(s), Out::Text(o)) => s == o,
                 _ => false,
             }
         }
@@ -187,7 +258,9 @@ mod xval3 {
                 Mirror::Bool(b) => b.to_string(),
                 Mirror::Int(i) => i.to_string(),
                 Mirror::Text(s) => format!("\"{}\"", s),
+                Mirror::Owned(s) => format!("\"{}\"", s),
                 Mirror::Unpinned => "(spec silent)".to_string(),
+                Mirror::OutOfContract => "(out of contract)".to_string(),
             }
         }
     }
@@ -500,6 +573,130 @@ mod xval3 {
         ))
     }
 
+    // ── Slice-3 mirrors (same copying rule) ───────────────
+
+    /// The keyword-suffix step over the SANITIZED string —
+    /// the spec's input contract. A name in
+    /// IDENT_OOC_NAMES needs char surgery (finding F5): the
+    /// suffix step does not decide it, so the case is
+    /// OutOfContract, counted in no agreement bucket.
+    fn rust_ident_suffix(name: &str) -> Mirror {
+        if IDENT_OOC_NAMES.contains(&name) {
+            return Mirror::OutOfContract;
+        }
+        if is_rust_keyword(name) {
+            Mirror::Owned(format!("{}_", name))
+        } else {
+            Mirror::Owned(name.to_string())
+        }
+    }
+
+    fn rust_ident_empty(name: &str) -> Mirror {
+        // The spec pins exactly the empty name; every
+        // non-empty name is spec-silent here (the per-char
+        // step is mirror-only, finding F5).
+        if name.is_empty() {
+            Mirror::Text("_")
+        } else {
+            Mirror::Unpinned
+        }
+    }
+
+    fn rust_typed_form(kind: i64) -> Mirror {
+        // The proof mirror's domain is the 28 IRNode kinds
+        // (None outside); the spec's third constraint,
+        // however, decides every other Int as delegate (0),
+        // so under the pinned-by-constraint rule the whole
+        // band is pinned — the rust_condition_wrap precedent.
+        match kind {
+            9 => Mirror::Int(1),
+            22 => Mirror::Int(2),
+            _ => Mirror::Int(0),
+        }
+    }
+
+    fn rust_string_ownership(lit: i64, expected: i64) -> Mirror {
+        // Total (the proof mirror is a plain bool function):
+        // owned exactly at (String literal, String expectation).
+        Mirror::Bool(lit == 3 && expected == 3)
+    }
+
+    fn rust_string_literal_text(contents: &str) -> Mirror {
+        Mirror::Owned(format!("\"{}\"", contents))
+    }
+
+    fn rust_string_literal_owned_text(contents: &str) -> Mirror {
+        Mirror::Owned(format!("\"{}\".to_string()", contents))
+    }
+
+    fn rust_doc_line(line: &str) -> Mirror {
+        Mirror::Owned(format!("//! {}\n", line))
+    }
+
+    fn rust_param_text(name: &str, ty: &str) -> Mirror {
+        Mirror::Owned(format!("{}: {}", name, ty))
+    }
+
+    fn rust_generics_text(joined: &str, present: bool) -> Mirror {
+        Mirror::Owned(if present {
+            format!("<{}>", joined)
+        } else {
+            String::new()
+        })
+    }
+
+    fn rust_signature(name: &str, generics: &str, params: &str, ret: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "pub fn {}{}({}) -> {} {{\n",
+            name, generics, params, ret
+        ))
+    }
+
+    fn rust_precondition_assert(rendered: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "    debug_assert!({}, \"Precondition violated\");\n",
+            rendered
+        ))
+    }
+
+    fn rust_precondition_block(asserts: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "#[cfg(debug_assertions)]\n{{\n{}}}\n\n",
+            asserts
+        ))
+    }
+
+    fn rust_test_name_form(has_name: bool) -> Mirror {
+        Mirror::Int(if has_name { 0 } else { 1 })
+    }
+
+    fn rust_test_case(
+        test_name: &str,
+        fn_name: &str,
+        input_text: &str,
+        expected_text: &str,
+    ) -> Mirror {
+        Mirror::Owned(format!(
+            "    #[test]\n    fn {}() {{\n        let result = {}({});\n        assert_eq!(result, {});\n    }}\n",
+            test_name, fn_name, input_text, expected_text
+        ))
+    }
+
+    fn rust_test_module(tests: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "\n#[cfg(test)]\nmod tests {{\n    use super::*;\n\n{}}}\n",
+            tests
+        ))
+    }
+
+    fn rust_file_fixed_text(piece: i64) -> Mirror {
+        match piece {
+            0 => Mirror::Text("}\n"),
+            1 => Mirror::Text("\n"),
+            _ => Mirror::Unpinned,
+        }
+    }
+
     fn mirror(spec: &str, input: &In) -> Mirror {
         match (spec, input) {
             ("rust_type_name", In::Int(a)) => rust_type_name(*a),
@@ -538,6 +735,24 @@ mod xval3 {
             ("rust_order_form", In::Int(a)) => rust_order_form(*a),
             ("rust_order_separator", In::Int(a)) => rust_order_separator(*a),
             ("rust_condition_wrap", In::Int(a)) => rust_condition_wrap(*a),
+            ("rust_ident_suffix", In::Text(s)) => rust_ident_suffix(s),
+            ("rust_ident_empty", In::Text(s)) => rust_ident_empty(s),
+            ("rust_typed_form", In::Int(a)) => rust_typed_form(*a),
+            ("rust_string_ownership", In::IntPair(a, b)) => rust_string_ownership(*a, *b),
+            ("rust_string_literal_text", In::Text(s)) => rust_string_literal_text(s),
+            ("rust_string_literal_owned_text", In::Text(s)) => {
+                rust_string_literal_owned_text(s)
+            }
+            ("rust_doc_line", In::Text(s)) => rust_doc_line(s),
+            ("rust_param_text", In::StrPair(n, t)) => rust_param_text(n, t),
+            ("rust_generics_text", In::StrBool(j, p)) => rust_generics_text(j, *p),
+            ("rust_signature", In::Str4(n, g, p, r)) => rust_signature(n, g, p, r),
+            ("rust_precondition_assert", In::Text(s)) => rust_precondition_assert(s),
+            ("rust_precondition_block", In::Text(s)) => rust_precondition_block(s),
+            ("rust_test_name_form", In::Bool(b)) => rust_test_name_form(*b),
+            ("rust_test_case", In::Str4(t, f, i, e)) => rust_test_case(t, f, i, e),
+            ("rust_test_module", In::Text(s)) => rust_test_module(s),
+            ("rust_file_fixed_text", In::Int(a)) => rust_file_fixed_text(*a),
             _ => panic!("no mirror for spec {} with input {:?}", spec, input),
         }
     }
@@ -586,8 +801,8 @@ mod xval3 {
         "returns",
     ];
 
-    /// Every spec in the module, in file order (slices 1+2).
-    const ALL_SPECS: [&str; 28] = [
+    /// Every spec in the module, in file order (slices 1–3).
+    const ALL_SPECS: [&str; 44] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -616,12 +831,28 @@ mod xval3 {
         "rust_order_form",
         "rust_order_separator",
         "rust_condition_wrap",
+        "rust_ident_suffix",
+        "rust_ident_empty",
+        "rust_typed_form",
+        "rust_string_ownership",
+        "rust_string_literal_text",
+        "rust_string_literal_owned_text",
+        "rust_doc_line",
+        "rust_param_text",
+        "rust_generics_text",
+        "rust_signature",
+        "rust_precondition_assert",
+        "rust_precondition_block",
+        "rust_test_name_form",
+        "rust_test_case",
+        "rust_test_module",
+        "rust_file_fixed_text",
     ];
 
     /// The Int-code specs swept over the full -2..=30 band
     /// (every spec whose single input is an Int code: 7 from
-    /// slice 1, 18 from slice 2).
-    const INT_BAND_SPECS: [&str; 25] = [
+    /// slice 1, 18 from slice 2, 2 from slice 3).
+    const INT_BAND_SPECS: [&str; 27] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -647,6 +878,8 @@ mod xval3 {
         "rust_order_form",
         "rust_order_separator",
         "rust_condition_wrap",
+        "rust_typed_form",
+        "rust_file_fixed_text",
     ];
 
     /// Constructor names for the rust_pattern_ctor_name grid:
@@ -654,6 +887,117 @@ mod xval3 {
     /// representative rendered constructor names from the
     /// assembly mirrors' golden tests.
     const CTOR_NAMES: [&str; 7] = ["Some", "None", "Ok", "Err", "Pair", "Leaf", ""];
+
+    // ── Slice-3 sweep batteries ────────────────────────────
+
+    /// Already-sanitized NON-keyword names for
+    /// rust_ident_suffix: legitimate outputs of the per-char
+    /// step (letters/digits/underscore, Unicode letters kept,
+    /// a leading non-ASCII digit kept unprefixed) that are
+    /// not keywords — the spec pins identity for each.
+    const IDENT_VALID_NAMES: [&str; 12] = [
+        "sort",
+        "type_",
+        "_",
+        "_x",
+        "a1_b",
+        "empty_list",
+        "caf\u{e9}", // "café": Unicode letters pass sanitization untouched
+        "test_0",
+        "Self_",
+        "x",
+        "while_",
+        "\u{663}x", // leading Arabic-Indic digit: kept, no prefix (ASCII-only check)
+    ];
+
+    /// Names needing char surgery (finding F5) — OUT OF
+    /// CONTRACT for rust_ident_suffix, whose input is the
+    /// sanitized string (never empty, never containing a
+    /// replaced char, never starting with an ASCII digit).
+    /// Executed and reported separately; counted in no
+    /// agreement bucket.
+    const IDENT_OOC_NAMES: [&str; 7] = [
+        "empty-list", // hyphen is replaced by sanitization
+        "type ",      // trailing space is replaced
+        "9lives",     // leading ASCII digit gets a '_' prefix
+        "a.b",        // dot is replaced
+        "---",        // every char is replaced
+        "ma tch",     // interior space is replaced
+        "",           // the sanitized string is never empty
+    ];
+
+    /// String contents battery for the two literal-template
+    /// equations (total: every case pinned). Includes the
+    /// raw-quote and backslash cases the proof file pins —
+    /// the contents render RAW, unescaped.
+    const STRING_CONTENTS: [&str; 9] = [
+        "",
+        "Int",
+        "x",
+        "a\"b",
+        "a\\b",
+        "Vec<i64>",
+        "with space",
+        "caf\u{e9}",
+        "line\nbreak",
+    ];
+
+    /// Doc lines for rust_doc_line (total equation).
+    const DOC_LINES: [&str; 4] = ["Sorts a list", "", "  indented", "one"];
+
+    /// (name, type) pairs for rust_param_text (total equation).
+    const PARAM_PAIRS: [(&str, &str); 5] = [
+        ("a", "i64"),
+        ("list", "Vec<String>"),
+        ("x", "String"),
+        ("", ""),
+        ("name", "()"),
+    ];
+
+    /// (joined, present) cases for rust_generics_text (total:
+    /// both Bool branches are decided by the constraints).
+    const GENERICS_CASES: [(&str, bool); 6] = [
+        ("T", true),
+        ("T, U", true),
+        ("", true),
+        ("T", false),
+        ("", false),
+        ("ignored", false),
+    ];
+
+    /// Signature 4-tuples for rust_signature (total equation).
+    const SIGNATURE_CASES: [(&str, &str, &str, &str); 3] = [
+        ("add", "", "a: i64, b: i64", "i64"),
+        ("sort", "<T>", "list: Vec<T>", "Vec<T>"),
+        ("f", "", "", "()"),
+    ];
+
+    /// Rendered-constraint texts for rust_precondition_assert.
+    const ASSERT_TEXTS: [&str; 4] = ["x > 0", "true", "a", "len > 0"];
+
+    /// Pre-joined assert blocks for rust_precondition_block.
+    const BLOCK_INPUTS: [&str; 3] = [
+        "    debug_assert!(true, \"Precondition violated\");\n",
+        "",
+        "    debug_assert!(a, \"Precondition violated\");\n    debug_assert!(b, \"Precondition violated\");\n",
+    ];
+
+    /// Test-block 4-tuples for rust_test_case (total equation).
+    const TEST_CASES: [(&str, &str, &str, &str); 2] = [
+        ("adds", "add", "3", "7"),
+        ("names", "f", "\"Int\"", "\"Int\""),
+    ];
+
+    /// Pre-joined test blocks for rust_test_module.
+    const MODULE_INPUTS: [&str; 3] = [
+        "X",
+        "",
+        "    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n",
+    ];
+
+    /// Inputs for rust_ident_empty: the pinned empty name
+    /// plus non-empty names (spec-silent here).
+    const IDENT_EMPTY_INPUTS: [&str; 5] = ["", "x", "type", "sort", "_"];
 
     fn sweep(spec: &str) -> Vec<In> {
         match spec {
@@ -667,6 +1011,44 @@ mod xval3 {
                 .iter()
                 .flat_map(|n| [In::Pair(n, false), In::Pair(n, true)])
                 .collect(),
+            "rust_ident_suffix" => KEYWORD_POSITIVES
+                .iter()
+                .chain(IDENT_VALID_NAMES.iter())
+                .chain(IDENT_OOC_NAMES.iter())
+                .map(|s| In::Text(s))
+                .collect(),
+            "rust_ident_empty" => IDENT_EMPTY_INPUTS.iter().map(|s| In::Text(s)).collect(),
+            "rust_string_ownership" => (-2..=30)
+                .flat_map(|lit| (-2..=30).map(move |expected| In::IntPair(lit, expected)))
+                .collect(),
+            "rust_string_literal_text" | "rust_string_literal_owned_text" => {
+                STRING_CONTENTS.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_doc_line" => DOC_LINES.iter().map(|s| In::Text(s)).collect(),
+            "rust_param_text" => PARAM_PAIRS
+                .iter()
+                .map(|(n, t)| In::StrPair(n, t))
+                .collect(),
+            "rust_generics_text" => GENERICS_CASES
+                .iter()
+                .map(|(j, p)| In::StrBool(j, *p))
+                .collect(),
+            "rust_signature" => SIGNATURE_CASES
+                .iter()
+                .map(|(n, g, p, r)| In::Str4(n, g, p, r))
+                .collect(),
+            "rust_precondition_assert" => {
+                ASSERT_TEXTS.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_precondition_block" => {
+                BLOCK_INPUTS.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_test_name_form" => vec![In::Bool(false), In::Bool(true)],
+            "rust_test_case" => TEST_CASES
+                .iter()
+                .map(|(t, f, i, e)| In::Str4(t, f, i, e))
+                .collect(),
+            "rust_test_module" => MODULE_INPUTS.iter().map(|s| In::Text(s)).collect(),
             s if INT_BAND_SPECS.contains(&s) => (-2..=30).map(In::Int).collect(),
             _ => panic!("no sweep defined for spec {}", spec),
         }
@@ -676,9 +1058,12 @@ mod xval3 {
     //  Golden cases — the in-spec tests of codegen.morph (the
     //  case list only; expectations come from the mirrors,
     //  which m3_proof's golden tests pin to these same cases).
-    //  rust_pattern_ctor_name is the one exception: it has no
-    //  in-spec tests, and its golden cases are the proof
-    //  file's pinned assertions (see its arm below).
+    //  Specs whose inputs the test syntax cannot bind
+    //  (rust_pattern_ctor_name, rust_string_ownership,
+    //  rust_param_text, rust_generics_text, rust_signature,
+    //  rust_test_case) have no in-spec tests; their golden
+    //  cases are the proof file's pinned assertions for the
+    //  same specs (see their arms below).
     // ─────────────────────────────────────────────────────────
 
     fn ints(vals: &[i64]) -> Vec<In> {
@@ -754,6 +1139,82 @@ mod xval3 {
             "rust_order_separator" => ints(&[0, 1]),
             // tests: match-wraps 6, loop-wraps 24, literal-bare 9, hole-bare 0
             "rust_condition_wrap" => ints(&[6, 24, 9, 0]),
+            // ── slice 3 ──
+            // tests: type/Self/try suffix; sort, type_, _ pass through
+            "rust_ident_suffix" => ["type", "Self", "try", "sort", "type_", "_"]
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            // test: empty-name
+            "rust_ident_empty" => vec![In::Text("")],
+            // tests: literal-check 9, typed-reenter 22, binop 11, var 10
+            "rust_typed_form" => ints(&[9, 22, 11, 10]),
+            // No in-spec tests (tuple inputs cannot be bound);
+            // golden cases are the proof file's ownership
+            // grid: lit 0..=5 × expected {0,1,2,3,4,5,13,25,26}
+            // (54 cases, all inside the full cross product).
+            "rust_string_ownership" => {
+                let mut v = Vec::new();
+                for lit in 0..=5 {
+                    for e in [0, 1, 2, 3, 4, 5, 13, 25, 26] {
+                        v.push(In::IntPair(lit, e));
+                    }
+                }
+                v
+            }
+            // tests: plain, empty, raw quote
+            "rust_string_literal_text" => ["Int", "", "a\"b"]
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            // tests: owned, owned-empty
+            "rust_string_literal_owned_text" => ["Int", ""]
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            // tests: doc line, empty doc line
+            "rust_doc_line" => ["Sorts a list", ""]
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            // No in-spec tests; proof assertions: (a, i64),
+            // (list, Vec<String>)
+            "rust_param_text" => vec![
+                In::StrPair("a", "i64"),
+                In::StrPair("list", "Vec<String>"),
+            ],
+            // No in-spec tests; proof assertions: absent,
+            // single, joined pair
+            "rust_generics_text" => vec![
+                In::StrBool("", false),
+                In::StrBool("T", true),
+                In::StrBool("T, U", true),
+            ],
+            // No in-spec tests; the proof file's three
+            // signature assertions
+            "rust_signature" => SIGNATURE_CASES
+                .iter()
+                .map(|(n, g, p, r)| In::Str4(n, g, p, r))
+                .collect(),
+            // tests: assert line, assert-true
+            "rust_precondition_assert" => ["x > 0", "true"]
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            // test: block over one assert
+            "rust_precondition_block" => vec![In::Text(BLOCK_INPUTS[0])],
+            // tests: named (true), unnamed (false)
+            "rust_test_name_form" => vec![In::Bool(true), In::Bool(false)],
+            // No in-spec tests; the proof file's two
+            // test-block assertions
+            "rust_test_case" => TEST_CASES
+                .iter()
+                .map(|(t, f, i, e)| In::Str4(t, f, i, e))
+                .collect(),
+            // test: module over the marker "X"
+            "rust_test_module" => vec![In::Text("X")],
+            // tests: fn-close 0, doc-blank 1
+            "rust_file_fixed_text" => ints(&[0, 1]),
             _ => panic!("no golden cases defined for spec {}", spec),
         }
     }
@@ -766,7 +1227,11 @@ mod xval3 {
     //  (`pub fn rust_keyword(name: String) -> bool`); the
     //  pair-input spec is called with (String, bool), matching
     //  `pub fn rust_pattern_ctor_name(name: String,
-    //  has_subs: bool) -> String`.
+    //  has_subs: bool) -> String`; slice 3 adds (i64, i64)
+    //  for rust_string_ownership, (String, String) for
+    //  rust_param_text, (String, bool) for rust_generics_text,
+    //  and (String, String, String, String) for
+    //  rust_signature / rust_test_case.
     // ─────────────────────────────────────────────────────────
 
     fn rust_str_literal(s: &str) -> String {
@@ -843,6 +1308,74 @@ mod xval3 {
                     .collect();
                 format!(
                     "{code}\n\nfn main() {{\n    let __inputs: &[(&str, bool)] = &[{vals}];\n    for &(__n, __h) in __inputs {{\n        let __out = {name}(__n.to_string(), __h);\n        println!(\"{{:?}}\", __out);\n    }}\n}}\n",
+                    code = winner_code,
+                    vals = vals.join(", "),
+                    name = func.name,
+                )
+            }
+            In::IntPair(_, _) => {
+                let vals: Vec<String> = inputs
+                    .iter()
+                    .map(|i| match i {
+                        In::IntPair(a, b) => format!("({}, {})", a, b),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                format!(
+                    "{code}\n\nfn main() {{\n    let __inputs: &[(i64, i64)] = &[{vals}];\n    for &(__a, __b) in __inputs {{\n        let __out = {name}(__a, __b);\n        println!(\"{{:?}}\", __out);\n    }}\n}}\n",
+                    code = winner_code,
+                    vals = vals.join(", "),
+                    name = func.name,
+                )
+            }
+            In::StrPair(_, _) => {
+                let vals: Vec<String> = inputs
+                    .iter()
+                    .map(|i| match i {
+                        In::StrPair(a, b) => {
+                            format!("({}, {})", rust_str_literal(a), rust_str_literal(b))
+                        }
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                format!(
+                    "{code}\n\nfn main() {{\n    let __inputs: &[(&str, &str)] = &[{vals}];\n    for &(__a, __b) in __inputs {{\n        let __out = {name}(__a.to_string(), __b.to_string());\n        println!(\"{{:?}}\", __out);\n    }}\n}}\n",
+                    code = winner_code,
+                    vals = vals.join(", "),
+                    name = func.name,
+                )
+            }
+            In::StrBool(_, _) => {
+                let vals: Vec<String> = inputs
+                    .iter()
+                    .map(|i| match i {
+                        In::StrBool(s, b) => format!("({}, {})", rust_str_literal(s), b),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                format!(
+                    "{code}\n\nfn main() {{\n    let __inputs: &[(&str, bool)] = &[{vals}];\n    for &(__a, __b) in __inputs {{\n        let __out = {name}(__a.to_string(), __b);\n        println!(\"{{:?}}\", __out);\n    }}\n}}\n",
+                    code = winner_code,
+                    vals = vals.join(", "),
+                    name = func.name,
+                )
+            }
+            In::Str4(_, _, _, _) => {
+                let vals: Vec<String> = inputs
+                    .iter()
+                    .map(|i| match i {
+                        In::Str4(a, b, c, d) => format!(
+                            "({}, {}, {}, {})",
+                            rust_str_literal(a),
+                            rust_str_literal(b),
+                            rust_str_literal(c),
+                            rust_str_literal(d)
+                        ),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                format!(
+                    "{code}\n\nfn main() {{\n    let __inputs: &[(&str, &str, &str, &str)] = &[{vals}];\n    for &(__a, __b, __c, __d) in __inputs {{\n        let __out = {name}(__a.to_string(), __b.to_string(), __c.to_string(), __d.to_string());\n        println!(\"{{:?}}\", __out);\n    }}\n}}\n",
                     code = winner_code,
                     vals = vals.join(", "),
                     name = func.name,
@@ -1026,6 +1559,10 @@ mod xval3 {
         /// Distinct winner outputs on unpinned inputs, in the
         /// order first seen (usually one: the wildcard value).
         unpinned_winner_values: Vec<Out>,
+        /// Winner outputs on out-of-contract inputs
+        /// (rust_ident_suffix only), in sweep order: reported,
+        /// counted in no agreement bucket.
+        out_of_contract: Vec<(In, Out)>,
         /// All pinned disagreements, in sweep order.
         disagreements: Vec<Disagreement>,
     }
@@ -1040,7 +1577,10 @@ mod xval3 {
             if golden_set.contains(input) {
                 golden_total += 1;
             }
-            if mirror(spec, input).is_pinned() {
+            let m = mirror(spec, input);
+            if m.is_out_of_contract() {
+                // Counted in no bucket.
+            } else if m.is_pinned() {
                 pinned_total += 1;
             } else {
                 unpinned += 1;
@@ -1056,6 +1596,10 @@ mod xval3 {
         let mut ag = Agreement::default();
         for (input, out) in inputs.iter().zip(outs.iter()) {
             let m = mirror(spec, input);
+            if m.is_out_of_contract() {
+                ag.out_of_contract.push((input.clone(), out.clone()));
+                continue;
+            }
             let is_golden = golden_set.contains(input);
             if is_golden {
                 ag.golden_total += 1;
@@ -1089,7 +1633,7 @@ mod xval3 {
     // ─────────────────────────────────────────────────────────
 
     #[test]
-    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 28 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
+    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 44 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
     fn m3_cross_validation() {
         let root = env!("CARGO_MANIFEST_DIR");
         let out_dir = format!("{}/target/m3-synthesis", root);
@@ -1102,16 +1646,16 @@ mod xval3 {
         let functions = checked.spec.functions.clone();
 
         let mut md = String::new();
-        let _ = writeln!(md, "# M3 cross-validation (slices 1–2): synthesized winners vs tests/m3_proof.rs mirrors");
+        let _ = writeln!(md, "# M3 cross-validation (slices 1–3): synthesized winners vs tests/m3_proof.rs mirrors");
         let _ = writeln!(md);
-        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the complete finite domain (Int codes -2..=30 for the 25 Int-code specs; rust_keyword: 51 positives + 24 near-miss negatives; rust_literal_bool: the full Bool domain; rust_pattern_ctor_name: 7 names × has_subs). See src/m3_cross_validation.rs for sweep definitions and mirror semantics: a case is pinned exactly where the spec's constraints decide it.");
-        let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL). Spec-silent (unpinned) cases are reported separately and never counted as disagreements.");
+        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the complete finite domain (Int codes -2..=30 for the 27 Int-code specs; rust_keyword: 51 positives + 24 near-miss negatives; rust_literal_bool and rust_test_name_form: the full Bool domain; rust_pattern_ctor_name: 7 names × has_subs; slice 3: rust_string_ownership over the full -2..=30 × -2..=30 cross product, the `++` equation templates over string batteries, rust_ident_suffix over its sanitized-string contract domain plus out-of-contract names reported separately). See src/m3_cross_validation.rs for sweep definitions and mirror semantics: a case is pinned exactly where the spec's constraints decide it.");
+        let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL) — except a rustc failure at the frozen emitter's rendering layer (E0369 Concat-operand ownership, Phase 25; E0308 string-boundary rendering; parse-level unescaped-literal failures), which is recorded as COMPILE_EDGE: not executed, not a behavioral disagreement. Spec-silent (unpinned) cases are reported separately and never counted as disagreements; out-of-contract cases (rust_ident_suffix) are reported separately and counted in no bucket.");
         let _ = writeln!(md);
         let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 verified | Winner prov | Golden agree | Sweep pinned agree | Unpinned cases | Exec |");
         let _ = writeln!(md, "|---|---|---|---|---|---|---|---|---|");
 
         let mut details = String::new();
-        let _ = writeln!(details, "\n## Spec-silent behavior + disagreements (first 5 pinned per spec per run)\n");
+        let _ = writeln!(details, "\n## Spec-silent behavior + out-of-contract behavior + disagreements (first 5 pinned per spec per run)\n");
 
         for run in 1..=3usize {
             for func in &functions {
@@ -1181,6 +1725,12 @@ mod xval3 {
                                 run, name, d.input.render(), d.winner.render(), d.mirror.render()
                             );
                         }
+                        for (input, out) in &ag.out_of_contract {
+                            println!(
+                                "XVAL3-OOC|run={}|spec={}|input={}|winner={}",
+                                run, name, input.render(), out.render()
+                            );
+                        }
                         let _ = writeln!(
                             md,
                             "| {} | {} | {:.3} | {} | {} | {}/{} | {}/{} | {} | ok |",
@@ -1190,7 +1740,10 @@ mod xval3 {
                             ag.sweep_pinned_agree, ag.sweep_pinned_total,
                             ag.unpinned
                         );
-                        if !ag.disagreements.is_empty() || ag.unpinned > 0 {
+                        if !ag.disagreements.is_empty()
+                            || ag.unpinned > 0
+                            || !ag.out_of_contract.is_empty()
+                        {
                             let _ = writeln!(details, "### run {} — {}", run, name);
                             if ag.unpinned > 0 {
                                 let vals: Vec<String> =
@@ -1201,6 +1754,21 @@ mod xval3 {
                                     ag.unpinned,
                                     vals.join(", ")
                                 );
+                            }
+                            if !ag.out_of_contract.is_empty() {
+                                let _ = writeln!(
+                                    details,
+                                    "- out of contract (input outside the spec's contract; reported, counted nowhere): {} cases",
+                                    ag.out_of_contract.len()
+                                );
+                                for (input, out) in &ag.out_of_contract {
+                                    let _ = writeln!(
+                                        details,
+                                        "  - input {}: winner {}",
+                                        input.render(),
+                                        out.render()
+                                    );
+                                }
                             }
                             for d in ag.disagreements.iter().take(5) {
                                 let _ = writeln!(
@@ -1222,7 +1790,14 @@ mod xval3 {
                         }
                     }
                     Err(e) => {
-                        record_failure(&mut md, &mut details, run, func, &e, golden_total, pinned_total, unpinned_total);
+                        match compile_edge_kind(&e) {
+                            Some(kind) => {
+                                record_compile_edge(&mut md, &mut details, run, func, kind, &e, golden_total, pinned_total, unpinned_total);
+                            }
+                            None => {
+                                record_failure(&mut md, &mut details, run, func, &e, golden_total, pinned_total, unpinned_total);
+                            }
+                        }
                     }
                 }
             }
@@ -1259,6 +1834,79 @@ mod xval3 {
             details,
             "### run {} — {} — EXECUTION FAILURE\n- {}\n",
             run, func.name, why
+        );
+    }
+
+    /// Classify a runner rustc failure as an emitter
+    /// RENDERING edge (the winner's IR body is not what
+    /// failed — its verbatim Rust rendering is), or None for
+    /// a failure that keeps the standing total-disagreement
+    /// treatment. The three rendering edges measured on
+    /// slice-3 winners (Phase 27), all properties of the
+    /// frozen emitter:
+    ///  - E0369: Concat renders as Rust `+` and the
+    ///    string-ownership rewrite never fires on Concat
+    ///    operands (Phase 25) — a literal-first assembly is
+    ///    `&str + String`.
+    ///  - E0308: the same bare-operand rendering one step
+    ///    later (`String + String`, the RHS never borrowed),
+    ///    and String-scrutinee matches rendered without
+    ///    `.as_str()` (&str patterns against a String).
+    ///  - parse-level: string literals are emitted RAW
+    ///    (contents unescaped), so a literal containing `"`
+    ///    breaks the file's syntax before any type check
+    ///    (`"""`, `", "Precondition violated");"`).
+    /// Anything else (a winner that runs but panics, wrong
+    /// output count, a non-rendering type error) is NOT an
+    /// edge and stays a disagreement.
+    fn compile_edge_kind(err: &str) -> Option<&'static str> {
+        if err.contains("E0369") {
+            Some("E0369 concat-ownership")
+        } else if err.contains("E0308") {
+            Some("E0308 string-boundary rendering")
+        } else if err.contains("mismatched closing delimiter")
+            || err.contains("is unknown")
+            || err.contains("unexpected token")
+            || err.contains("expected one of")
+        {
+            Some("literal-rendering (unescaped string literal)")
+        } else {
+            None
+        }
+    }
+
+    /// The classified exception to record_failure: the
+    /// winner's verbatim code failed rustc at the rendering
+    /// layer (see compile_edge_kind). The winner was NOT
+    /// executed: pinned agreement is unmeasurable for this
+    /// run and this is not a behavioral disagreement. The
+    /// row shows the pinned totals as not-measured (—/N)
+    /// rather than 0/N.
+    #[allow(clippy::too_many_arguments)]
+    fn record_compile_edge(
+        md: &mut String,
+        details: &mut String,
+        run: usize,
+        func: &spec::ast::FunctionSpec,
+        kind: &str,
+        why: &str,
+        golden_total: usize,
+        pinned_total: usize,
+        unpinned_total: usize,
+    ) {
+        println!(
+            "XVAL3|run={}|spec={}|exec=COMPILE_EDGE({})|golden=-/{}|sweep_pinned=-/{}|unpinned={}",
+            run, func.name, kind, golden_total, pinned_total, unpinned_total
+        );
+        let _ = writeln!(
+            md,
+            "| {} | {} | - | - | - | -/{} | -/{} | {} | COMPILE_EDGE ({}): {} |",
+            run, func.name, golden_total, pinned_total, unpinned_total, kind, why
+        );
+        let _ = writeln!(
+            details,
+            "### run {} — {} — COMPILE EDGE ({}, winner not executed)\n- {}\n- The winner's IR body as emitted by the frozen emitter does not compile at the rendering layer (see compile_edge_kind in src/m3_cross_validation.rs). Pinned agreement is not measurable for this run; this is not a behavioral disagreement.\n",
+            run, func.name, kind, why
         );
     }
 
@@ -1300,12 +1948,16 @@ mod xval3 {
 
     /// Pinned-case totals per spec over its sweep, computed
     /// from the spec constraints (partial guard tables pin
-    /// only their rows; the two equation specs and the Bool
-    /// spec are total; rust_pattern_ctor_name pins exactly
-    /// its has_subs == false half). The harness's bookkeeping
-    /// stands or falls with these numbers, so they are pinned
-    /// here, per spec, all 28.
-    const PINNED_TOTALS: [(&str, usize); 28] = [
+    /// only their rows; the equation specs, the Bool specs,
+    /// rust_string_ownership and the `++` templates are
+    /// total; rust_pattern_ctor_name pins exactly its
+    /// has_subs == false half; rust_ident_suffix pins its
+    /// contract domain — 51 keywords + 12 sanitized names —
+    /// with 7 further sweep cases out of contract, counted
+    /// in no bucket). The harness's bookkeeping stands or
+    /// falls with these numbers, so they are pinned here,
+    /// per spec, all 44.
+    const PINNED_TOTALS: [(&str, usize); 44] = [
         ("rust_type_name", 14),
         ("rust_binop_symbol", 17),
         ("rust_unaryop_symbol", 2),
@@ -1334,6 +1986,22 @@ mod xval3 {
         ("rust_order_form", 4),
         ("rust_order_separator", 2),
         ("rust_condition_wrap", 33),
+        ("rust_ident_suffix", 63),
+        ("rust_ident_empty", 1),
+        ("rust_typed_form", 33),
+        ("rust_string_ownership", 1089),
+        ("rust_string_literal_text", 9),
+        ("rust_string_literal_owned_text", 9),
+        ("rust_doc_line", 4),
+        ("rust_param_text", 5),
+        ("rust_generics_text", 6),
+        ("rust_signature", 3),
+        ("rust_precondition_assert", 4),
+        ("rust_precondition_block", 3),
+        ("rust_test_name_form", 2),
+        ("rust_test_case", 2),
+        ("rust_test_module", 3),
+        ("rust_file_fixed_text", 2),
     ];
 
     #[test]
@@ -1381,12 +2049,53 @@ mod xval3 {
         assert_eq!(cn.len(), 14);
         let (_, pinned, unpinned) = totals("rust_pattern_ctor_name", &cn);
         assert_eq!((pinned, unpinned), (7, 7));
-        // Grand totals across the module: 916 cases per run,
-        // 301 pinned, 615 spec-silent.
+        // rust_typed_form: the spec's constraints are total
+        // over Int (9 → 1, 22 → 2, everything else → 0), so
+        // the whole band is pinned, nothing silent.
+        let tf = sweep("rust_typed_form");
+        assert_eq!(tf.len(), 33);
+        let (_, pinned, unpinned) = totals("rust_typed_form", &tf);
+        assert_eq!((pinned, unpinned), (33, 0));
+        // rust_file_fixed_text: only pieces 0 and 1 pinned.
+        let ff = sweep("rust_file_fixed_text");
+        assert_eq!(ff.len(), 33);
+        let (_, pinned, unpinned) = totals("rust_file_fixed_text", &ff);
+        assert_eq!((pinned, unpinned), (2, 31));
+        // rust_string_ownership: total over the full cross
+        // product -2..=30 × -2..=30.
+        let so = sweep("rust_string_ownership");
+        assert_eq!(so.len(), 1089);
+        let (_, pinned, unpinned) = totals("rust_string_ownership", &so);
+        assert_eq!((pinned, unpinned), (1089, 0));
+        // rust_ident_suffix: 51 keywords + 12 sanitized names
+        // pinned; 7 char-surgery names out of contract —
+        // counted in NO bucket (not pinned, not silent).
+        let is = sweep("rust_ident_suffix");
+        assert_eq!(is.len(), 70);
+        let (_, pinned, unpinned) = totals("rust_ident_suffix", &is);
+        assert_eq!((pinned, unpinned), (63, 0));
+        let ooc = is
+            .iter()
+            .filter(|i| mirror("rust_ident_suffix", i).is_out_of_contract())
+            .count();
+        assert_eq!(ooc, 7);
+        // rust_ident_empty: the empty name pinned, the four
+        // non-empty names spec-silent.
+        let ie = sweep("rust_ident_empty");
+        assert_eq!(ie.len(), 5);
+        let (_, pinned, unpinned) = totals("rust_ident_empty", &ie);
+        assert_eq!((pinned, unpinned), (1, 4));
+        // rust_test_name_form: total over the Bool domain.
+        let tn = sweep("rust_test_name_form");
+        assert_eq!(tn.len(), 2);
+        let (_, pinned, unpinned) = totals("rust_test_name_form", &tn);
+        assert_eq!((pinned, unpinned), (2, 0));
+        // Grand totals across the module: 2196 cases per run,
+        // 1539 pinned, 650 spec-silent, 7 out of contract.
         let total_cases: usize = ALL_SPECS.iter().map(|n| sweep(n).len()).sum();
         let total_pinned: usize = PINNED_TOTALS.iter().map(|(_, t)| t).sum();
-        assert_eq!(total_cases, 916);
-        assert_eq!(total_pinned, 301);
+        assert_eq!(total_cases, 2196);
+        assert_eq!(total_pinned, 1539);
     }
 
     #[test]
@@ -1538,6 +2247,105 @@ mod xval3 {
         assert_eq!(ag.sweep_pinned_agree, 1);
         assert_eq!(ag.disagreements.len(), 1);
         assert_eq!(ag.disagreements[0].input, In::Int(28));
+
+        // rust_typed_form is total by its constraints: an
+        // out-of-band code is pinned 0 (delegate), so a
+        // winner returning 1 there IS a disagreement.
+        let inputs = ints(&[9, 22, 28]);
+        let outs = vec![Out::Int(1), Out::Int(2), Out::Int(1)];
+        let ag = compare("rust_typed_form", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 3);
+        assert_eq!(ag.sweep_pinned_agree, 2);
+        assert_eq!(ag.disagreements.len(), 1);
+        assert_eq!(ag.disagreements[0].input, In::Int(28));
+
+        // rust_string_ownership is total over Int × Int:
+        // owned exactly at (3, 3); a false positive at
+        // (3, 26) is a disagreement.
+        let inputs = vec![In::IntPair(3, 3), In::IntPair(3, 26), In::IntPair(0, 3)];
+        let outs = vec![Out::Bool(true), Out::Bool(true), Out::Bool(false)];
+        let ag = compare("rust_string_ownership", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 3);
+        assert_eq!(ag.sweep_pinned_agree, 2);
+        assert_eq!(ag.disagreements.len(), 1);
+        assert_eq!(ag.disagreements[0].input, In::IntPair(3, 26));
+
+        // rust_ident_suffix: a keyword pins name++"_", a
+        // sanitized non-keyword pins identity, and a
+        // char-surgery name is OUT OF CONTRACT — recorded
+        // with the winner's output, counted in no bucket,
+        // whatever the winner returns there.
+        let inputs = vec![
+            In::Text("type"),
+            In::Text("sort"),
+            In::Text("empty-list"),
+        ];
+        let outs = vec![
+            Out::Text("type_".to_string()),
+            Out::Text("sort".to_string()),
+            Out::Text("empty-list".to_string()),
+        ];
+        let ag = compare("rust_ident_suffix", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 2);
+        assert_eq!(ag.sweep_pinned_agree, 2);
+        assert_eq!(ag.unpinned, 0);
+        assert_eq!(ag.out_of_contract.len(), 1);
+        assert_eq!(
+            ag.out_of_contract[0],
+            (In::Text("empty-list"), Out::Text("empty-list".to_string()))
+        );
+        assert!(ag.disagreements.is_empty());
+        // A missing suffix on a keyword IS a disagreement.
+        let outs = vec![
+            Out::Text("type".to_string()),
+            Out::Text("sort".to_string()),
+            Out::Text("anything".to_string()),
+        ];
+        let ag = compare("rust_ident_suffix", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_agree, 1);
+        assert_eq!(ag.disagreements.len(), 1);
+        assert_eq!(ag.disagreements[0].input, In::Text("type"));
+
+        // A `++` template (rust_string_literal_text): the
+        // mirror is the computed quoting; raw contents are
+        // not escaped, so a winner that escapes disagrees.
+        let inputs = vec![In::Text("Int"), In::Text("a\"b")];
+        let outs = vec![
+            Out::Text("\"Int\"".to_string()),
+            Out::Text("\"a\\\"b\"".to_string()),
+        ];
+        let ag = compare("rust_string_literal_text", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 2);
+        assert_eq!(ag.sweep_pinned_agree, 1);
+        assert_eq!(ag.disagreements.len(), 1);
+        assert_eq!(ag.disagreements[0].input, In::Text("a\"b"));
+    }
+
+    #[test]
+    fn xval3_compile_edge_classification() {
+        // The three measured rendering edges classify; a
+        // behavioral failure does not.
+        assert_eq!(
+            compile_edge_kind("rustc failed: error[E0369]: cannot add `String` to `&str`"),
+            Some("E0369 concat-ownership")
+        );
+        assert_eq!(
+            compile_edge_kind("rustc failed: error[E0308]: mismatched types"),
+            Some("E0308 string-boundary rendering")
+        );
+        assert_eq!(
+            compile_edge_kind("rustc failed: error: mismatched closing delimiter: `}`"),
+            Some("literal-rendering (unescaped string literal)")
+        );
+        assert_eq!(
+            compile_edge_kind("rustc failed: error: prefix `violated` is unknown"),
+            Some("literal-rendering (unescaped string literal)")
+        );
+        assert_eq!(compile_edge_kind("runner exited with code 101"), None);
+        assert_eq!(
+            compile_edge_kind("expected 9 output lines, got 4"),
+            None
+        );
     }
 
     #[test]
@@ -1605,6 +2413,61 @@ mod xval3 {
             ag.unpinned_winner_values,
             vec![Out::Text("Some()".to_string())]
         );
+        assert!(ag.disagreements.is_empty());
+
+        // Int-pair spec (slice 3): the runner passes two
+        // i64 codes, matching `pub fn rust_string_ownership(
+        // lit: i64, expected: i64) -> bool`.
+        let so_func = dummy_func("rust_string_ownership", TypeRef::Int, TypeRef::Bool);
+        let inputs = vec![In::IntPair(3, 3), In::IntPair(3, 26), In::IntPair(0, 3)];
+        let so = "pub fn rust_string_ownership(lit: i64, expected: i64) -> bool {\n    lit == 3 && expected == 3\n}\n";
+        let outs = execute_winner(0, &so_func, so, &inputs).expect("ownership winner must run");
+        let ag = compare("rust_string_ownership", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 3);
+        assert_eq!(ag.sweep_pinned_agree, 3);
+        assert!(ag.disagreements.is_empty());
+        let so_wrong = "pub fn rust_string_ownership(lit: i64, expected: i64) -> bool {\n    lit == 3\n}\n";
+        let outs = execute_winner(0, &so_func, so_wrong, &inputs).expect("wrong ownership winner must run");
+        let ag = compare("rust_string_ownership", &inputs, &outs);
+        assert_eq!(ag.disagreements.len(), 1);
+        assert_eq!(ag.disagreements[0].input, In::IntPair(3, 26));
+
+        // String-pair spec (slice 3): the runner passes two
+        // owned Strings, matching `pub fn rust_param_text(
+        // name: String, ty: String) -> String`.
+        let pt_func = dummy_func("rust_param_text", TypeRef::String, TypeRef::String);
+        let inputs = vec![In::StrPair("a", "i64"), In::StrPair("list", "Vec<String>")];
+        let pt = "pub fn rust_param_text(name: String, ty: String) -> String {\n    format!(\"{}: {}\", name, ty)\n}\n";
+        let outs = execute_winner(0, &pt_func, pt, &inputs).expect("param winner must run");
+        let ag = compare("rust_param_text", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 2);
+        assert_eq!(ag.sweep_pinned_agree, 2);
+        assert!(ag.disagreements.is_empty());
+
+        // (String, bool) spec (slice 3): the runner passes
+        // an owned String and the bool directly, matching
+        // `pub fn rust_generics_text(joined: String,
+        // present: bool) -> String`.
+        let gt_func = dummy_func("rust_generics_text", TypeRef::String, TypeRef::String);
+        let inputs = vec![In::StrBool("T", true), In::StrBool("T", false)];
+        let gt = "pub fn rust_generics_text(joined: String, present: bool) -> String {\n    if present { format!(\"<{}>\", joined) } else { String::new() }\n}\n";
+        let outs = execute_winner(0, &gt_func, gt, &inputs).expect("generics winner must run");
+        let ag = compare("rust_generics_text", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 2);
+        assert_eq!(ag.sweep_pinned_agree, 2);
+        assert!(ag.disagreements.is_empty());
+
+        // String 4-tuple spec (slice 3): the runner passes
+        // four owned Strings, matching `pub fn
+        // rust_signature(name: String, generics: String,
+        // params: String, ret: String) -> String`.
+        let sig_func = dummy_func("rust_signature", TypeRef::String, TypeRef::String);
+        let inputs = vec![In::Str4("f", "", "", "()")];
+        let sig = "pub fn rust_signature(name: String, generics: String, params: String, ret: String) -> String {\n    format!(\"pub fn {}{}({}) -> {} {{\\n\", name, generics, params, ret)\n}\n";
+        let outs = execute_winner(0, &sig_func, sig, &inputs).expect("signature winner must run");
+        let ag = compare("rust_signature", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 1);
+        assert_eq!(ag.sweep_pinned_agree, 1);
         assert!(ag.disagreements.is_empty());
     }
 }

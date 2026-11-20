@@ -1,15 +1,16 @@
 // ─────────────────────────────────────────────────────────────
-//  M3 SYNTHESIS PROBE (test-only) — slices 1–2: leaf mappings
-//  + small template families
+//  M3 SYNTHESIS PROBE (test-only) — slices 1–3: leaf mappings,
+//  small template families, name/text assembly
 //
 //  Generalizes the M2 synthesis probe (src/m2_synthesis_probe.rs)
 //  to the Codegen module: runs the real build pipeline (parse →
 //  typecheck → synthesize at opt level 1 → verify_all (Z3) →
 //  select_best → codegen) for every spec in
-//  examples/self_host/codegen.morph (all 28: the 8 slice-1 leaf
-//  mappings and the 20 slice-2 template families, including
-//  the Bool-input rust_literal_bool and the multi-input
-//  rust_pattern_ctor_name), through the module-aware
+//  examples/self_host/codegen.morph (all 44: the 8 slice-1 leaf
+//  mappings, the 20 slice-2 template families, and the 16
+//  slice-3 name/text-assembly specs — String inputs, multi-
+//  String tuples up to 4 params, an Int-code pair, Bool+String
+//  and Bool-only inputs), through the module-aware
 //  path (synthesize_with_module + Verifier::with_specs), exactly
 //  as the M2 probe does for validator.morph / printer.morph.
 //
@@ -20,7 +21,23 @@
 //  exists in the verified pool and whether it is Verified, and
 //  whether the winner's generated Rust compiles standalone
 //  (rustc --crate-type lib on the emitted file — the same check
-//  the M2 phases applied to target/m2-synthesis winners).
+//  the M2 phases applied to target/m2-synthesis winners). For
+//  slice-3 `++` template winners the compile verdict is
+//  recorded factually: the frozen emitter renders Concat as
+//  Rust `+` without the string-ownership rewrite on Concat
+//  operands (the Phase 25 edge), so literal-first assemblies
+//  fail E0369 while variable-first ones compile — the probe
+//  reports the rustc verdict, never a judgment.
+//
+//  For the four slice-3 specs Phase 26 predicted seedless
+//  (rust_ident_suffix, rust_ident_empty, rust_string_ownership,
+//  rust_generics_text) the probe additionally dumps one CAND3
+//  line per verified-pool candidate: provenance, verdict,
+//  status, measured tpr, the spec names the body CALLS (the
+//  composition question for rust_ident_suffix: does any pool
+//  candidate call rust_keyword?), its root shape, and whether
+//  it contains a Concat or a Match — the characterization
+//  evidence for seedless winners.
 //
 //  The probe never asserts on synthesis *quality* — the engine
 //  is randomized — only on pipeline invariants: parse/typecheck
@@ -92,6 +109,155 @@ mod probe3 {
             Provenance::Template { .. } => "Template".to_string(),
             Provenance::HumanGuided => "HumanGuided".to_string(),
         }
+    }
+
+    /// The slice-3 specs Phase 26 predicted seedless; their
+    /// pools are dumped candidate by candidate (CAND3 lines).
+    const SEEDLESS_WATCH: [&str; 4] = [
+        "rust_ident_suffix",
+        "rust_ident_empty",
+        "rust_string_ownership",
+        "rust_generics_text",
+    ];
+
+    /// Body facts for the CAND3 pool dump: the spec names this
+    /// body calls (sorted, deduplicated), its root shape, and
+    /// whether it contains a Concat or a Match anywhere.
+    fn body_facts(node: &IRNode) -> (Vec<String>, &'static str, bool, bool) {
+        use crate::synthesis::engine::IRBinOp;
+        use IRNode::*;
+        fn walk(
+            node: &IRNode,
+            calls: &mut Vec<String>,
+            concat: &mut bool,
+            has_match: &mut bool,
+        ) {
+            match node {
+                Call { function, args } => {
+                    if !calls.contains(function) {
+                        calls.push(function.clone());
+                    }
+                    for a in args {
+                        walk(a, calls, concat, has_match);
+                    }
+                }
+                BinOp(op, l, r) => {
+                    if matches!(op, IRBinOp::Concat) {
+                        *concat = true;
+                    }
+                    walk(l, calls, concat, has_match);
+                    walk(r, calls, concat, has_match);
+                }
+                Match { scrutinee, cases } => {
+                    *has_match = true;
+                    walk(scrutinee, calls, concat, has_match);
+                    for (_, b) in cases {
+                        walk(b, calls, concat, has_match);
+                    }
+                }
+                Block(stmts) => {
+                    for s in stmts {
+                        walk(s, calls, concat, has_match);
+                    }
+                }
+                Let { value, body, .. } => {
+                    walk(value, calls, concat, has_match);
+                    walk(body, calls, concat, has_match);
+                }
+                If { condition, then_branch, else_branch } => {
+                    walk(condition, calls, concat, has_match);
+                    walk(then_branch, calls, concat, has_match);
+                    walk(else_branch, calls, concat, has_match);
+                }
+                While { condition, body, .. } => {
+                    walk(condition, calls, concat, has_match);
+                    walk(body, calls, concat, has_match);
+                }
+                For { start, end, body, .. } => {
+                    walk(start, calls, concat, has_match);
+                    walk(end, calls, concat, has_match);
+                    walk(body, calls, concat, has_match);
+                }
+                Return(e) => walk(e, calls, concat, has_match),
+                UnaryOp(_, e) => walk(e, calls, concat, has_match),
+                Lambda { body, .. } | Closure { body, .. } => {
+                    walk(body, calls, concat, has_match)
+                }
+                Collection { elements, .. } => {
+                    for e in elements {
+                        walk(e, calls, concat, has_match);
+                    }
+                }
+                Map { function, over } | Filter { predicate: function, over } => {
+                    walk(function, calls, concat, has_match);
+                    walk(over, calls, concat, has_match);
+                }
+                Fold { operation, initial, over } => {
+                    walk(operation, calls, concat, has_match);
+                    walk(initial, calls, concat, has_match);
+                    walk(over, calls, concat, has_match);
+                }
+                Sort { comparator, collection } => {
+                    walk(comparator, calls, concat, has_match);
+                    walk(collection, calls, concat, has_match);
+                }
+                Alloc { initial, .. } => walk(initial, calls, concat, has_match),
+                Assign { target, value } => {
+                    walk(target, calls, concat, has_match);
+                    walk(value, calls, concat, has_match);
+                }
+                Typed { node, .. } => walk(node, calls, concat, has_match),
+                Index(c, i) => {
+                    walk(c, calls, concat, has_match);
+                    walk(i, calls, concat, has_match);
+                }
+                Loop { body } => walk(body, calls, concat, has_match),
+                Break { value } => {
+                    if let Some(v) = value {
+                        walk(v, calls, concat, has_match);
+                    }
+                }
+                StructDef { body, .. } => walk(body, calls, concat, has_match),
+                TryPropagate(e) => walk(e, calls, concat, has_match),
+                Hole { .. } | Literal(_) | Var(_) => {}
+            }
+        }
+        let root = match node {
+            Block(_) => "Block",
+            Let { .. } => "Let",
+            If { .. } => "If",
+            While { .. } => "While",
+            For { .. } => "For",
+            Match { .. } => "Match",
+            Call { .. } => "Call",
+            Return(_) => "Return",
+            BinOp(..) => "BinOp",
+            UnaryOp(..) => "UnaryOp",
+            Lambda { .. } => "Lambda",
+            Closure { .. } => "Closure",
+            Collection { .. } => "Collection",
+            Map { .. } => "Map",
+            Filter { .. } => "Filter",
+            Fold { .. } => "Fold",
+            Sort { .. } => "Sort",
+            Alloc { .. } => "Alloc",
+            Assign { .. } => "Assign",
+            Typed { .. } => "Typed",
+            Index(..) => "Index",
+            Loop { .. } => "Loop",
+            Break { .. } => "Break",
+            StructDef { .. } => "StructDef",
+            TryPropagate(_) => "TryPropagate",
+            Hole { .. } => "Hole",
+            Literal(_) => "Literal",
+            Var(_) => "Var",
+        };
+        let mut calls = Vec::new();
+        let mut concat = false;
+        let mut has_match = false;
+        walk(node, &mut calls, &mut concat, &mut has_match);
+        calls.sort();
+        (calls, root, concat, has_match)
     }
 
     fn load_codegen_module() -> Vec<spec::ast::FunctionSpec> {
@@ -191,10 +357,35 @@ mod probe3 {
                     }
                 }
 
+                // Seedless-watch pool dump (Phase 27): for the
+                // four slice-3 specs predicted to have no
+                // constraint seed, characterize EVERY candidate
+                // in the verified pool — provenance, verdict,
+                // measured tpr, called spec names, root shape.
+                if SEEDLESS_WATCH.contains(&name.as_str()) {
+                    for c in &verified {
+                        let (calls, root, concat, has_match) = body_facts(&c.body);
+                        println!(
+                            "CAND3|run={}|{}|prov={}|verified={}|status={:?}|tpr={:.3}|calls=[{}]|root={}|concat={}|match={}",
+                            run,
+                            name,
+                            provenance_name(&c.provenance),
+                            c.verified,
+                            c.verification_status,
+                            c.scores.test_pass_ratio,
+                            calls.join(","),
+                            root,
+                            concat,
+                            has_match
+                        );
+                    }
+                }
+
                 // Phase 5: selection, exactly as `morphic build` does.
                 let winner = selector::select_best(verified, func).expect("select_best");
                 let holes = count_holes(&winner.body);
                 let winner_is_seed = matches!(winner.provenance, Provenance::ConstraintInduced { .. });
+                let (winner_calls, winner_root, winner_concat, _) = body_facts(&winner.body);
 
                 // Phase 6: codegen (rust target), saved + compiled.
                 let (codegen_status, compiles) = match codegen::generate(&winner, "rust") {
@@ -207,7 +398,7 @@ mod probe3 {
                 };
 
                 println!(
-                    "PROBE3|run={}|{}|synth=ok(n={})|ms={}|verified={}/{}|seeds=[{}]|seed_verified={}|winner_verified={}|winner_status={:?}|winner_prov={}|winner_is_seed={}|winner_holes={}|winner_score={:.3}|winner_tpr={:.3}|codegen={}|compiles={}",
+                    "PROBE3|run={}|{}|synth=ok(n={})|ms={}|verified={}/{}|seeds=[{}]|seed_verified={}|winner_verified={}|winner_status={:?}|winner_prov={}|winner_is_seed={}|winner_holes={}|winner_score={:.3}|winner_tpr={:.3}|winner_calls=[{}]|winner_root={}|winner_concat={}|codegen={}|compiles={}",
                     run,
                     name,
                     n_candidates,
@@ -223,6 +414,9 @@ mod probe3 {
                     holes,
                     winner.score,
                     winner.scores.test_pass_ratio,
+                    winner_calls.join(","),
+                    winner_root,
+                    winner_concat,
                     codegen_status,
                     compiles
                 );
