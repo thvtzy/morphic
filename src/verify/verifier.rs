@@ -840,6 +840,21 @@ fn is_well_formed(node: &IRNode) -> bool {
 
 // ── Public API ─────────────────────────────────────────────
 
+/// Whether `body` lies in the verifier's encodable subset for
+/// `spec`: symbolic evaluation over the spec's parameters as
+/// free constants produces a value. This is exactly the
+/// precondition `verify_one` needs before any postcondition
+/// can come back Proven — a body failing it can only ever be
+/// Inconclusive, never Verified. Synthesis consults it when
+/// admitting constraint-derived seeds, so a seed is only built
+/// from a constraint when the verifier can actually judge the
+/// resulting body (an unencodable seed would be one more
+/// Inconclusive pool member, indistinguishable from junk).
+pub fn body_is_encodable(spec: &FunctionSpec, body: &IRNode) -> bool {
+    let mut env = param_env(spec);
+    sym_eval(body, &mut env).is_some()
+}
+
 pub fn verify_all(
     candidates: Vec<CandidateImplementation>,
     spec: &FunctionSpec,

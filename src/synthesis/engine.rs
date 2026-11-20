@@ -97,6 +97,12 @@ pub enum Provenance {
     Crossover { parent_a: u64, parent_b: u64 },
     /// Seeded from test cases (inductive synthesis)
     TestInduced { num_tests: usize },
+    /// Seeded from the spec's constraints — the declared
+    /// contract rather than measured examples: an equation
+    /// constraint used directly as the body, or a set of
+    /// guard-table constraints compiled into a match. `kind`
+    /// is "equation" or "guard_table".
+    ConstraintInduced { kind: String },
     /// Built from predefined template
     Template { template_name: String },
     /// Human-provided partial implementation
@@ -468,18 +474,25 @@ impl SynthesisEngine {
         // Phase 1: Seed the population
         let mut population = self.seed_population(spec)?;
 
-        // Protect the test-induced seeds. They are the only
-        // candidates whose shape is derived from the spec's
-        // measured behavior, and the search phases are free to
-        // lose them: the GA's elitism keeps only the top 10% by
-        // composite score per generation, and nothing else in
-        // Phases 2–3 guarantees their survival. They are re-admitted
-        // just before final scoring (Phase 4), so selection always
-        // sees them; whether they WIN is still up to their scores
-        // and the selector's completeness gate.
+        // Protect the spec-derived seeds (test-induced and
+        // constraint-induced). They are the only candidates
+        // whose shape is derived from the spec itself — its
+        // measured behavior or its declared contract — and the
+        // search phases are free to lose them: the GA's elitism
+        // keeps only the top 10% by composite score per
+        // generation, and nothing else in Phases 2–3 guarantees
+        // their survival. They are re-admitted just before
+        // final scoring (Phase 4), so selection always sees
+        // them; whether they WIN is still up to their scores
+        // and the selector's gates.
         let protected_seeds: Vec<CandidateImplementation> = population
             .iter()
-            .filter(|c| matches!(c.provenance, Provenance::TestInduced { .. }))
+            .filter(|c| {
+                matches!(
+                    c.provenance,
+                    Provenance::TestInduced { .. } | Provenance::ConstraintInduced { .. }
+                )
+            })
             .cloned()
             .collect();
 
@@ -526,13 +539,24 @@ impl SynthesisEngine {
         let template = self.seed_from_templates(spec)?;
         population.extend(template);
 
-        // Seed 3: From LLM (if enabled)
+        // Seed 3: From constraints (spec-derived bodies: an
+        // equation constraint used directly as the body, or a
+        // guard-table constraint set compiled into a match).
+        // These are the only seeds that can be spec-exact on
+        // inputs no test exercises — the range/lookup/test-less
+        // pools previously contained no Verified candidate in
+        // any measured draw, so the refutation gate had nothing
+        // spec-exact to crown there.
+        let constraint_seeds = self.seed_from_constraints(spec);
+        population.extend(constraint_seeds);
+
+        // Seed 4: From LLM (if enabled)
         if self.config.use_llm {
             let llm_seeds = self.seed_from_llm(spec)?;
             population.extend(llm_seeds);
         }
 
-        // Seed 4: Random AST generation (bootstrap diversity)
+        // Seed 5: Random AST generation (bootstrap diversity)
         while population.len() < self.config.population_size {
             let random = self.seed_random(spec);
             population.push(random);
@@ -587,6 +611,54 @@ impl SynthesisEngine {
         };
 
         Ok(vec![candidate])
+    }
+
+    /// Seed 3: candidates built from the spec's constraints —
+    /// the declared contract, where `seed_from_tests` uses the
+    /// measured examples. Two shapes are admitted, each only
+    /// when the resulting body lies in the verifier's encodable
+    /// subset (a seed the verifier cannot judge would be one
+    /// more Inconclusive pool member, indistinguishable from
+    /// the junk this family exists to displace):
+    ///
+    /// - **equation**: a postcondition `output == <expr>` whose
+    ///   right-hand side converts to IR whole (no dropped
+    ///   subexpressions) becomes a candidate whose body is that
+    ///   expression — the spec states its body outright.
+    /// - **guard table**: a set of postconditions of the form
+    ///   `<guard on the input> || output == <literal>` becomes
+    ///   one match over the input with an arm per row plus a
+    ///   wildcard arm carrying the typed-literal default for
+    ///   the return type (the spec is silent off-table; the
+    ///   default is a documented guess).
+    ///
+    /// A spec whose constraints fit neither shape — including
+    /// equations whose bodies call other specs, which convert
+    /// but do not encode — gets no constraint seed and behaves
+    /// exactly as before.
+    fn seed_from_constraints(&self, spec: &FunctionSpec) -> Vec<CandidateImplementation> {
+        let mut seeds = Vec::new();
+        let mut admit = |kind: &str, body: IRNode| {
+            seeds.push(CandidateImplementation {
+                id: self.new_id(),
+                body,
+                spec_name: spec.name.clone(),
+                spec: spec.clone(),
+                score: 0.0,
+                scores: empty_scores(),
+                generation: 0,
+                provenance: Provenance::ConstraintInduced { kind: kind.into() },
+                verified: false,
+                verification_status: None,
+            });
+        };
+        if let Some(body) = equation_seed_body(spec) {
+            admit("equation", body);
+        }
+        if let Some(body) = guard_table_seed_body(spec) {
+            admit("guard_table", body);
+        }
+        seeds
     }
 
     fn seed_from_templates(&self, spec: &FunctionSpec) -> Result<Vec<CandidateImplementation>, SynthesisError> {
@@ -2491,6 +2563,265 @@ fn parse_rust_into_ir(code: &str, _spec: &FunctionSpec) -> Result<Vec<CandidateI
         verified: false,
         verification_status: None,
     }])
+}
+
+// ── Constraint-derived seed bodies ────────────────────────
+//
+// The two builders below read the spec's postconditions (the
+// parser stores every `constraint:` line there) and produce a
+// candidate body from the declared contract alone. Both are
+// total and conservative: any shape they do not recognize
+// yields None, never a guessed body.
+
+/// The variable postconditions state the result with. The
+/// verifier binds the candidate's symbolic value under exactly
+/// this name (see verify::verifier::verify_constraint), and
+/// every spec in the tree writes it so.
+const OUTPUT_VAR: &str = "output";
+
+/// The equation seed's body: the right-hand side of the first
+/// postcondition of the form `output == <expr>` (either
+/// orientation), converted with the same `expr_to_ir` the
+/// test-induced seed uses. Admitted only when the conversion
+/// is whole — `expr_to_ir` drops subexpressions it cannot
+/// represent into Holes, and a holed body is not the spec's
+/// body — the body does not mention `output` itself, and the
+/// verifier can encode it (composition equations, whose
+/// bodies call other specs, fail here and are skipped).
+fn equation_seed_body(spec: &FunctionSpec) -> Option<IRNode> {
+    for c in &spec.postconditions {
+        let (lhs, rhs) = match c {
+            Constraint::Expr(Expr::BinOp(BinOp::Eq, l, r)) => (l.as_ref(), r.as_ref()),
+            Constraint::Eq(l, r) => (l, r),
+            _ => continue,
+        };
+        let body_expr = if matches!(lhs, Expr::Var(v) if v == OUTPUT_VAR) {
+            rhs
+        } else if matches!(rhs, Expr::Var(v) if v == OUTPUT_VAR) {
+            lhs
+        } else {
+            continue;
+        };
+        if expr_mentions_var(body_expr, OUTPUT_VAR) {
+            continue;
+        }
+        let body = expr_to_ir(body_expr);
+        if count_holes(&body) > 0 {
+            continue;
+        }
+        if crate::verify::verifier::body_is_encodable(spec, &body) {
+            return Some(body);
+        }
+    }
+    None
+}
+
+fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Var(v) => v == name,
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => false,
+        Expr::Field(inner, _) => expr_mentions_var(inner, name),
+        Expr::Index(coll, idx) => {
+            expr_mentions_var(coll, name) || expr_mentions_var(idx, name)
+        }
+        Expr::Call(_, args) => args.iter().any(|a| expr_mentions_var(a, name)),
+        Expr::BinOp(_, l, r) => expr_mentions_var(l, name) || expr_mentions_var(r, name),
+        Expr::UnaryOp(_, inner) => expr_mentions_var(inner, name),
+        Expr::Lambda(_, body) => expr_mentions_var(body, name),
+        Expr::Length(inner) => expr_mentions_var(inner, name),
+        Expr::Comprehension { collection, body, .. } => {
+            expr_mentions_var(collection, name) || expr_mentions_var(body, name)
+        }
+    }
+}
+
+/// The guard-table seed's body: one match over the spec's
+/// single Int parameter, with one literal arm per usable
+/// guard row and a wildcard arm carrying the typed-literal
+/// default for the return type (the Phase 10 menu's first
+/// entry — the spec is silent off-table, so the default is a
+/// documented guess; the Phase 15 classification showed the
+/// mirrors return exactly that default on unpinned cases).
+/// Rows pinning an already-pinned input are skipped (the
+/// first row wins). Admitted only when at least one row is
+/// usable and the verifier can encode the match.
+fn guard_table_seed_body(spec: &FunctionSpec) -> Option<IRNode> {
+    if spec.params.len() != 1 {
+        return None;
+    }
+    let param = &spec.params[0];
+    if !is_int_family(&param.ty) {
+        return None;
+    }
+    let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+    for c in &spec.postconditions {
+        if let Some((pinned, output)) = guard_row(c, &param.name) {
+            if cases
+                .iter()
+                .any(|(p, _)| matches!(p, IRPattern::Literal(IRLiteral::Int(v)) if *v == pinned))
+            {
+                continue;
+            }
+            cases.push((IRPattern::Literal(IRLiteral::Int(pinned)), output));
+        }
+    }
+    if cases.is_empty() {
+        return None;
+    }
+    let default = typed_literal_fillings(&spec.return_type)?
+        .into_iter()
+        .next()?;
+    cases.push((IRPattern::Wildcard, default));
+    let body = IRNode::Match {
+        scrutinee: Box::new(IRNode::Var(param.name.clone())),
+        cases,
+    };
+    if crate::verify::verifier::body_is_encodable(spec, &body) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+fn is_int_family(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Int
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+    )
+}
+
+/// One guard-table row, from a postcondition of the form
+/// `<guard on the input> || output == <literal>` — the shape
+/// the spec dialect writes lookup tables in ("param<v ||
+/// param>v || output==lit" reads as "param == v implies
+/// output == lit": the constraint can only hold at param == v
+/// if the output pin does). Returns the pinned input value
+/// and the pinned output as an IR literal.
+///
+/// Recognition is by evaluation, not by pattern-matching one
+/// exact guard spelling: the Or's leaves must be exactly one
+/// output pin plus comparisons of the single parameter
+/// against Int constants, and the row pins a value only where
+/// EVERY guard leaf is false. The integers around the guard
+/// constants are probed: outside the outermost constants each
+/// comparison's truth is stable, and the two extra probe
+/// points on each side expose a false-region extending to
+/// infinity, so exactly one falsifying probe point ⟺ the
+/// guard pins exactly that single value. A row pinning a
+/// range, carrying two output pins, or mentioning anything
+/// else is not a row.
+fn guard_row(c: &Constraint, param: &str) -> Option<(i64, IRNode)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let mut leaves = Vec::new();
+    flatten_or(expr, &mut leaves);
+    if leaves.len() < 2 {
+        return None;
+    }
+    let mut pin: Option<IRNode> = None;
+    let mut guards: Vec<(BinOp, bool, i64)> = Vec::new();
+    for leaf in leaves {
+        if let Expr::BinOp(BinOp::Eq, l, r) = leaf {
+            let lit = if matches!(l.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(r.as_ref())
+            } else if matches!(r.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(l.as_ref())
+            } else {
+                None
+            };
+            if let Some(lit) = lit {
+                if pin.is_some() {
+                    return None; // two output pins in one row: ambiguous
+                }
+                let node = expr_to_ir(lit);
+                if !matches!(node, IRNode::Literal(_)) {
+                    return None; // the pin must be a literal value
+                }
+                pin = Some(node);
+                continue;
+            }
+            // An Eq leaf that does not pin the output may still
+            // be a guard on the parameter (param == v): fall
+            // through to guard parsing.
+        }
+        guards.push(guard_leaf(leaf, param)?);
+    }
+    let pin = pin?;
+    if guards.is_empty() {
+        return None;
+    }
+    let lo = guards.iter().map(|g| g.2).min()? - 2;
+    let hi = guards.iter().map(|g| g.2).max()? + 2;
+    let mut pinned: Option<i64> = None;
+    for x in lo..=hi {
+        if guards.iter().all(|g| !guard_leaf_holds(g, x)) {
+            if pinned.is_some() {
+                return None; // pins a range, not a single value
+            }
+            pinned = Some(x);
+        }
+    }
+    Some((pinned?, pin))
+}
+
+fn flatten_or<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::BinOp(BinOp::Or, l, r) => {
+            flatten_or(l, out);
+            flatten_or(r, out);
+        }
+        _ => out.push(expr),
+    }
+}
+
+/// A guard leaf normalized to (operator, constant_on_left,
+/// constant): a comparison between the parameter and an Int
+/// constant, in either operand order. Anything else — another
+/// variable, a compound side, a non-comparison operator — is
+/// not a guard leaf.
+fn guard_leaf(leaf: &Expr, param: &str) -> Option<(BinOp, bool, i64)> {
+    let Expr::BinOp(op, l, r) = leaf else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Neq
+    ) {
+        return None;
+    }
+    match (l.as_ref(), r.as_ref()) {
+        (Expr::Var(v), Expr::IntLit(n)) if v == param => Some((*op, false, *n)),
+        (Expr::IntLit(n), Expr::Var(v)) if v == param => Some((*op, true, *n)),
+        _ => None,
+    }
+}
+
+/// Does the normalized guard leaf hold at `param == x`?
+fn guard_leaf_holds(guard: &(BinOp, bool, i64), x: i64) -> bool {
+    let (op, constant_on_left, constant) = guard;
+    let (a, b) = if *constant_on_left {
+        (*constant, x)
+    } else {
+        (x, *constant)
+    };
+    match op {
+        BinOp::Lt => a < b,
+        BinOp::Le => a <= b,
+        BinOp::Gt => a > b,
+        BinOp::Ge => a >= b,
+        BinOp::Eq => a == b,
+        BinOp::Neq => a != b,
+        _ => unreachable!("guard_leaf admits only comparisons"),
+    }
 }
 
 pub fn expr_to_pattern(expr: &Expr) -> IRPattern {

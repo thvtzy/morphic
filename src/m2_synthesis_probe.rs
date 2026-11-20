@@ -76,6 +76,7 @@ mod probe {
             Provenance::Mutation { .. } => "Mutation",
             Provenance::Crossover { .. } => "Crossover",
             Provenance::TestInduced { .. } => "TestInduced",
+            Provenance::ConstraintInduced { .. } => "ConstraintInduced",
             Provenance::Template { .. } => "Template",
             Provenance::HumanGuided => "HumanGuided",
         }
