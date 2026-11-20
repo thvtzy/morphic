@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **M2 self-host specs** — `examples/self_host/validator.morph` (type checker lite: type-tag/node-kind domains, node arity table, lite tag compatibility, recursion depth guard) and `examples/self_host/printer.morph` (IR → text: type/kind/operator name lookups, parenthesis precedence rule, line-width rule), written in the dialect the current parser + typechecker verifiably accept
+- **M2 proof tests** — `tests/m2_proof.rs`: pure-Rust mirror implementations with golden tests for every spec test case (including the multi-input specs the spec test syntax cannot bind), plus end-to-end `morphic check` pipeline tests with negative controls; the e2e self-host suite now also covers both new spec files
+
+Tests: 59/59 passing (25 unit + 8 e2e + 21 M2 proof + 5 tokenizer proof), 2 ignored
+
+---
+
 ## [0.4.0] — 2026-06-09
 
 ### Added

@@ -160,10 +160,16 @@ spec test_tokenizer_equivalence {
 - [ ] **Gate**: 100% golden test pass + Z3 verified
 
 ### M2: Pretty-Printer + Validator
-- [ ] Tulis `validator.morph` (type checker lite)
-- [ ] Tulis `printer.morph` (IR → text)
+- [x] Tulis `validator.morph` (type checker lite)
+- [x] Tulis `printer.morph` (IR → text)
 - [ ] Same validation pipeline as M1
 - [ ] **Gate**: Both pass independently
+
+> **Progress note (2026-11-20):** `examples/self_host/validator.morph` (7 specs: type-tag/node-kind domains, arity table, lite tag compatibility, depth guard) and `examples/self_host/printer.morph` (7 specs: type/kind/operator name lookups, precedence `needs_parens`, line-width rule) are written and are the first self-host specs verified end-to-end by the real pipeline: both pass `morphic check` (parser + typechecker in the compiled binary), enforced by `tests/m2_proof.rs` — which also carries pure-Rust mirror implementations with golden tests for every spec test case (the M0 Phase B pattern), plus negative controls proving `check` rejects invalid specs. Full suite: 59 passed / 0 failed.
+>
+> **Still open for the M2 gate:** no synthesis run yet for these specs (LLM seed → MCTS → Z3 verify → codegen), and no cross-validation of synthesized output against a Rust original — the Rust code in `tests/m2_proof.rs` is a hand-written mirror, not generated code. The gate therefore stays unchecked.
+>
+> **Baseline discovery while doing M2:** none of the pre-existing example specs (`sort.morph`, `binary_search.morph`, `functional_tokenizer.morph`, `self_host/is_sorted.morph`, `self_host/count_matching.morph`) currently pass `morphic check` — they use syntax the parser does not implement (no module wrapper, `if/then`, `implies`, record/list literals in tests, spaced operators; two files also trip a byte-boundary panic in the parser's error-snippet code at `src/spec/parser.rs:1094`). The M2 specs are written in the parser's actually-supported dialect, documented in their file headers. Wiring the older examples into `check` (or fixing the parser gaps) is future work, separate from M2.
 
 ### M3: Codegen (biggest risk)
 - [ ] Tulis `codegen.morph` (IR → Rust, 1 target dulu)

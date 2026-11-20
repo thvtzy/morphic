@@ -1,0 +1,164 @@
+// =================================================================
+//  M2: Validator -- "type checker lite"
+//  Self-host spec for validating Morphic AST nodes.
+//
+//  Same pattern as M0/M1: ADTs are simulated with Int codes
+//  (see functional_tokenizer.morph -- TokenKind = Int), and every
+//  check is a pure function over explicit values. No self, no
+//  &mut, no OOP -- the IR can synthesize this.
+//
+//  DIALECT NOTE (verified against the real parser, 2026-11-20):
+//  these specs are written in the subset the current parser +
+//  typechecker actually accept, and are verified end-to-end by
+//  `morphic check` in tests/m2_proof.rs. Two parser realities
+//  shape the style below:
+//    1. Operator loops in the expression parser do not skip
+//       whitespace, so operators inside expressions are written
+//       tight: (tag>=0&&tag<=8), tag<1||tag>1||output==0.
+//    2. A constraint may not start with '(' and there is no
+//       if/implies syntax ('!=' is also unreachable in the
+//       expression parser), so lookup tables are written as
+//       per-row guards: kind<2||kind>2||output==2 reads as
+//       "kind == 2 implies output == 2".
+//  Specs with more than one input cannot bind a tuple test input
+//  in the current test syntax, so their executable golden tests
+//  live in tests/m2_proof.rs (same approach as M0 Phase B).
+// =================================================================
+
+Validator {
+
+// -- Types --------------------------------------------------
+
+// Type tags for the lite checker.
+// 0=Unknown, 1=Int, 2=Float, 3=Bool, 4=String, 5=Char,
+// 6=List, 7=Option, 8=Result
+type TypeTag = Int;
+
+// AST node kinds, coded exactly as in printer.morph.
+// 0=Literal, 1=Variable, 2=BinaryOp, 3=UnaryOp, 4=Call,
+// 5=Index, 6=FieldAccess, 7=Lambda, 8=ListLiteral, 9=Comprehension
+type NodeKind = Int;
+
+// State of the lite checker, passed explicitly (never mutated).
+type CheckState = {
+    errors: Int,
+    warnings: Int,
+    depth: Int
+}
+
+// -- Tag / kind domains -------------------------------------
+
+spec is_known_type_tag {
+    doc: "A type tag is known when it names a built-in or container type."
+    input: tag: Int
+    output: Bool
+
+    constraint: output == (tag>=0&&tag<=8)
+
+    optimize: time < O(n)
+
+    test "unknown-tag" { input: 0 expect: true }
+    test "int-tag" { input: 1 expect: true }
+    test "result-tag" { input: 8 expect: true }
+    test "out-of-range" { input: 9 expect: false }
+    test "far-out" { input: 42 expect: false }
+}
+
+spec is_known_node_kind {
+    doc: "A node kind is known when the validator has a rule for it."
+    input: kind: Int
+    output: Bool
+
+    constraint: output == (kind>=0&&kind<=9)
+
+    optimize: time < O(n)
+
+    test "literal-kind" { input: 0 expect: true }
+    test "comprehension-kind" { input: 9 expect: true }
+    test "unknown-kind" { input: 10 expect: false }
+}
+
+// -- Node shape rules ---------------------------------------
+
+spec node_arity {
+    doc: "Fixed child count per node kind. Variadic kinds (Call, ListLiteral) are not pinned here."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==0
+    constraint: kind<3||kind>3||output==1
+    constraint: kind<6||kind>6||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<5||kind>5||output==2
+    constraint: output >= 0
+
+    optimize: time < O(n)
+
+    test "literal-arity" { input: 0 expect: 0 }
+    test "variable-arity" { input: 1 expect: 0 }
+    test "unary-arity" { input: 3 expect: 1 }
+    test "binary-arity" { input: 2 expect: 2 }
+    test "index-arity" { input: 5 expect: 2 }
+}
+
+spec is_literal_kind {
+    doc: "Only kind 0 (Literal) carries a self-contained value."
+    input: kind: Int
+    output: Bool
+
+    constraint: output == (kind==0)
+
+    optimize: time < O(n)
+
+    test "literal" { input: 0 expect: true }
+    test "binary-not-literal" { input: 2 expect: false }
+    test "call-not-literal" { input: 4 expect: false }
+}
+
+// -- Type compatibility (lite) ------------------------------
+
+spec tags_compatible {
+    doc: "Lite assignability: tags must match, unless either side is Unknown (0), which accepts anything."
+    input: expected: Int, actual: Int
+    output: Bool
+
+    constraint: output == (expected==actual||actual==0||expected==0)
+
+    optimize: time < O(n)
+
+    // Executable golden tests: tests/m2_proof.rs (multi-input specs
+    // cannot bind a tuple test input in the current spec syntax).
+}
+
+// -- Composition + recursion guard --------------------------
+
+spec validate_kind_tag {
+    doc: "Composition proof: one spec may call another spec in the same module."
+    input: kind: Int
+    output: Bool
+
+    constraint: output == is_known_node_kind(kind)
+
+    optimize: time < O(n)
+
+    test "call-kind-ok" { input: 4 expect: true }
+    test "bad-kind-rejected" { input: 77 expect: false }
+}
+
+spec max_depth_ok {
+    doc: "Recursion guard of the lite checker: expression nesting is capped at 64."
+    input: depth: Int
+    output: Bool
+
+    constraint: output == (depth>=1&&depth<=64)
+
+    optimize: time < O(n)
+
+    test "shallow" { input: 1 expect: true }
+    test "at-cap" { input: 64 expect: true }
+    test "over-cap" { input: 65 expect: false }
+    test "zero-depth" { input: 0 expect: false }
+}
+
+}
