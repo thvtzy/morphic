@@ -4389,6 +4389,15 @@ mod tests {
     /// phase freezes the emitter, so wrap_vec's generated code
     /// is asserted byte-for-byte and exclaim carries the
     /// compile leg.
+    ///
+    /// Phase 29 update (re-pin E-1/E-2 of the unfreeze
+    /// inventory): the user approved unfreezing the emitter
+    /// for exactly this defect family, and the Concat arm now
+    /// renders the left operand owned and the right operand
+    /// borrowed. wrap_vec's generated code is therefore
+    /// `(("Vec<".to_string() + &inner) + ">")` and BOTH specs
+    /// carry a compile leg below; exclaim's rendering is
+    /// unchanged (a literal right operand stays a bare &str).
     #[test]
     fn concat_equation_seed_is_verified_and_wins() {
         let src = r#"
@@ -4481,13 +4490,37 @@ spec exclaim {
             "the winning body must be the constraint's own expression"
         );
 
-        // The generated code is the emitter's current Concat
-        // rendering, byte-for-byte (see the doc comment above
-        // for why this shape is not the compile leg).
+        // The generated code is the emitter's Concat
+        // rendering after the Phase 29 fix, byte-for-byte:
+        // left operand owned, right operand borrowed.
         let code = crate::codegen::generate(&winner, "rust").expect("codegen");
         assert!(
-            code.contains(r#"(("Vec<" + inner) + ">")"#),
-            "generated code must render the assembly with `+`:\n{}",
+            code.contains(r#"(("Vec<".to_string() + &inner) + ">")"#),
+            "generated code must render the assembly owned/borrowed:\n{}",
+            code
+        );
+
+        // And it compiles — the leg this shape could not
+        // carry before Phase 29 (same standalone rustc check
+        // as exclaim's, below).
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_concat_e2e_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("wrap_vec.rs");
+        std::fs::write(&file, &code).unwrap();
+        let out = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "--crate-type", "lib"])
+            .arg(&file)
+            .arg("-o")
+            .arg(dir.join("libwrap_vec.rlib"))
+            .output()
+            .expect("failed to run rustc");
+        assert!(
+            out.status.success(),
+            "generated Rust failed to compile:\n{}\n--- code ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
             code
         );
 

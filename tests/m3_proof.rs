@@ -569,20 +569,45 @@ fn rust_string_ownership(lit: i64, expected: i64) -> bool {
     lit == 3 && expected == 3
 }
 
+/// The emitter's string escaping, hand-mirrored (Phase
+/// 29): `"` and `\` take a backslash; `\n`, `\r`, `\t`
+/// use their short forms; other control characters use
+/// `\u{...}`; everything else (including non-ASCII text)
+/// is emitted as-is. The rule is per-character (F5), so
+/// it lives here and in the emitter, not in the spec —
+/// the spec pins the wrap on the identity subdomain.
+fn escape_rust_str_mirror(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Mirror of the bare String literal rendering
-/// (src/codegen/mod.rs:610; the same template in pattern
-/// position at src/codegen/mod.rs:820): quote + RAW
-/// contents + quote — no escaping, so a quote inside the
-/// contents renders as-is.
+/// (src/codegen/mod.rs; the same template in pattern
+/// position): quote + ESCAPED contents + quote (Phase
+/// 29 — before the unfreeze the contents rendered RAW).
 fn rust_string_literal_text(contents: &str) -> String {
-    format!("\"{}\"", contents)
+    format!("\"{}\"", escape_rust_str_mirror(contents))
 }
 
 /// Mirror of the owned String literal rendering
-/// (src/codegen/mod.rs:553): the bare template with
-/// `.to_string()` appended.
+/// (src/codegen/mod.rs): the bare template with
+/// `.to_string()` appended, composed exactly as the
+/// emitter's typed arm composes the literal arm.
 fn rust_string_literal_owned_text(contents: &str) -> String {
-    format!("\"{}\".to_string()", contents)
+    format!("{}.to_string()", rust_string_literal_text(contents))
 }
 
 /// Mirror of one doc-header line (src/codegen/mod.rs:73).
@@ -1853,14 +1878,21 @@ mod golden_tests {
 
     #[test]
     fn string_literal_templates() {
-        // .morph tests: plain, empty, raw quote
+        // .morph tests: plain, empty, symbol text
         assert_eq!(rust_string_literal_text("Int"), "\"Int\"");
         assert_eq!(rust_string_literal_text(""), "\"\"");
-        // The contents render RAW: a quote or backslash
-        // inside is not escaped (a quote breaks the
-        // generated Rust — pinned as-is)
-        assert_eq!(rust_string_literal_text("a\"b"), "\"a\"b\"");
-        assert_eq!(rust_string_literal_text("a\\b"), "\"a\\b\"");
+        assert_eq!(rust_string_literal_text("Vec<i64>"), "\"Vec<i64>\"");
+        // The contents are ESCAPED (Phase 29): a quote, a
+        // backslash and a newline inside the contents take
+        // their Rust escape forms — this is where the
+        // escaping rule is pinned (the spec equation pins
+        // only the wrap, on the identity subdomain)
+        assert_eq!(rust_string_literal_text("a\"b"), "\"a\\\"b\"");
+        assert_eq!(rust_string_literal_text("a\\b"), "\"a\\\\b\"");
+        assert_eq!(
+            rust_string_literal_text("line\nbreak"),
+            "\"line\\nbreak\""
+        );
         // .morph tests: owned forms
         assert_eq!(
             rust_string_literal_owned_text("Int"),

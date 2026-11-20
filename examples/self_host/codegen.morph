@@ -465,7 +465,7 @@ spec rust_type_midfix {
 // -- Literal rendering ------------------------------------------
 
 spec rust_literal_form {
-    doc: "Rendering family of an IR literal in expression position (the Literal arm of ir_to_rust_expr, src/codegen/mod.rs:605-612); pattern position uses the same six kinds with its own fallback table (rust_pattern_literal_form). 0 = decimal text of the value (Int: n.to_string()), 1 = f64 Display text (Float: f.to_string() -- 1.0 renders '1', not '1.0'), 2 = value text (Bool, via rust_literal_bool), 3 = quoted-raw template (String: a quote, the contents with NO escaping, a quote -- a quote inside the string renders as-is and breaks the generated Rust), 4 = quoted template (Char: a single quote, the character, a single quote), 5 = fixed text (Unit, via rust_literal_fixed_text). Total over all six IRLiteral kinds. Families 0 and 1 are classifications only: turning a number into its decimal/Display text is not expressible in the spec language (no Int -> String conversion, no float formatting), and families 3 and 4 need the concatenation the language lacks -- all recorded in the ROAD M3 notes. What is pinned here is WHICH rule applies to each kind, completely."
+    doc: "Rendering family of an IR literal in expression position (the Literal arm of ir_to_rust_expr, src/codegen/mod.rs:605-612); pattern position uses the same six kinds with its own fallback table (rust_pattern_literal_form). 0 = decimal text of the value (Int: n.to_string()), 1 = f64 Display text (Float: f.to_string() -- 1.0 renders '1', not '1.0'), 2 = value text (Bool, via rust_literal_bool), 3 = quoted template (String: a quote, the escaped contents, a quote -- the escape rule is per-character and mirror-pinned, Phase 29), 4 = quoted template (Char: a single quote, the escaped character, a single quote), 5 = fixed text (Unit, via rust_literal_fixed_text). Total over all six IRLiteral kinds. Families 0 and 1 are classifications only: turning a number into its decimal/Display text is not expressible in the spec language (no Int -> String conversion, no float formatting), and families 3 and 4 need the concatenation the language lacks -- all recorded in the ROAD M3 notes. What is pinned here is WHICH rule applies to each kind, completely."
     input: kind: Int
     output: Int
 
@@ -543,7 +543,7 @@ spec rust_pattern_fixed_text {
 }
 
 spec rust_pattern_literal_form {
-    doc: "Rendering family of a literal inside a pattern (the Literal arm of ir_pattern_to_rust, src/codegen/mod.rs:817-822): 0 = value text (Int renders its decimal text; Bool renders via rust_literal_bool), 1 = wildcard fallback (Float, Char and Unit patterns render '_' regardless of value -- pinned by rust_pattern_literal_text; such a pattern therefore matches EVERYTHING, silently widening the match arm), 2 = quoted-raw template (String: a quote, the contents with no escaping, a quote -- as in expression position). Total over all six IRLiteral kinds."
+    doc: "Rendering family of a literal inside a pattern (the Literal arm of ir_pattern_to_rust, src/codegen/mod.rs:817-822): 0 = value text (Int renders its decimal text; Bool renders via rust_literal_bool), 1 = wildcard fallback (Float, Char and Unit patterns render '_' regardless of value -- pinned by rust_pattern_literal_text; such a pattern therefore matches EVERYTHING, silently widening the match arm), 2 = quoted template (String: a quote, the escaped contents, a quote -- as in expression position; the escape rule is per-character and mirror-pinned, Phase 29). Total over all six IRLiteral kinds."
     input: kind: Int
     output: Int
 
@@ -591,7 +591,7 @@ spec rust_pattern_ctor_name {
 // -- Spec-expression templates (expr_to_rust) -------------------
 
 spec rust_expr_form {
-    doc: "Rendering family of a spec expression in expr_to_rust (src/codegen/mod.rs:1177-1200) -- the walker that emits spec tests into generated code (generate_rust's test module) and constraint operands into precondition asserts: 0 = name (Var: the rust_ident-rendered name), 1 = decimal text (IntLit), 2 = value text (BoolLit, via rust_literal_bool), 3 = quoted-raw template (StringLit), 4 = call template (the name, then '(' + args joined ', ' + ')'), 5 = binary template ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from spec_binop_symbol, slice 1), 6 = fallback fixed text '??' (via rust_expr_fixed_text). Total over all thirteen Expr kinds. Two sharp edges of the original are pinned deliberately: FloatLit (2) and UnaryOp (9) have NO arm and fall through to '??' like the structural kinds -- a float literal in a spec test renders as '??' in the generated test. And StringLit's bare quoted rendering is pinned as-is: the E0308 it can cause (a &str literal passed where the synthesized function takes String) is a property of generate_rust placing this rendering in call position -- the driver slice owns it; the IR side's ownership rewrite (ir_to_rust_expr_typed) has no counterpart here."
+    doc: "Rendering family of a spec expression in expr_to_rust (src/codegen/mod.rs:1177-1200) -- the walker that emits spec tests into generated code (generate_rust's test module) and constraint operands into precondition asserts: 0 = name (Var: the rust_ident-rendered name), 1 = decimal text (IntLit), 2 = value text (BoolLit, via rust_literal_bool), 3 = quoted template (StringLit: a quote, the escaped contents, a quote -- the escape rule is per-character and mirror-pinned, Phase 29), 4 = call template (the name, then '(' + args joined ', ' + ')'), 5 = binary template ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from spec_binop_symbol, slice 1), 6 = fallback fixed text '??' (via rust_expr_fixed_text). Total over all thirteen Expr kinds. Two sharp edges of the original are pinned deliberately: FloatLit (2) and UnaryOp (9) have NO arm and fall through to '??' like the structural kinds -- a float literal in a spec test renders as '??' in the generated test. And StringLit's rendering carries a placement caveat, pinned as-is: the E0308 it can cause (a &str literal passed where the synthesized function takes String) is a property of generate_rust placing this rendering in call position -- the driver slice owns it; the IR side's ownership rewrite (ir_to_rust_expr_typed) has no counterpart here."
     input: kind: Int
     output: Int
 
@@ -783,7 +783,7 @@ spec rust_ident_empty {
 // -- String ownership (ir_to_rust_expr_typed) ------------------
 
 spec rust_typed_form {
-    doc: "Dispatch family of ir_to_rust_expr_typed (src/codegen/mod.rs:549-558) over IRNode kinds: 0 = delegate to the untyped emitter ir_to_rust_expr (no ownership rewrite -- every kind except Literal and Typed, INCLUDING composites: a string literal nested inside a BinOp, Call or Collection is rendered untyped and stays bare even where a String is expected; Concat operands are the standing example, recorded with F1's resolution), 1 = Literal -- the ownership check (rust_string_ownership) decides owned vs bare, 2 = Typed -- re-enter the typed emitter with the node's declared type as the expectation (the untyped emitter routes Typed nodes here too, src/codegen/mod.rs:809). Total over all 28 IRNode kinds."
+    doc: "Dispatch family of ir_to_rust_expr_typed (src/codegen/mod.rs:549-558) over IRNode kinds: 0 = delegate to the untyped emitter ir_to_rust_expr (no ownership rewrite -- every kind except Literal and Typed, INCLUDING composites: a string literal nested inside a BinOp, Call or Collection is rendered untyped and stays bare even where a String is expected) -- with one Phase 29 exception: the untyped emitter's Concat arm applies the ownership/borrow treatment to its own operands directly (defects 1 and 2a of the unfreeze inventory), so a literal that IS a Concat operand no longer stays bare; literals nested in any other composite still do, 1 = Literal -- the ownership check (rust_string_ownership) decides owned vs bare, 2 = Typed -- re-enter the typed emitter with the node's declared type as the expectation (the untyped emitter routes Typed nodes here too, src/codegen/mod.rs:809). Total over all 28 IRNode kinds."
     input: kind: Int
     output: Int
 
@@ -812,7 +812,7 @@ spec rust_string_ownership {
 }
 
 spec rust_string_literal_text {
-    doc: "The bare rendering of a String literal: a quote, the contents RAW (no escaping of any kind -- a quote or backslash inside the contents renders as-is and breaks the generated Rust; pinned as-is), a quote. This one template serves three emitter sites: the Literal arm of ir_to_rust_expr (src/codegen/mod.rs:610), the Literal arm of ir_pattern_to_rust (src/codegen/mod.rs:820), and the delegate target of ir_to_rust_expr_typed whenever rust_string_ownership does not fire. Slice 2 could only classify it (rust_literal_form family 3, rust_pattern_literal_form family 2) because the spec language had no concatenation; F1's resolution makes the template itself a statable equation."
+    doc: "The bare rendering of a String literal: a quote, the ESCAPED contents, a quote. The escaping follows Rust source rules (a quote or backslash takes a backslash; newline, carriage return and tab use their short forms; other control characters use the unicode escape form; every other character, including non-ASCII text, is emitted as-is) and is a per-character transformation -- inexpressible in the spec language (F5) and therefore mirror-pinned (tests/m3_proof.rs). This spec's equation pins the WRAP: it is exact exactly on the identity subdomain (contents with no quote, backslash or control character, where escaping changes nothing) and silent off it -- cross-validation counts such contents as spec-silent for this spec. Before Phase 29 the emitter rendered the contents RAW and this equation was total; the user-approved unfreeze of the three rendering defects replaced the raw rendering with the escaped one. This one template serves three emitter sites: the Literal arm of ir_to_rust_expr, the Literal arm of ir_pattern_to_rust, and the delegate target of ir_to_rust_expr_typed whenever rust_string_ownership does not fire. Slice 2 could only classify it (rust_literal_form family 3, rust_pattern_literal_form family 2) because the spec language had no concatenation; F1's resolution makes the template itself a statable equation."
     input: contents: String
     output: String
 
@@ -822,11 +822,11 @@ spec rust_string_literal_text {
 
     test "plain-text" { input: "Int" expect: "\"Int\"" }
     test "empty-text" { input: "" expect: "\"\"" }
-    test "raw-quote" { input: "a\"b" expect: "\"a\"b\"" }
+    test "symbol-text" { input: "Vec<i64>" expect: "\"Vec<i64>\"" }
 }
 
 spec rust_string_literal_owned_text {
-    doc: "The owned rendering of a String literal (src/codegen/mod.rs:552-554): the bare template (rust_string_literal_text) with '.to_string()' appended -- exactly what ir_to_rust_expr_typed emits when rust_string_ownership fires, converting the &str literal into a String where the expected type requires one."
+    doc: "The owned rendering of a String literal (src/codegen/mod.rs:552-554): the bare template (rust_string_literal_text) with '.to_string()' appended -- exactly what ir_to_rust_expr_typed emits when rust_string_ownership fires, converting the &str literal into a String where the expected type requires one. The bare template it composes escapes its contents (Phase 29; see rust_string_literal_text) -- this spec's equation is exact on the same identity subdomain."
     input: contents: String
     output: String
 

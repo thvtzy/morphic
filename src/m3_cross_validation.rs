@@ -621,12 +621,60 @@ mod xval3 {
         Mirror::Bool(lit == 3 && expected == 3)
     }
 
+    /// The emitter's string escaping, hand-mirrored
+    /// (Phase 29) — a copy of the proof file's mirror of
+    /// the same rule (the harnesses mirror independently
+    /// by design).
+    fn escape_rust_str_mirror(s: &str) -> String {
+        let mut out = String::new();
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if c.is_control() => {
+                    out.push_str(&format!("\\u{{{:x}}}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// Whether escaping is the identity on these contents
+    /// — the subdomain on which the literal specs'
+    /// equations are exact (Phase 29).
+    fn escape_is_identity(s: &str) -> bool {
+        !s.chars().any(|c| c == '"' || c == '\\' || c.is_control())
+    }
+
     fn rust_string_literal_text(contents: &str) -> Mirror {
-        Mirror::Owned(format!("\"{}\"", contents))
+        // Phase 29: the spec equation pins the wrap only
+        // where escaping changes nothing. Off that
+        // subdomain the escaping rule is mirror-pinned in
+        // tests/m3_proof.rs and the spec is silent here —
+        // the winner body implements the equation as
+        // written, and the equation cannot state the
+        // per-character escape (F5).
+        if escape_is_identity(contents) {
+            Mirror::Owned(format!(
+                "\"{}\"",
+                escape_rust_str_mirror(contents)
+            ))
+        } else {
+            Mirror::Unpinned
+        }
     }
 
     fn rust_string_literal_owned_text(contents: &str) -> Mirror {
-        Mirror::Owned(format!("\"{}\".to_string()", contents))
+        match rust_string_literal_text(contents) {
+            Mirror::Owned(bare) => {
+                Mirror::Owned(format!("{}.to_string()", bare))
+            }
+            other => other,
+        }
     }
 
     fn rust_doc_line(line: &str) -> Mirror {
@@ -927,9 +975,13 @@ mod xval3 {
     ];
 
     /// String contents battery for the two literal-template
-    /// equations (total: every case pinned). Includes the
-    /// raw-quote and backslash cases the proof file pins —
-    /// the contents render RAW, unescaped.
+    /// equations. The battery itself is unchanged (9 cases),
+    /// but since Phase 29 the three cases whose escaping is
+    /// non-identity (`a"b`, `a\b`, `line\nbreak`) are
+    /// spec-silent for both literal specs: the spec
+    /// equations pin the wrap only on the identity
+    /// subdomain, and the escaping rule itself is
+    /// mirror-pinned in tests/m3_proof.rs.
     const STRING_CONTENTS: [&str; 9] = [
         "",
         "Int",
@@ -1162,8 +1214,8 @@ mod xval3 {
                 }
                 v
             }
-            // tests: plain, empty, raw quote
-            "rust_string_literal_text" => ["Int", "", "a\"b"]
+            // tests: plain, empty, symbol text
+            "rust_string_literal_text" => ["Int", "", "Vec<i64>"]
                 .iter()
                 .map(|s| In::Text(s))
                 .collect(),
@@ -1990,8 +2042,8 @@ mod xval3 {
         ("rust_ident_empty", 1),
         ("rust_typed_form", 33),
         ("rust_string_ownership", 1089),
-        ("rust_string_literal_text", 9),
-        ("rust_string_literal_owned_text", 9),
+        ("rust_string_literal_text", 6),
+        ("rust_string_literal_owned_text", 6),
         ("rust_doc_line", 4),
         ("rust_param_text", 5),
         ("rust_generics_text", 6),
@@ -2091,11 +2143,14 @@ mod xval3 {
         let (_, pinned, unpinned) = totals("rust_test_name_form", &tn);
         assert_eq!((pinned, unpinned), (2, 0));
         // Grand totals across the module: 2196 cases per run,
-        // 1539 pinned, 650 spec-silent, 7 out of contract.
+        // 1533 pinned, 656 spec-silent, 7 out of contract.
+        // (Phase 29: the literal specs' three special-contents
+        // cases each moved from pinned to spec-silent —
+        // 1539 - 6 pinned, 650 + 6 silent.)
         let total_cases: usize = ALL_SPECS.iter().map(|n| sweep(n).len()).sum();
         let total_pinned: usize = PINNED_TOTALS.iter().map(|(_, t)| t).sum();
         assert_eq!(total_cases, 2196);
-        assert_eq!(total_pinned, 1539);
+        assert_eq!(total_pinned, 1533);
     }
 
     #[test]
@@ -2324,19 +2379,33 @@ mod xval3 {
         assert_eq!(ag.disagreements.len(), 1);
         assert_eq!(ag.disagreements[0].input, In::Text("type"));
 
-        // A `++` template (rust_string_literal_text): the
-        // mirror is the computed quoting; raw contents are
-        // not escaped, so a winner that escapes disagrees.
+        // A `++` template (rust_string_literal_text) after
+        // Phase 29: on identity-subdomain contents the
+        // mirror is the computed quoting; on contents whose
+        // escaping is non-identity the spec is SILENT (the
+        // equation pins only the wrap there; the escaping
+        // rule is mirror-pinned in the proof file), so the
+        // escaped winner output is counted in no bucket —
+        // and neither would the raw wrap be.
         let inputs = vec![In::Text("Int"), In::Text("a\"b")];
         let outs = vec![
             Out::Text("\"Int\"".to_string()),
             Out::Text("\"a\\\"b\"".to_string()),
         ];
         let ag = compare("rust_string_literal_text", &inputs, &outs);
-        assert_eq!(ag.sweep_pinned_total, 2);
+        assert_eq!(ag.sweep_pinned_total, 1);
         assert_eq!(ag.sweep_pinned_agree, 1);
+        assert_eq!(ag.unpinned, 1);
+        assert!(ag.disagreements.is_empty());
+        // A wrong quoting on a pinned case IS a disagreement.
+        let outs = vec![
+            Out::Text("\"Int".to_string()),
+            Out::Text("\"a\\\"b\"".to_string()),
+        ];
+        let ag = compare("rust_string_literal_text", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_agree, 0);
         assert_eq!(ag.disagreements.len(), 1);
-        assert_eq!(ag.disagreements[0].input, In::Text("a\"b"));
+        assert_eq!(ag.disagreements[0].input, In::Text("Int"));
     }
 
     #[test]
