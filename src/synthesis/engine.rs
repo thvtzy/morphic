@@ -769,7 +769,7 @@ impl SynthesisEngine {
         }
     }
 
-    fn mcts_expand(&self, node: &MCTSNode, _spec: &FunctionSpec) -> Vec<IRNode> {
+    fn mcts_expand(&self, node: &MCTSNode, spec: &FunctionSpec) -> Vec<IRNode> {
         let mut children = Vec::new();
 
         // Find first hole in the tree
@@ -780,7 +780,7 @@ impl SynthesisEngine {
 
         // Generate multiple fillings for the first hole
         let hole = &holes[0];
-        let fillings = generate_hole_fillings(hole, node);
+        let fillings = generate_hole_fillings(hole, node, spec);
 
         for filling in fillings {
             let mut new_state = node.state.clone();
@@ -791,17 +791,20 @@ impl SynthesisEngine {
         children
     }
 
-    fn mcts_rollout(&self, node: &IRNode, _spec: &FunctionSpec) -> IRNode {
+    fn mcts_rollout(&self, node: &IRNode, spec: &FunctionSpec) -> IRNode {
         let mut current = node.clone();
         let max_iterations = 100; // Prevent infinite loops
+        let params: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
 
         for _ in 0..max_iterations {
             let holes = find_hole_positions(&current);
             if holes.is_empty() { break; }
 
             let hole = &holes[0];
-            // Random filling for rollout
-            let filling = random_filling(hole);
+            // Random filling for rollout — variables only from
+            // the scope at the hole's position, never invented.
+            let scope = scope_at_path(&current, &hole.path, &params);
+            let filling = random_filling(hole, &scope);
             replace_hole(&mut current, hole, &filling);
         }
 
@@ -1455,58 +1458,194 @@ fn build_simple_loop(_spec: &FunctionSpec, engine: &SynthesisEngine) -> IRNode {
 
 // ── Mutation helpers ──────────────────────────────────────
 
-fn generate_hole_fillings(hole: &HoleRef, node: &MCTSNode) -> Vec<IRNode> {
-    // Generate diverse fillings for the hole
+fn generate_hole_fillings(hole: &HoleRef, node: &MCTSNode, spec: &FunctionSpec) -> Vec<IRNode> {
+    // Generate diverse fillings for the hole. Every variable a
+    // filling references must be in scope at the hole's position:
+    // the previous version hardcoded Var("x") and `a + b` — names
+    // bound nowhere — so expanded children could never evaluate
+    // or compile, whatever the search did with them.
     // In production: use LLM, type-directed search, library functions
+    let params: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
+    let scope = scope_at_path(&node.state, &hole.path, &params);
     vec![
         IRNode::Literal(IRLiteral::Int(0)),
         IRNode::Literal(IRLiteral::Bool(true)),
-        IRNode::Var("x".into()),
+        random_scoped_leaf(&scope),
         IRNode::BinOp(IRBinOp::Add,
-            Box::new(IRNode::Var("a".into())),
-            Box::new(IRNode::Var("b".into()))),
+            Box::new(random_scoped_leaf(&scope)),
+            Box::new(random_scoped_leaf(&scope))),
     ]
 }
 
-fn random_filling(_hole: &HoleRef) -> IRNode {
+/// Collect the names a match pattern binds (variable patterns,
+/// recursively through constructors and guards).
+fn pattern_bindings(pattern: &IRPattern, out: &mut Vec<String>) {
+    match pattern {
+        IRPattern::Variable(name) => out.push(name.clone()),
+        IRPattern::Constructor(_, subs) => {
+            for sub in subs {
+                pattern_bindings(sub, out);
+            }
+        }
+        IRPattern::Guard(inner, _) => pattern_bindings(inner, out),
+        IRPattern::Wildcard | IRPattern::Literal(_) => {}
+    }
+}
+
+/// The variable names in scope at position `path` inside `root`:
+/// the spec's parameter names, plus every binder enclosing the
+/// position (a `Let` name in its body, a `For` variable in its
+/// body, lambda/closure parameters, match-arm pattern bindings).
+/// Paths come from `find_hole_positions` on the same tree, so
+/// node/step pairs always correspond; on any mismatch the walk
+/// stops defensively with the scope accumulated so far.
+fn scope_at_path(root: &IRNode, path: &[PathElem], params: &[String]) -> Vec<String> {
+    let mut scope: Vec<String> = params.to_vec();
+    let mut current = root;
+    for elem in path {
+        match (current, elem) {
+            (IRNode::Block(stmts), PathElem::Block(i)) => match stmts.get(*i) {
+                Some(next) => current = next,
+                None => break,
+            },
+            (IRNode::Let { value, .. }, PathElem::LetValue) => current = value,
+            (IRNode::Let { name, body, .. }, PathElem::LetBody) => {
+                scope.push(name.clone());
+                current = body;
+            }
+            (IRNode::If { condition, .. }, PathElem::IfCond) => current = condition,
+            (IRNode::If { then_branch, .. }, PathElem::IfThen) => current = then_branch,
+            (IRNode::If { else_branch, .. }, PathElem::IfElse) => current = else_branch,
+            (IRNode::While { condition, .. }, PathElem::WhileCond) => current = condition,
+            (IRNode::While { body, .. }, PathElem::WhileBody) => current = body,
+            (IRNode::For { start, .. }, PathElem::ForStart) => current = start,
+            (IRNode::For { end, .. }, PathElem::ForEnd) => current = end,
+            (IRNode::For { var, body, .. }, PathElem::ForBody) => {
+                scope.push(var.clone());
+                current = body;
+            }
+            (IRNode::Match { scrutinee, .. }, PathElem::MatchScrutinee) => current = scrutinee,
+            (IRNode::Match { cases, .. }, PathElem::MatchCase(i)) => match cases.get(*i) {
+                Some((pattern, body)) => {
+                    pattern_bindings(pattern, &mut scope);
+                    current = body;
+                }
+                None => break,
+            },
+            (IRNode::Call { args, .. }, PathElem::CallArg(i)) => match args.get(*i) {
+                Some(next) => current = next,
+                None => break,
+            },
+            (IRNode::Return(inner), PathElem::Return) => current = inner,
+            (IRNode::BinOp(_, l, _), PathElem::BinOpL) => current = l,
+            (IRNode::BinOp(_, _, r), PathElem::BinOpR) => current = r,
+            (IRNode::UnaryOp(_, inner), PathElem::UnaryInner) => current = inner,
+            (IRNode::Lambda { params, body }, PathElem::LambdaBody) => {
+                scope.extend(params.iter().map(|(n, _)| n.clone()));
+                current = body;
+            }
+            (IRNode::Closure { params, body, .. }, PathElem::LambdaBody) => {
+                scope.extend(params.iter().map(|(n, _)| n.clone()));
+                current = body;
+            }
+            (IRNode::Collection { elements, .. }, PathElem::CollectionElem(i)) => {
+                match elements.get(*i) {
+                    Some(next) => current = next,
+                    None => break,
+                }
+            }
+            (IRNode::Map { function, .. }, PathElem::MapFunc) => current = function,
+            (IRNode::Map { over, .. }, PathElem::MapOver) => current = over,
+            (IRNode::Filter { predicate, .. }, PathElem::FilterPred) => current = predicate,
+            (IRNode::Filter { over, .. }, PathElem::FilterOver) => current = over,
+            (IRNode::Fold { operation, .. }, PathElem::FoldOp) => current = operation,
+            (IRNode::Fold { initial, .. }, PathElem::FoldInit) => current = initial,
+            (IRNode::Fold { over, .. }, PathElem::FoldOver) => current = over,
+            (IRNode::Sort { comparator, .. }, PathElem::SortComp) => current = comparator,
+            (IRNode::Sort { collection, .. }, PathElem::SortColl) => current = collection,
+            (IRNode::Alloc { initial, .. }, PathElem::AllocInit) => current = initial,
+            (IRNode::Assign { target, .. }, PathElem::AssignTarget) => current = target,
+            (IRNode::Assign { value, .. }, PathElem::AssignValue) => current = value,
+            (IRNode::Typed { node, .. }, PathElem::TypedNode) => current = node,
+            // Path does not match this node — stop with what we have.
+            _ => break,
+        }
+    }
+    scope
+}
+
+/// A random leaf that is valid wherever it lands: a variable
+/// drawn from `scope` when the scope is non-empty, otherwise a
+/// literal. Generation must never invent a name — a `Var` that
+/// nothing binds can neither evaluate nor compile.
+fn random_scoped_leaf(scope: &[String]) -> IRNode {
+    use rand::Rng;
+    if scope.is_empty() {
+        IRNode::Literal(IRLiteral::Int(0))
+    } else {
+        let idx = rand::thread_rng().gen_range(0..scope.len());
+        IRNode::Var(scope[idx].clone())
+    }
+}
+
+fn random_filling(_hole: &HoleRef, scope: &[String]) -> IRNode {
     use rand::Rng;
     match rand::thread_rng().gen_range(0u32..5) {
         0 => IRNode::Literal(IRLiteral::Int(0)),
         1 => IRNode::Literal(IRLiteral::Bool(true)),
-        2 => IRNode::Var("result".into()),
-        3 => IRNode::Return(Box::new(IRNode::Var("output".into()))),
+        2 => random_scoped_leaf(scope),
+        3 => IRNode::Return(Box::new(random_scoped_leaf(scope))),
         _ => IRNode::Hole { id: 0, expected_type: None },
     }
 }
 
-fn random_ir_tree(_spec: &FunctionSpec, depth: u32, engine: &SynthesisEngine) -> IRNode {
+fn random_ir_tree(spec: &FunctionSpec, depth: u32, engine: &SynthesisEngine) -> IRNode {
+    // Generation starts in the scope of the spec's parameters;
+    // binders the generator itself creates extend it on the way
+    // down (see random_ir_tree_scoped).
+    let scope: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
+    random_ir_tree_scoped(spec, depth, engine, &scope)
+}
+
+fn random_ir_tree_scoped(
+    spec: &FunctionSpec,
+    depth: u32,
+    engine: &SynthesisEngine,
+    scope: &[String],
+) -> IRNode {
     if depth == 0 {
         return IRNode::Hole { id: engine.new_id(), expected_type: None };
     }
     use rand::Rng;
     match rand::thread_rng().gen_range(0u32..8) {
         0 => IRNode::Block(vec![
-            random_ir_tree(_spec, depth - 1, engine),
-            IRNode::Return(Box::new(
-                IRNode::Var("result".into())
-            )),
+            random_ir_tree_scoped(spec, depth - 1, engine, scope),
+            // The trailing value used to be a hardcoded
+            // Var("result") — a name bound nowhere, so every tree
+            // containing this arm was unevaluable dead weight.
+            IRNode::Return(Box::new(random_scoped_leaf(scope))),
         ]),
         1 => IRNode::If {
-            condition: Box::new(random_ir_tree(_spec, depth - 1, engine)),
-            then_branch: Box::new(random_ir_tree(_spec, depth - 1, engine)),
-            else_branch: Box::new(random_ir_tree(_spec, depth - 1, engine)),
+            condition: Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope)),
+            then_branch: Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope)),
+            else_branch: Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope)),
         },
-        2 => IRNode::For {
-            var: "i".into(),
-            start: Box::new(IRNode::Literal(IRLiteral::Int(0))),
-            end: Box::new(IRNode::Literal(IRLiteral::Int(10))),
-            body: Box::new(random_ir_tree(_spec, depth - 1, engine)),
-        },
+        2 => {
+            // The loop variable is in scope in the body only.
+            let mut body_scope = scope.to_vec();
+            body_scope.push("i".into());
+            IRNode::For {
+                var: "i".into(),
+                start: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                end: Box::new(IRNode::Literal(IRLiteral::Int(10))),
+                body: Box::new(random_ir_tree_scoped(spec, depth - 1, engine, &body_scope)),
+            }
+        }
         // An unfilled leaf is an honest Hole (tracked by count_holes
         // and penalized at evaluation) — never a fake `Call` to "_",
         // which codegen would emit as a call to a nonexistent function.
         3 => IRNode::Hole { id: engine.new_id(), expected_type: None },
-        4 => IRNode::Return(Box::new(random_ir_tree(_spec, depth - 1, engine))),
+        4 => IRNode::Return(Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope))),
         5 => IRNode::Collection { kind: CollectionKind::List, elements: vec![] },
         _ => IRNode::Hole { id: engine.new_id(), expected_type: None },
     }
@@ -2070,6 +2209,216 @@ mod tests {
         let candidate = make_candidate(body, &spec);
         let scores = evaluate_candidate(&candidate, &spec);
         assert!((scores.test_pass_ratio - 0.5).abs() < 1e-9);
+    }
+
+    /// Walk `node` tracking lexical scope the way the language
+    /// binds names (Let / For / Lambda / Closure / match-arm
+    /// variable patterns) and assert every `Var` refers to a name
+    /// actually in scope at that point.
+    fn assert_vars_in_scope(node: &IRNode, scope: &[String]) {
+        match node {
+            IRNode::Var(name) => assert!(
+                scope.iter().any(|s| s == name),
+                "free variable Var({:?}) emitted with scope {:?}",
+                name,
+                scope
+            ),
+            IRNode::Block(stmts) => stmts.iter().for_each(|s| assert_vars_in_scope(s, scope)),
+            IRNode::Let { name, value, body } => {
+                assert_vars_in_scope(value, scope);
+                let mut inner = scope.to_vec();
+                inner.push(name.clone());
+                assert_vars_in_scope(body, &inner);
+            }
+            IRNode::If { condition, then_branch, else_branch } => {
+                assert_vars_in_scope(condition, scope);
+                assert_vars_in_scope(then_branch, scope);
+                assert_vars_in_scope(else_branch, scope);
+            }
+            IRNode::While { condition, body, .. } => {
+                assert_vars_in_scope(condition, scope);
+                assert_vars_in_scope(body, scope);
+            }
+            IRNode::For { var, start, end, body } => {
+                assert_vars_in_scope(start, scope);
+                assert_vars_in_scope(end, scope);
+                let mut inner = scope.to_vec();
+                inner.push(var.clone());
+                assert_vars_in_scope(body, &inner);
+            }
+            IRNode::Match { scrutinee, cases } => {
+                assert_vars_in_scope(scrutinee, scope);
+                for (pattern, body) in cases {
+                    let mut inner = scope.to_vec();
+                    pattern_bindings(pattern, &mut inner);
+                    assert_vars_in_scope(body, &inner);
+                }
+            }
+            IRNode::Call { args, .. } => {
+                args.iter().for_each(|a| assert_vars_in_scope(a, scope))
+            }
+            IRNode::Return(e) => assert_vars_in_scope(e, scope),
+            IRNode::BinOp(_, l, r) => {
+                assert_vars_in_scope(l, scope);
+                assert_vars_in_scope(r, scope);
+            }
+            IRNode::UnaryOp(_, e) => assert_vars_in_scope(e, scope),
+            IRNode::Lambda { params, body, .. } | IRNode::Closure { params, body, .. } => {
+                let mut inner = scope.to_vec();
+                inner.extend(params.iter().map(|(n, _)| n.clone()));
+                assert_vars_in_scope(body, &inner);
+            }
+            IRNode::Collection { elements, .. } => {
+                elements.iter().for_each(|e| assert_vars_in_scope(e, scope))
+            }
+            IRNode::Map { function, over } | IRNode::Filter { predicate: function, over } => {
+                assert_vars_in_scope(function, scope);
+                assert_vars_in_scope(over, scope);
+            }
+            IRNode::Fold { operation, initial, over } => {
+                assert_vars_in_scope(operation, scope);
+                assert_vars_in_scope(initial, scope);
+                assert_vars_in_scope(over, scope);
+            }
+            IRNode::Sort { comparator, collection } => {
+                assert_vars_in_scope(comparator, scope);
+                assert_vars_in_scope(collection, scope);
+            }
+            IRNode::Alloc { initial, .. } => assert_vars_in_scope(initial, scope),
+            IRNode::Assign { target, value } => {
+                assert_vars_in_scope(target, scope);
+                assert_vars_in_scope(value, scope);
+            }
+            IRNode::Typed { node, .. } => assert_vars_in_scope(node, scope),
+            IRNode::Index(c, i) => {
+                assert_vars_in_scope(c, scope);
+                assert_vars_in_scope(i, scope);
+            }
+            IRNode::Loop { body } => assert_vars_in_scope(body, scope),
+            IRNode::Break { value } => {
+                if let Some(v) = value {
+                    assert_vars_in_scope(v, scope);
+                }
+            }
+            IRNode::StructDef { body, .. } => assert_vars_in_scope(body, scope),
+            IRNode::TryPropagate(e) => assert_vars_in_scope(e, scope),
+            IRNode::Hole { .. } | IRNode::Literal(_) => {}
+        }
+    }
+
+    /// Scope-aware generation: every `Var` leaf the random tree
+    /// generator emits must name a variable that is actually in
+    /// scope there — a spec parameter, or a name the generator
+    /// itself bound on the way down (its `For` variable). The old
+    /// generator hardcoded `Var("result")` as a leaf, which is
+    /// bound nowhere: such trees can never evaluate or compile.
+    /// Checked against a spec with a parameter and one without
+    /// (empty scope → no `Var` leaves at all).
+    #[test]
+    fn random_ir_tree_only_emits_in_scope_vars() {
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        for spec in [dummy_spec(), is_literal_kind_spec()] {
+            let scope: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
+            for depth in 0..=4 {
+                for _ in 0..200 {
+                    let tree = random_ir_tree(&spec, depth, &engine);
+                    assert_vars_in_scope(&tree, &scope);
+                }
+            }
+        }
+    }
+
+    /// `scope_at_path` starts from the spec parameters and adds
+    /// exactly the binders enclosing the position: a `Let` name
+    /// counts in its body but not its value; a `For` variable in
+    /// its body; a match-arm variable pattern in that arm only.
+    #[test]
+    fn scope_at_path_collects_enclosing_binders() {
+        let tree = IRNode::Let {
+            name: "y".into(),
+            value: Box::new(IRNode::Hole { id: 1, expected_type: None }),
+            body: Box::new(IRNode::For {
+                var: "i".into(),
+                start: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                end: Box::new(IRNode::Literal(IRLiteral::Int(3))),
+                body: Box::new(IRNode::Match {
+                    scrutinee: Box::new(IRNode::Var("kind".into())),
+                    cases: vec![
+                        (
+                            IRPattern::Variable("m".into()),
+                            IRNode::Hole { id: 2, expected_type: None },
+                        ),
+                        (
+                            IRPattern::Wildcard,
+                            IRNode::Hole { id: 3, expected_type: None },
+                        ),
+                    ],
+                }),
+            }),
+        };
+        let params = vec!["kind".to_string()];
+        let holes = find_hole_positions(&tree);
+        assert_eq!(holes.len(), 3);
+        // Hole 1 sits in the Let's *value*: "y" is not yet bound.
+        assert_eq!(scope_at_path(&tree, &holes[0].path, &params), vec!["kind"]);
+        // Hole 2 sits in the variable-pattern arm inside the loop.
+        assert_eq!(
+            scope_at_path(&tree, &holes[1].path, &params),
+            vec!["kind", "y", "i", "m"]
+        );
+        // Hole 3 sits in the wildcard arm: no pattern binding.
+        assert_eq!(
+            scope_at_path(&tree, &holes[2].path, &params),
+            vec!["kind", "y", "i"]
+        );
+    }
+
+    /// Rollout fillings obey the same rule as tree generation:
+    /// with a non-empty scope every emitted `Var` comes from it;
+    /// with an empty scope no `Var` is emitted at all (the old
+    /// code returned Var("result") / Var("output") here).
+    #[test]
+    fn random_filling_only_emits_in_scope_vars() {
+        let hole = HoleRef { path: Vec::new() };
+        let scope = vec!["kind".to_string(), "y".to_string()];
+        for _ in 0..500 {
+            let filling = random_filling(&hole, &scope);
+            assert_vars_in_scope(&filling, &scope);
+        }
+        for _ in 0..500 {
+            let filling = random_filling(&hole, &[]);
+            assert_vars_in_scope(&filling, &[]);
+        }
+    }
+
+    /// MCTS expansion fillings are computed against the scope at
+    /// the hole: inside `let y = … in □` for a spec with parameter
+    /// `kind`, fillings may reference `kind` and `y` — and nothing
+    /// else (the old code hardcoded Var("x") and `a + b`).
+    #[test]
+    fn generate_hole_fillings_only_emit_in_scope_vars() {
+        let spec = is_literal_kind_spec();
+        let node = MCTSNode {
+            state: IRNode::Let {
+                name: "y".into(),
+                value: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                body: Box::new(IRNode::Hole { id: 7, expected_type: None }),
+            },
+            parent: None,
+            children: Vec::new(),
+            visits: 0,
+            total_reward: 0.0,
+            is_terminal: false,
+            hole_count: 1,
+        };
+        let holes = find_hole_positions(&node.state);
+        assert_eq!(holes.len(), 1);
+        let scope = vec!["kind".to_string(), "y".to_string()];
+        for _ in 0..100 {
+            for filling in generate_hole_fillings(&holes[0], &node, &spec) {
+                assert_vars_in_scope(&filling, &scope);
+            }
+        }
     }
 
     /// Regression: `random_ir_tree` used to emit
