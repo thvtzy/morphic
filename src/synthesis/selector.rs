@@ -4,8 +4,11 @@
 // └──────────────────────────────────────────────────────────┘
 
 use std::collections::HashMap;
-use super::engine::{count_holes, CandidateImplementation, ScoreBreakdown};
-use crate::spec::ast::FunctionSpec;
+use super::engine::{
+    count_holes, CandidateImplementation, CollectionKind, IRBinOp, IRLiteral, IRNode, IRPattern,
+    IRUnaryOp, ScoreBreakdown,
+};
+use crate::spec::ast::{FunctionSpec, TypeRef};
 
 /// Selection criteria for choosing among candidates
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,10 +27,637 @@ pub enum SelectionCriterion {
     MostCompact,
 }
 
+// ── Return-type verdict (conservative IR type inference) ──
+//
+// Whole-body type discipline for selection. Specs with tests
+// get a truth signal (measured test_pass_ratio) and a
+// TestInduced seed whose shape is return-typed by construction,
+// so their winners type-check. Specs WITHOUT tests have
+// neither: every candidate sits at the neutral tpr 0.5 and the
+// winner used to be an arbitrary random tree whose entire body
+// had the wrong type vs the declared return type — `(actual +
+// expected)` as a Bool body, a `for` loop as a Bool body —
+// E0308 on every probe run. Nothing anywhere checked a body's
+// type against the return type; this verdict is that check.
+//
+// The inference is deliberately CONSERVATIVE, mirroring the
+// interpreter's stance in synthesis::eval (only the shapes that
+// can be given a value without guessing get one): a type is
+// claimed only when it is certain — literals; collections whose
+// elements are certain and agree; BinOp/UnaryOp with certain
+// operand rules; If/Match whose branches all agree; Let/Block
+// tail expressions; Vars resolved against parameter types;
+// calls to known pure builtins (len → Int, the parser's List
+// literal); Typed nodes. Anything else is Unknown, and Unknown
+// is NEUTRAL in selection: never punished, never rewarded.
+
+/// Verdict on a candidate body's type vs the spec's return type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeVerdict {
+    /// The body's type is provably the spec's return type.
+    Matches,
+    /// The body's type is provably NOT the spec's return type:
+    /// the generated function cannot type-check against the
+    /// signature. (A provably mistyped `return` anywhere in the
+    /// body is enough — rustc checks every return against the
+    /// signature, reachable or not.)
+    Mismatched,
+    /// Nothing provable either way.
+    Unknown,
+}
+
+/// Inference environment: a name maps to its type when the
+/// binding's type is certain, or to None when the name is bound
+/// but its type is unprovable. The distinction matters: a
+/// shadowing binding with an unknown type must ERASE an outer
+/// binding's certainty, not inherit it.
+type TypeEnv = HashMap<String, Option<TypeRef>>;
+
+fn int_family(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Int
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+    )
+}
+
+/// Placeholder for a type position about which nothing is known
+/// (an empty collection's element, one tuple component). It
+/// rides on TypeRef::Generic so the difference/equality checks
+/// treat that position as unprovable — exactly its meaning.
+fn wildcard() -> TypeRef {
+    TypeRef::Generic("?".into())
+}
+
+/// Can these two types be PROVEN different? Integer-family
+/// members are mutually compatible (an integer literal is
+/// accepted wherever an integer type stands); a Generic in any
+/// position proves nothing; otherwise the head constructors
+/// must match and the parts must not be provably different.
+fn provably_different(a: &TypeRef, b: &TypeRef) -> bool {
+    use TypeRef::*;
+    if a == b {
+        return false;
+    }
+    if matches!(a, Generic(_)) || matches!(b, Generic(_)) {
+        return false;
+    }
+    if int_family(a) && int_family(b) {
+        return false;
+    }
+    match (a, b) {
+        (List(x), List(y))
+        | (Set(x), Set(y))
+        | (Option(x), Option(y))
+        | (Ref(x), Ref(y))
+        | (Stream(x), Stream(y)) => provably_different(x, y),
+        (Map(k1, v1), Map(k2, v2)) => {
+            provably_different(k1, k2) || provably_different(v1, v2)
+        }
+        (Result(o1, e1), Result(o2, e2)) => {
+            provably_different(o1, o2) || provably_different(e1, e2)
+        }
+        (Tuple(xs), Tuple(ys)) => {
+            xs.len() != ys.len()
+                || xs
+                    .iter()
+                    .zip(ys.iter())
+                    .any(|(x, y)| provably_different(x, y))
+        }
+        (Array(x, n), Array(y, m)) => n != m || provably_different(x, y),
+        (Function(a1, r1), Function(a2, r2)) => {
+            a1.len() != a2.len()
+                || a1
+                    .iter()
+                    .zip(a2.iter())
+                    .any(|(x, y)| provably_different(x, y))
+                || provably_different(r1, r2)
+        }
+        // Same-head pairs were handled above (or by a == b);
+        // anything reaching here has different heads — including
+        // Named vs Named with different names and Named vs any
+        // builtin, which are different types by definition.
+        _ => true,
+    }
+}
+
+/// Are these two types provably THE SAME type? The structural
+/// dual of `provably_different`; a Generic anywhere makes
+/// equality unprovable (except identical names, via a == b).
+fn certainly_equal(a: &TypeRef, b: &TypeRef) -> bool {
+    use TypeRef::*;
+    if a == b {
+        return true;
+    }
+    if int_family(a) && int_family(b) {
+        return true;
+    }
+    match (a, b) {
+        (List(x), List(y))
+        | (Set(x), Set(y))
+        | (Option(x), Option(y))
+        | (Ref(x), Ref(y))
+        | (Stream(x), Stream(y)) => certainly_equal(x, y),
+        (Map(k1, v1), Map(k2, v2)) => {
+            certainly_equal(k1, k2) && certainly_equal(v1, v2)
+        }
+        (Result(o1, e1), Result(o2, e2)) => {
+            certainly_equal(o1, o2) && certainly_equal(e1, e2)
+        }
+        (Tuple(xs), Tuple(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys.iter())
+                    .all(|(x, y)| certainly_equal(x, y))
+        }
+        (Array(x, n), Array(y, m)) => n == m && certainly_equal(x, y),
+        (Function(a1, r1), Function(a2, r2)) => {
+            a1.len() == a2.len()
+                && a1
+                    .iter()
+                    .zip(a2.iter())
+                    .all(|(x, y)| certainly_equal(x, y))
+                && certainly_equal(r1, r2)
+        }
+        _ => false,
+    }
+}
+
+/// The two branch types of an If, when both are certain and do
+/// not provably disagree.
+fn agree(a: Option<TypeRef>, b: Option<TypeRef>) -> Option<TypeRef> {
+    let (a, b) = (a?, b?);
+    if provably_different(&a, &b) {
+        None
+    } else {
+        Some(a)
+    }
+}
+
+/// Bind a match pattern's variables in `env`: a bare Variable
+/// binds the scrutinee's type; variables inside Constructor
+/// patterns bind UNKNOWN (their component types need the
+/// constructor's definition, which inference does not have) —
+/// bound at all so they shadow outer names soundly.
+fn bind_pattern_types(pattern: &IRPattern, scrut_ty: &Option<TypeRef>, env: &mut TypeEnv) {
+    match pattern {
+        IRPattern::Variable(name) => {
+            env.insert(name.clone(), scrut_ty.clone());
+        }
+        IRPattern::Constructor(_, subs) => {
+            for sub in subs {
+                bind_unknown_pattern_vars(sub, env);
+            }
+        }
+        IRPattern::Guard(inner, _) => bind_pattern_types(inner, scrut_ty, env),
+        IRPattern::Wildcard | IRPattern::Literal(_) => {}
+    }
+}
+
+fn bind_unknown_pattern_vars(pattern: &IRPattern, env: &mut TypeEnv) {
+    match pattern {
+        IRPattern::Variable(name) => {
+            env.insert(name.clone(), None);
+        }
+        IRPattern::Constructor(_, subs) => {
+            for sub in subs {
+                bind_unknown_pattern_vars(sub, env);
+            }
+        }
+        IRPattern::Guard(inner, _) => bind_unknown_pattern_vars(inner, env),
+        IRPattern::Wildcard | IRPattern::Literal(_) => {}
+    }
+}
+
+/// Direct children of an IR node, for the generic walkers.
+fn child_nodes(node: &IRNode) -> Vec<&IRNode> {
+    match node {
+        IRNode::Hole { .. } | IRNode::Literal(_) | IRNode::Var(_) => vec![],
+        IRNode::Block(stmts) => stmts.iter().collect(),
+        IRNode::Let { value, body, .. } => vec![value.as_ref(), body.as_ref()],
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => vec![
+            condition.as_ref(),
+            then_branch.as_ref(),
+            else_branch.as_ref(),
+        ],
+        IRNode::While {
+            condition, body, ..
+        } => vec![condition.as_ref(), body.as_ref()],
+        IRNode::For {
+            start, end, body, ..
+        } => vec![start.as_ref(), end.as_ref(), body.as_ref()],
+        IRNode::Match { scrutinee, cases } => {
+            let mut out = vec![scrutinee.as_ref()];
+            out.extend(cases.iter().map(|(_, b)| b));
+            out
+        }
+        IRNode::Call { args, .. } => args.iter().collect(),
+        IRNode::Return(inner) => vec![inner.as_ref()],
+        IRNode::BinOp(_, l, r) => vec![l.as_ref(), r.as_ref()],
+        IRNode::UnaryOp(_, inner) => vec![inner.as_ref()],
+        IRNode::Lambda { body, .. } | IRNode::Closure { body, .. } => vec![body.as_ref()],
+        IRNode::Collection { elements, .. } => elements.iter().collect(),
+        IRNode::Map { function, over } | IRNode::Filter { predicate: function, over } => {
+            vec![function.as_ref(), over.as_ref()]
+        }
+        IRNode::Fold {
+            operation,
+            initial,
+            over,
+        } => vec![operation.as_ref(), initial.as_ref(), over.as_ref()],
+        IRNode::Sort {
+            comparator,
+            collection,
+        } => vec![comparator.as_ref(), collection.as_ref()],
+        IRNode::Alloc { initial, .. } => vec![initial.as_ref()],
+        IRNode::Assign { target, value } => vec![target.as_ref(), value.as_ref()],
+        IRNode::Typed { node, .. } => vec![node.as_ref()],
+        IRNode::Index(c, i) => vec![c.as_ref(), i.as_ref()],
+        IRNode::Loop { body } => vec![body.as_ref()],
+        IRNode::Break { value } => value
+            .as_ref()
+            .map(|v| vec![v.as_ref()])
+            .unwrap_or_default(),
+        IRNode::StructDef { body, .. } => vec![body.as_ref()],
+        IRNode::TryPropagate(inner) => vec![inner.as_ref()],
+    }
+}
+
+/// Does this subtree contain a Return outside any nested
+/// function value? The walkers stay out of Lambda/Closure
+/// bodies entirely: what a function value does internally is
+/// not this function's return flow for inference purposes.
+fn contains_return(node: &IRNode) -> bool {
+    match node {
+        IRNode::Return(_) => true,
+        IRNode::Lambda { .. } | IRNode::Closure { .. } => false,
+        _ => child_nodes(node).iter().any(|c| contains_return(c)),
+    }
+}
+
+/// The representative element type of a collection literal:
+/// the certain element type when all certain elements agree,
+/// the wildcard when none is certain or they provably disagree
+/// (a heterogeneously-typed literal is internally ill-typed —
+/// the wildcard keeps the collection's own verdict neutral in
+/// the positions where it could still be anything).
+fn element_repr(nodes: &[IRNode], env: &TypeEnv) -> TypeRef {
+    let mut repr: Option<TypeRef> = None;
+    for node in nodes {
+        if let Some(ty) = infer_ir_type(node, env) {
+            match &repr {
+                None => repr = Some(ty),
+                Some(prev) => {
+                    if provably_different(prev, &ty) {
+                        return wildcard();
+                    }
+                }
+            }
+        }
+    }
+    repr.unwrap_or_else(wildcard)
+}
+
+fn is_certain_scalar(ty: &TypeRef) -> bool {
+    int_family(ty)
+        || matches!(
+            ty,
+            TypeRef::Float | TypeRef::Bool | TypeRef::Char | TypeRef::Unit
+        )
+}
+
+fn binop_type(op: IRBinOp, lt: &TypeRef, rt: &TypeRef) -> Option<TypeRef> {
+    use IRBinOp::*;
+    match op {
+        Eq | Neq | Lt | Le | Gt | Ge => {
+            // A comparison of provably disagreeing operands is
+            // internally ill-typed; its result is not claimed.
+            if provably_different(lt, rt) {
+                None
+            } else {
+                Some(TypeRef::Bool)
+            }
+        }
+        And | Or | Xor => {
+            if *lt == TypeRef::Bool && *rt == TypeRef::Bool {
+                Some(TypeRef::Bool)
+            } else if int_family(lt) && int_family(rt) {
+                Some(lt.clone())
+            } else {
+                None
+            }
+        }
+        Add | Sub | Mul | Div | Mod => {
+            if int_family(lt) && int_family(rt) {
+                Some(if lt == rt { lt.clone() } else { TypeRef::Int })
+            } else if *lt == TypeRef::Float && *rt == TypeRef::Float {
+                Some(TypeRef::Float)
+            } else {
+                None
+            }
+        }
+        Shl | Shr => {
+            if int_family(lt) {
+                Some(lt.clone())
+            } else {
+                None
+            }
+        }
+        Concat => {
+            if *lt == TypeRef::String && *rt == TypeRef::String {
+                Some(TypeRef::String)
+            } else if let (TypeRef::List(a), TypeRef::List(b)) = (lt, rt) {
+                if provably_different(a, b) {
+                    None
+                } else {
+                    Some(TypeRef::List(a.clone()))
+                }
+            } else {
+                None
+            }
+        }
+        Append => {
+            if let TypeRef::List(elem) = lt {
+                if provably_different(elem, rt) {
+                    None
+                } else {
+                    Some(lt.clone())
+                }
+            } else {
+                None
+            }
+        }
+        Merge => None,
+    }
+}
+
+/// Infer the type of an IR expression — Some only when certain.
+/// Mirrors the evaluator's evaluable subset (synthesis::eval):
+/// the shapes that cannot be given a value without guessing
+/// (loops, mutation, function values, higher-order combinators,
+/// holes, unknown calls) get no type either.
+fn infer_ir_type(node: &IRNode, env: &TypeEnv) -> Option<TypeRef> {
+    match node {
+        IRNode::Literal(lit) => Some(match lit {
+            IRLiteral::Int(_) => TypeRef::Int,
+            IRLiteral::Float(_) => TypeRef::Float,
+            IRLiteral::Bool(_) => TypeRef::Bool,
+            IRLiteral::String(_) => TypeRef::String,
+            IRLiteral::Char(_) => TypeRef::Char,
+            IRLiteral::Unit => TypeRef::Unit,
+        }),
+        IRNode::Var(name) => env.get(name).cloned().flatten(),
+        // A Typed node declares its own type; the declaration is
+        // the claim codegen already trusts, so inference does too.
+        IRNode::Typed { ty, .. } => Some(ty.clone()),
+        IRNode::Hole { .. } => None,
+        IRNode::Return(inner) => infer_ir_type(inner, env),
+        IRNode::Block(stmts) => {
+            if stmts.is_empty() {
+                return Some(TypeRef::Unit);
+            }
+            let (last, rest) = stmts.split_last()?;
+            // A Return among the earlier statements can leave the
+            // block before the tail is reached, so the tail alone
+            // proves nothing about the block's value.
+            if rest.iter().any(|s| contains_return(s)) {
+                return None;
+            }
+            // Alloc statements bind names for the rest of the block.
+            let mut env = env.clone();
+            for stmt in rest {
+                if let IRNode::Alloc { name, ty, .. } = stmt {
+                    env.insert(name.clone(), Some(ty.clone()));
+                }
+            }
+            infer_ir_type(last, &env)
+        }
+        IRNode::Let { name, value, body } => {
+            let value_ty = infer_ir_type(value, env);
+            let mut inner = env.clone();
+            inner.insert(name.clone(), value_ty);
+            infer_ir_type(body, &inner)
+        }
+        IRNode::If {
+            then_branch,
+            else_branch,
+            ..
+        } => agree(
+            infer_ir_type(then_branch, env),
+            infer_ir_type(else_branch, env),
+        ),
+        IRNode::Match { scrutinee, cases } => {
+            if cases.is_empty() {
+                return None;
+            }
+            let scrut_ty = infer_ir_type(scrutinee, env);
+            let mut agreed: Option<TypeRef> = None;
+            for (pattern, arm) in cases {
+                let mut arm_env = env.clone();
+                bind_pattern_types(pattern, &scrut_ty, &mut arm_env);
+                let arm_ty = infer_ir_type(arm, &arm_env)?;
+                match &agreed {
+                    None => agreed = Some(arm_ty),
+                    Some(prev) => {
+                        if provably_different(prev, &arm_ty) {
+                            return None;
+                        }
+                    }
+                }
+            }
+            agreed
+        }
+        IRNode::BinOp(op, l, r) => {
+            let lt = infer_ir_type(l, env)?;
+            let rt = infer_ir_type(r, env)?;
+            binop_type(*op, &lt, &rt)
+        }
+        IRNode::UnaryOp(op, inner) => {
+            let it = infer_ir_type(inner, env)?;
+            match op {
+                IRUnaryOp::Neg | IRUnaryOp::Abs => {
+                    if int_family(&it) || it == TypeRef::Float {
+                        Some(it)
+                    } else {
+                        None
+                    }
+                }
+                IRUnaryOp::Not => {
+                    if it == TypeRef::Bool || int_family(&it) {
+                        Some(it)
+                    } else {
+                        None
+                    }
+                }
+                IRUnaryOp::Len => match &it {
+                    TypeRef::List(_)
+                    | TypeRef::Set(_)
+                    | TypeRef::Map(..)
+                    | TypeRef::String
+                    | TypeRef::Array(..) => Some(TypeRef::Int),
+                    _ => None,
+                },
+                IRUnaryOp::Head | IRUnaryOp::Last => match &it {
+                    TypeRef::List(elem) | TypeRef::Array(elem, _) => Some((**elem).clone()),
+                    _ => None,
+                },
+                IRUnaryOp::Tail | IRUnaryOp::Init | IRUnaryOp::Reverse => match &it {
+                    TypeRef::List(_) => Some(it),
+                    _ => None,
+                },
+                IRUnaryOp::Clone => Some(it),
+            }
+        }
+        IRNode::Call { function, args } => match function.as_str() {
+            // The pure builtins whose result type is fixed by
+            // definition (mirrors eval::eval_call and typeck's
+            // stdlib table). `len` of a certainly-scalar argument
+            // is an internal error rather than an Int, so no type
+            // is claimed there.
+            "len" if args.len() == 1 => match infer_ir_type(&args[0], env) {
+                Some(t) if is_certain_scalar(&t) => None,
+                _ => Some(TypeRef::Int),
+            },
+            // The parser's list-literal form (see eval_call).
+            "List" => Some(TypeRef::List(Box::new(element_repr(args, env)))),
+            _ => None,
+        },
+        IRNode::Collection { kind, elements } => match kind {
+            CollectionKind::List => {
+                Some(TypeRef::List(Box::new(element_repr(elements, env))))
+            }
+            CollectionKind::Set => {
+                Some(TypeRef::Set(Box::new(element_repr(elements, env))))
+            }
+            CollectionKind::Array => Some(TypeRef::Array(
+                Box::new(element_repr(elements, env)),
+                elements.len(),
+            )),
+            CollectionKind::Tuple => Some(TypeRef::Tuple(
+                elements
+                    .iter()
+                    .map(|e| infer_ir_type(e, env).unwrap_or_else(wildcard))
+                    .collect(),
+            )),
+            CollectionKind::Map => None,
+        },
+        IRNode::Index(coll, _) => match infer_ir_type(coll, env) {
+            Some(TypeRef::List(elem)) | Some(TypeRef::Array(elem, _)) => Some(*elem),
+            _ => None,
+        },
+        // Loops, allocation/mutation, function values, and the
+        // higher-order combinators: no certain type (see header).
+        _ => None,
+    }
+}
+
+/// Is there a Return anywhere in this body (outside nested
+/// function values) whose value's type is PROVABLY not the
+/// spec's return type? Such a candidate cannot type-check
+/// against the signature whatever its tail expression says.
+fn has_mistyped_return(node: &IRNode, env: &TypeEnv, ret: &TypeRef) -> bool {
+    match node {
+        IRNode::Lambda { .. } | IRNode::Closure { .. } => false,
+        IRNode::Return(inner) => {
+            let bad = match infer_ir_type(inner, env) {
+                Some(t) => provably_different(&t, ret),
+                None => false,
+            };
+            bad || has_mistyped_return(inner, env, ret)
+        }
+        IRNode::Block(stmts) => {
+            let mut env = env.clone();
+            for stmt in stmts {
+                if has_mistyped_return(stmt, &env, ret) {
+                    return true;
+                }
+                if let IRNode::Alloc { name, ty, .. } = stmt {
+                    env.insert(name.clone(), Some(ty.clone()));
+                }
+            }
+            false
+        }
+        IRNode::Let { name, value, body } => {
+            if has_mistyped_return(value, env, ret) {
+                return true;
+            }
+            let mut inner = env.clone();
+            inner.insert(name.clone(), infer_ir_type(value, env));
+            has_mistyped_return(body, &inner, ret)
+        }
+        IRNode::For {
+            var,
+            start,
+            end,
+            body,
+        } => {
+            if has_mistyped_return(start, env, ret) || has_mistyped_return(end, env, ret) {
+                return true;
+            }
+            let range_ty = match (infer_ir_type(start, env), infer_ir_type(end, env)) {
+                (Some(a), Some(b)) if int_family(&a) && int_family(&b) => {
+                    Some(TypeRef::Int)
+                }
+                _ => None,
+            };
+            let mut inner = env.clone();
+            inner.insert(var.clone(), range_ty);
+            has_mistyped_return(body, &inner, ret)
+        }
+        IRNode::Match { scrutinee, cases } => {
+            if has_mistyped_return(scrutinee, env, ret) {
+                return true;
+            }
+            let scrut_ty = infer_ir_type(scrutinee, env);
+            cases.iter().any(|(pattern, arm)| {
+                let mut arm_env = env.clone();
+                bind_pattern_types(pattern, &scrut_ty, &mut arm_env);
+                has_mistyped_return(arm, &arm_env, ret)
+            })
+        }
+        _ => child_nodes(node)
+            .iter()
+            .any(|c| has_mistyped_return(c, env, ret)),
+    }
+}
+
+/// The conservative verdict on a candidate body vs its spec's
+/// declared return type. A provably mistyped `return` anywhere
+/// dooms the candidate regardless of its tail, so it is checked
+/// first; the tail type decides the rest.
+pub fn return_type_verdict(body: &IRNode, spec: &FunctionSpec) -> TypeVerdict {
+    let ret = &spec.return_type;
+    let env: TypeEnv = spec
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), Some(p.ty.clone())))
+        .collect();
+    if has_mistyped_return(body, &env, ret) {
+        return TypeVerdict::Mismatched;
+    }
+    match infer_ir_type(body, &env) {
+        Some(t) if provably_different(&t, ret) => TypeVerdict::Mismatched,
+        Some(t) if certainly_equal(&t, ret) => TypeVerdict::Matches,
+        _ => TypeVerdict::Unknown,
+    }
+}
+
 /// Select the single best implementation from a list
 pub fn select_best(
     candidates: Vec<CandidateImplementation>,
-    _spec: &FunctionSpec,
+    spec: &FunctionSpec,
 ) -> Result<CandidateImplementation, SelectionError> {
     if candidates.is_empty() {
         return Err(SelectionError::NoCandidates);
@@ -46,11 +676,31 @@ pub fn select_best(
         .filter(|c| count_holes(&c.body) == 0)
         .cloned()
         .collect();
-    let pool: &[CandidateImplementation] =
-        if hole_free.is_empty() { &candidates } else { &hole_free };
+    let mut pool: Vec<CandidateImplementation> =
+        if hole_free.is_empty() { candidates } else { hole_free };
+
+    // Return-type gate (mirrors the completeness gate): a
+    // candidate whose body is PROVABLY not the spec's return type
+    // (see return_type_verdict) cannot be a correct
+    // implementation of the spec — its generated code does not
+    // type-check against the signature. If any candidate in the
+    // pool is provably matching or merely unprovable (Unknown is
+    // neutral), the provably mistyped ones are excluded from
+    // winning. Only when EVERY candidate is provably mistyped
+    // does selection fall back to ranking the mistyped pool
+    // unchanged, so callers still get the best-scored answer
+    // available instead of no answer.
+    let type_sound: Vec<CandidateImplementation> = pool
+        .iter()
+        .filter(|c| return_type_verdict(&c.body, spec) != TypeVerdict::Mismatched)
+        .cloned()
+        .collect();
+    if !type_sound.is_empty() {
+        pool = type_sound;
+    }
 
     // Apply multiple criteria in priority order
-    let best = select_by_criteria(pool, &[
+    let best = select_by_criteria(&pool, &[
         SelectionCriterion::MostCorrect,
         SelectionCriterion::ParetoOptimal,
         SelectionCriterion::BestOverall,
@@ -872,12 +1522,22 @@ mod tests {
     fn synthesized_testless_spec_winner_is_not_provably_mistyped() {
         // Integration, mirroring the probe pipeline (synthesize →
         // verify_all → select_best) for the two test-less M2
-        // specs. The gate's precise guarantee: WHENEVER the final
-        // pool contains any candidate that is not provably
-        // mistyped, the winner is not provably mistyped. Both
-        // halves are asserted — the pool condition is what makes
-        // the winner assertion meaningful rather than vacuous.
-        use crate::synthesis::engine::synthesize;
+        // specs. The precise guarantee of the two composed gates
+        // (completeness first, then return-type): WHENEVER the
+        // hole-free pool contains any candidate that is not
+        // provably mistyped, the winner is not provably mistyped.
+        //
+        // The engine is randomized and the premise is NOT
+        // structural: in roughly half of raw runs the hole-free
+        // pool of a test-less spec is uniformly mistyped (every
+        // MCTS completion inherits a certainly-wrong root shape),
+        // and only the documented fallback remains. The test
+        // therefore retries synthesis per spec until the premise
+        // holds — each attempt is an independent draw — and
+        // asserts the winner guarantee on that attempt. Eight
+        // attempts make the all-fallback probability negligible
+        // (measured premise rate ≈ 0.7 per attempt per spec).
+        use crate::synthesis::engine::{count_holes, synthesize};
         for (file, name) in [("validator", "tags_compatible"), ("printer", "needs_parens")] {
             let root = env!("CARGO_MANIFEST_DIR");
             let path = format!("{}/examples/self_host/{}.morph", root, file);
@@ -893,23 +1553,37 @@ mod tests {
                 .clone();
             assert!(spec.tests.is_empty(), "{} must be test-less", name);
 
-            let candidates = synthesize(&spec, 1).expect("opt-1 synthesis");
-            let pool = crate::verify::verifier::verify_all(candidates, &spec)
-                .expect("verify_all");
+            let mut asserted = false;
+            for _attempt in 0..8 {
+                let candidates = synthesize(&spec, 1).expect("opt-1 synthesis");
+                let pool = crate::verify::verifier::verify_all(candidates, &spec)
+                    .expect("verify_all");
+                let premise = pool
+                    .iter()
+                    .filter(|c| count_holes(&c.body) == 0)
+                    .any(|c| {
+                        return_type_verdict(&c.body, &spec) != TypeVerdict::Mismatched
+                    });
+                if !premise {
+                    continue; // all-fallback draw: nothing to assert
+                }
+                let winner = select_best(pool, &spec).expect("select_best");
+                assert_ne!(
+                    return_type_verdict(&winner.body, &spec),
+                    TypeVerdict::Mismatched,
+                    "winner for {} is provably mistyped against {} \
+                     although the hole-free pool held a sound candidate",
+                    name,
+                    spec.return_type
+                );
+                asserted = true;
+                break;
+            }
             assert!(
-                pool.iter()
-                    .any(|c| return_type_verdict(&c.body, &spec) != TypeVerdict::Mismatched),
-                "final pool for {} contains only provably mistyped candidates — \
-                 the gate has nothing to crown",
+                asserted,
+                "8 synthesis attempts for {} never produced a hole-free pool \
+                 containing a non-mistyped candidate",
                 name
-            );
-            let winner = select_best(pool, &spec).expect("select_best");
-            assert_ne!(
-                return_type_verdict(&winner.body, &spec),
-                TypeVerdict::Mismatched,
-                "winner for {} is provably mistyped against {}",
-                name,
-                spec.return_type
             );
         }
     }
@@ -927,3 +1601,4 @@ mod tests {
         assert!(frontier.iter().any(|c| c.id == 3));
     }
 }
+
