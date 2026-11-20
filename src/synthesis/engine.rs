@@ -2693,34 +2693,54 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
 }
 
 /// The guard-table body: one match over the spec's
-/// single Int parameter, with one literal arm per usable
+/// single parameter, with one literal arm per usable
 /// guard row and a wildcard arm carrying the typed-literal
 /// default for the return type (the Phase 10 menu's first
 /// entry — the spec is silent off-table, so the default is a
 /// documented guess; the Phase 15 classification showed the
 /// mirrors return exactly that default on unpinned cases).
-/// Rows pinning an already-pinned input are skipped (the
-/// first row wins). The raw builder stops at constructing the
-/// match; admission is the seed builder's step.
+/// The parameter is an Int (rows recognized by `guard_row`'s
+/// interval scan) or a Bool (rows recognized by
+/// `guard_row_bool`'s finite-domain enumeration — a total
+/// Bool table pins both domain values, so its wildcard arm
+/// is unreachable, but the match convention keeps it: the
+/// verifier's symbolic match requires a final unconditional
+/// arm). Rows pinning an already-pinned input are skipped
+/// (the first row wins). The raw builder stops at
+/// constructing the match; admission is the seed builder's
+/// step.
 fn guard_table_body(spec: &FunctionSpec) -> Option<IRNode> {
     if spec.params.len() != 1 {
         return None;
     }
     let param = &spec.params[0];
-    if !is_int_family(&param.ty) {
-        return None;
-    }
     let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
-    for c in &spec.postconditions {
-        if let Some((pinned, output)) = guard_row(c, &param.name) {
-            if cases
-                .iter()
-                .any(|(p, _)| matches!(p, IRPattern::Literal(IRLiteral::Int(v)) if *v == pinned))
-            {
-                continue;
+    if is_int_family(&param.ty) {
+        for c in &spec.postconditions {
+            if let Some((pinned, output)) = guard_row(c, &param.name) {
+                if cases
+                    .iter()
+                    .any(|(p, _)| matches!(p, IRPattern::Literal(IRLiteral::Int(v)) if *v == pinned))
+                {
+                    continue;
+                }
+                cases.push((IRPattern::Literal(IRLiteral::Int(pinned)), output));
             }
-            cases.push((IRPattern::Literal(IRLiteral::Int(pinned)), output));
         }
+    } else if matches!(param.ty, TypeRef::Bool) {
+        for c in &spec.postconditions {
+            if let Some((pinned, output)) = guard_row_bool(c, &param.name) {
+                if cases
+                    .iter()
+                    .any(|(p, _)| matches!(p, IRPattern::Literal(IRLiteral::Bool(v)) if *v == pinned))
+                {
+                    continue;
+                }
+                cases.push((IRPattern::Literal(IRLiteral::Bool(pinned)), output));
+            }
+        }
+    } else {
+        return None;
     }
     if cases.is_empty() {
         return None;
@@ -3044,7 +3064,54 @@ fn is_int_family(ty: &TypeRef) -> bool {
     )
 }
 
-/// One guard-table row, from a postcondition of the form
+/// One guard row split into its two parts: the output pin
+/// (the non-`output` side of the row's single `output == …`
+/// leaf) and the remaining leaves, each still to be parsed
+/// as a guard by the caller's domain. A postcondition is
+/// row-shaped when it is an Or of at least two leaves with
+/// exactly one output pin among them; anything else — a bare
+/// equation, an ordering on `output`, two pins, no guard
+/// leaf — is not a row, and every guard-table-family builder
+/// skips it alike. An Eq leaf that does not pin the output
+/// is not consumed here: it may still be a guard on the
+/// parameter (`param == v`), so it stays with the leaves.
+fn guard_row_parts<'a>(c: &'a Constraint) -> Option<(&'a Expr, Vec<&'a Expr>)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let mut leaves = Vec::new();
+    flatten_or(expr, &mut leaves);
+    if leaves.len() < 2 {
+        return None;
+    }
+    let mut pin: Option<&Expr> = None;
+    let mut guards: Vec<&Expr> = Vec::new();
+    for leaf in leaves {
+        if let Expr::BinOp(BinOp::Eq, l, r) = leaf {
+            let side = if matches!(l.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(r.as_ref())
+            } else if matches!(r.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(l.as_ref())
+            } else {
+                None
+            };
+            if let Some(side) = side {
+                if pin.is_some() {
+                    return None; // two output pins in one row: ambiguous
+                }
+                pin = Some(side);
+                continue;
+            }
+        }
+        guards.push(leaf);
+    }
+    if guards.is_empty() {
+        return None;
+    }
+    Some((pin?, guards))
+}
+
+/// One Int guard-table row, from a postcondition of the form
 /// `<guard on the input> || output == <literal>` — the shape
 /// the spec dialect writes lookup tables in ("param<v ||
 /// param>v || output==lit" reads as "param == v implies
@@ -3065,45 +3132,14 @@ fn is_int_family(ty: &TypeRef) -> bool {
 /// range, carrying two output pins, or mentioning anything
 /// else is not a row.
 fn guard_row(c: &Constraint, param: &str) -> Option<(i64, IRNode)> {
-    let Constraint::Expr(expr) = c else {
-        return None;
-    };
-    let mut leaves = Vec::new();
-    flatten_or(expr, &mut leaves);
-    if leaves.len() < 2 {
-        return None;
+    let (pin_side, guard_leaves) = guard_row_parts(c)?;
+    let pin = expr_to_ir(pin_side);
+    if !matches!(pin, IRNode::Literal(_)) {
+        return None; // the pin must be a literal value
     }
-    let mut pin: Option<IRNode> = None;
     let mut guards: Vec<(BinOp, bool, i64)> = Vec::new();
-    for leaf in leaves {
-        if let Expr::BinOp(BinOp::Eq, l, r) = leaf {
-            let lit = if matches!(l.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
-                Some(r.as_ref())
-            } else if matches!(r.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
-                Some(l.as_ref())
-            } else {
-                None
-            };
-            if let Some(lit) = lit {
-                if pin.is_some() {
-                    return None; // two output pins in one row: ambiguous
-                }
-                let node = expr_to_ir(lit);
-                if !matches!(node, IRNode::Literal(_)) {
-                    return None; // the pin must be a literal value
-                }
-                pin = Some(node);
-                continue;
-            }
-            // An Eq leaf that does not pin the output may still
-            // be a guard on the parameter (param == v): fall
-            // through to guard parsing.
-        }
+    for leaf in guard_leaves {
         guards.push(guard_leaf(leaf, param)?);
-    }
-    let pin = pin?;
-    if guards.is_empty() {
-        return None;
     }
     let lo = guards.iter().map(|g| g.2).min()? - 2;
     let hi = guards.iter().map(|g| g.2).max()? + 2;
@@ -3117,6 +3153,75 @@ fn guard_row(c: &Constraint, param: &str) -> Option<(i64, IRNode)> {
         }
     }
     Some((pinned?, pin))
+}
+
+/// One Bool guard-table row: the same row shape as
+/// `guard_row`, over the finite Bool domain. The guard
+/// leaves compare the parameter against BoolLit constants
+/// (Eq/Neq only — the domain has no order to state), and
+/// the pinned value is recovered by enumeration instead of
+/// the integer-interval scan: the unique domain value
+/// falsifying EVERY guard leaf. An Eq/Neq leaf is false at
+/// exactly one of the two domain values, so the falsifying
+/// set is a singleton or empty; empty — the guard leaves
+/// jointly cover the domain — pins nothing and is not a
+/// row. (The two-falsifying-values check below is therefore
+/// unreachable for admitted leaves; it stays as the Int
+/// scan's structural mirror.)
+fn guard_row_bool(c: &Constraint, param: &str) -> Option<(bool, IRNode)> {
+    let (pin_side, guard_leaves) = guard_row_parts(c)?;
+    let pin = expr_to_ir(pin_side);
+    if !matches!(pin, IRNode::Literal(_)) {
+        return None; // the pin must be a literal value
+    }
+    let mut guards: Vec<(BinOp, bool, bool)> = Vec::new();
+    for leaf in guard_leaves {
+        guards.push(guard_leaf_bool(leaf, param)?);
+    }
+    let mut pinned: Option<bool> = None;
+    for x in [false, true] {
+        if guards.iter().all(|g| !guard_leaf_bool_holds(g, x)) {
+            if pinned.is_some() {
+                return None; // pins the whole domain, not a single value
+            }
+            pinned = Some(x);
+        }
+    }
+    Some((pinned?, pin))
+}
+
+/// A Bool guard leaf normalized to (operator,
+/// constant_on_left, constant): an Eq/Neq between the
+/// parameter and a BoolLit constant, in either operand
+/// order. Ordering comparisons and anything else — another
+/// variable, a compound side — are not Bool guard leaves.
+fn guard_leaf_bool(leaf: &Expr, param: &str) -> Option<(BinOp, bool, bool)> {
+    let Expr::BinOp(op, l, r) = leaf else {
+        return None;
+    };
+    if !matches!(op, BinOp::Eq | BinOp::Neq) {
+        return None;
+    }
+    match (l.as_ref(), r.as_ref()) {
+        (Expr::Var(v), Expr::BoolLit(b)) if v == param => Some((*op, false, *b)),
+        (Expr::BoolLit(b), Expr::Var(v)) if v == param => Some((*op, true, *b)),
+        _ => None,
+    }
+}
+
+/// Does the normalized Bool guard leaf hold at `param == x`?
+fn guard_leaf_bool_holds(guard: &(BinOp, bool, bool), x: bool) -> bool {
+    let (op, constant_on_left, constant) = guard;
+    let (a, b) = if *constant_on_left {
+        (*constant, x)
+    } else {
+        (x, *constant)
+    };
+    match op {
+        BinOp::Eq => a == b,
+        BinOp::Neq => a != b,
+        _ => unreachable!("guard_leaf_bool admits only Eq/Neq"),
+    }
 }
 
 fn flatten_or<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
