@@ -110,7 +110,7 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
     ));
 
     // Body
-    let body_code = ir_to_rust(&candidate.body, 1);
+    let body_code = ir_to_rust(&candidate.body, 1, &candidate.spec.return_type);
     out.push_str(&body_code);
 
     out.push_str("}\n");
@@ -287,7 +287,16 @@ fn generate_javascript(candidate: &CandidateImplementation) -> Result<String, Co
 
 // ── IR → Rust Translation ─────────────────────────────────
 
-fn ir_to_rust(node: &IRNode, indent: usize) -> String {
+/// Statement-level IR → Rust. `fn_ret` is the enclosing function's
+/// return type, threaded through so value positions whose expected
+/// type is the return type (match arms, `Return` expressions) can be
+/// emitted with that expectation — see `ir_to_rust_expr_typed`.
+/// A `Match` rendered here in statement position has its value
+/// discarded unless it is the function tail; using `fn_ret` as the
+/// arm expectation in both cases keeps the arms mutually consistent,
+/// and the only conversion it drives (string literal → `String`)
+/// fires solely when the function actually returns `String`.
+fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
     let pad = "    ".repeat(indent);
     let pad_inner = "    ".repeat(indent + 1);
 
@@ -299,7 +308,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
         IRNode::Block(stmts) => {
             let mut out = String::new();
             for stmt in stmts {
-                out.push_str(&ir_to_rust(stmt, indent));
+                out.push_str(&ir_to_rust(stmt, indent, fn_ret));
             }
             out
         }
@@ -307,7 +316,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
         IRNode::Let { name, value, body } => {
             format!(
                 "{}let {} = {};\n{}",
-                pad, rust_ident(name), ir_to_rust_expr(value), ir_to_rust(body, indent)
+                pad, rust_ident(name), ir_to_rust_expr(value), ir_to_rust(body, indent, fn_ret)
             )
         }
 
@@ -316,8 +325,8 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
                 "{}if {} {{\n{}}} else {{\n{}}}\n",
                 pad,
                 ir_to_rust_expr(condition),
-                ir_to_rust(then_branch, indent + 1),
-                ir_to_rust(else_branch, indent + 1),
+                ir_to_rust(then_branch, indent + 1, fn_ret),
+                ir_to_rust(else_branch, indent + 1, fn_ret),
             )
         }
 
@@ -330,7 +339,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
                 inv_comment,
                 pad,
                 ir_to_rust_expr(condition),
-                ir_to_rust(body, indent + 1),
+                ir_to_rust(body, indent + 1, fn_ret),
                 pad,
             )
         }
@@ -341,7 +350,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
                 pad, rust_ident(var),
                 ir_to_rust_expr(start),
                 ir_to_rust_expr(end),
-                ir_to_rust(body, indent + 1),
+                ir_to_rust(body, indent + 1, fn_ret),
                 pad,
             )
         }
@@ -352,7 +361,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
                 let pat = ir_pattern_to_rust(pattern);
                 out.push_str(&format!("{}{} => {{\n{}{}}},\n",
                     pad_inner, pat,
-                    ir_to_rust_tail(body, indent + 2),
+                    ir_to_rust_tail(body, indent + 2, fn_ret, Some(fn_ret)),
                     pad_inner,
                 ));
             }
@@ -366,13 +375,13 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
         }
 
         IRNode::Return(expr) => {
-            format!("{}return {};\n", pad, ir_to_rust_expr(expr))
+            format!("{}return {};\n", pad, ir_to_rust_expr_typed(expr, Some(fn_ret)))
         }
 
         IRNode::Alloc { name, ty, initial } => {
             format!(
                 "{}let mut {}: {} = {};\n",
-                pad, rust_ident(name), ty_to_rust(ty), ir_to_rust_expr(initial)
+                pad, rust_ident(name), ty_to_rust(ty), ir_to_rust_expr_typed(initial, Some(ty))
             )
         }
 
@@ -445,7 +454,7 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
             )
         }
 
-        IRNode::Typed { node, .. } => ir_to_rust(node, indent),
+        IRNode::Typed { node, .. } => ir_to_rust(node, indent, fn_ret),
 
         // Expressions that shouldn't appear as statements
         _ => format!("{}{};\n", pad, ir_to_rust_expr(node)),
@@ -459,25 +468,52 @@ fn ir_to_rust(node: &IRNode, indent: usize) -> String {
 /// Statement-shaped nodes (Let, If, Return, Hole, nested Match, …)
 /// keep their normal statement rendering, which is already tail-shaped
 /// where it needs to be.
-fn ir_to_rust_tail(node: &IRNode, indent: usize) -> String {
+fn ir_to_rust_tail(
+    node: &IRNode,
+    indent: usize,
+    fn_ret: &TypeRef,
+    expected: Option<&TypeRef>,
+) -> String {
     let pad = "    ".repeat(indent);
     match node {
         IRNode::Block(stmts) => {
             let mut out = String::new();
             if let Some((last, rest)) = stmts.split_last() {
                 for stmt in rest {
-                    out.push_str(&ir_to_rust(stmt, indent));
+                    out.push_str(&ir_to_rust(stmt, indent, fn_ret));
                 }
-                out.push_str(&ir_to_rust_tail(last, indent));
+                out.push_str(&ir_to_rust_tail(last, indent, fn_ret, expected));
             }
             out
         }
-        IRNode::Typed { node, .. } => ir_to_rust_tail(node, indent),
+        // A Typed node declares its own type: it overrides the
+        // expectation inherited from the enclosing position.
+        IRNode::Typed { node, ty } => ir_to_rust_tail(node, indent, fn_ret, Some(ty)),
         IRNode::Literal(_) | IRNode::Var(_) | IRNode::BinOp(..) | IRNode::UnaryOp(..)
         | IRNode::Lambda { .. } | IRNode::Collection { .. } => {
-            format!("{}{}\n", pad, ir_to_rust_expr(node))
+            format!("{}{}\n", pad, ir_to_rust_expr_typed(node, expected))
         }
-        _ => ir_to_rust(node, indent),
+        _ => ir_to_rust(node, indent, fn_ret),
+    }
+}
+
+/// Expression emission with an expected type, where the caller knows
+/// one (function return position, match arm tail, an `Alloc`'s
+/// declared type, or a `Typed` node's annotation). The only
+/// expectation-driven rewrite: a string literal whose expected type
+/// is `String` is emitted owned (`"s".to_string()`) — a bare `"s"`
+/// is a `&str` and fails E0308 where a `String` is required
+/// (defect 4d). Everywhere else the literal stays a `&str`, so
+/// `&str` contexts are unchanged. All other nodes delegate to the
+/// untyped emitter; a `Typed` node re-enters here with its own
+/// declared type as the expectation.
+fn ir_to_rust_expr_typed(node: &IRNode, expected: Option<&TypeRef>) -> String {
+    match node {
+        IRNode::Typed { node, ty } => ir_to_rust_expr_typed(node, Some(ty)),
+        IRNode::Literal(IRLiteral::String(s)) if expected == Some(&TypeRef::String) => {
+            format!("\"{}\".to_string()", s)
+        }
+        _ => ir_to_rust_expr(node),
     }
 }
 
@@ -562,7 +598,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 CollectionKind::Map => format!("HashMap::from([{}])", elems.join(", ")),
             }
         }
-        IRNode::Typed { node, .. } => ir_to_rust_expr(node),
+        IRNode::Typed { node, ty } => ir_to_rust_expr_typed(node, Some(ty)),
         _ => "/* UNSUPPORTED */".into(),
     }
 }
@@ -1126,6 +1162,108 @@ mod tests {
         assert!(!code.contains("(kind + 1);"), "BinOp arm discarded:\n{}", code);
         assert!(code.contains("7\n"), "Block arm value not yielded:\n{}", code);
         assert!(!code.contains("7;"), "Block arm value discarded:\n{}", code);
+    }
+
+    // Regression (M2 synthesis run, defect 4d): `IRLiteral::String` was
+    // emitted as a bare `&str` literal in tail position of functions
+    // whose spec return type is `String` — E0308 in 4/14 winner files
+    // (`binop_symbol`, `node_kind_name`, `print_node_kind`,
+    // `type_tag_name`). This is the exact `type_tag_name` winner shape:
+    // a Match body whose arms are string literals (direct, wrapped in a
+    // Block, and wrapped in a Typed node), plus a Hole wildcard arm.
+    #[test]
+    fn rust_codegen_string_literals_owned_in_string_returning_match() {
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(1)),
+                    IRNode::Literal(IRLiteral::String("Int".into())),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Int(4)),
+                    IRNode::Block(vec![IRNode::Literal(IRLiteral::String(
+                        "String".into(),
+                    ))]),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Int(6)),
+                    IRNode::Typed {
+                        node: Box::new(IRNode::Literal(IRLiteral::String("List".into()))),
+                        ty: TypeRef::String,
+                    },
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Hole { id: 1, expected_type: None },
+                ),
+            ],
+        };
+        let mut cand = candidate("type_tag_name", body);
+        cand.spec.return_type = TypeRef::String;
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("\"Int\".to_string()"),
+            "direct literal arm not owned:\n{}", code
+        );
+        assert!(
+            code.contains("\"String\".to_string()"),
+            "block-wrapped literal arm not owned:\n{}", code
+        );
+        assert!(
+            code.contains("\"List\".to_string()"),
+            "Typed literal arm not owned:\n{}", code
+        );
+        assert!(
+            !code.contains("\n            \"Int\"\n"),
+            "bare &str literal still emitted as arm tail:\n{}", code
+        );
+    }
+
+    // Same defect, `Return` position: a returned string literal in a
+    // `String`-returning function must also be owned.
+    #[test]
+    fn rust_codegen_string_literal_owned_in_return() {
+        let body = IRNode::Return(Box::new(IRNode::Literal(IRLiteral::String(
+            "done".into(),
+        ))));
+        let mut cand = candidate("greeting", body);
+        cand.spec.return_type = TypeRef::String;
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("return \"done\".to_string();"),
+            "returned literal not owned:\n{}", code
+        );
+    }
+
+    // No blanket conversion: where the expected type is NOT `String`,
+    // string literals stay `&str` — converting everywhere would change
+    // semantics for `&str` contexts.
+    #[test]
+    fn rust_codegen_string_literals_stay_str_without_string_expectation() {
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(1)),
+                    IRNode::Literal(IRLiteral::String("Int".into())),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::String("Other".into())),
+                ),
+            ],
+        };
+        let cand = candidate("not_a_string_fn", body); // return_type: Bool
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            !code.contains(".to_string()"),
+            "literal converted without a String expectation:\n{}", code
+        );
+        assert!(
+            code.contains("\"Int\""),
+            "literal missing entirely:\n{}", code
+        );
     }
 
     // Sanitization must also guard Rust keywords and leading digits,
