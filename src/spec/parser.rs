@@ -559,6 +559,23 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_expr_mul()?;
         loop {
             self.skip_whitespace_and_comments();
+            // `++` (BinOp::Concat) shares the additive level and
+            // must be probed BEFORE `+`: it is the two-character
+            // operator at this level, and a single-`+` probe
+            // would consume its first character as Add and leave
+            // the second as a parse error. Concat is the
+            // additive operation on the operands the layers
+            // below define it for (Strings, Lists — see the
+            // interpreter and verifier), so it groups with
+            // `+`/`-`: left-associative, operands at the
+            // multiplicative level, binding tighter than the
+            // comparisons handled by the caller.
+            if self.peek_n(2) == "++" {
+                self.eat_str("++")?;
+                let right = self.parse_expr_mul()?;
+                left = Expr::BinOp(BinOp::Concat, Box::new(left), Box::new(right));
+                continue;
+            }
             match self.peek() {
                 Some('+') => {
                     self.advance();
