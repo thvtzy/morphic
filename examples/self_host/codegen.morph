@@ -1,6 +1,6 @@
 // =================================================================
-//  M3: Codegen -- IR to Rust (slices 1-2: leaf mappings +
-//  small template families)
+//  M3: Codegen -- IR to Rust (slices 1-3: leaf mappings +
+//  small template families + name/text assembly)
 //  Self-host spec for the Rust emitter in src/codegen/mod.rs.
 //
 //  The codegen is the biggest self-host component and is being
@@ -12,12 +12,15 @@
 //  consult; slice 2 is the small template families (ty_to_rust
 //  composite forms, literal rendering, ir_pattern_to_rust,
 //  expr_to_rust + constraint_to_rust, and the wrap
-//  classification of expr_in_condition_position). Every spec
-//  below states the COMPLETE mapping of its table as
-//  constraints -- the central M2 lesson is that specs pinning
-//  only tested rows crown memorizers -- while the in-spec
-//  tests stay representative, not exhaustive. Mirrors +
-//  full-range golden tests live in tests/m3_proof.rs.
+//  classification of expr_in_condition_position); slice 3 is
+//  name/text assembly (rust_ident, the String-ownership rule
+//  of ir_to_rust_expr_typed, generate_rust's assembly pieces).
+//  Every spec below states the COMPLETE mapping of its table
+//  as constraints -- the central M2 lesson is that specs
+//  pinning only tested rows crown memorizers -- while the
+//  in-spec tests stay representative, not exhaustive.
+//  Mirrors + full-range golden tests live in
+//  tests/m3_proof.rs.
 //
 //  Enums are simulated with Int codes, as in M0/M1/M2, using
 //  declaration order in the Rust source.
@@ -36,9 +39,17 @@
 //  (rust_pattern_ctor_name); string literals may contain
 //  escaped quotes. Char literals do NOT parse in expression
 //  position ('a' is a parse error), though Char-typed inputs
-//  declare fine -- so no spec below writes a Char value. And
-//  the spec language has no string concatenation (see the
-//  slice-2 representation note before rust_type_form).
+//  declare fine -- so no spec below writes a Char value.
+//  Slice-3 probes (2026-11-21) added: F1 is RESOLVED -- the
+//  parser now surfaces BinOp::Concat as the `++` operator
+//  (Phase 25), so template assembly is statable as equations
+//  over already-rendered parts, and slice 3 pins its
+//  templates that way. String literals support the escapes
+//  \n, \t, \\ and \" (the parser's escape set), which the
+//  generate_rust templates rely on. A constraint may call
+//  another spec of the module (validator.morph's
+//  validate_kind_tag is the precedent), which
+//  rust_ident_suffix's composition over rust_keyword uses.
 // =================================================================
 
 Codegen {
@@ -117,6 +128,11 @@ type ConstraintKindCode = Int;
 // 0=LessThan, 1=LessThanOrEqual, 2=GreaterThan,
 // 3=GreaterThanOrEqual
 type OrderOpCode = Int;
+
+// Expectation codes for ir_to_rust_expr_typed (slice 3): a
+// TypeRef code (0-25, as in TypeCode) stands for
+// Some(that type); 26 stands for no expectation (None).
+type ExpectedTypeCode = Int;
 
 // -- Type names ------------------------------------------------
 
@@ -716,6 +732,231 @@ spec rust_condition_wrap {
     test "loop-wraps" { input: 24 expect: true }
     test "literal-bare" { input: 9 expect: false }
     test "hole-bare" { input: 0 expect: false }
+}
+
+// -- Slice 3: name / text assembly ----------------------------
+//
+//  rust_ident, the String-ownership rule of
+//  ir_to_rust_expr_typed, and generate_rust's assembly
+//  pieces. With F1 resolved (the `++` concat operator,
+//  Phase 25), this slice's templates are pinned as EQUATIONS
+//  over already-rendered parts -- the slice-2 representation
+//  rule, with the assembly act itself now statable. What
+//  remains unpinnable is what needs per-character or
+//  per-element iteration (rust_ident's sanitization loop,
+//  the ", " joins inside generate_rust) and the Int ->
+//  decimal conversion (F2); those are mirror-only and
+//  recorded as finding F5 in the ROAD M3 notes.
+
+// -- rust_ident (src/codegen/mod.rs:32-52) ---------------------
+
+spec rust_ident_suffix {
+    doc: "The keyword-suffix step of rust_ident (src/codegen/mod.rs:49-51), stated as a composition over rust_keyword: a name that is a Rust keyword gets '_' appended; any other name passes through unchanged. The input is the PER-CHAR STEP'S OUTPUT (the sanitized string -- never empty: the empty name becomes '_' in that step, pinned by rust_ident_empty), not a raw spec name; the per-char step itself is finding F5. Stating the guard over the sanitized string loses nothing: sanitization only ever introduces '_' characters or a leading '_' prefix, and no keyword contains '_', so a raw name is a keyword iff its sanitization is one."
+    input: name: String
+    output: String
+
+    constraint: rust_keyword(name)==false||output==name++"_"
+    constraint: rust_keyword(name)==true||output==name
+
+    optimize: time < O(n)
+
+    test "type-suffix" { input: "type" expect: "type_" }
+    test "self-suffix" { input: "Self" expect: "Self_" }
+    test "try-suffix" { input: "try" expect: "try_" }
+    test "plain-name" { input: "sort" expect: "sort" }
+    test "suffixed-name" { input: "type_" expect: "type_" }
+    test "underscore-name" { input: "_" expect: "_" }
+}
+
+spec rust_ident_empty {
+    doc: "The empty-name fallback of rust_ident's per-char step (src/codegen/mod.rs:46-48): an empty name sanitizes to '_'. This is the only case of the per-char step the spec language pins completely -- the step is a per-character loop and the language has no character access (finding F5); every non-empty name is unpinned here and covered by the mirror. The fallback feeds the suffix step: '_' is not a keyword, so the full rust_ident of the empty name is exactly '_'."
+    input: name: String
+    output: String
+
+    constraint: name!=""||output=="_"
+
+    optimize: time < O(n)
+
+    test "empty-name" { input: "" expect: "_" }
+}
+
+// -- String ownership (ir_to_rust_expr_typed) ------------------
+
+spec rust_typed_form {
+    doc: "Dispatch family of ir_to_rust_expr_typed (src/codegen/mod.rs:549-558) over IRNode kinds: 0 = delegate to the untyped emitter ir_to_rust_expr (no ownership rewrite -- every kind except Literal and Typed, INCLUDING composites: a string literal nested inside a BinOp, Call or Collection is rendered untyped and stays bare even where a String is expected; Concat operands are the standing example, recorded with F1's resolution), 1 = Literal -- the ownership check (rust_string_ownership) decides owned vs bare, 2 = Typed -- re-enter the typed emitter with the node's declared type as the expectation (the untyped emitter routes Typed nodes here too, src/codegen/mod.rs:809). Total over all 28 IRNode kinds."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<9||kind>9||output==1
+    constraint: kind<22||kind>22||output==2
+    constraint: kind==9||kind==22||output==0
+
+    optimize: time < O(n)
+
+    test "literal-check" { input: 9 expect: 1 }
+    test "typed-reenter" { input: 22 expect: 2 }
+    test "binop-delegates" { input: 11 expect: 0 }
+    test "var-delegates" { input: 10 expect: 0 }
+}
+
+spec rust_string_ownership {
+    doc: "The ownership leaf check of ir_to_rust_expr_typed (src/codegen/mod.rs:552-554): a String literal is emitted owned -- rust_string_literal_owned_text instead of rust_string_literal_text -- exactly when its literal kind is String (3) AND the expected type is String (ExpectedTypeCode 3). 'expected' is an ExpectedTypeCode: a TypeRef code for Some(type), 26 for None. Callers pass Some(String) only via: a Return in a String-returning function (fn_ret, src/codegen/mod.rs:400), an Alloc whose declared type is String (src/codegen/mod.rs:406), a tail position inheriting the function's return type (ir_to_rust_tail, src/codegen/mod.rs:507-540; generate_rust seeds the body with Some(return type)), or a Typed node annotated String (src/codegen/mod.rs:551 and 809). Every other expectation -- any other type, or none -- leaves the literal a &str. Only the String literal kind is ever rewritten; no other literal kind has a &str form. Multi-input spec: no in-spec tests (the test syntax cannot bind tuple inputs); golden cases live in tests/m3_proof.rs."
+    input: lit: Int, expected: Int
+    output: Bool
+
+    constraint: lit<3||lit>3||expected<3||expected>3||output==true
+    constraint: lit==3||output==false
+    constraint: expected==3||output==false
+
+    optimize: time < O(n)
+}
+
+spec rust_string_literal_text {
+    doc: "The bare rendering of a String literal: a quote, the contents RAW (no escaping of any kind -- a quote or backslash inside the contents renders as-is and breaks the generated Rust; pinned as-is), a quote. This one template serves three emitter sites: the Literal arm of ir_to_rust_expr (src/codegen/mod.rs:610), the Literal arm of ir_pattern_to_rust (src/codegen/mod.rs:820), and the delegate target of ir_to_rust_expr_typed whenever rust_string_ownership does not fire. Slice 2 could only classify it (rust_literal_form family 3, rust_pattern_literal_form family 2) because the spec language had no concatenation; F1's resolution makes the template itself a statable equation."
+    input: contents: String
+    output: String
+
+    constraint: output == "\"" ++ contents ++ "\""
+
+    optimize: time < O(n)
+
+    test "plain-text" { input: "Int" expect: "\"Int\"" }
+    test "empty-text" { input: "" expect: "\"\"" }
+    test "raw-quote" { input: "a\"b" expect: "\"a\"b\"" }
+}
+
+spec rust_string_literal_owned_text {
+    doc: "The owned rendering of a String literal (src/codegen/mod.rs:552-554): the bare template (rust_string_literal_text) with '.to_string()' appended -- exactly what ir_to_rust_expr_typed emits when rust_string_ownership fires, converting the &str literal into a String where the expected type requires one."
+    input: contents: String
+    output: String
+
+    constraint: output == "\"" ++ contents ++ "\".to_string()"
+
+    optimize: time < O(n)
+
+    test "owned-text" { input: "Int" expect: "\"Int\".to_string()" }
+    test "owned-empty" { input: "" expect: "\"\".to_string()" }
+}
+
+// -- generate_rust assembly pieces (src/codegen/mod.rs:66) -----
+
+spec rust_doc_line {
+    doc: "One line of generate_rust's module doc header (src/codegen/mod.rs:73): '//! ' + the doc line + a newline. The doc string is split into lines by the driver (str::lines -- iteration, mirror-only) and the header exists only when the spec has a doc comment; after the last line the driver emits one blank line (rust_file_fixed_text, piece 1)."
+    input: line: String
+    output: String
+
+    constraint: output == "//! " ++ line ++ "\n"
+
+    optimize: time < O(n)
+
+    test "doc-line" { input: "Sorts a list" expect: "//! Sorts a list\n" }
+    test "doc-empty-line" { input: "" expect: "//! \n" }
+}
+
+spec rust_param_text {
+    doc: "One parameter of the generated signature (src/codegen/mod.rs:91): the rust_ident-rendered name, ': ', the ty_to_rust-rendered type. Both parts arrive already rendered (the slice-2/3 representation rule); the ', ' join over the parameter list is iteration and lives in the mirror. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: name: String, ty: String
+    output: String
+
+    constraint: output == name ++ ": " ++ ty
+
+    optimize: time < O(n)
+}
+
+spec rust_generics_text {
+    doc: "The generics bracket of the generated signature (src/codegen/mod.rs:80-88): no generics renders the empty string; otherwise '<' + the ', '-joined rust_ident-rendered generic names + '>'. The joined text arrives pre-rendered -- the join is iteration, mirror-only. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: joined: String, present: Bool
+    output: String
+
+    constraint: present==true||output==""
+    constraint: present==false||output=="<" ++ joined ++ ">"
+
+    optimize: time < O(n)
+}
+
+spec rust_signature {
+    doc: "The generated function's signature line (src/codegen/mod.rs:107-110) over pre-rendered parts: 'pub fn ' + the rust_ident-rendered name + the generics text (rust_generics_text) + '(' + the ', '-joined parameter texts (rust_param_text) + ') -> ' + the ty_to_rust-rendered return type + ' {' and a newline. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: name: String, generics: String, params: String, ret: String
+    output: String
+
+    constraint: output == "pub fn " ++ name ++ generics ++ "(" ++ params ++ ") -> " ++ ret ++ " {\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_precondition_assert {
+    doc: "One precondition assert line inside generate_rust's debug block (src/codegen/mod.rs:100-101): four spaces, 'debug_assert!(', the constraint_to_rust rendering, ', \"Precondition violated\");' and a newline. The rendering arrives pre-rendered (slice 2 owns constraint_to_rust's families); note a constraint the walker swallows still asserts -- as 'true' -- it is not dropped at this layer."
+    input: rendered: String
+    output: String
+
+    constraint: output == "    debug_assert!(" ++ rendered ++ ", \"Precondition violated\");\n"
+
+    optimize: time < O(n)
+
+    test "assert-line" { input: "x > 0" expect: "    debug_assert!(x > 0, \"Precondition violated\");\n" }
+    test "assert-true" { input: "true" expect: "    debug_assert!(true, \"Precondition violated\");\n" }
+}
+
+spec rust_precondition_block {
+    doc: "generate_rust's precondition block (src/codegen/mod.rs:96-104) over the pre-joined assert lines (rust_precondition_assert): the '#[cfg(debug_assertions)]' attribute line, '{', the asserts, '}' and a blank line. The block exists only when the spec has preconditions -- that branch is the driver's. Recorded as-is (surprise 13 in the ROAD M3 notes): the block is emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters -- outside the function body entirely."
+    input: asserts: String
+    output: String
+
+    constraint: output == "#[cfg(debug_assertions)]\n{\n" ++ asserts ++ "}\n\n"
+
+    optimize: time < O(n)
+
+    test "block-one-assert" { input: "    debug_assert!(true, \"Precondition violated\");\n" expect: "#[cfg(debug_assertions)]\n{\n    debug_assert!(true, \"Precondition violated\");\n}\n\n" }
+}
+
+spec rust_test_name_form {
+    doc: "Which name a generated test gets (src/codegen/mod.rs:136): 0 = the test's own name (rust_ident-rendered), 1 = the default 'test_{i}' with i the test's index. Only the CHOICE is pinned: the default's text needs the index as decimal, which the spec language cannot express (finding F2) -- the mirror renders it exactly."
+    input: has_name: Bool
+    output: Int
+
+    constraint: has_name==false||output==0
+    constraint: has_name==true||output==1
+
+    optimize: time < O(n)
+
+    test "named-test" { input: true expect: 0 }
+    test "unnamed-test" { input: false expect: 1 }
+}
+
+spec rust_test_case {
+    doc: "One generated test's block (src/codegen/mod.rs:139-150) over pre-rendered parts: the '#[test]' attribute and 'fn' line at four spaces with the test's final name (rust_ident-rendered, chosen per rust_test_name_form), then at eight spaces the call 'let result = <fn>(<input>);' and the assertion 'assert_eq!(result, <expected>);', then the closing brace at four spaces. The function name arrives rust_ident-rendered; input and expected arrive as expr_to_rust renderings (slice 2 owns that walker) placed BARE in call/assert position -- the recorded E0308 property of the generated-test path (a String test input renders as a &str literal against a String parameter) is a property of this placement, pinned as-is. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: test_name: String, fn_name: String, input_text: String, expected_text: String
+    output: String
+
+    constraint: output == "    #[test]\n    fn " ++ test_name ++ "() {\n        let result = " ++ fn_name ++ "(" ++ input_text ++ ");\n        assert_eq!(result, " ++ expected_text ++ ");\n    }\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_test_module {
+    doc: "generate_rust's test module wrapper (src/codegen/mod.rs:131-133,151) over the pre-joined test blocks (rust_test_case): a blank line, '#[cfg(test)]', 'mod tests {', the 'use super::*;' import and a blank line, then the blocks, then '}'. The module exists only when the spec has tests -- that branch is the driver's."
+    input: tests: String
+    output: String
+
+    constraint: output == "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n" ++ tests ++ "}\n"
+
+    optimize: time < O(n)
+
+    test "module-marker" { input: "X" expect: "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\nX}\n" }
+}
+
+spec rust_file_fixed_text {
+    doc: "generate_rust's two standalone fixed texts -- the ones no slice-3 template carries: piece 0 = the function body's closing brace and newline, emitted after the rendered body (src/codegen/mod.rs:127); piece 1 = the blank line after the doc header block (src/codegen/mod.rs:75). Every other fixed text of the driver lives inside a slice-3 template (rust_signature, rust_precondition_block, rust_test_module)."
+    input: piece: Int
+    output: String
+
+    constraint: piece<0||piece>0||output=="}\n"
+    constraint: piece<1||piece>1||output=="\n"
+
+    optimize: time < O(n)
+
+    test "fn-close" { input: 0 expect: "}\n" }
+    test "doc-blank" { input: 1 expect: "\n" }
 }
 
 }
