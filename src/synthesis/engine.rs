@@ -1139,7 +1139,7 @@ pub fn composite_score(scores: &ScoreBreakdown) -> f64 {
         + 0.1 * scores.quality_score
 }
 
-fn count_holes(node: &IRNode) -> usize {
+pub(crate) fn count_holes(node: &IRNode) -> usize {
     match node {
         IRNode::Hole { .. } => 1,
         IRNode::Block(stmts) => stmts.iter().map(count_holes).sum(),
@@ -1613,6 +1613,16 @@ fn evaluate_candidate(candidate: &CandidateImplementation, spec: &FunctionSpec) 
     // Constraint score: structural similarity to constraint shape
     let constraint_score = 0.7; // Placeholder — real version checks Z3
 
+    // Hole penalty: a body with unfilled Holes has not actually run
+    // any test or satisfied any constraint — those parts of it are
+    // literally missing. Correctness credit therefore decays by
+    // half per hole (1 hole → ×0.5, 2 holes → ×0.25, …), so a holed
+    // candidate always ranks strictly below an otherwise-equal
+    // hole-free one. selector::select_best additionally hard-gates
+    // holed candidates whenever a hole-free candidate exists.
+    let holes = count_holes(&candidate.body);
+    let hole_factor = 0.5f64.powi(holes as i32);
+
     // Complexity: check if body matches Big-O bound
     let complexity_score = estimate_complexity(&candidate.body, spec);
 
@@ -1620,8 +1630,8 @@ fn evaluate_candidate(candidate: &CandidateImplementation, spec: &FunctionSpec) 
     let quality_score = estimate_quality(&candidate.body);
 
     ScoreBreakdown {
-        test_pass_ratio: test_score,
-        constraint_score,
+        test_pass_ratio: test_score * hole_factor,
+        constraint_score: constraint_score * hole_factor,
         complexity_score,
         quality_score,
         synthesis_time_us: 0,
@@ -1903,6 +1913,58 @@ mod tests {
             IRNode::Typed { node, .. } => contains_placeholder_call(node),
             _ => false, // Holes, Literals, Vars, etc.
         }
+    }
+
+    fn make_candidate(body: IRNode, spec: &FunctionSpec) -> CandidateImplementation {
+        CandidateImplementation {
+            id: 0,
+            body,
+            spec_name: spec.name.clone(),
+            spec: spec.clone(),
+            score: 0.0,
+            scores: empty_scores(),
+            generation: 0,
+            provenance: Provenance::Template { template_name: "test".into() },
+            verified: false,
+        }
+    }
+
+    /// Hole penalty: correctness credit halves per unfilled hole,
+    /// so a holed candidate ranks strictly below an otherwise-equal
+    /// hole-free one. The dummy spec has no tests, so the neutral
+    /// test score is 0.5 and the placeholder constraint score 0.7.
+    #[test]
+    fn evaluate_candidate_penalizes_holes() {
+        let spec = dummy_spec();
+        let free = make_candidate(IRNode::Literal(IRLiteral::Int(1)), &spec);
+        let one_hole = make_candidate(
+            IRNode::Block(vec![
+                IRNode::Literal(IRLiteral::Int(1)),
+                IRNode::Hole { id: 1, expected_type: None },
+            ]),
+            &spec,
+        );
+        let two_holes = make_candidate(
+            IRNode::Block(vec![
+                IRNode::Hole { id: 1, expected_type: None },
+                IRNode::Hole { id: 2, expected_type: None },
+            ]),
+            &spec,
+        );
+
+        let free_scores = evaluate_candidate(&free, &spec);
+        assert!((free_scores.test_pass_ratio - 0.5).abs() < 1e-9);
+        assert!((free_scores.constraint_score - 0.7).abs() < 1e-9);
+
+        let one_scores = evaluate_candidate(&one_hole, &spec);
+        assert!((one_scores.test_pass_ratio - 0.25).abs() < 1e-9);
+        assert!((one_scores.constraint_score - 0.35).abs() < 1e-9);
+        assert!(one_scores.test_pass_ratio < free_scores.test_pass_ratio);
+        assert!(one_scores.constraint_score < free_scores.constraint_score);
+
+        let two_scores = evaluate_candidate(&two_holes, &spec);
+        assert!((two_scores.test_pass_ratio - 0.125).abs() < 1e-9);
+        assert!(two_scores.test_pass_ratio < one_scores.test_pass_ratio);
     }
 
     /// Regression: `random_ir_tree` used to emit

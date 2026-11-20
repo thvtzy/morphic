@@ -4,7 +4,7 @@
 // └──────────────────────────────────────────────────────────┘
 
 use std::collections::HashMap;
-use super::engine::{CandidateImplementation, ScoreBreakdown};
+use super::engine::{count_holes, CandidateImplementation, ScoreBreakdown};
 use crate::spec::ast::FunctionSpec;
 
 /// Selection criteria for choosing among candidates
@@ -33,8 +33,24 @@ pub fn select_best(
         return Err(SelectionError::NoCandidates);
     }
 
+    // Completeness gate: a candidate whose body still contains
+    // unfilled Holes is not a finished implementation, whatever its
+    // scores say (test/constraint credit for holed bodies is partly
+    // placeholder — see the hole penalty in engine::evaluate_candidate).
+    // If any hole-free candidate exists, holed candidates are
+    // excluded from winning outright. Only when every candidate is
+    // holed does selection fall back to ranking the holed pool, so
+    // callers still get the least-incomplete answer available.
+    let hole_free: Vec<CandidateImplementation> = candidates
+        .iter()
+        .filter(|c| count_holes(&c.body) == 0)
+        .cloned()
+        .collect();
+    let pool: &[CandidateImplementation] =
+        if hole_free.is_empty() { &candidates } else { &hole_free };
+
     // Apply multiple criteria in priority order
-    let best = select_by_criteria(&candidates, &[
+    let best = select_by_criteria(pool, &[
         SelectionCriterion::MostCorrect,
         SelectionCriterion::ParetoOptimal,
         SelectionCriterion::BestOverall,
@@ -320,6 +336,51 @@ mod tests {
         ];
         let spec = candidates[0].spec.clone();
         let best = select_best(candidates, &spec).unwrap();
+        assert_eq!(best.id, 2);
+    }
+
+    fn with_body(mut c: CandidateImplementation, body: IRNode) -> CandidateImplementation {
+        c.body = body;
+        c
+    }
+
+    fn holed_body() -> IRNode {
+        IRNode::Block(vec![
+            IRNode::Return(Box::new(IRNode::Literal(IRLiteral::Int(1)))),
+            IRNode::Hole { id: 99, expected_type: None },
+        ])
+    }
+
+    #[test]
+    fn select_best_prefers_hole_free_at_equal_scores() {
+        // Identical scores, holed candidate listed first — only the
+        // completeness gate can explain the hole-free one winning.
+        let holed = with_body(make_candidate(1, 0.9, 0.9, 0.9), holed_body());
+        let complete = make_candidate(2, 0.9, 0.9, 0.9);
+        let spec = complete.spec.clone();
+        let best = select_best(vec![holed, complete], &spec).unwrap();
+        assert_eq!(best.id, 2);
+    }
+
+    #[test]
+    fn select_best_gate_beats_higher_scored_holed() {
+        // Even a maximally scored holed candidate must not win
+        // while any hole-free candidate exists.
+        let holed = with_body(make_candidate(1, 1.0, 1.0, 1.0), holed_body());
+        let complete = make_candidate(2, 0.5, 0.5, 0.5);
+        let spec = complete.spec.clone();
+        let best = select_best(vec![holed, complete], &spec).unwrap();
+        assert_eq!(best.id, 2);
+    }
+
+    #[test]
+    fn select_best_still_ranks_pool_when_all_holed() {
+        // No hole-free candidate: selection falls back to ranking
+        // the holed pool instead of failing.
+        let weak = with_body(make_candidate(1, 0.4, 0.4, 0.4), holed_body());
+        let strong = with_body(make_candidate(2, 0.9, 0.9, 0.9), holed_body());
+        let spec = strong.spec.clone();
+        let best = select_best(vec![weak, strong], &spec).unwrap();
         assert_eq!(best.id, 2);
     }
 
