@@ -1016,6 +1016,585 @@ fn generate_rust_assembled(
 }
 
 // ═════════════════════════════════════════════════════════════
+// A4. MIRRORS — slice 4 expression walker
+//
+// ir_to_rust_expr (src/codegen/mod.rs:742-971), arm by arm.
+// The per-arm mirrors state each template over pre-rendered
+// children exactly as the .morph specs pin them; the
+// assembly mirror further below performs the recursion the
+// specs cannot state, composing the per-arm mirrors exactly
+// as the walker composes the real helpers. Mirror-only
+// machinery: the ", " joins (iteration), the statement
+// rendering inside Block/Loop (slice 5 — those nodes arrive
+// pre-rendered here), pattern_has_string_literal's
+// recursion over the pattern tree, and
+// is_bare_string_literal's recursion through Typed (the
+// flat kind code cannot carry it; the spec
+// rust_match_scrutinee_bare leaves kind 22 unpinned for
+// exactly this reason).
+// ═════════════════════════════════════════════════════════════
+
+/// Mirror of the BinOp branch classification of
+/// `ir_to_rust_expr` (src/codegen/mod.rs:753-781): 0 =
+/// general infix, 1 = Concat, 2 = Append, 3 = Merge.
+/// Total over the nineteen IRBinOp codes.
+fn rust_expr_binop_form(op: i64) -> Option<i64> {
+    match op {
+        0..=15 => Some(0),
+        16 => Some(1),
+        17 => Some(2),
+        18 => Some(3),
+        _ => None,
+    }
+}
+
+/// Mirror of the general infix rendering
+/// (src/codegen/mod.rs:778), composed over the slice-1
+/// symbol table exactly as the walker consults it.
+fn rust_binop_infix_text(op: i64, l: &str, r: &str) -> String {
+    format!("({} {} {})", l, rust_binop_symbol(op).unwrap(), r)
+}
+
+/// Mirror of the Append rendering (src/codegen/mod.rs:762-763).
+fn rust_binop_append_text(l: &str, r: &str) -> String {
+    format!("{}.push({})", l, r)
+}
+
+/// Mirror of the Merge rendering (src/codegen/mod.rs:764-765).
+fn rust_binop_merge_text(l: &str, r: &str) -> String {
+    format!("{}.extend({})", l, r)
+}
+
+/// Mirror of the Concat rendering (src/codegen/mod.rs:766-777)
+/// over the two treated operand texts.
+fn rust_binop_concat_text(owned: &str, borrowed: &str) -> String {
+    format!("({} + {})", owned, borrowed)
+}
+
+/// Mirror of the Concat left-operand leaf check
+/// (concat_owned_operand, src/codegen/mod.rs:622-628):
+/// owned exactly for a direct String literal node.
+fn rust_concat_left_owned(kind: i64, lit: i64) -> bool {
+    kind == 9 && lit == 3
+}
+
+/// Mirror of the Concat left operand's final text: the
+/// owned template when the leaf check fires, else the
+/// operand's own rendering.
+fn rust_concat_left_text(owned: bool, rendered: &str, owned_text: &str) -> String {
+    if owned {
+        owned_text.to_string()
+    } else {
+        rendered.to_string()
+    }
+}
+
+/// Mirror of the Concat right-operand classification
+/// (concat_borrowed_operand, src/codegen/mod.rs:640-651):
+/// 0 = bare (a String literal), 1 = parenthesized borrow
+/// (the block-like kinds — the rust_condition_wrap set),
+/// 2 = plain borrow. Total over 28 kinds x 6 literal kinds.
+fn rust_concat_right_form(kind: i64, lit: i64) -> Option<i64> {
+    match kind {
+        9 if lit == 3 => Some(0),
+        1 | 2 | 3 | 4 | 5 | 6 | 13 | 14 | 24 | 26 => Some(1),
+        0..=27 => Some(2),
+        _ => None,
+    }
+}
+
+/// Mirror of the Concat right operand's final text, by
+/// rust_concat_right_form.
+fn rust_concat_right_text(form: i64, rendered: &str) -> Option<String> {
+    match form {
+        0 => Some(rendered.to_string()),
+        1 => Some(format!("&({})", rendered)),
+        2 => Some(format!("&{}", rendered)),
+        _ => None,
+    }
+}
+
+/// Mirror of the UnaryOp rendering
+/// (src/codegen/mod.rs:789-809) over the operand's own
+/// rendering: prefix forms for Neg/Not, method forms for
+/// Abs/Len/Reverse/Clone, indexing/slicing lowerings for
+/// the list parts (Init and Last emit the operand twice).
+fn rust_unary_text(op: i64, inner: &str) -> Option<String> {
+    match op {
+        0 => Some(format!("(- {})", inner)),
+        1 => Some(format!("(! {})", inner)),
+        2 => Some(format!("{}.abs()", inner)),
+        3 => Some(format!("{}.len()", inner)),
+        4 => Some(format!("({})[0]", inner)),
+        5 => Some(format!("({})[1..].to_vec()", inner)),
+        6 => Some(format!("({})[..({}).len() - 1].to_vec()", inner, inner)),
+        7 => Some(format!("({})[({}).len() - 1]", inner, inner)),
+        8 => Some(format!("{}.reverse()", inner)),
+        9 => Some(format!("{}.clone()", inner)),
+        _ => None,
+    }
+}
+
+/// Mirror of the Collection arm's opening text in
+/// expression position (src/codegen/mod.rs:838-852).
+fn rust_collection_prefix(kind: i64) -> Option<&'static str> {
+    match kind {
+        0 => Some("vec!["),
+        1 => Some("std::collections::HashSet::from(["),
+        2 => Some("std::collections::HashMap::from(["),
+        3 => Some("["),
+        4 => Some("("),
+        _ => None,
+    }
+}
+
+/// Mirror of the Collection arm's closing text in
+/// expression position (src/codegen/mod.rs:838-852).
+fn rust_collection_suffix(kind: i64) -> Option<&'static str> {
+    match kind {
+        0 => Some("]"),
+        1 => Some("])"),
+        2 => Some("])"),
+        3 => Some("]"),
+        4 => Some(")"),
+        _ => None,
+    }
+}
+
+/// Mirror of the Map rendering (src/codegen/mod.rs:853-859).
+fn rust_map_text(over: &str, func: &str) -> String {
+    format!("({}).iter().map({}).collect()", over, func)
+}
+
+/// Mirror of the Filter rendering (src/codegen/mod.rs:860-866).
+fn rust_filter_text(over: &str, pred: &str) -> String {
+    format!("({}).iter().filter({}).collect()", over, pred)
+}
+
+/// Mirror of the Fold rendering (src/codegen/mod.rs:867-873).
+fn rust_fold_text(over: &str, initial: &str, operation: &str) -> String {
+    format!("({}).iter().fold({}, {})", over, initial, operation)
+}
+
+/// Mirror of the Sort rendering (src/codegen/mod.rs:874-882).
+fn rust_sort_text(coll: &str, cmp: &str) -> String {
+    format!(
+        "{{ let mut sorted = {}; sorted.sort_by({}); sorted }}",
+        coll, cmp
+    )
+}
+
+/// Mirror of the Call rendering (src/codegen/mod.rs:810-813)
+/// over the rendered name and the pre-joined arguments.
+fn rust_call_text(func: &str, args: &str) -> String {
+    format!("{}({})", func, args)
+}
+
+/// Mirror of `expr_in_condition_position`
+/// (src/codegen/mod.rs:734-740) as specced in slice 4: the
+/// same assembly the slice-2 `condition_text` states,
+/// restated for the walker's own spec.
+fn rust_condition_text(kind: i64, rendered: &str) -> String {
+    match rust_condition_wrap(kind) {
+        Some(true) => format!("({})", rendered),
+        _ => rendered.to_string(),
+    }
+}
+
+/// Mirror of the If rendering (src/codegen/mod.rs:814-822).
+fn rust_if_text(cond: &str, then_text: &str, else_text: &str) -> String {
+    format!("if {} {{ {} }} else {{ {} }}", cond, then_text, else_text)
+}
+
+/// Mirror of the Lambda/Closure rendering
+/// (src/codegen/mod.rs:823-832) over the pre-joined
+/// parameter names.
+fn rust_lambda_text(params: &str, body: &str) -> String {
+    format!("|{}| {{ {} }}", params, body)
+}
+
+/// Mirror of one Match arm (src/codegen/mod.rs:883-890).
+fn rust_match_arm_text(pat: &str, body: &str) -> String {
+    format!("{} => {}", pat, body)
+}
+
+/// Mirror of the Match rendering (src/codegen/mod.rs:883-898)
+/// over the treated scrutinee and the pre-joined arms.
+fn rust_match_text(scrutinee: &str, arms: &str) -> String {
+    format!("match {} {{ {} }}", scrutinee, arms)
+}
+
+/// Mirror of the bare-literal scrutinee check over the
+/// flat codes (is_bare_string_literal,
+/// src/codegen/mod.rs:708-714): None for kind 22 (Typed),
+/// whose bareness is its inner node's — the recursion the
+/// codes cannot carry, which the spec leaves unpinned.
+fn rust_match_scrutinee_bare(kind: i64, lit: i64) -> Option<bool> {
+    match kind {
+        22 => None,
+        9 => Some(lit == 3),
+        0..=27 => Some(false),
+        _ => None,
+    }
+}
+
+/// Mirror of the scrutinee treatment decision
+/// (match_scrutinee_to_rust, src/codegen/mod.rs:683-695):
+/// 1 exactly when a string-literal pattern is present and
+/// the scrutinee is not itself a bare String literal.
+fn rust_match_scrutinee_form(has_string_pat: bool, bare: bool) -> i64 {
+    if has_string_pat && !bare {
+        1
+    } else {
+        0
+    }
+}
+
+/// Mirror of the scrutinee's final text: the
+/// condition-position rendering, with ".as_str()"
+/// appended exactly when the form is 1.
+fn rust_match_scrutinee_text(form: i64, rendered: &str) -> Option<String> {
+    match form {
+        0 => Some(rendered.to_string()),
+        1 => Some(format!("{}.as_str()", rendered)),
+        _ => None,
+    }
+}
+
+/// Mirror of the block-expression wrap shared by the
+/// Block arm (src/codegen/mod.rs:900-913) and
+/// expr_block_stmt (src/codegen/mod.rs:716-719).
+fn rust_block_text(inner: &str) -> String {
+    format!("{{ {} }}", inner)
+}
+
+/// Mirror of the Loop rendering (src/codegen/mod.rs:917-922).
+fn rust_loop_text(body: &str) -> String {
+    format!("loop {{\n{}}}", body)
+}
+
+/// Mirror of the StructDef rendering
+/// (src/codegen/mod.rs:923-935) over the rendered name, the
+/// pre-joined fields and the rendered body.
+fn rust_struct_def_text(name: &str, fields: &str, body: &str) -> String {
+    format!("{{ struct {} {{ {} }} {} }}", name, fields, body)
+}
+
+/// Mirror of the Index rendering (src/codegen/mod.rs:936-938).
+fn rust_index_text(coll: &str, idx: &str) -> String {
+    format!("({})[{}]", coll, idx)
+}
+
+/// Mirror of the TryPropagate rendering
+/// (src/codegen/mod.rs:939-941).
+fn rust_try_text(inner: &str) -> String {
+    format!("({})?", inner)
+}
+
+/// Mirror of the Assign rendering (src/codegen/mod.rs:942-948).
+fn rust_assign_text(target: &str, value: &str) -> String {
+    format!("({} = {})", target, value)
+}
+
+/// Mirror of the Return rendering (src/codegen/mod.rs:949-954).
+fn rust_return_text(inner: &str) -> String {
+    format!("(return {})", inner)
+}
+
+/// Mirror of the Break rendering (src/codegen/mod.rs:955-958).
+fn rust_break_text(has_value: bool, value: &str) -> String {
+    if has_value {
+        format!("(break {})", value)
+    } else {
+        "(break)".to_string()
+    }
+}
+
+/// Mirror of the Hole arm's fixed text
+/// (src/codegen/mod.rs:959).
+fn rust_hole_text(kind: i64) -> Option<String> {
+    match kind {
+        0 => Some("panic!(\"Hole not filled\")".to_string()),
+        _ => None,
+    }
+}
+
+/// Mirror of the loud fallback (unsupported_expr,
+/// src/codegen/mod.rs:725-727).
+fn rust_unsupported_text(shape: &str) -> String {
+    format!(
+        "panic!(\"unsupported IR in expression position: {}\")",
+        shape
+    )
+}
+
+/// The emitter's char escaping, hand-mirrored (Phase 29):
+/// like escape_rust_str_mirror, plus `'` escaped, and `"`
+/// NOT escaped (a double quote is a fine char literal).
+fn escape_rust_char_mirror(c: char) -> String {
+    match c {
+        '\'' => "\\'".to_string(),
+        '\\' => "\\\\".to_string(),
+        '\n' => "\\n".to_string(),
+        '\r' => "\\r".to_string(),
+        '\t' => "\\t".to_string(),
+        c if c.is_control() => format!("\\u{{{:x}}}", c as u32),
+        c => c.to_string(),
+    }
+}
+
+/// IRLiteralKindCode of a Lit (slices 1-2's table).
+fn lit_kind(lit: &Lit) -> i64 {
+    match lit {
+        Lit::Int(_) => 0,
+        Lit::Float(_) => 1,
+        Lit::Bool(_) => 2,
+        Lit::Str(_) => 3,
+        Lit::Char(_) => 4,
+        Lit::Unit => 5,
+    }
+}
+
+/// The Literal arm of `ir_to_rust_expr`
+/// (src/codegen/mod.rs:744-751), composed from the slice
+/// 1-3 literal mirrors — with the Phase 29 escaping,
+/// unlike the older `ir_literal_text` above (which
+/// predates the unfreeze and renders strings raw; it is
+/// exercised only on Int/Float/Bool).
+fn ir_expr_literal_text(lit: &Lit) -> String {
+    match lit {
+        Lit::Int(n) => n.to_string(),
+        Lit::Float(f) => f.to_string(),
+        Lit::Bool(b) => rust_literal_bool(*b).to_string(),
+        Lit::Str(s) => rust_string_literal_text(s),
+        Lit::Char(c) => format!("'{}'", escape_rust_char_mirror(*c)),
+        Lit::Unit => "()".to_string(),
+    }
+}
+
+/// Mirror of `pattern_has_string_literal`
+/// (src/codegen/mod.rs:697-706): the recursion over the
+/// pattern tree that the spec representation cannot carry
+/// (patterns arrive pre-rendered), so the spec
+/// rust_match_scrutinee_form takes the Bool as an input.
+fn pattern_has_string_literal_mirror(pat: &Pat) -> bool {
+    match pat {
+        Pat::Literal(Lit::Str(_)) => true,
+        Pat::Constructor(_, subs) => subs.iter().any(pattern_has_string_literal_mirror),
+        Pat::Guard(inner, _) => pattern_has_string_literal_mirror(inner),
+        _ => false,
+    }
+}
+
+/// Tree form of IRNode for the assembled `ir_to_rust_expr`
+/// mirror. Names arrive raw (the mirror applies
+/// rust_ident_verbatim, the full rust_ident). BlockText
+/// carries a pre-rendered, end-trimmed statement rendering:
+/// it stands for Block and, through expr_block_stmt, for
+/// Let/While/For — all block-like, so every classification
+/// the walker consults agrees. LoopText likewise carries
+/// its pre-rendered body. StructDef field types arrive
+/// pre-rendered (ty_to_rust is slices 1-2). There is no
+/// Typed variant: the Typed arm delegates to
+/// ir_to_rust_expr_typed (slice 3 owns it), and its absence
+/// is exactly why is_bare_string_literal's Typed recursion
+/// is decided here only for direct literals.
+#[allow(dead_code)]
+enum Expr {
+    Lit(Lit),
+    Var(&'static str),
+    BinOp(i64, Box<Expr>, Box<Expr>),
+    UnaryOp(i64, Box<Expr>),
+    Call(&'static str, Vec<Expr>),
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    Lambda(Vec<&'static str>, Box<Expr>),
+    Collection(i64, Vec<Expr>),
+    Map(Box<Expr>, Box<Expr>),
+    Filter(Box<Expr>, Box<Expr>),
+    Fold(Box<Expr>, Box<Expr>, Box<Expr>),
+    Sort(Box<Expr>, Box<Expr>),
+    Match(Box<Expr>, Vec<(Pat, Expr)>),
+    BlockText(&'static str),
+    LoopText(&'static str),
+    StructDef(&'static str, Vec<(&'static str, &'static str)>, Box<Expr>),
+    Index(Box<Expr>, Box<Expr>),
+    Try(Box<Expr>),
+    Assign(Box<Expr>, Box<Expr>),
+    Return(Box<Expr>),
+    Break(Option<Box<Expr>>),
+    Hole,
+    Alloc,
+}
+
+/// IRNodeKindCode of an Expr (declaration order, slices 1-2).
+fn expr_kind(e: &Expr) -> i64 {
+    match e {
+        Expr::Hole => 0,
+        Expr::BlockText(_) => 1,
+        Expr::If(..) => 3,
+        Expr::Match(..) => 6,
+        Expr::Call(..) => 7,
+        Expr::Return(_) => 8,
+        Expr::Lit(_) => 9,
+        Expr::Var(_) => 10,
+        Expr::BinOp(..) => 11,
+        Expr::UnaryOp(..) => 12,
+        Expr::Lambda(..) => 13,
+        Expr::Collection(..) => 15,
+        Expr::Map(..) => 16,
+        Expr::Filter(..) => 17,
+        Expr::Fold(..) => 18,
+        Expr::Sort(..) => 19,
+        Expr::Alloc => 20,
+        Expr::Assign(..) => 21,
+        Expr::Index(..) => 23,
+        Expr::LoopText(_) => 24,
+        Expr::Break(_) => 25,
+        Expr::StructDef(..) => 26,
+        Expr::Try(_) => 27,
+    }
+}
+
+/// Assembly of `concat_owned_operand`
+/// (src/codegen/mod.rs:622-628): a direct String literal
+/// takes the owned template (the decision
+/// rust_concat_left_owned pins); every other node renders
+/// as usual.
+fn concat_owned_mirror(e: &Expr) -> String {
+    match e {
+        Expr::Lit(Lit::Str(s)) => rust_string_literal_owned_text(s),
+        _ => ir_expr_assembled(e),
+    }
+}
+
+/// Assembly of `concat_borrowed_operand`
+/// (src/codegen/mod.rs:640-651), composed through the
+/// rust_concat_right_form / rust_concat_right_text
+/// mirrors exactly as the emitter decides then renders.
+fn concat_borrowed_mirror(e: &Expr) -> String {
+    let rendered = ir_expr_assembled(e);
+    let (kind, lit) = match e {
+        Expr::Lit(l) => (9, lit_kind(l)),
+        _ => (expr_kind(e), 0),
+    };
+    let form = rust_concat_right_form(kind, lit).unwrap();
+    rust_concat_right_text(form, &rendered).unwrap()
+}
+
+/// Assembly of `is_bare_string_literal`
+/// (src/codegen/mod.rs:708-714) over the Expr tree: a
+/// direct String literal only — the enum has no Typed
+/// variant, so the original's recursion through Typed has
+/// no counterpart here (kind 22 is covered at code level
+/// by the rust_match_scrutinee_bare golden).
+fn is_bare_string_literal_mirror(e: &Expr) -> bool {
+    matches!(e, Expr::Lit(Lit::Str(_)))
+}
+
+/// Assembly of `match_scrutinee_to_rust`
+/// (src/codegen/mod.rs:683-695), composed through the
+/// slice-4 scrutinee mirrors.
+fn match_scrutinee_mirror(scrutinee: &Expr, cases: &[(Pat, Expr)]) -> String {
+    let base = rust_condition_text(expr_kind(scrutinee), &ir_expr_assembled(scrutinee));
+    let has_string = cases
+        .iter()
+        .any(|(p, _)| pattern_has_string_literal_mirror(p));
+    let form = rust_match_scrutinee_form(has_string, is_bare_string_literal_mirror(scrutinee));
+    rust_match_scrutinee_text(form, &base).unwrap()
+}
+
+/// Faithful assembly of `ir_to_rust_expr`
+/// (src/codegen/mod.rs:742-971) from the slice 1-4 mirrors:
+/// every arm dispatches through its per-arm mirror, and
+/// children recurse exactly as the walker recurses. The
+/// Literal and Var arms are slices 1-3's (the literal
+/// mirrors; rust_ident_verbatim).
+fn ir_expr_assembled(e: &Expr) -> String {
+    match e {
+        Expr::Lit(lit) => ir_expr_literal_text(lit),
+        Expr::Var(name) => rust_ident_verbatim(name),
+        Expr::BinOp(op, l, r) => match rust_expr_binop_form(*op).unwrap() {
+            1 => rust_binop_concat_text(&concat_owned_mirror(l), &concat_borrowed_mirror(r)),
+            2 => rust_binop_append_text(&ir_expr_assembled(l), &ir_expr_assembled(r)),
+            3 => rust_binop_merge_text(&ir_expr_assembled(l), &ir_expr_assembled(r)),
+            _ => rust_binop_infix_text(*op, &ir_expr_assembled(l), &ir_expr_assembled(r)),
+        },
+        Expr::UnaryOp(op, inner) => rust_unary_text(*op, &ir_expr_assembled(inner)).unwrap(),
+        Expr::Call(name, args) => {
+            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
+            rust_call_text(&rust_ident_verbatim(name), &rendered.join(", "))
+        }
+        Expr::If(c, t, el) => rust_if_text(
+            &rust_condition_text(expr_kind(c), &ir_expr_assembled(c)),
+            &ir_expr_assembled(t),
+            &ir_expr_assembled(el),
+        ),
+        Expr::Lambda(params, body) => {
+            let names: Vec<String> = params
+                .iter()
+                .map(|p| rust_ident_verbatim(p))
+                .collect();
+            rust_lambda_text(&names.join(", "), &ir_expr_assembled(body))
+        }
+        Expr::Collection(kind, elems) => {
+            let rendered: Vec<String> = elems.iter().map(ir_expr_assembled).collect();
+            format!(
+                "{}{}{}",
+                rust_collection_prefix(*kind).unwrap(),
+                rendered.join(", "),
+                rust_collection_suffix(*kind).unwrap()
+            )
+        }
+        Expr::Map(f, over) => rust_map_text(&ir_expr_assembled(over), &ir_expr_assembled(f)),
+        Expr::Filter(p, over) => {
+            rust_filter_text(&ir_expr_assembled(over), &ir_expr_assembled(p))
+        }
+        Expr::Fold(op, init, over) => rust_fold_text(
+            &ir_expr_assembled(over),
+            &ir_expr_assembled(init),
+            &ir_expr_assembled(op),
+        ),
+        Expr::Sort(cmp, coll) => rust_sort_text(&ir_expr_assembled(coll), &ir_expr_assembled(cmp)),
+        Expr::Match(scrutinee, cases) => {
+            let arms: Vec<String> = cases
+                .iter()
+                .map(|(p, b)| {
+                    rust_match_arm_text(&ir_pattern_assembled(p), &ir_expr_assembled(b))
+                })
+                .collect();
+            rust_match_text(&match_scrutinee_mirror(scrutinee, cases), &arms.join(", "))
+        }
+        Expr::BlockText(inner) => rust_block_text(inner),
+        Expr::LoopText(body) => rust_loop_text(body),
+        Expr::StructDef(name, fields, body) => {
+            let rendered: Vec<String> = fields
+                .iter()
+                .map(|(n, t)| rust_param_text(&rust_ident_verbatim(n), t))
+                .collect();
+            rust_struct_def_text(
+                &rust_ident_verbatim(name),
+                &rendered.join(", "),
+                &ir_expr_assembled(body),
+            )
+        }
+        Expr::Index(coll, idx) => {
+            rust_index_text(&ir_expr_assembled(coll), &ir_expr_assembled(idx))
+        }
+        Expr::Try(inner) => rust_try_text(&ir_expr_assembled(inner)),
+        Expr::Assign(t, v) => {
+            rust_assign_text(&ir_expr_assembled(t), &ir_expr_assembled(v))
+        }
+        Expr::Return(inner) => rust_return_text(&ir_expr_assembled(inner)),
+        Expr::Break(v) => match v {
+            Some(inner) => rust_break_text(true, &ir_expr_assembled(inner)),
+            None => rust_break_text(false, ""),
+        },
+        Expr::Hole => rust_hole_text(0).unwrap(),
+        Expr::Alloc => rust_unsupported_text("Alloc"),
+    }
+}
+
+// ═════════════════════════════════════════════════════════════
 // A. GOLDEN TESTS — full mapping range + off-range inputs
 // ═════════════════════════════════════════════════════════════
 
@@ -2038,6 +2617,538 @@ mod golden_tests {
             None,
         );
         assert!(out.starts_with("//! one\n//! two\n\npub fn add"));
+    }
+
+    // ── Slice 4: the expression walker ──
+
+    #[test]
+    fn binop_forms_total() {
+        // .morph tests: add/shr general, concat, append, merge
+        assert_eq!(rust_expr_binop_form(0), Some(0));
+        assert_eq!(rust_expr_binop_form(15), Some(0));
+        assert_eq!(rust_expr_binop_form(16), Some(1));
+        assert_eq!(rust_expr_binop_form(17), Some(2));
+        assert_eq!(rust_expr_binop_form(18), Some(3));
+        for op in 0..=18 {
+            let want = match op {
+                16 => 1,
+                17 => 2,
+                18 => 3,
+                _ => 0,
+            };
+            assert_eq!(rust_expr_binop_form(op), Some(want), "op {}", op);
+        }
+        assert_eq!(rust_expr_binop_form(19), None);
+        assert_eq!(rust_expr_binop_form(-1), None);
+    }
+
+    #[test]
+    fn binop_texts() {
+        // The infix template composes the slice-1 symbol table
+        assert_eq!(rust_binop_infix_text(0, "a", "b"), "(a + b)");
+        assert_eq!(rust_binop_infix_text(8, "x", "y"), "(x == y)");
+        assert_eq!(rust_binop_infix_text(14, "a", "b"), "(a << b)");
+        // Append/Merge: the left operand is interpolated bare
+        assert_eq!(rust_binop_append_text("items", "x"), "items.push(x)");
+        assert_eq!(rust_binop_merge_text("a", "b"), "a.extend(b)");
+        // Concat over the two treated operand texts
+        assert_eq!(
+            rust_binop_concat_text("\"a\".to_string()", "&b"),
+            "(\"a\".to_string() + &b)"
+        );
+    }
+
+    #[test]
+    fn concat_left_owned_grid() {
+        // Owned exactly at (Literal kind, String literal kind)
+        for kind in 0..=27 {
+            for lit in 0..=5 {
+                assert_eq!(
+                    rust_concat_left_owned(kind, lit),
+                    kind == 9 && lit == 3,
+                    "kind {} lit {}",
+                    kind,
+                    lit
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn concat_right_form_grid() {
+        // The full 28 x 6 grid: bare only for a String
+        // literal, parenthesized borrow for the block-like
+        // kinds, plain borrow everywhere else
+        for kind in 0..=27 {
+            for lit in 0..=5 {
+                let want = if kind == 9 && lit == 3 {
+                    0
+                } else if matches!(kind, 1 | 2 | 3 | 4 | 5 | 6 | 13 | 14 | 24 | 26) {
+                    1
+                } else {
+                    2
+                };
+                assert_eq!(
+                    rust_concat_right_form(kind, lit),
+                    Some(want),
+                    "kind {} lit {}",
+                    kind,
+                    lit
+                );
+            }
+        }
+        assert_eq!(rust_concat_right_form(28, 0), None);
+        // The three text forms
+        assert_eq!(rust_concat_right_text(0, "\"a\""), Some("\"a\"".to_string()));
+        assert_eq!(
+            rust_concat_right_text(1, "if c { 1 }"),
+            Some("&(if c { 1 })".to_string())
+        );
+        assert_eq!(rust_concat_right_text(2, "x"), Some("&x".to_string()));
+        assert_eq!(rust_concat_right_text(3, "x"), None);
+    }
+
+    #[test]
+    fn unary_texts_total() {
+        let cases = [
+            "(- xs)",
+            "(! xs)",
+            "xs.abs()",
+            "xs.len()",
+            "(xs)[0]",
+            "(xs)[1..].to_vec()",
+            "(xs)[..(xs).len() - 1].to_vec()",
+            "(xs)[(xs).len() - 1]",
+            "xs.reverse()",
+            "xs.clone()",
+        ];
+        for (op, want) in cases.iter().enumerate() {
+            assert_eq!(
+                rust_unary_text(op as i64, "xs"),
+                Some(want.to_string()),
+                "op {}",
+                op
+            );
+        }
+        assert_eq!(rust_unary_text(10, "xs"), None);
+        assert_eq!(rust_unary_text(-1, "xs"), None);
+    }
+
+    #[test]
+    fn collection_affixes_total() {
+        // .morph tests: list/set prefixes, tuple suffix
+        assert_eq!(rust_collection_prefix(0), Some("vec!["));
+        assert_eq!(
+            rust_collection_prefix(1),
+            Some("std::collections::HashSet::from([")
+        );
+        assert_eq!(
+            rust_collection_prefix(2),
+            Some("std::collections::HashMap::from([")
+        );
+        assert_eq!(rust_collection_prefix(3), Some("["));
+        assert_eq!(rust_collection_prefix(4), Some("("));
+        assert_eq!(rust_collection_prefix(5), None);
+        assert_eq!(rust_collection_suffix(0), Some("]"));
+        assert_eq!(rust_collection_suffix(1), Some("])"));
+        assert_eq!(rust_collection_suffix(2), Some("])"));
+        assert_eq!(rust_collection_suffix(3), Some("]"));
+        assert_eq!(rust_collection_suffix(4), Some(")"));
+        assert_eq!(rust_collection_suffix(5), None);
+    }
+
+    #[test]
+    fn iterator_templates() {
+        assert_eq!(
+            rust_map_text("xs", "|x| { x }"),
+            "(xs).iter().map(|x| { x }).collect()"
+        );
+        assert_eq!(
+            rust_filter_text("xs", "|x| { ok }"),
+            "(xs).iter().filter(|x| { ok }).collect()"
+        );
+        assert_eq!(rust_fold_text("xs", "0", "add"), "(xs).iter().fold(0, add)");
+        assert_eq!(
+            rust_sort_text("xs", "cmp"),
+            "{ let mut sorted = xs; sorted.sort_by(cmp); sorted }"
+        );
+    }
+
+    #[test]
+    fn control_templates() {
+        assert_eq!(rust_call_text("add", "1, 2"), "add(1, 2)");
+        assert_eq!(rust_call_text("f", ""), "f()");
+        // Condition position: block-like kinds wrap, others not
+        assert_eq!(
+            rust_condition_text(6, "match y { _ => 1 }"),
+            "(match y { _ => 1 })"
+        );
+        assert_eq!(rust_condition_text(3, "if a { b }"), "(if a { b })");
+        assert_eq!(rust_condition_text(11, "(a && b)"), "(a && b)");
+        assert_eq!(rust_condition_text(10, "flag"), "flag");
+        assert_eq!(
+            rust_if_text("(a && b)", "1", "2"),
+            "if (a && b) { 1 } else { 2 }"
+        );
+        assert_eq!(rust_lambda_text("x, y", "(x + y)"), "|x, y| { (x + y) }");
+        assert_eq!(rust_match_arm_text("_", "0"), "_ => 0");
+        assert_eq!(rust_match_text("y", "_ => 0"), "match y { _ => 0 }");
+        assert_eq!(rust_block_text("let x = 1;"), "{ let x = 1; }");
+        assert_eq!(rust_loop_text("tick();"), "loop {\ntick();}");
+        assert_eq!(
+            rust_struct_def_text("Point", "x: i64, y: i64", "origin"),
+            "{ struct Point { x: i64, y: i64 } origin }"
+        );
+    }
+
+    #[test]
+    fn scrutinee_decisions() {
+        // Bare exactly for a direct String literal; kind 22
+        // (Typed) is unpinned — the recursion the codes
+        // cannot carry
+        assert_eq!(rust_match_scrutinee_bare(9, 3), Some(true));
+        assert_eq!(rust_match_scrutinee_bare(9, 0), Some(false));
+        assert_eq!(rust_match_scrutinee_bare(10, 3), Some(false));
+        assert_eq!(rust_match_scrutinee_bare(22, 3), None);
+        assert_eq!(rust_match_scrutinee_bare(22, 0), None);
+        assert_eq!(rust_match_scrutinee_bare(28, 3), None);
+        // The .as_str() decision: string pattern present AND
+        // scrutinee not itself a bare literal
+        assert_eq!(rust_match_scrutinee_form(true, false), 1);
+        assert_eq!(rust_match_scrutinee_form(true, true), 0);
+        assert_eq!(rust_match_scrutinee_form(false, false), 0);
+        assert_eq!(rust_match_scrutinee_form(false, true), 0);
+        assert_eq!(rust_match_scrutinee_text(0, "y"), Some("y".to_string()));
+        assert_eq!(
+            rust_match_scrutinee_text(1, "y"),
+            Some("y.as_str()".to_string())
+        );
+        assert_eq!(rust_match_scrutinee_text(2, "y"), None);
+    }
+
+    #[test]
+    fn leaf_templates() {
+        assert_eq!(rust_index_text("xs", "i"), "(xs)[i]");
+        assert_eq!(rust_try_text("load()"), "(load())?");
+        assert_eq!(rust_assign_text("x", "5"), "(x = 5)");
+        assert_eq!(rust_return_text("5"), "(return 5)");
+        assert_eq!(rust_break_text(true, "x"), "(break x)");
+        assert_eq!(rust_break_text(false, ""), "(break)");
+        // .morph tests: the Hole fixed text, the Alloc fallback
+        assert_eq!(
+            rust_hole_text(0),
+            Some("panic!(\"Hole not filled\")".to_string())
+        );
+        assert_eq!(rust_hole_text(1), None);
+        assert_eq!(
+            rust_unsupported_text("Alloc"),
+            "panic!(\"unsupported IR in expression position: Alloc\")"
+        );
+    }
+
+    #[test]
+    fn expr_walker_operators() {
+        // Two levels deep: BinOp inside Call inside BinOp —
+        // each level's own template supplies its parentheses
+        let e = Expr::BinOp(
+            2,
+            Box::new(Expr::Call(
+                "add",
+                vec![
+                    Expr::BinOp(0, Box::new(Expr::Var("a")), Box::new(Expr::Lit(Lit::Int(1)))),
+                    Expr::Var("b"),
+                ],
+            )),
+            Box::new(Expr::Lit(Lit::Int(2))),
+        );
+        assert_eq!(ir_expr_assembled(&e), "(add((a + 1), b) * 2)");
+        // Append/Merge through the assembly
+        let e = Expr::BinOp(
+            17,
+            Box::new(Expr::Var("items")),
+            Box::new(Expr::Call("next", vec![])),
+        );
+        assert_eq!(ir_expr_assembled(&e), "items.push(next())");
+        let e = Expr::BinOp(18, Box::new(Expr::Var("a")), Box::new(Expr::Var("b")));
+        assert_eq!(ir_expr_assembled(&e), "a.extend(b)");
+        // Init/Last emit the operand text twice
+        let e = Expr::UnaryOp(7, Box::new(Expr::Var("xs")));
+        assert_eq!(ir_expr_assembled(&e), "(xs)[(xs).len() - 1]");
+        let e = Expr::UnaryOp(6, Box::new(Expr::Var("xs")));
+        assert_eq!(ir_expr_assembled(&e), "(xs)[..(xs).len() - 1].to_vec()");
+        // A Concat chain: the inner Concat renders owned on
+        // the left as-is; the trailing literal stays bare on
+        // the right; the leading literal takes .to_string()
+        let e = Expr::BinOp(
+            16,
+            Box::new(Expr::BinOp(
+                16,
+                Box::new(Expr::Lit(Lit::Str("a"))),
+                Box::new(Expr::Var("x")),
+            )),
+            Box::new(Expr::Lit(Lit::Str("b"))),
+        );
+        assert_eq!(ir_expr_assembled(&e), "((\"a\".to_string() + &x) + \"b\")");
+        // A block-like right operand is borrowed parenthesized
+        let e = Expr::BinOp(
+            16,
+            Box::new(Expr::Var("s")),
+            Box::new(Expr::If(
+                Box::new(Expr::Var("c")),
+                Box::new(Expr::Lit(Lit::Str("y"))),
+                Box::new(Expr::Lit(Lit::Str("n"))),
+            )),
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "(s + &(if c { \"y\" } else { \"n\" }))"
+        );
+        // The owned literal is escaped before .to_string()
+        let e = Expr::BinOp(
+            16,
+            Box::new(Expr::Lit(Lit::Str("a\"b"))),
+            Box::new(Expr::Var("x")),
+        );
+        assert_eq!(ir_expr_assembled(&e), "(\"a\\\"b\".to_string() + &x)");
+    }
+
+    #[test]
+    fn expr_walker_control() {
+        // A Match condition is block-like: wrapped
+        let e = Expr::If(
+            Box::new(Expr::Match(
+                Box::new(Expr::Var("y")),
+                vec![(Pat::Wildcard, Expr::Lit(Lit::Int(1)))],
+            )),
+            Box::new(Expr::Lit(Lit::Int(2))),
+            Box::new(Expr::Lit(Lit::Int(3))),
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "if (match y { _ => 1 }) { 2 } else { 3 }"
+        );
+        // A BinOp condition is NOT re-wrapped: its own
+        // template already parenthesized it
+        let e = Expr::If(
+            Box::new(Expr::BinOp(
+                6,
+                Box::new(Expr::Var("a")),
+                Box::new(Expr::Var("b")),
+            )),
+            Box::new(Expr::Var("t")),
+            Box::new(Expr::Var("e")),
+        );
+        assert_eq!(ir_expr_assembled(&e), "if (a || b) { t } else { e }");
+        // A string-literal pattern over a variable scrutinee:
+        // .as_str() is appended
+        let e = Expr::Match(
+            Box::new(Expr::Var("s")),
+            vec![
+                (Pat::Literal(Lit::Str("go")), Expr::Lit(Lit::Int(1))),
+                (Pat::Wildcard, Expr::Lit(Lit::Int(0))),
+            ],
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "match s.as_str() { \"go\" => 1, _ => 0 }"
+        );
+        // The same pattern NESTED inside a constructor
+        // pattern still triggers it (the tree recursion)
+        let e = Expr::Match(
+            Box::new(Expr::Var("s")),
+            vec![(
+                Pat::Constructor("Some", vec![Pat::Literal(Lit::Str("x"))]),
+                Expr::Lit(Lit::Int(1)),
+            )],
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "match s.as_str() { Some(\"x\") => 1 }"
+        );
+        // A bare literal scrutinee: already a &str, no
+        // .as_str() (and &str has no stable as_str — E0658)
+        let e = Expr::Match(
+            Box::new(Expr::Lit(Lit::Str("go"))),
+            vec![(Pat::Literal(Lit::Str("go")), Expr::Lit(Lit::Int(1)))],
+        );
+        assert_eq!(ir_expr_assembled(&e), "match \"go\" { \"go\" => 1 }");
+        // A Match inside a Match arm body (two levels)
+        let e = Expr::Match(
+            Box::new(Expr::Var("a")),
+            vec![(
+                Pat::Wildcard,
+                Expr::Match(
+                    Box::new(Expr::Var("b")),
+                    vec![(Pat::Wildcard, Expr::Lit(Lit::Int(0)))],
+                ),
+            )],
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "match a { _ => match b { _ => 0 } }"
+        );
+        // A Lambda whose body is a BinOp
+        let e = Expr::Lambda(
+            vec!["x"],
+            Box::new(Expr::BinOp(
+                0,
+                Box::new(Expr::Var("x")),
+                Box::new(Expr::Lit(Lit::Int(1))),
+            )),
+        );
+        assert_eq!(ir_expr_assembled(&e), "|x| { (x + 1) }");
+        // A Hole in condition position: the panic! text,
+        // unwrapped (Hole is not block-like)
+        let e = Expr::If(
+            Box::new(Expr::Hole),
+            Box::new(Expr::Lit(Lit::Int(1))),
+            Box::new(Expr::Lit(Lit::Int(2))),
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "if panic!(\"Hole not filled\") { 1 } else { 2 }"
+        );
+    }
+
+    #[test]
+    fn expr_walker_collections() {
+        // Set/Map collections are fully qualified
+        let e = Expr::Collection(1, vec![Expr::Lit(Lit::Int(1)), Expr::Lit(Lit::Int(2))]);
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "std::collections::HashSet::from([1, 2])"
+        );
+        let e = Expr::Collection(
+            2,
+            vec![Expr::Collection(
+                4,
+                vec![Expr::Lit(Lit::Str("k")), Expr::Lit(Lit::Int(1))],
+            )],
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "std::collections::HashMap::from([(\"k\", 1)])"
+        );
+        let e = Expr::Collection(
+            0,
+            vec![Expr::BinOp(
+                0,
+                Box::new(Expr::Var("a")),
+                Box::new(Expr::Lit(Lit::Int(1))),
+            )],
+        );
+        assert_eq!(ir_expr_assembled(&e), "vec![(a + 1)]");
+        // The iterator combinators through the assembly
+        let e = Expr::Map(
+            Box::new(Expr::Lambda(
+                vec!["x"],
+                Box::new(Expr::BinOp(
+                    2,
+                    Box::new(Expr::Var("x")),
+                    Box::new(Expr::Lit(Lit::Int(2))),
+                )),
+            )),
+            Box::new(Expr::Var("xs")),
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "(xs).iter().map(|x| { (x * 2) }).collect()"
+        );
+        let e = Expr::Filter(Box::new(Expr::Var("ok")), Box::new(Expr::Var("xs")));
+        assert_eq!(ir_expr_assembled(&e), "(xs).iter().filter(ok).collect()");
+        let e = Expr::Fold(
+            Box::new(Expr::Var("add")),
+            Box::new(Expr::Lit(Lit::Int(0))),
+            Box::new(Expr::Var("xs")),
+        );
+        assert_eq!(ir_expr_assembled(&e), "(xs).iter().fold(0, add)");
+        let e = Expr::Sort(Box::new(Expr::Var("cmp")), Box::new(Expr::Var("xs")));
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "{ let mut sorted = xs; sorted.sort_by(cmp); sorted }"
+        );
+        // Two levels: a Map over a Filter result — the inner
+        // collect() text is parenthesized by the outer template
+        let e = Expr::Map(
+            Box::new(Expr::Var("f")),
+            Box::new(Expr::Filter(
+                Box::new(Expr::Var("p")),
+                Box::new(Expr::Var("xs")),
+            )),
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "((xs).iter().filter(p).collect()).iter().map(f).collect()"
+        );
+    }
+
+    #[test]
+    fn expr_walker_leaves() {
+        // (return 5) + 1: the Return template's parentheses
+        // keep the + outside the return
+        let e = Expr::BinOp(
+            0,
+            Box::new(Expr::Return(Box::new(Expr::Lit(Lit::Int(5))))),
+            Box::new(Expr::Lit(Lit::Int(1))),
+        );
+        assert_eq!(ir_expr_assembled(&e), "((return 5) + 1)");
+        // The two loud fallbacks
+        assert_eq!(
+            ir_expr_assembled(&Expr::Alloc),
+            "panic!(\"unsupported IR in expression position: Alloc\")"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Hole),
+            "panic!(\"Hole not filled\")"
+        );
+        // StructDef: item + body in one block expression
+        let e = Expr::StructDef(
+            "Point",
+            vec![("x", "i64"), ("y", "i64")],
+            Box::new(Expr::Var("origin")),
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "{ struct Point { x: i64, y: i64 } origin }"
+        );
+        // Pre-rendered statement forms
+        assert_eq!(ir_expr_assembled(&Expr::LoopText("tick();")), "loop {\ntick();}");
+        assert_eq!(
+            ir_expr_assembled(&Expr::BlockText("let x = 1; x")),
+            "{ let x = 1; x }"
+        );
+        // Index/Try nesting: each template parenthesizes its
+        // own operand
+        let e = Expr::Try(Box::new(Expr::Index(
+            Box::new(Expr::Var("xs")),
+            Box::new(Expr::Lit(Lit::Int(0))),
+        )));
+        assert_eq!(ir_expr_assembled(&e), "((xs)[0])?");
+        let e = Expr::Index(
+            Box::new(Expr::Call("get", vec![Expr::Var("i")])),
+            Box::new(Expr::Lit(Lit::Int(0))),
+        );
+        assert_eq!(ir_expr_assembled(&e), "(get(i))[0]");
+        // Assign with a composite value
+        let e = Expr::Assign(
+            Box::new(Expr::Var("x")),
+            Box::new(Expr::BinOp(
+                0,
+                Box::new(Expr::Var("x")),
+                Box::new(Expr::Lit(Lit::Int(1))),
+            )),
+        );
+        assert_eq!(ir_expr_assembled(&e), "(x = (x + 1))");
+        // Break, both forms
+        assert_eq!(
+            ir_expr_assembled(&Expr::Break(Some(Box::new(Expr::Var("v"))))),
+            "(break v)"
+        );
+        assert_eq!(ir_expr_assembled(&Expr::Break(None)), "(break)");
+        // Char literals through the walker: a quote escapes,
+        // a double quote does not
+        assert_eq!(ir_expr_assembled(&Expr::Lit(Lit::Char('\''))), "'\\''");
+        assert_eq!(ir_expr_assembled(&Expr::Lit(Lit::Char('"'))), "'\"'");
     }
 }
 
