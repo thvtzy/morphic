@@ -643,7 +643,13 @@ impl SynthesisEngine {
     }
 
     fn seed_random(&self, spec: &FunctionSpec) -> CandidateImplementation {
-        let body = random_ir_tree(spec, 3, self);
+        // Fresh bodies are generated type-aware (see
+        // random_ir_tree_typed): the seeds are the pool's
+        // foundation — MCTS completions inherit their root
+        // shape — so a type-blind seed poisons every completion
+        // drawn from it, and the selector's return-type gate
+        // cannot crown a sound body the pool does not contain.
+        let body = random_ir_tree_typed(spec, 3, self);
         CandidateImplementation {
             id: self.new_id(),
             body,
@@ -1988,6 +1994,461 @@ fn random_ir_tree_scoped(
         4 => IRNode::Return(Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope))),
         5 => IRNode::Collection { kind: CollectionKind::List, elements: vec![] },
         _ => IRNode::Hole { id: engine.new_id(), expected_type: None },
+    }
+}
+
+// ── Type-directed random generation ─────────────────────
+//
+// The typed counterpart of random_ir_tree, used by seed_random
+// (the one call site that creates fresh candidate bodies). The
+// legacy generator above is type-blind: measured over the M2
+// signatures, 31.4% of its seed bodies were PROVABLY mistyped
+// for their spec and only 1.3% provably matching (see the
+// property test). Those seeds are not a cosmetic problem —
+// MCTS only fills holes, so completions inherit the seed's
+// root shape, and the selector's return-type gate (Phase 11)
+// can only crown what the pool contains: in roughly half of
+// draws a test-less spec's hole-free pool was uniformly
+// mistyped and the gate's documented fallback crowned a
+// mistyped winner anyway.
+//
+// This generator threads the spec's declared return type
+// through generation, reusing the verdict's own certainty
+// rules (selector::certainly_equal / int_family — no second
+// inference is written here). The discipline:
+//   * the ROOT shape is generated in the return type's
+//     context, from shapes the conservative inference can
+//     type as that type (Matches) or cannot type at all
+//     (Unknown, neutral) — never one it can prove wrong;
+//   * a statement-only tree (For/While root, a Block whose
+//     tail is a statement) is never the entire body of a
+//     non-Unit function — loops appear only as statements
+//     inside a Block that ends in a typed tail;
+//   * every Return the generator emits wraps an expression
+//     generated in the return type's context (Returns are
+//     produced only by the tail generator, whose target is
+//     always the return type; expression/statement positions
+//     never produce one).
+//
+// The shape menu is additionally restricted to what the Rust
+// codegen can actually render — a stricter filter than the
+// verdict's: no Call (emitted as a call to a nonexistent free
+// function — `len(x)` is E0425), no Index/Head/Tail/Init
+// (unsupported in the expression emitter), no Reverse (emits
+// `.reverse()`, which returns ()), no Concat (emitted as
+// String + String, which Rust rejects), no Len unary (emits
+// `.len()` → usize, but the signature's Int is i64). Those
+// shapes remain available to the legacy generator and to
+// hole fillings; fresh bodies are simply not built from them.
+
+/// A name in scope together with its declared type — the
+/// generation-time mirror of the verdict's type environment.
+type TypedScope = Vec<(String, TypeRef)>;
+
+/// Generate a fresh candidate body for `spec` in the context
+/// of its declared return type. Counterpart of random_ir_tree
+/// for callers that HAVE a type context (seed_random);
+/// random_ir_tree itself is unchanged for callers without one.
+fn random_ir_tree_typed(spec: &FunctionSpec, depth: u32, engine: &SynthesisEngine) -> IRNode {
+    let scope: TypedScope = spec
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.clone()))
+        .collect();
+    gen_typed_tail(&spec.return_type, depth, engine, &scope)
+}
+
+/// Can a collection literal's elements be generated for this
+/// element type without risking a render/type mismatch?
+/// Literal elements of these types are inferred by rustc in
+/// exactly the position the verdict claims for them; String
+/// elements would render as `&str` inside a `vec![…]` (the
+/// typed-literal rewrite only fires for a bare literal node),
+/// so non-empty collections are generated only for these.
+fn literal_safe_element(ty: &TypeRef) -> bool {
+    super::selector::int_family(ty) || matches!(ty, TypeRef::Bool | TypeRef::Char)
+}
+
+/// Generate an expression of target type `ty` for an
+/// EXPRESSION position (operand, condition, scrutinee, Let
+/// value, Return value, collection element): shapes the
+/// expression emitter can render and the verdict can type as
+/// `ty` or not at all. For the types with a literal menu
+/// (Bool, the integer family, Float, String, Char, Unit,
+/// List, Tuple of menufull parts) every shape emitted here is
+/// in fact certainly `ty` under the verdict's rules — the
+/// menu, Var and operator rules below are exactly the shapes
+/// infer_ir_type can type. For types with no menu (Named,
+/// Option, Map, …) the only honest leaf is a typed Hole
+/// (Unknown to the verdict), which hole filling can later
+/// complete with the Phase 10 typed menu.
+fn gen_typed_expr(
+    ty: &TypeRef,
+    depth: u32,
+    engine: &SynthesisEngine,
+    scope: &TypedScope,
+) -> IRNode {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+
+    // Applicable shapes, as option codes. Composite shapes are
+    // depth-gated; leaves are always available.
+    let mut options: Vec<u8> = Vec::new();
+    let literals = typed_literal_fillings(ty);
+    if literals.is_some() {
+        options.push(0); // literal of exactly this type
+    }
+    let matching_vars: Vec<&str> = scope
+        .iter()
+        .filter(|(_, vty)| super::selector::certainly_equal(vty, ty))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !matching_vars.is_empty() {
+        options.push(1); // a variable of exactly this type
+    }
+    let binop_ok = matches!(ty, TypeRef::Bool | TypeRef::Float)
+        || super::selector::int_family(ty);
+    let unop_ok = matches!(ty, TypeRef::Bool) || super::selector::int_family(ty);
+    let collection_ok = match ty {
+        TypeRef::List(elem) => literal_safe_element(elem),
+        TypeRef::Tuple(parts) => parts.iter().all(literal_safe_element),
+        _ => false,
+    };
+    if depth > 0 {
+        if binop_ok {
+            options.push(2);
+        }
+        if unop_ok {
+            options.push(3);
+        }
+        if collection_ok {
+            options.push(4);
+        }
+    }
+    if options.is_empty() {
+        // No honest shape for this type in expression
+        // position: an explicitly typed Hole (Unknown), never
+        // a wrong-typed guess.
+        return IRNode::Hole {
+            id: engine.new_id(),
+            expected_type: Some(ty.clone()),
+        };
+    }
+
+    match options[rng.gen_range(0..options.len())] {
+        0 => {
+            let menu = literals.unwrap();
+            let idx = rng.gen_range(0..menu.len());
+            menu.into_iter().nth(idx).unwrap()
+        }
+        1 => {
+            let idx = rng.gen_range(0..matching_vars.len());
+            IRNode::Var(matching_vars[idx].to_string())
+        }
+        2 => gen_typed_binop(ty, depth, engine, scope),
+        3 => {
+            // Unary operators whose result the verdict types as
+            // the operand's family: Not on Bool, Neg/Abs on
+            // integers. (Len/Head/Tail/Reverse are excluded —
+            // see the section header for the codegen reasons.)
+            if *ty == TypeRef::Bool {
+                IRNode::UnaryOp(
+                    IRUnaryOp::Not,
+                    Box::new(gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope)),
+                )
+            } else {
+                let inner = gen_typed_expr(&TypeRef::Int, depth - 1, engine, scope);
+                let op = if rng.gen_bool(0.5) {
+                    IRUnaryOp::Neg
+                } else {
+                    IRUnaryOp::Abs
+                };
+                IRNode::UnaryOp(op, Box::new(inner))
+            }
+        }
+        _ => {
+            // Non-empty collection of certainly-typed elements.
+            match ty {
+                TypeRef::List(elem) => {
+                    let n = rng.gen_range(0..=3usize);
+                    let elements = (0..n)
+                        .map(|_| gen_typed_expr(elem, depth - 1, engine, scope))
+                        .collect();
+                    IRNode::Collection {
+                        kind: CollectionKind::List,
+                        elements,
+                    }
+                }
+                TypeRef::Tuple(parts) => {
+                    let elements = parts
+                        .iter()
+                        .map(|p| gen_typed_expr(p, depth - 1, engine, scope))
+                        .collect();
+                    IRNode::Collection {
+                        kind: CollectionKind::Tuple,
+                        elements,
+                    }
+                }
+                _ => unreachable!("collection option gated on List/Tuple"),
+            }
+        }
+    }
+}
+
+/// A binary operation whose result the verdict types as `ty`:
+/// comparisons and logical ops for Bool (operands of one
+/// certain type — Int or Bool, the operand types whose
+/// literals and variables render and compare soundly in
+/// Rust), arithmetic for the integer family and Float.
+/// Div/Mod never take a constant-zero divisor (rustc's
+/// unconditional_panic lint rejects `x / 0` at compile time).
+fn gen_typed_binop(
+    ty: &TypeRef,
+    depth: u32,
+    engine: &SynthesisEngine,
+    scope: &TypedScope,
+) -> IRNode {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let bin = |op: IRBinOp, l: IRNode, r: IRNode| {
+        IRNode::BinOp(op, Box::new(l), Box::new(r))
+    };
+    // A divisor that cannot be a compile-time zero: a nonzero
+    // literal, or a variable (its value is not a constant).
+    let divisor = |rng: &mut rand::rngs::ThreadRng, scope: &TypedScope| -> IRNode {
+        let int_vars: Vec<&str> = scope
+            .iter()
+            .filter(|(_, vty)| super::selector::int_family(vty))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !int_vars.is_empty() && rng.gen_bool(0.5) {
+            IRNode::Var(int_vars[rng.gen_range(0..int_vars.len())].to_string())
+        } else {
+            IRNode::Literal(IRLiteral::Int(if rng.gen_bool(0.5) { 1 } else { 2 }))
+        }
+    };
+
+    if *ty == TypeRef::Bool {
+        if rng.gen_bool(0.5) {
+            // Logical: both operands Bool.
+            let op = if rng.gen_bool(0.5) { IRBinOp::And } else { IRBinOp::Or };
+            let l = gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope);
+            let r = gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope);
+            bin(op, l, r)
+        } else {
+            // Comparison: both operands of one certain type.
+            let ot = if rng.gen_bool(0.5) {
+                TypeRef::Int
+            } else {
+                TypeRef::Bool
+            };
+            let op = [
+                IRBinOp::Eq,
+                IRBinOp::Neq,
+                IRBinOp::Lt,
+                IRBinOp::Le,
+                IRBinOp::Gt,
+                IRBinOp::Ge,
+            ][rng.gen_range(0..6)];
+            let l = gen_typed_expr(&ot, depth - 1, engine, scope);
+            let r = gen_typed_expr(&ot, depth - 1, engine, scope);
+            bin(op, l, r)
+        }
+    } else if *ty == TypeRef::Float {
+        let op = [IRBinOp::Add, IRBinOp::Sub, IRBinOp::Mul][rng.gen_range(0..3)];
+        let l = gen_typed_expr(&TypeRef::Float, depth - 1, engine, scope);
+        let r = gen_typed_expr(&TypeRef::Float, depth - 1, engine, scope);
+        bin(op, l, r)
+    } else {
+        // Integer family: arithmetic on Int operands (the
+        // family unifies under the verdict's rules).
+        let op = [
+            IRBinOp::Add,
+            IRBinOp::Sub,
+            IRBinOp::Mul,
+            IRBinOp::Div,
+            IRBinOp::Mod,
+        ][rng.gen_range(0..5)];
+        let l = gen_typed_expr(&TypeRef::Int, depth - 1, engine, scope);
+        let r = if matches!(op, IRBinOp::Div | IRBinOp::Mod) {
+            divisor(&mut rng, scope)
+        } else {
+            gen_typed_expr(&TypeRef::Int, depth - 1, engine, scope)
+        };
+        bin(op, l, r)
+    }
+}
+
+/// Generate a body for a TAIL position (function body, Block
+/// tail, If branch, Match arm, Let body) whose value must be
+/// of type `ty`. In this generator `ty` is always the spec's
+/// return type — the only place Returns are emitted, each
+/// wrapping an expression generated for that same type.
+/// Everything gen_typed_expr produces is also a valid tail;
+/// the structural shapes (If/Match/Let/Block/Return) exist
+/// only here, because the expression emitter cannot render
+/// them in operand positions.
+fn gen_typed_tail(
+    ty: &TypeRef,
+    depth: u32,
+    engine: &SynthesisEngine,
+    scope: &TypedScope,
+) -> IRNode {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    if depth == 0 {
+        return gen_typed_expr(ty, 0, engine, scope);
+    }
+    // Scrutinee candidates for a Match: in-scope Int/Bool
+    // variables (literal patterns of those types render and
+    // match soundly; a String scrutinee would need &str
+    // patterns the emitter does not produce).
+    let scrutinees: Vec<&(String, TypeRef)> = scope
+        .iter()
+        .filter(|(_, vty)| super::selector::int_family(vty) || *vty == TypeRef::Bool)
+        .collect();
+
+    let mut options: Vec<u8> = vec![0]; // plain expression tail
+    options.push(1); // If with typed branches
+    if !scrutinees.is_empty() {
+        options.push(2); // Match on an in-scope variable
+    }
+    options.push(3); // Let with a simply-typed value
+    options.push(4); // Block: statements, then a typed tail
+    options.push(5); // Return of a typed expression
+
+    match options[rng.gen_range(0..options.len())] {
+        0 => gen_typed_expr(ty, depth, engine, scope),
+        1 => IRNode::If {
+            condition: Box::new(gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope)),
+            then_branch: Box::new(gen_typed_tail(ty, depth - 1, engine, scope)),
+            else_branch: Box::new(gen_typed_tail(ty, depth - 1, engine, scope)),
+        },
+        2 => {
+            let (name, sty) = scrutinees[rng.gen_range(0..scrutinees.len())];
+            let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+            if *sty == TypeRef::Bool {
+                cases.push((
+                    IRPattern::Literal(IRLiteral::Bool(true)),
+                    gen_typed_tail(ty, depth - 1, engine, scope),
+                ));
+            } else {
+                let first = rng.gen_range(0..3i64);
+                cases.push((
+                    IRPattern::Literal(IRLiteral::Int(first)),
+                    gen_typed_tail(ty, depth - 1, engine, scope),
+                ));
+                if rng.gen_bool(0.5) {
+                    cases.push((
+                        IRPattern::Literal(IRLiteral::Int(first + 1)),
+                        gen_typed_tail(ty, depth - 1, engine, scope),
+                    ));
+                }
+            }
+            cases.push((
+                IRPattern::Wildcard,
+                gen_typed_tail(ty, depth - 1, engine, scope),
+            ));
+            IRNode::Match {
+                scrutinee: Box::new(IRNode::Var(name.clone())),
+                cases,
+            }
+        }
+        3 => {
+            // The value's type is one the emitter types
+            // exactly (an Int/Bool/Char literal or expression
+            // binds at that type in Rust as in the verdict);
+            // String values are excluded — a `let` value
+            // renders untyped, so a String literal would bind
+            // as &str while the verdict binds String.
+            let vt = [TypeRef::Int, TypeRef::Bool, TypeRef::Char]
+                [rng.gen_range(0..3)]
+            .clone();
+            let value = gen_typed_expr(&vt, depth - 1, engine, scope);
+            let name = format!("v{}", engine.new_id());
+            let mut body_scope = scope.clone();
+            body_scope.push((name.clone(), vt));
+            IRNode::Let {
+                name,
+                value: Box::new(value),
+                body: Box::new(gen_typed_tail(ty, depth - 1, engine, &body_scope)),
+            }
+        }
+        4 => {
+            let n = rng.gen_range(1..=3usize);
+            let mut stmts: Vec<IRNode> = (0..n)
+                .map(|_| gen_typed_stmt(depth - 1, engine, scope))
+                .collect();
+            stmts.push(gen_typed_tail(ty, depth - 1, engine, scope));
+            IRNode::Block(stmts)
+        }
+        _ => IRNode::Return(Box::new(gen_typed_expr(ty, depth - 1, engine, scope))),
+    }
+}
+
+/// An expression used as a statement: its value is
+/// discarded, so it is generated for a simple type (Int or
+/// Bool) whose shapes are always available and render as a
+/// terminated expression statement.
+fn gen_typed_expr_stmt(depth: u32, engine: &SynthesisEngine, scope: &TypedScope) -> IRNode {
+    use rand::Rng;
+    let ty = if rand::thread_rng().gen_bool(0.5) {
+        TypeRef::Int
+    } else {
+        TypeRef::Bool
+    };
+    gen_typed_expr(&ty, depth, engine, scope)
+}
+
+/// Generate a STATEMENT: a node whose value is discarded.
+/// Statements never contain a Return (a mistyped or even
+/// well-typed stray Return in statement position would hijack
+/// the body's value flow and its verdict); loops live here,
+/// as statements inside a Block — never as a whole body.
+fn gen_typed_stmt(depth: u32, engine: &SynthesisEngine, scope: &TypedScope) -> IRNode {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    if depth == 0 {
+        return gen_typed_expr_stmt(depth, engine, scope);
+    }
+    match rng.gen_range(0..4u32) {
+        0 => gen_typed_expr_stmt(depth, engine, scope),
+        1 => {
+            // For over a literal range; the loop variable is
+            // Int-typed inside the body, as the verdict's
+            // range rule also concludes.
+            let var = format!("i{}", engine.new_id());
+            let int_vars: Vec<&str> = scope
+                .iter()
+                .filter(|(_, vty)| super::selector::int_family(vty))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let end = if !int_vars.is_empty() && rng.gen_bool(0.5) {
+                IRNode::Var(int_vars[rng.gen_range(0..int_vars.len())].to_string())
+            } else {
+                IRNode::Literal(IRLiteral::Int(10))
+            };
+            let mut body_scope = scope.clone();
+            body_scope.push((var.clone(), TypeRef::Int));
+            IRNode::For {
+                var,
+                start: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                end: Box::new(end),
+                body: Box::new(gen_typed_stmt(depth - 1, engine, &body_scope)),
+            }
+        }
+        2 => IRNode::While {
+            condition: Box::new(gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope)),
+            body: Box::new(gen_typed_stmt(depth - 1, engine, scope)),
+            invariant: None,
+        },
+        _ => {
+            let n = rng.gen_range(1..=2usize);
+            let stmts: Vec<IRNode> = (0..n)
+                .map(|_| gen_typed_stmt(depth - 1, engine, scope))
+                .collect();
+            IRNode::Block(stmts)
+        }
     }
 }
 

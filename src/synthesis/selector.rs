@@ -73,7 +73,7 @@ pub enum TypeVerdict {
 /// binding's certainty, not inherit it.
 type TypeEnv = HashMap<String, Option<TypeRef>>;
 
-fn int_family(ty: &TypeRef) -> bool {
+pub(crate) fn int_family(ty: &TypeRef) -> bool {
     matches!(
         ty,
         TypeRef::Int
@@ -151,7 +151,10 @@ fn provably_different(a: &TypeRef, b: &TypeRef) -> bool {
 /// Are these two types provably THE SAME type? The structural
 /// dual of `provably_different`; a Generic anywhere makes
 /// equality unprovable (except identical names, via a == b).
-fn certainly_equal(a: &TypeRef, b: &TypeRef) -> bool {
+/// Also used by the engine's type-directed generator, which
+/// must reuse these exact certainty rules rather than grow a
+/// second notion of type equality.
+pub(crate) fn certainly_equal(a: &TypeRef, b: &TypeRef) -> bool {
     use TypeRef::*;
     if a == b {
         return true;
