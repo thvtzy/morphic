@@ -3554,6 +3554,186 @@ mod tests {
         assert!(engine.seed_from_constraints(&spec).is_empty());
     }
 
+    /// Load every spec of one M2 module file — the module
+    /// context spec-to-spec calls resolve against.
+    fn load_m2_module(file: &str) -> Vec<FunctionSpec> {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/self_host/{}.morph", root, file);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        let checked = crate::spec::typeck::check(parsed).unwrap();
+        checked.spec.functions
+    }
+
+    fn module_spec(module: &[FunctionSpec], name: &str) -> FunctionSpec {
+        module.iter().find(|f| f.name == name).unwrap().clone()
+    }
+
+    fn contains_call_to(node: &IRNode, name: &str) -> bool {
+        match node {
+            IRNode::Call { function, args } => {
+                function == name || args.iter().any(|a| contains_call_to(a, name))
+            }
+            IRNode::BinOp(_, l, r) => {
+                contains_call_to(l, name) || contains_call_to(r, name)
+            }
+            IRNode::UnaryOp(_, inner) => contains_call_to(inner, name),
+            IRNode::Match { scrutinee, cases } => {
+                contains_call_to(scrutinee, name)
+                    || cases.iter().any(|(_, b)| contains_call_to(b, name))
+            }
+            _ => false,
+        }
+    }
+
+    /// Spec calls (i): with the module present, validate_kind_tag's
+    /// equation — `output == is_known_node_kind(kind)` — finally
+    /// yields a seed: the call is resolved against the callee's
+    /// own constraint body, so the seed IS the range check the
+    /// composed spec denotes. It must be Verified by the
+    /// module-aware verifier and win module-aware synthesis at
+    /// tpr 1.000 with its own body. (Without the module the same
+    /// spec gets no seed — see
+    /// constraint_seeds_absent_where_constraints_fit_neither_pattern,
+    /// which runs registry-less and is unchanged.)
+    #[test]
+    fn composition_equation_seed_is_verified_and_wins() {
+        let module = load_m2_module("validator");
+        let spec = module_spec(&module, "validate_kind_tag");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &spec, "equation");
+        assert_eq!(count_holes(&seed.body), 0);
+        assert!(
+            !contains_call_to(&seed.body, "is_known_node_kind"),
+            "the seed body must be the resolved callee body, not the call: {:?}",
+            seed.body
+        );
+        // The resolved body is the callee's range, executed here
+        // through the IR interpreter — including the untested
+        // boundary points 9 (in) and 10 (out).
+        for (kind, expected) in [(0, true), (4, true), (9, true), (10, false), (77, false)] {
+            let v = eval_int_body(&seed.body, "kind", kind);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Bool(expected),
+                "kind {}",
+                kind
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let pool = synthesize_with_module(&spec, 1, &module)
+            .expect("opt-1 synthesis must succeed");
+        assert!(
+            pool.iter()
+                .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+            "final pool must contain the constraint seed"
+        );
+        let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the resolved seed body"
+        );
+    }
+
+    /// Spec calls (ii): print_node_kind composes node_kind_name —
+    /// a guard-table spec with NO equation — so the resolver
+    /// falls back to the callee's guard-table body and the seed
+    /// is the name lookup itself. Verified by the module-aware
+    /// verifier, and wins module-aware synthesis at tpr 1.000.
+    #[test]
+    fn composition_seed_for_print_node_kind_is_verified_and_wins() {
+        let module = load_m2_module("printer");
+        let spec = module_spec(&module, "print_node_kind");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &spec, "equation");
+        assert_eq!(count_holes(&seed.body), 0);
+        assert!(
+            !contains_call_to(&seed.body, "node_kind_name"),
+            "the seed body must be the resolved callee body, not the call: {:?}",
+            seed.body
+        );
+        // The lookup itself, on rows no in-spec test exercises
+        // (0 → "Literal") as well as both tested rows.
+        for (kind, expected) in [(0, "Literal"), (2, "BinaryOp"), (7, "Lambda")] {
+            let v = eval_int_body(&seed.body, "kind", kind);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(expected.into()),
+                "kind {}",
+                kind
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let pool = synthesize_with_module(&spec, 1, &module)
+            .expect("opt-1 synthesis must succeed");
+        assert!(
+            pool.iter()
+                .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+            "final pool must contain the constraint seed"
+        );
+        let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the resolved seed body"
+        );
+    }
+
+    /// Spec calls (iii): a cyclic pair of specs (a calls b, b
+    /// calls a) must not hang or panic resolution — the cycle
+    /// simply yields no seed, exactly like an unresolvable call.
+    /// This test completing at all is the termination evidence.
+    #[test]
+    fn cyclic_specs_get_no_constraint_seed() {
+        let cyclic = |name: &str, callee: &str| {
+            let mut spec = dummy_spec();
+            spec.name = name.into();
+            spec.params = vec![Param {
+                name: "x".into(),
+                ty: TypeRef::Int,
+                annotations: HashMap::new(),
+            }];
+            spec.return_type = TypeRef::Bool;
+            spec.postconditions = vec![Constraint::Expr(Expr::BinOp(
+                BinOp::Eq,
+                Box::new(Expr::Var("output".into())),
+                Box::new(Expr::Call(callee.into(), vec![Expr::Var("x".into())])),
+            ))];
+            spec
+        };
+        let a = cyclic("cyc_a", "cyc_b");
+        let b = cyclic("cyc_b", "cyc_a");
+        let module = vec![a.clone(), b];
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        assert!(engine.seed_from_constraints(&a).is_empty());
+        assert!(engine.seed_from_constraints(&module[1]).is_empty());
+    }
+
     /// replace_hole must actually substitute the hole wherever
     /// find_hole_positions found it. The path walker behind it
     /// used to implement only the Block step — every other

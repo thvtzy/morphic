@@ -977,6 +977,250 @@ mod tests {
             .status
     }
 
+    fn load_module(file: &str) -> Vec<FunctionSpec> {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/self_host/{}.morph", root, file);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        let checked = crate::spec::typeck::check(parsed).unwrap();
+        checked.spec.functions
+    }
+
+    fn module_spec(module: &[FunctionSpec], name: &str) -> FunctionSpec {
+        module.iter().find(|f| f.name == name).unwrap().clone()
+    }
+
+    fn status_of_in_module(
+        module: &[FunctionSpec],
+        spec: &FunctionSpec,
+        body: IRNode,
+    ) -> VerificationStatus {
+        Verifier::with_specs(module)
+            .verify_one(&candidate(spec, 1, body), spec)
+            .status
+    }
+
+    // ── Spec-to-spec calls ────────────────────────────────
+
+    /// validate_kind_tag's postcondition IS a call (`output ==
+    /// is_known_node_kind(kind)`). Without a module the
+    /// constraint cannot encode and every candidate is
+    /// Inconclusive — the pre-fix ceiling. With the module, the
+    /// constraint-side call inlines the callee's range body and
+    /// a constant candidate is REFUTED (true fails at kind 77,
+    /// false fails at kind 4): the first refutation this spec
+    /// can produce.
+    #[test]
+    fn composition_wrong_candidate_is_refuted_with_module() {
+        let module = load_module("validator");
+        let spec = module_spec(&module, "validate_kind_tag");
+        assert_eq!(
+            status_of(&spec, boolean(true)),
+            VerificationStatus::Inconclusive
+        );
+        assert_eq!(
+            status_of_in_module(&module, &spec, boolean(true)),
+            VerificationStatus::VerificationFailed
+        );
+        assert_eq!(
+            status_of_in_module(&module, &spec, boolean(false)),
+            VerificationStatus::VerificationFailed
+        );
+    }
+
+    /// Both sides inline: a candidate whose body is the raw
+    /// call itself verifies against the calling postcondition —
+    /// body side and constraint side resolve the same callee
+    /// body and meet.
+    #[test]
+    fn composition_call_body_is_verified_with_module() {
+        let module = load_module("validator");
+        let spec = module_spec(&module, "validate_kind_tag");
+        let body = IRNode::Call {
+            function: "is_known_node_kind".into(),
+            args: vec![var("kind")],
+        };
+        assert_eq!(
+            status_of(&spec, body.clone()),
+            VerificationStatus::Inconclusive
+        );
+        assert_eq!(
+            status_of_in_module(&module, &spec, body),
+            VerificationStatus::Verified
+        );
+    }
+
+    /// Body-side inlining evaluates the ACTUAL callee: a body
+    /// calling is_literal_kind (kind == 0) does not satisfy
+    /// validate_kind_tag (0 <= kind <= 9) — the two disagree at
+    /// kind 5, so the candidate is refuted, not merely
+    /// unjudged.
+    #[test]
+    fn composition_call_to_wrong_callee_is_refuted() {
+        let module = load_module("validator");
+        let spec = module_spec(&module, "validate_kind_tag");
+        let body = IRNode::Call {
+            function: "is_literal_kind".into(),
+            args: vec![var("kind")],
+        };
+        assert_eq!(
+            status_of_in_module(&module, &spec, body),
+            VerificationStatus::VerificationFailed
+        );
+    }
+
+    /// print_node_kind's callee is a guard-table spec (no
+    /// equation): the resolver's guard-table body makes the
+    /// composition judgable. The per-test match — right on both
+    /// tested kinds, wrong on the untested Literal row — is
+    /// refuted; the full lookup verifies.
+    #[test]
+    fn composition_guard_table_callee_is_judgable() {
+        let module = load_module("printer");
+        let spec = module_spec(&module, "print_node_kind");
+        let per_test = match_on(
+            var("kind"),
+            vec![
+                lit_arm(2, string("BinaryOp")),
+                lit_arm(7, string("Lambda")),
+                wild(string("")),
+            ],
+        );
+        assert_eq!(
+            status_of_in_module(&module, &spec, per_test),
+            VerificationStatus::VerificationFailed
+        );
+        let lookup = match_on(
+            var("kind"),
+            vec![
+                lit_arm(0, string("Literal")),
+                lit_arm(1, string("Variable")),
+                lit_arm(2, string("BinaryOp")),
+                lit_arm(3, string("UnaryOp")),
+                lit_arm(4, string("Call")),
+                lit_arm(5, string("Index")),
+                lit_arm(6, string("FieldAccess")),
+                lit_arm(7, string("Lambda")),
+                wild(string("")),
+            ],
+        );
+        assert_eq!(
+            status_of_in_module(&module, &spec, lookup),
+            VerificationStatus::Verified
+        );
+    }
+
+    fn eq_spec(name: &str, rhs: SpecExpr) -> FunctionSpec {
+        FunctionSpec {
+            name: name.into(),
+            doc: None,
+            generics: vec![],
+            params: vec![Param {
+                name: "x".into(),
+                ty: TypeRef::Int,
+                annotations: HashMap::new(),
+            }],
+            return_type: TypeRef::Bool,
+            preconditions: vec![],
+            postconditions: vec![Constraint::Expr(SpecExpr::BinOp(
+                SpecBinOp::Eq,
+                Box::new(SpecExpr::Var("output".into())),
+                Box::new(rhs),
+            ))],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: HashMap::new(),
+        }
+    }
+
+    fn call_expr(name: &str) -> SpecExpr {
+        SpecExpr::Call(name.into(), vec![SpecExpr::Var("x".into())])
+    }
+
+    /// A cyclic pair (a calls b, b calls a) yields Inconclusive
+    /// from BOTH sides — a candidate whose body is the cyclic
+    /// call (body side cannot resolve it) and a plain candidate
+    /// judged against the cyclic postcondition (constraint side
+    /// cannot resolve it) — never a hang or a panic. The test
+    /// completing at all is the termination evidence.
+    #[test]
+    fn cyclic_spec_calls_are_inconclusive_not_hanging() {
+        let a = eq_spec("cyc_a", call_expr("cyc_b"));
+        let b = eq_spec("cyc_b", call_expr("cyc_a"));
+        let module = vec![a.clone(), b];
+        let call_body = IRNode::Call {
+            function: "cyc_b".into(),
+            args: vec![var("x")],
+        };
+        assert_eq!(
+            status_of_in_module(&module, &a, call_body),
+            VerificationStatus::Inconclusive
+        );
+        assert_eq!(
+            status_of_in_module(&module, &a, boolean(true)),
+            VerificationStatus::Inconclusive
+        );
+    }
+
+    /// Inlining is transitive under a depth cap: a three-spec
+    /// chain (top → mid → tail, the tail a plain range)
+    /// verifies end to end; a twelve-spec chain exceeds the cap
+    /// and stays Inconclusive rather than expanding without
+    /// bound.
+    #[test]
+    fn spec_call_chains_inline_transitively_under_a_depth_cap() {
+        let range = SpecExpr::BinOp(
+            SpecBinOp::And,
+            Box::new(SpecExpr::BinOp(
+                SpecBinOp::Ge,
+                Box::new(SpecExpr::Var("x".into())),
+                Box::new(SpecExpr::IntLit(0)),
+            )),
+            Box::new(SpecExpr::BinOp(
+                SpecBinOp::Le,
+                Box::new(SpecExpr::Var("x".into())),
+                Box::new(SpecExpr::IntLit(9)),
+            )),
+        );
+        let tail = eq_spec("chain_tail", range);
+        let mid = eq_spec("chain_mid", call_expr("chain_tail"));
+        let top = eq_spec("chain_top", call_expr("chain_mid"));
+        let module = vec![top.clone(), mid, tail];
+        let body = IRNode::Call {
+            function: "chain_mid".into(),
+            args: vec![var("x")],
+        };
+        assert_eq!(
+            status_of_in_module(&module, &top, body),
+            VerificationStatus::Verified
+        );
+
+        // Twelve specs, each calling the next, the last a range:
+        // resolving the head needs eleven nested inlinings.
+        let mut module: Vec<FunctionSpec> = (0..11)
+            .map(|i| eq_spec(&format!("deep_{}", i), call_expr(&format!("deep_{}", i + 1))))
+            .collect();
+        module.push(eq_spec(
+            "deep_11",
+            SpecExpr::BinOp(
+                SpecBinOp::Ge,
+                Box::new(SpecExpr::Var("x".into())),
+                Box::new(SpecExpr::IntLit(0)),
+            ),
+        ));
+        let head = module[0].clone();
+        let body = IRNode::Call {
+            function: "deep_1".into(),
+            args: vec![var("x")],
+        };
+        assert_eq!(
+            status_of_in_module(&module, &head, body),
+            VerificationStatus::Inconclusive
+        );
+    }
+
     // ── The decisive pair ─────────────────────────────────
 
     /// Guard-style spec (node_arity: per-row `kind<a||kind>a||
