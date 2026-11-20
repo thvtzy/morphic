@@ -43,6 +43,12 @@ pub struct Z3Session {
 impl Z3Session {
     pub fn new(timeout_ms: u64) -> Self {
         let solver = z3::Solver::new();
+        // The timeout was previously stored but never applied;
+        // with candidate bodies encoded, solver calls do real
+        // work and the bound matters.
+        let mut params = z3::Params::new();
+        params.set_u32("timeout", timeout_ms as u32);
+        solver.set_params(&params);
         Self { solver, timeout_ms }
     }
 
@@ -84,6 +90,30 @@ impl Z3Session {
                 } else {
                     SmtResult::Sat(HashMap::new())
                 }
+            }
+            z3::SatResult::Unsat  => SmtResult::Unsat,
+            z3::SatResult::Unknown => SmtResult::Unknown,
+        }
+    }
+
+    /// Check satisfiability; on Sat, evaluate the given Int
+    /// constants in the model so callers get real counterexample
+    /// values for the variables they created. Constants the
+    /// model does not pin to a numeral are omitted.
+    pub fn check_and_eval_ints(&self, vars: &[(&str, &z3::ast::Int)]) -> SmtResult {
+        match self.solver.check() {
+            z3::SatResult::Sat => {
+                let mut values = HashMap::new();
+                if let Some(model) = self.solver.get_model() {
+                    for (name, ast) in vars {
+                        if let Some(v) = model.eval(*ast, true) {
+                            if let Some(n) = v.as_i64() {
+                                values.insert(name.to_string(), SmtValue::Int(n));
+                            }
+                        }
+                    }
+                }
+                SmtResult::Sat(values)
             }
             z3::SatResult::Unsat  => SmtResult::Unsat,
             z3::SatResult::Unknown => SmtResult::Unknown,

@@ -4,9 +4,13 @@
 // └──────────────────────────────────────────────────────────┘
 
 use crate::spec::ast::*;
-use crate::synthesis::engine::{CandidateImplementation, IRNode, ScoreBreakdown, composite_score};
+use crate::synthesis::engine::{
+    CandidateImplementation, IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp,
+    ScoreBreakdown, composite_score,
+};
 use super::smt::{Z3Session, SmtResult, SmtValue, z3_add, z3_sub, z3_mul, z3_and};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Instant;
 
 // ── Public Types ───────────────────────────────────────────
@@ -87,106 +91,748 @@ impl Verifier {
             };
         }
 
+        // The verdict must be a statement about THIS candidate:
+        // the spec's parameters become free Z3 constants and the
+        // candidate body is symbolically evaluated over them,
+        // once, producing the expression `output` denotes for
+        // this implementation. `None` = the body is outside the
+        // encodable subset; every constraint is then Unknown and
+        // the candidate can only be Inconclusive, never Verified.
+        let param_env = param_env(spec);
+        let output = sym_eval(&candidate.body, &mut param_env.clone());
+
+        let mut any_refuted = false;
+        let mut any_unknown = false;
         for (i, c) in spec.postconditions.iter().enumerate() {
-            let result = self.verify_constraint(c, &format!("post[{}]", i));
-            if !result.holds && counterexample.is_none() {
-                counterexample = Some(Counterexample {
-                    description: format!("Postcondition {} violated", i + 1),
-                    inputs: result.model.clone().unwrap_or_default(),
-                });
+            let (result, tri) = self.verify_constraint(
+                c,
+                &format!("post[{}]", i),
+                spec,
+                &param_env,
+                &output,
+            );
+            match tri {
+                Tri::Refuted => {
+                    any_refuted = true;
+                    if counterexample.is_none() {
+                        counterexample = Some(Counterexample {
+                            description: format!("Postcondition {} violated", i + 1),
+                            inputs: result.model.clone().unwrap_or_default(),
+                        });
+                    }
+                }
+                Tri::Unknown => any_unknown = true,
+                Tri::Proven => {}
             }
             constraint_results.push(result);
         }
 
-        let all_hold = constraint_results.iter().all(|r| r.holds);
         VerificationResult {
             candidate_id: candidate.id,
-            status: if all_hold { VerificationStatus::Verified } else { VerificationStatus::VerificationFailed },
+            status: if any_refuted {
+                VerificationStatus::VerificationFailed
+            } else if any_unknown {
+                VerificationStatus::Inconclusive
+            } else {
+                VerificationStatus::Verified
+            },
             constraint_results, counterexample,
             verification_time_ms: start.elapsed().as_millis() as u64,
         }
     }
 
-    fn verify_constraint(&self, constraint: &Constraint, label: &str) -> ConstraintResult {
+    fn verify_constraint(
+        &self,
+        constraint: &Constraint,
+        label: &str,
+        spec: &FunctionSpec,
+        param_env: &SymEnv,
+        output: &Option<Sym>,
+    ) -> (ConstraintResult, Tri) {
         let start = Instant::now();
-        let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+        let done = |holds: bool, model: Option<HashMap<String, SmtValue>>, tri: Tri| {
+            (
+                ConstraintResult {
+                    constraint: label.into(),
+                    holds,
+                    solver_time_ms: start.elapsed().as_millis() as u64,
+                    model,
+                },
+                tri,
+            )
+        };
 
-        let formula = encode_constraint(constraint, &z3);
+        // No symbolic output (unencodable body) or an
+        // unencodable constraint: the honest outcome is
+        // Unknown. Nothing is silently treated as true.
+        let Some(output) = output else {
+            return done(false, None, Tri::Unknown);
+        };
+        let mut env = param_env.clone();
+        env.insert("output".to_string(), output.clone());
+        let Some(formula) = encode_constraint(constraint, &env) else {
+            return done(false, None, Tri::Unknown);
+        };
+
+        let z3 = Z3Session::new(self.timeout_per_constraint_ms);
         let negated = formula.not();
         z3.assert(&negated);
 
-        let result = z3.check_and_get_model();
-        match result {
-            SmtResult::Unsat => ConstraintResult {
-                constraint: label.into(), holds: true,
-                solver_time_ms: start.elapsed().as_millis() as u64, model: None,
-            },
-            SmtResult::Sat(model) => ConstraintResult {
-                constraint: label.into(), holds: false,
-                solver_time_ms: start.elapsed().as_millis() as u64,
-                model: if model.is_empty() { None } else { Some(model) },
-            },
-            _ => ConstraintResult {
-                constraint: label.into(), holds: false,
-                solver_time_ms: start.elapsed().as_millis() as u64, model: None,
-            },
+        // Int parameters, for real counterexample values.
+        let int_params: Vec<(&str, &z3::ast::Int)> = spec
+            .params
+            .iter()
+            .filter_map(|p| match param_env.get(&p.name) {
+                Some(Sym::Int(ast)) => Some((p.name.as_str(), ast)),
+                _ => None,
+            })
+            .collect();
+
+        match z3.check_and_eval_ints(&int_params) {
+            SmtResult::Unsat => done(true, None, Tri::Proven),
+            SmtResult::Sat(model) => done(
+                false,
+                if model.is_empty() { None } else { Some(model) },
+                Tri::Refuted,
+            ),
+            _ => done(false, None, Tri::Unknown),
         }
+    }
+}
+
+/// Three-valued outcome of one constraint check against one
+/// candidate. `ConstraintResult::holds` records only `Proven`;
+/// the distinction between Refuted and Unknown drives the
+/// candidate's overall status (Failed vs Inconclusive).
+enum Tri {
+    Proven,
+    Refuted,
+    Unknown,
+}
+
+// ── Symbolic candidate encoding ────────────────────────────
+//
+// The candidate body is folded over the spec's parameters as
+// free Z3 constants, mirroring the evaluable subset of the IR
+// interpreter (synthesis/eval.rs) construct by construct:
+//
+//   Literal, Var, BinOp, UnaryOp (Neg/Not/Abs/Len), If, Match
+//   (literal/variable/wildcard patterns), Let, Block, Return,
+//   Call ("len" and the "List" literal), Collection, Index,
+//   Typed.
+//
+// Anything else — holes, loops, mutation, lambdas and other
+// function values, higher-order combinators, unknown calls,
+// guard/constructor patterns that cannot be decided — makes
+// the body unencodable (`None`), never a guessed value.
+//
+// Representable sorts are Int, Bool and String, plus literal
+// lists of representable values (needed for len/Index over
+// collection literals). Floats and Chars have no honest Z3
+// sort here (IEEE floats are not Z3 reals), so they are
+// `Opaque`: bindable and discardable, but any use that needs
+// a concrete sort makes the body unencodable.
+
+#[derive(Debug, Clone)]
+enum Sym {
+    Int(z3::ast::Int),
+    Bool(z3::ast::Bool),
+    Str(z3::ast::String),
+    List(Vec<Sym>),
+    Opaque,
+}
+
+type SymEnv = HashMap<String, Sym>;
+
+/// Internal control flow, mirroring the interpreter: `Return`
+/// unwinds to the top of the candidate body.
+enum SymFlow {
+    Normal(Sym),
+    Returned(Sym),
+}
+
+impl SymFlow {
+    fn into_value(self) -> Sym {
+        match self {
+            SymFlow::Normal(v) | SymFlow::Returned(v) => v,
+        }
+    }
+}
+
+/// The initial symbolic environment: one free constant per
+/// spec parameter, of the parameter's sort. Parameters whose
+/// type has no representable sort are Opaque.
+fn param_env(spec: &FunctionSpec) -> SymEnv {
+    let mut env = SymEnv::new();
+    for p in &spec.params {
+        let sym = match &p.ty {
+            TypeRef::Int
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64 => Sym::Int(z3::ast::Int::new_const(p.name.as_str())),
+            TypeRef::Bool => Sym::Bool(z3::ast::Bool::new_const(p.name.as_str())),
+            TypeRef::String => Sym::Str(z3::ast::String::new_const(p.name.as_str())),
+            _ => Sym::Opaque,
+        };
+        env.insert(p.name.clone(), sym);
+    }
+    env
+}
+
+fn sym_eval(node: &IRNode, env: &mut SymEnv) -> Option<Sym> {
+    Some(sym_eval_flow(node, env)?.into_value())
+}
+
+fn sym_eval_flow(node: &IRNode, env: &mut SymEnv) -> Option<SymFlow> {
+    match node {
+        IRNode::Literal(lit) => Some(SymFlow::Normal(sym_literal(lit)?)),
+
+        IRNode::Var(name) => env.get(name).cloned().map(SymFlow::Normal),
+
+        IRNode::BinOp(op, l, r) => {
+            let lv = sym_eval(l, env)?;
+            let rv = sym_eval(r, env)?;
+            Some(SymFlow::Normal(sym_binop_ir(*op, lv, rv)?))
+        }
+
+        IRNode::UnaryOp(op, inner) => {
+            let v = sym_eval(inner, env)?;
+            Some(SymFlow::Normal(sym_unary_ir(*op, v)?))
+        }
+
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => match sym_eval(condition, env)? {
+            Sym::Bool(cond) => {
+                let t = sym_eval(then_branch, env)?;
+                let e = sym_eval(else_branch, env)?;
+                Some(SymFlow::Normal(sym_ite(&cond, t, e)?))
+            }
+            _ => None,
+        },
+
+        IRNode::Let { name, value, body } => {
+            let v = match sym_eval_flow(value, env)? {
+                SymFlow::Returned(v) => return Some(SymFlow::Returned(v)),
+                SymFlow::Normal(v) => v,
+            };
+            let mut inner = env.clone();
+            inner.insert(name.clone(), v);
+            sym_eval_flow(body, &mut inner)
+        }
+
+        IRNode::Block(stmts) => {
+            let mut last = Sym::Opaque; // an empty block is Unit
+            for stmt in stmts {
+                match sym_eval_flow(stmt, env)? {
+                    SymFlow::Returned(v) => return Some(SymFlow::Returned(v)),
+                    SymFlow::Normal(v) => last = v,
+                }
+            }
+            Some(SymFlow::Normal(last))
+        }
+
+        IRNode::Return(inner) => {
+            let v = sym_eval(inner, env)?;
+            Some(SymFlow::Returned(v))
+        }
+
+        IRNode::Match { scrutinee, cases } => {
+            sym_match(scrutinee, cases, env).map(SymFlow::Normal)
+        }
+
+        IRNode::Call { function, args } => {
+            sym_call(function, args, env).map(SymFlow::Normal)
+        }
+
+        IRNode::Collection { elements, .. } => {
+            // The interpreter maps every collection literal to
+            // a List value regardless of kind; mirror that.
+            let mut values = Vec::with_capacity(elements.len());
+            for el in elements {
+                match sym_eval_flow(el, env)? {
+                    SymFlow::Returned(v) => return Some(SymFlow::Returned(v)),
+                    SymFlow::Normal(v) => values.push(v),
+                }
+            }
+            Some(SymFlow::Normal(Sym::List(values)))
+        }
+
+        IRNode::Index(coll, idx) => {
+            let coll = sym_eval(coll, env)?;
+            let idx = sym_eval(idx, env)?;
+            Some(SymFlow::Normal(sym_index(coll, idx)?))
+        }
+
+        IRNode::Typed { node, .. } => sym_eval_flow(node, env),
+
+        // Everything below is outside the encodable subset,
+        // exactly as in the interpreter: unfilled holes, loops,
+        // allocation/mutation, function values, higher-order
+        // combinators, struct definitions, Result propagation.
+        IRNode::Hole { .. }
+        | IRNode::While { .. }
+        | IRNode::For { .. }
+        | IRNode::Loop { .. }
+        | IRNode::Break { .. }
+        | IRNode::Alloc { .. }
+        | IRNode::Assign { .. }
+        | IRNode::Lambda { .. }
+        | IRNode::Closure { .. }
+        | IRNode::Map { .. }
+        | IRNode::Filter { .. }
+        | IRNode::Fold { .. }
+        | IRNode::Sort { .. }
+        | IRNode::StructDef { .. }
+        | IRNode::TryPropagate(_) => None,
+    }
+}
+
+fn sym_literal(lit: &IRLiteral) -> Option<Sym> {
+    match lit {
+        IRLiteral::Int(n) => Some(Sym::Int(z3::ast::Int::from_i64(*n))),
+        IRLiteral::Bool(b) => Some(Sym::Bool(z3::ast::Bool::from_bool(*b))),
+        IRLiteral::String(s) => {
+            Some(Sym::Str(z3::ast::String::from_str(s).ok()?))
+        }
+        // Float, Char, Unit: no honest Z3 sort in this encoder.
+        IRLiteral::Float(_) | IRLiteral::Char(_) | IRLiteral::Unit => {
+            Some(Sym::Opaque)
+        }
+    }
+}
+
+/// Symbolic match, folded into nested `ite`s from the last arm
+/// backwards. Mirrors the interpreter: arms are tried in order,
+/// constructor patterns never match a value in this domain,
+/// guard patterns are undecidable. The last reachable arm
+/// must be unconditional (wildcard/variable) — otherwise some
+/// scrutinee values match nothing and the body has no defined
+/// output, which is unencodable rather than a guess.
+fn sym_match(
+    scrutinee: &IRNode,
+    cases: &[(IRPattern, IRNode)],
+    env: &mut SymEnv,
+) -> Option<Sym> {
+    let scrut = sym_eval(scrutinee, env)?;
+    // (condition, value) per arm; condition None = unconditional.
+    let mut arms: Vec<(Option<z3::ast::Bool>, Sym)> = Vec::new();
+    for (pattern, body) in cases {
+        match pattern {
+            IRPattern::Wildcard => {
+                arms.push((None, sym_eval(body, env)?));
+                break; // later arms are unreachable
+            }
+            IRPattern::Variable(name) => {
+                let mut inner = env.clone();
+                inner.insert(name.clone(), scrut.clone());
+                arms.push((None, sym_eval(body, &mut inner)?));
+                break;
+            }
+            IRPattern::Literal(lit) => {
+                match sym_pattern_cond(&scrut, lit) {
+                    PatternCond::Eq(cond) => {
+                        arms.push((Some(cond), sym_eval(body, env)?));
+                    }
+                    // Provably never equal (interpreter equality
+                    // is sort-strict here): the arm is dead.
+                    PatternCond::Never => continue,
+                    PatternCond::Undecidable => return None,
+                }
+            }
+            IRPattern::Constructor(..) => continue,
+            IRPattern::Guard(..) => return None,
+        }
+    }
+    let (last_cond, last_val) = arms.pop()?;
+    if last_cond.is_some() {
+        return None; // the match can fall through
+    }
+    let mut acc = last_val;
+    for (cond, val) in arms.into_iter().rev() {
+        let cond = cond.expect("non-final arms are conditional");
+        acc = sym_ite(&cond, val, acc)?;
+    }
+    Some(acc)
+}
+
+enum PatternCond {
+    Eq(z3::ast::Bool),
+    Never,
+    Undecidable,
+}
+
+/// The condition "scrutinee equals this literal pattern", in
+/// the interpreter's equality semantics: same-sort equality,
+/// plus Int/Float numeric promotion. Provably disjoint sorts
+/// never match; anything involving an unrepresentable value
+/// is undecidable.
+fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
+    match (scrut, lit) {
+        (Sym::Int(a), IRLiteral::Int(n)) => {
+            PatternCond::Eq(a.eq(&z3::ast::Int::from_i64(*n)))
+        }
+        (Sym::Int(a), IRLiteral::Float(f)) => {
+            // Interpreter promotion: Int(i) == Float(f) iff
+            // i as f64 == f. Only an integral f in i64 range
+            // can ever be equal.
+            if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+                PatternCond::Eq(a.eq(&z3::ast::Int::from_i64(*f as i64)))
+            } else {
+                PatternCond::Never
+            }
+        }
+        (Sym::Bool(a), IRLiteral::Bool(b)) => {
+            PatternCond::Eq(a.eq(&z3::ast::Bool::from_bool(*b)))
+        }
+        (Sym::Str(a), IRLiteral::String(s)) => {
+            match z3::ast::String::from_str(s) {
+                Ok(lit) => PatternCond::Eq(a.eq(&lit)),
+                Err(_) => PatternCond::Undecidable,
+            }
+        }
+        // A list scrutinee has no literal patterns; an Opaque
+        // scrutinee cannot be compared at all.
+        (Sym::List(_), _) | (Sym::Opaque, _) => PatternCond::Undecidable,
+        // Remaining pairs are provably disjoint sorts.
+        _ => PatternCond::Never,
+    }
+}
+
+fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv) -> Option<Sym> {
+    match function {
+        // `List[...]` is the spec language's list literal; the
+        // parser lowers it to a Call named "List" (parser.rs).
+        "List" => {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                values.push(sym_eval(arg, env)?);
+            }
+            Some(Sym::List(values))
+        }
+        // The one pure builtin the specs and templates rely on.
+        "len" if args.len() == 1 => sym_len(sym_eval(&args[0], env)?),
+        // Template-internal pseudo-calls and spec-to-spec calls
+        // have no definition to encode.
+        _ => None,
+    }
+}
+
+fn sym_len(v: Sym) -> Option<Sym> {
+    match v {
+        Sym::List(items) => Some(Sym::Int(z3::ast::Int::from_i64(items.len() as i64))),
+        Sym::Str(s) => Some(Sym::Int(s.length())),
+        _ => None,
+    }
+}
+
+fn sym_index(coll: Sym, idx: Sym) -> Option<Sym> {
+    match (coll, idx) {
+        (Sym::List(items), Sym::Int(i)) => {
+            // Only a constant index picks an element; a
+            // symbolic index would need array theory. An
+            // out-of-bounds constant mirrors the interpreter's
+            // evaluation failure: unencodable, not a guess.
+            let n = i.as_i64()?;
+            if n < 0 {
+                return None;
+            }
+            items.into_iter().nth(n as usize)
+        }
+        (Sym::Str(s), Sym::Int(i)) => {
+            // A character of a literal string at a constant
+            // in-range index: a Char value (Opaque sort).
+            let n = i.as_i64()?;
+            if n < 0 {
+                return None;
+            }
+            let lit = s.as_string()?;
+            if lit.chars().nth(n as usize).is_some() {
+                Some(Sym::Opaque)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
+    match (a, b) {
+        (Sym::Int(x), Sym::Int(y)) => Some(Sym::Int(cond.ite(&x, &y))),
+        (Sym::Bool(x), Sym::Bool(y)) => Some(Sym::Bool(cond.ite(&x, &y))),
+        (Sym::Str(x), Sym::Str(y)) => Some(Sym::Str(cond.ite(&x, &y))),
+        (Sym::Opaque, Sym::Opaque) => Some(Sym::Opaque),
+        _ => None,
+    }
+}
+
+// ── Shared symbolic operators ──────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinKind {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    And,
+    Or,
+    Xor,
+    Eq,
+    Neq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Concat,
+    Append,
+}
+
+/// One operator table for both IR bodies and spec expressions:
+/// the two syntaxes denote the same operations. Sort-strict,
+/// like the interpreter: operands of the wrong sort (or an
+/// Opaque operand) make the whole expression unencodable.
+/// Z3 totalizes Div/Mod where the interpreter fails (division
+/// by zero, overflow): proofs about bodies using them are
+/// proofs about Z3's totalized semantics — see ROAD notes.
+fn sym_binop(kind: BinKind, l: Sym, r: Sym) -> Option<Sym> {
+    use BinKind::*;
+    match (kind, l, r) {
+        (Add, Sym::Int(a), Sym::Int(b)) => Some(Sym::Int(z3_add(&a, &b))),
+        (Sub, Sym::Int(a), Sym::Int(b)) => Some(Sym::Int(z3_sub(&a, &b))),
+        (Mul, Sym::Int(a), Sym::Int(b)) => Some(Sym::Int(z3_mul(&a, &b))),
+        (Div, Sym::Int(a), Sym::Int(b)) => Some(Sym::Int(a.div(&b))),
+        // The interpreter's Mod is Rust `%` (remainder, sign of
+        // the dividend) = Z3's rem, not Z3's mod.
+        (Mod, Sym::Int(a), Sym::Int(b)) => Some(Sym::Int(a.rem(&b))),
+        (And, Sym::Bool(a), Sym::Bool(b)) => {
+            Some(Sym::Bool(z3::ast::Bool::and(&[&a, &b])))
+        }
+        (Or, Sym::Bool(a), Sym::Bool(b)) => {
+            Some(Sym::Bool(z3::ast::Bool::or(&[&a, &b])))
+        }
+        (Xor, Sym::Bool(a), Sym::Bool(b)) => Some(Sym::Bool(a.xor(&b))),
+        (Eq, Sym::Int(a), Sym::Int(b)) => Some(Sym::Bool(a.eq(&b))),
+        (Eq, Sym::Bool(a), Sym::Bool(b)) => Some(Sym::Bool(a.eq(&b))),
+        (Eq, Sym::Str(a), Sym::Str(b)) => Some(Sym::Bool(a.eq(&b))),
+        (Neq, Sym::Int(a), Sym::Int(b)) => Some(Sym::Bool(a.eq(&b).not())),
+        (Neq, Sym::Bool(a), Sym::Bool(b)) => Some(Sym::Bool(a.eq(&b).not())),
+        (Neq, Sym::Str(a), Sym::Str(b)) => Some(Sym::Bool(a.eq(&b).not())),
+        (Lt, Sym::Int(a), Sym::Int(b)) => Some(Sym::Bool(a.lt(&b))),
+        (Le, Sym::Int(a), Sym::Int(b)) => Some(Sym::Bool(a.le(&b))),
+        (Gt, Sym::Int(a), Sym::Int(b)) => Some(Sym::Bool(a.gt(&b))),
+        (Ge, Sym::Int(a), Sym::Int(b)) => Some(Sym::Bool(a.ge(&b))),
+        (Lt, Sym::Str(a), Sym::Str(b)) => Some(Sym::Bool(a.str_lt(&b))),
+        (Le, Sym::Str(a), Sym::Str(b)) => Some(Sym::Bool(a.str_le(&b))),
+        (Gt, Sym::Str(a), Sym::Str(b)) => Some(Sym::Bool(a.str_gt(&b))),
+        (Ge, Sym::Str(a), Sym::Str(b)) => Some(Sym::Bool(a.str_ge(&b))),
+        (Concat, Sym::Str(a), Sym::Str(b)) => {
+            Some(Sym::Str(z3::ast::String::concat(&[&a, &b])))
+        }
+        (Concat, Sym::List(mut a), Sym::List(b)) => {
+            a.extend(b);
+            Some(Sym::List(a))
+        }
+        (Append, Sym::List(mut a), item) => {
+            a.push(item);
+            Some(Sym::List(a))
+        }
+        _ => None,
+    }
+}
+
+fn sym_binop_ir(op: IRBinOp, l: Sym, r: Sym) -> Option<Sym> {
+    let kind = match op {
+        IRBinOp::Add => BinKind::Add,
+        IRBinOp::Sub => BinKind::Sub,
+        IRBinOp::Mul => BinKind::Mul,
+        IRBinOp::Div => BinKind::Div,
+        IRBinOp::Mod => BinKind::Mod,
+        IRBinOp::And => BinKind::And,
+        IRBinOp::Or => BinKind::Or,
+        IRBinOp::Xor => BinKind::Xor,
+        IRBinOp::Eq => BinKind::Eq,
+        IRBinOp::Neq => BinKind::Neq,
+        IRBinOp::Lt => BinKind::Lt,
+        IRBinOp::Le => BinKind::Le,
+        IRBinOp::Gt => BinKind::Gt,
+        IRBinOp::Ge => BinKind::Ge,
+        IRBinOp::Concat => BinKind::Concat,
+        IRBinOp::Append => BinKind::Append,
+        // Z3's Int has no shifts, and Merge has no meaning in
+        // the interpreter either: unencodable.
+        IRBinOp::Shl | IRBinOp::Shr | IRBinOp::Merge => return None,
+    };
+    sym_binop(kind, l, r)
+}
+
+fn sym_neg(v: Sym) -> Option<Sym> {
+    match v {
+        Sym::Int(a) => Some(Sym::Int(z3_sub(&z3::ast::Int::from_i64(0), &a))),
+        _ => None,
+    }
+}
+
+fn sym_not(v: Sym) -> Option<Sym> {
+    match v {
+        Sym::Bool(a) => Some(Sym::Bool(a.not())),
+        _ => None,
+    }
+}
+
+fn sym_abs(v: Sym) -> Option<Sym> {
+    match v {
+        Sym::Int(a) => {
+            let zero = z3::ast::Int::from_i64(0);
+            let neg = z3_sub(&zero, &a);
+            Some(Sym::Int(a.ge(&zero).ite(&a, &neg)))
+        }
+        _ => None,
+    }
+}
+
+fn sym_unary_ir(op: IRUnaryOp, v: Sym) -> Option<Sym> {
+    match op {
+        IRUnaryOp::Neg => sym_neg(v),
+        IRUnaryOp::Not => sym_not(v),
+        IRUnaryOp::Abs => sym_abs(v),
+        IRUnaryOp::Len => sym_len(v),
+        // Head/Tail/Init/Last/Reverse/Clone are outside the
+        // interpreter's evaluable subset too.
+        _ => None,
     }
 }
 
 // ── Constraint → Z3 Translation ────────────────────────────
+//
+// The spec side of the check: postconditions are encoded in
+// the SAME environment as the candidate — parameters are the
+// free constants and `output` is the candidate's symbolic
+// body. Every encoder returns Option: a formula that cannot
+// be encoded is Unknown to the caller, never silently `true`
+// (the pre-fix encoders mapped boolean-valued subexpressions
+// to int 0 and any Or-rooted formula to `true`, which made
+// the verdict a function of constraint syntax alone).
 
-fn encode_constraint(c: &Constraint, z3: &Z3Session) -> z3::ast::Bool {
+fn encode_constraint(c: &Constraint, env: &SymEnv) -> Option<z3::ast::Bool> {
     match c {
-        Constraint::True => z3::ast::Bool::from_bool(true),
-        Constraint::Not(inner) => encode_constraint(inner, z3).not(),
-        Constraint::Order(OrderOp::LessThan, a, b) => encode_expr_int(a, z3).lt(&encode_expr_int(b, z3)),
-        Constraint::Order(OrderOp::LessThanOrEqual, a, b) => encode_expr_int(a, z3).le(&encode_expr_int(b, z3)),
-        Constraint::Order(OrderOp::GreaterThan, a, b) => encode_expr_int(a, z3).gt(&encode_expr_int(b, z3)),
-        Constraint::Eq(a, b) => encode_expr_int(a, z3).eq(&encode_expr_int(b, z3)),
+        Constraint::True => Some(z3::ast::Bool::from_bool(true)),
+        Constraint::Not(inner) => Some(encode_constraint(inner, env)?.not()),
         Constraint::And(parts) => {
-            if parts.is_empty() {
-                return z3::ast::Bool::from_bool(true);
+            let mut acc = z3::ast::Bool::from_bool(true);
+            for p in parts {
+                acc = z3_and(&acc, &encode_constraint(p, env)?);
             }
-            let mut acc = encode_constraint(&parts[0], z3);
-            for p in &parts[1..] {
-                acc = z3_and(&acc, &encode_constraint(p, z3));
+            Some(acc)
+        }
+        Constraint::Or(parts) => {
+            let mut acc = z3::ast::Bool::from_bool(false);
+            for p in parts {
+                acc = z3::ast::Bool::or(&[&acc, &encode_constraint(p, env)?]);
             }
-            acc
+            Some(acc)
         }
-        Constraint::Implies(a, b) => encode_constraint(a, z3).implies(&encode_constraint(b, z3)),
-        Constraint::Expr(expr) => encode_expr_bool(expr, z3),
-        _ => z3::ast::Bool::from_bool(true),
-    }
-}
-
-fn encode_expr_int(expr: &Expr, z3: &Z3Session) -> z3::ast::Int {
-    match expr {
-        Expr::IntLit(n) => z3.int_val(*n as u64),
-        Expr::Var(name) => z3.int_const(name),
-        Expr::BinOp(BinOp::Add, l, r) => z3_add(&encode_expr_int(l, z3), &encode_expr_int(r, z3)),
-        Expr::BinOp(BinOp::Sub, l, r) => z3_sub(&encode_expr_int(l, z3), &encode_expr_int(r, z3)),
-        Expr::BinOp(BinOp::Mul, l, r) => z3_mul(&encode_expr_int(l, z3), &encode_expr_int(r, z3)),
-        _ => z3.int_val(0),
-    }
-}
-
-fn encode_expr_bool(expr: &Expr, z3: &Z3Session) -> z3::ast::Bool {
-    match expr {
-        Expr::BoolLit(true) => z3::ast::Bool::from_bool(true),
-        Expr::BoolLit(false) => z3::ast::Bool::from_bool(false),
-        Expr::BinOp(BinOp::Eq, l, r) => encode_expr_int(l, z3).eq(&encode_expr_int(r, z3)),
-        Expr::BinOp(BinOp::Lt, l, r) => encode_expr_int(l, z3).lt(&encode_expr_int(r, z3)),
-        Expr::BinOp(BinOp::Le, l, r) => encode_expr_int(l, z3).le(&encode_expr_int(r, z3)),
-        Expr::BinOp(BinOp::Gt, l, r) => encode_expr_int(l, z3).gt(&encode_expr_int(r, z3)),
-        Expr::BinOp(BinOp::And, l, r) => {
-            z3::ast::Bool::and(&[&encode_expr_bool(l, z3), &encode_expr_bool(r, z3)])
+        Constraint::Implies(a, b) => {
+            Some(encode_constraint(a, env)?.implies(&encode_constraint(b, env)?))
         }
-        _ => z3::ast::Bool::from_bool(true),
+        Constraint::Eq(a, b) => match sym_binop(
+            BinKind::Eq,
+            encode_expr(a, env)?,
+            encode_expr(b, env)?,
+        )? {
+            Sym::Bool(b) => Some(b),
+            _ => None,
+        },
+        Constraint::Order(op, a, b) => {
+            let kind = match op {
+                OrderOp::LessThan => BinKind::Lt,
+                OrderOp::LessThanOrEqual => BinKind::Le,
+                OrderOp::GreaterThan => BinKind::Gt,
+                OrderOp::GreaterThanOrEqual => BinKind::Ge,
+            };
+            match sym_binop(kind, encode_expr(a, env)?, encode_expr(b, env)?)? {
+                Sym::Bool(b) => Some(b),
+                _ => None,
+            }
+        }
+        Constraint::Expr(expr) => match encode_expr(expr, env)? {
+            Sym::Bool(b) => Some(b),
+            _ => None,
+        },
+        // Quantified formulas and named predicates (is_sorted
+        // and friends) have no encoding here.
+        Constraint::Forall { .. }
+        | Constraint::Exists { .. }
+        | Constraint::Predicate(..) => None,
     }
 }
 
-fn is_well_formed(_node: &IRNode) -> bool { true }
+fn encode_expr(expr: &Expr, env: &SymEnv) -> Option<Sym> {
+    match expr {
+        Expr::Var(name) => env.get(name).cloned(),
+        Expr::IntLit(n) => Some(Sym::Int(z3::ast::Int::from_i64(*n))),
+        Expr::FloatLit(_) => Some(Sym::Opaque),
+        Expr::BoolLit(b) => Some(Sym::Bool(z3::ast::Bool::from_bool(*b))),
+        Expr::StringLit(s) => Some(Sym::Str(z3::ast::String::from_str(s).ok()?)),
+        Expr::BinOp(op, l, r) => {
+            let kind = match op {
+                BinOp::Add => BinKind::Add,
+                BinOp::Sub => BinKind::Sub,
+                BinOp::Mul => BinKind::Mul,
+                BinOp::Div => BinKind::Div,
+                BinOp::Mod => BinKind::Mod,
+                BinOp::And => BinKind::And,
+                BinOp::Or => BinKind::Or,
+                BinOp::Eq => BinKind::Eq,
+                BinOp::Neq => BinKind::Neq,
+                BinOp::Lt => BinKind::Lt,
+                BinOp::Le => BinKind::Le,
+                BinOp::Gt => BinKind::Gt,
+                BinOp::Ge => BinKind::Ge,
+                BinOp::Concat => BinKind::Concat,
+            };
+            sym_binop(kind, encode_expr(l, env)?, encode_expr(r, env)?)
+        }
+        Expr::UnaryOp(op, inner) => match op {
+            UnaryOp::Neg => sym_neg(encode_expr(inner, env)?),
+            UnaryOp::Not => sym_not(encode_expr(inner, env)?),
+        },
+        Expr::Length(inner) => sym_len(encode_expr(inner, env)?),
+        Expr::Call(name, args) => match name.as_str() {
+            "len" if args.len() == 1 => sym_len(encode_expr(&args[0], env)?),
+            "List" => {
+                let mut values = Vec::with_capacity(args.len());
+                for a in args {
+                    values.push(encode_expr(a, env)?);
+                }
+                Some(Sym::List(values))
+            }
+            // Spec-to-spec calls and unknown functions have no
+            // definition to encode.
+            _ => None,
+        },
+        Expr::Index(coll, idx) => {
+            sym_index(encode_expr(coll, env)?, encode_expr(idx, env)?)
+        }
+        Expr::Field(..) | Expr::Lambda(..) | Expr::Comprehension { .. } => None,
+    }
+}
+
+/// A candidate body is a well-formed implementation only if
+/// synthesis is finished with it: a body still containing
+/// holes is not an implementation, and there is nothing for
+/// the verifier to judge.
+fn is_well_formed(node: &IRNode) -> bool {
+    crate::synthesis::engine::count_holes(node) == 0
+}
 
 // ── Public API ─────────────────────────────────────────────
 
