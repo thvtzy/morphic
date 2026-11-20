@@ -109,8 +109,19 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
         rust_ident(&candidate.spec.name), generics, params.join(", "), ret
     ));
 
-    // Body
-    let body_code = ir_to_rust(&candidate.body, 1, &candidate.spec.return_type);
+    // Body — a tail position: its value is the function's return
+    // value, so it is rendered with the tail renderer (the same
+    // one match arms use). Statement-shaped bodies (Match, Let,
+    // Return, loops, …) fall through to statement rendering
+    // unchanged; bare expression bodies (Literal, BinOp, Var,
+    // Collection, …) keep their value instead of being discarded
+    // as `expr;` statements that make the function return ().
+    let body_code = ir_to_rust_tail(
+        &candidate.body,
+        1,
+        &candidate.spec.return_type,
+        Some(&candidate.spec.return_type),
+    );
     out.push_str(&body_code);
 
     out.push_str("}\n");
@@ -314,19 +325,25 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
         }
 
         IRNode::Let { name, value, body } => {
+            // The Let's body is the value position of the whole
+            // Let: render it tail-shaped so a bare expression body
+            // yields its value (see ir_to_rust_tail).
             format!(
                 "{}let {} = {};\n{}",
-                pad, rust_ident(name), ir_to_rust_expr(value), ir_to_rust(body, indent, fn_ret)
+                pad, rust_ident(name), ir_to_rust_expr(value),
+                ir_to_rust_tail(body, indent, fn_ret, Some(fn_ret))
             )
         }
 
         IRNode::If { condition, then_branch, else_branch } => {
+            // Branch bodies are the If's value positions: render
+            // them tail-shaped, like match arms.
             format!(
                 "{}if {} {{\n{}}} else {{\n{}}}\n",
                 pad,
                 ir_to_rust_expr(condition),
-                ir_to_rust(then_branch, indent + 1, fn_ret),
-                ir_to_rust(else_branch, indent + 1, fn_ret),
+                ir_to_rust_tail(then_branch, indent + 1, fn_ret, Some(fn_ret)),
+                ir_to_rust_tail(else_branch, indent + 1, fn_ret, Some(fn_ret)),
             )
         }
 
@@ -393,26 +410,35 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
         }
 
         IRNode::Collection { kind, elements } => {
+            // Statement position: a collection used as a
+            // statement must be terminated with `;` like any
+            // other expression statement — the unterminated form
+            // was a syntax error whenever a statement followed
+            // ("expected `;`, found keyword `return`" in the
+            // Phase 11 probe winners). Genuine tail positions
+            // (function body, match arms, If/Let value positions)
+            // never reach this arm: they route through
+            // ir_to_rust_tail, which emits the bare expression.
             match kind {
                 CollectionKind::List => {
                     let elems: Vec<String> = elements.iter().map(|e| ir_to_rust_expr(e)).collect();
-                    format!("{}vec![{}]\n", pad, elems.join(", "))
+                    format!("{}vec![{}];\n", pad, elems.join(", "))
                 }
                 CollectionKind::Array => {
                     let elems: Vec<String> = elements.iter().map(|e| ir_to_rust_expr(e)).collect();
-                    format!("{}[{}]\n", pad, elems.join(", "))
+                    format!("{}[{}];\n", pad, elems.join(", "))
                 }
                 CollectionKind::Tuple => {
                     let elems: Vec<String> = elements.iter().map(|e| ir_to_rust_expr(e)).collect();
-                    format!("{}({})\n", pad, elems.join(", "))
+                    format!("{}({});\n", pad, elems.join(", "))
                 }
                 CollectionKind::Set => {
                     let elems: Vec<String> = elements.iter().map(|e| ir_to_rust_expr(e)).collect();
-                    format!("{}vec![{}]\n", pad, elems.join(", "))
+                    format!("{}vec![{}];\n", pad, elems.join(", "))
                 }
                 CollectionKind::Map => {
                     let elems: Vec<String> = elements.iter().map(|e| ir_to_rust_expr(e)).collect();
-                    format!("{}vec![{}]\n", pad, elems.join(", "))
+                    format!("{}vec![{}];\n", pad, elems.join(", "))
                 }
             }
         }
