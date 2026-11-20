@@ -5016,6 +5016,434 @@ spec exclaim {
         }
     }
 
+    // ── Phase 28: composition-guard seeds ─────────────────
+    //
+    // The two seedless shapes of the Phase 27 measurement
+    // that a builder can close: rows guarded by a Bool-valued
+    // expression that is not a lone parameter — a CALL to
+    // another spec (rust_ident_suffix, guarded by
+    // rust_keyword(name)) — or by a plain Bool parameter,
+    // whose output pins are EXPRESSIONS over the parameters
+    // (rust_generics_text: a literal on one row, a Concat on
+    // the other). Generation at opt 1 never proposes a Call,
+    // so without a builder these pools hold zero Verified
+    // candidates and selection crowns Inconclusive lotteries.
+    // The verifier already encodes both shapes (the Phase 27
+    // refutations flow through the inlined keyword set); only
+    // the guard-row machinery refused them: guard leaves had
+    // to compare a parameter VARIABLE against a literal, and
+    // output pins had to be literals or one bare Var.
+
+    /// Composition-guard seeds (i): rust_ident_suffix's rows
+    /// are guarded by `rust_keyword(name)` — a call to an
+    /// indexed Bool spec — and pin the output to `name ++ "_"`
+    /// (keyword) and `name` (anything else). The seed must
+    /// exist (kind `composition_guard`), its resolver-visible
+    /// body must be the match over the call itself, the
+    /// admitted body must be that match with the call RESOLVED
+    /// (the interpreter cannot execute spec calls, so a raw
+    /// call body could not be measured — the equation seed's
+    /// Phase 18 precedent), it must be Verified in module
+    /// context, execute to full pinned agreement (every one of
+    /// the 51 keywords suffixed, non-keywords identical), and
+    /// win module-aware synthesis deterministically.
+    #[test]
+    fn constraint_composition_guard_seed_for_ident_suffix() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_ident_suffix");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the composition-guard seed");
+        let seed = constraint_seed(&engine, &spec, "composition_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let arms = vec![
+            (
+                IRPattern::Literal(IRLiteral::Bool(true)),
+                IRNode::BinOp(
+                    IRBinOp::Concat,
+                    Box::new(IRNode::Var("name".into())),
+                    Box::new(IRNode::Literal(IRLiteral::String("_".into()))),
+                ),
+            ),
+            (
+                IRPattern::Literal(IRLiteral::Bool(false)),
+                IRNode::Var("name".into()),
+            ),
+            (
+                IRPattern::Wildcard,
+                IRNode::Literal(IRLiteral::String(String::new())),
+            ),
+        ];
+        // The resolver-visible body: a match over the call,
+        // evaluated once, one arm per pinned call value.
+        let index = SpecIndex::from_specs(&module);
+        let raw = index
+            .callee_body("rust_ident_suffix")
+            .expect("the composition-guard body must be resolver-visible");
+        let expected_raw = IRNode::Match {
+            scrutinee: Box::new(IRNode::Call {
+                function: "rust_keyword".into(),
+                args: vec![IRNode::Var("name".into())],
+            }),
+            cases: arms.clone(),
+        };
+        assert_eq!(format!("{:?}", raw), format!("{:?}", expected_raw));
+
+        // The admitted seed: same arms, scrutinee resolved to
+        // the callee's own body (the keyword disjunction over
+        // `name`), so the interpreter can execute it.
+        let IRNode::Match { scrutinee, cases } = &seed.body else {
+            panic!("seed body must be a match: {:?}", seed.body);
+        };
+        assert!(
+            !matches!(**scrutinee, IRNode::Call { .. }),
+            "seed scrutinee must be resolved, not a call: {:?}",
+            scrutinee
+        );
+        assert!(
+            format!("{:?}", scrutinee)
+                .contains("BinOp(Eq, Var(\"name\"), Literal(String(\"type\")))"),
+            "seed scrutinee must be the inlined keyword predicate: {:?}",
+            scrutinee
+        );
+        assert_eq!(format!("{:?}", cases), format!("{:?}", arms));
+
+        // Executed over the pinned domain: all 51 keywords
+        // take the suffix; non-keyword names pass through.
+        const KEYWORDS: [&str; 51] = [
+            "as", "break", "const", "continue", "crate", "else", "enum",
+            "extern", "false", "fn", "for", "if", "impl", "in", "let",
+            "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+            "self", "Self", "static", "struct", "super", "trait", "true",
+            "type", "unsafe", "use", "where", "while", "async", "await",
+            "dyn", "abstract", "become", "box", "do", "final", "macro",
+            "override", "priv", "typeof", "unsized", "virtual", "yield",
+            "try",
+        ];
+        for kw in KEYWORDS {
+            let v = eval_seed_body(
+                &seed.body,
+                &[("name", crate::synthesis::eval::Value::Str(kw.into()))],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(format!("{}_", kw)),
+                "keyword {:?} must be suffixed",
+                kw
+            );
+        }
+        for plain in ["sort", "type_", "_", "hello", "gen", "union", "main"] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[("name", crate::synthesis::eval::Value::Str(plain.into()))],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(plain.into()),
+                "non-keyword {:?} must pass through",
+                plain
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        // Deterministic across draws: the seed wins in every
+        // independent synthesis run (Phase 27 drew Inconclusive
+        // identity bodies and a constant).
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the composition-guard seed must win verified");
+            assert!(
+                (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+                "winner tpr was {}",
+                winner.scores.test_pass_ratio
+            );
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the composition-guard seed in every draw"
+            );
+        }
+    }
+
+    /// Composition-guard seeds (ii): rust_generics_text's rows
+    /// are guarded by the plain Bool parameter `present` and
+    /// pin a literal (`""`) and a Concat
+    /// (`"<" ++ joined ++ ">"`) — a guarded-identity deviation
+    /// (a literal row) and a guard-table deviation (two
+    /// params, a non-literal pin) at once. The seed must exist
+    /// (kind `composition_guard`), be exactly the match over
+    /// `present`, be Verified in module context, execute the
+    /// pinned domain exactly, and win deterministically (the
+    /// spec has no in-spec tests, so the win rides on the
+    /// verdict, as the guarded-identity seed's did).
+    #[test]
+    fn constraint_composition_guard_seed_for_generics_text() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_generics_text");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the composition-guard seed");
+        let seed = constraint_seed(&engine, &spec, "composition_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("present".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Bool(false)),
+                    IRNode::Literal(IRLiteral::String(String::new())),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Bool(true)),
+                    IRNode::BinOp(
+                        IRBinOp::Concat,
+                        Box::new(IRNode::BinOp(
+                            IRBinOp::Concat,
+                            Box::new(IRNode::Literal(IRLiteral::String("<".into()))),
+                            Box::new(IRNode::Var("joined".into())),
+                        )),
+                        Box::new(IRNode::Literal(IRLiteral::String(">".into()))),
+                    ),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::String(String::new())),
+                ),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+        // No call to resolve: the resolver-visible body is the
+        // same match.
+        let index = SpecIndex::from_specs(&module);
+        let raw = index
+            .callee_body("rust_generics_text")
+            .expect("the composition-guard body must be resolver-visible");
+        assert_eq!(format!("{:?}", raw), format!("{:?}", expected));
+
+        // Executed over the pinned domain.
+        for (present, joined, want) in [
+            (false, "T", ""),
+            (false, "", ""),
+            (true, "T", "<T>"),
+            (true, "", "<>"),
+            (true, "A, B", "<A, B>"),
+        ] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("joined", crate::synthesis::eval::Value::Str(joined.into())),
+                    ("present", crate::synthesis::eval::Value::Bool(present)),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(want.into()),
+                "present={} joined={:?}",
+                present,
+                joined
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the composition-guard seed must win verified");
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the composition-guard seed in every draw"
+            );
+        }
+    }
+
+    /// Composition-guard seeds (negatives): near-miss shapes
+    /// still get NO constraint seed — the generalization is as
+    /// conservative as the builders it extends, and the two
+    /// Phase 27 shapes recorded as separate generalizations
+    /// stay unadmitted. Each spec below deviates in exactly
+    /// one way.
+    #[test]
+    fn constraint_composition_guard_near_misses_get_no_seed() {
+        let concat = |l: Expr, r: &str| {
+            Expr::BinOp(
+                BinOp::Concat,
+                Box::new(l),
+                Box::new(Expr::StringLit(r.into())),
+            )
+        };
+        let mut cases: Vec<(SynthesisEngine, FunctionSpec)> = Vec::new();
+        let plain = || SynthesisEngine::new(SynthesisConfig::default());
+
+        // The output pin mentions `output` itself (inside a
+        // compound pin, so the shape is otherwise squarely in
+        // composition territory).
+        cases.push((
+            plain(),
+            guard_spec(
+                "comp_pin_mentions_output",
+                vec![("flag", TypeRef::Bool)],
+                TypeRef::String,
+                vec![or_row(vec![
+                    eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), concat(var_expr("output"), "!")),
+                ])],
+            ),
+        ));
+
+        // A pin calls a spec the module index does not hold.
+        cases.push((
+            plain(),
+            guard_spec(
+                "comp_pin_calls_unindexed",
+                vec![("name", TypeRef::String), ("flag", TypeRef::Bool)],
+                TypeRef::String,
+                vec![
+                    or_row(vec![
+                        eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                        eq_expr(var_expr("output"), concat(var_expr("name"), "!")),
+                    ]),
+                    or_row(vec![
+                        eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                        eq_expr(
+                            var_expr("output"),
+                            Expr::Call("render".into(), vec![var_expr("name")]),
+                        ),
+                    ]),
+                ],
+            ),
+        ));
+
+        // Two rows guarded by DIFFERENT expressions (two Bool
+        // params): a spec has one guard expression or none.
+        cases.push((
+            plain(),
+            guard_spec(
+                "comp_mixed_guard_expressions",
+                vec![
+                    ("a", TypeRef::String),
+                    ("flag", TypeRef::Bool),
+                    ("other", TypeRef::Bool),
+                ],
+                TypeRef::String,
+                vec![
+                    or_row(vec![
+                        eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                        eq_expr(var_expr("output"), concat(var_expr("a"), "!")),
+                    ]),
+                    or_row(vec![
+                        eq_expr(var_expr("other"), Expr::BoolLit(true)),
+                        eq_expr(var_expr("output"), concat(var_expr("a"), "?")),
+                    ]),
+                ],
+            ),
+        ));
+
+        // The guard is a call to a spec the index does not
+        // hold at all.
+        cases.push((
+            plain(),
+            guard_spec(
+                "comp_guard_call_unindexed",
+                vec![("name", TypeRef::String)],
+                TypeRef::String,
+                vec![
+                    or_row(vec![
+                        eq_expr(
+                            Expr::Call("ghost".into(), vec![var_expr("name")]),
+                            Expr::BoolLit(true),
+                        ),
+                        eq_expr(var_expr("output"), concat(var_expr("name"), "_")),
+                    ]),
+                    or_row(vec![
+                        eq_expr(
+                            Expr::Call("ghost".into(), vec![var_expr("name")]),
+                            Expr::BoolLit(false),
+                        ),
+                        eq_expr(var_expr("output"), var_expr("name")),
+                    ]),
+                ],
+            ),
+        ));
+
+        // The guard call resolves, but the callee does not
+        // return Bool — its value has no finite {false, true}
+        // domain to pin against.
+        let echo = guard_spec(
+            "echo",
+            vec![("name", TypeRef::String)],
+            TypeRef::String,
+            vec![Constraint::Eq(var_expr("output"), var_expr("name"))],
+        );
+        let not_bool_target = guard_spec(
+            "comp_guard_call_not_bool",
+            vec![("name", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                or_row(vec![
+                    eq_expr(
+                        Expr::Call("echo".into(), vec![var_expr("name")]),
+                        Expr::BoolLit(true),
+                    ),
+                    eq_expr(var_expr("output"), concat(var_expr("name"), "_")),
+                ]),
+                or_row(vec![
+                    eq_expr(
+                        Expr::Call("echo".into(), vec![var_expr("name")]),
+                        Expr::BoolLit(false),
+                    ),
+                    eq_expr(var_expr("output"), var_expr("name")),
+                ]),
+            ],
+        );
+        cases.push((
+            SynthesisEngine::with_module(
+                SynthesisConfig::default(),
+                &[echo, not_bool_target.clone()],
+            ),
+            not_bool_target,
+        ));
+
+        for (engine, spec) in &cases {
+            assert!(
+                engine.seed_from_constraints(spec).is_empty(),
+                "{}: near-miss shape must get no constraint seed",
+                spec.name
+            );
+        }
+
+        // The recorded non-goals, on the real specs: the
+        // two-parameter REGION rows of rust_string_ownership
+        // (each row pins a half-plane; jointly a conjunction —
+        // pinned-value recovery would be a coverage problem)
+        // and rust_ident_empty's String-equality leaf family
+        // stay unadmitted.
+        let module = load_codegen_module();
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        for name in ["rust_string_ownership", "rust_ident_empty"] {
+            let spec = module_spec(&module, name);
+            assert!(
+                engine.seed_from_constraints(&spec).is_empty(),
+                "{}: recorded non-goal must stay seedless",
+                name
+            );
+        }
+    }
+
     /// replace_hole must actually substitute the hole wherever
     /// find_hole_positions found it. The path walker behind it
     /// used to implement only the Block step — every other
