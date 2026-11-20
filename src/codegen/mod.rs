@@ -1384,4 +1384,673 @@ mod tests {
         assert!(code.contains("fn match_()"), "keyword test name not sanitized:\n{}", code);
         assert!(code.contains("fn _3d_case()"), "digit-led test name not sanitized:\n{}", code);
     }
+
+    fn candidate_with(
+        name: &str,
+        params: Vec<(&str, TypeRef)>,
+        return_type: TypeRef,
+        body: IRNode,
+    ) -> CandidateImplementation {
+        let mut cand = candidate(name, body);
+        cand.spec.params = params
+            .into_iter()
+            .map(|(n, ty)| Param {
+                name: n.into(),
+                ty,
+                annotations: HashMap::new(),
+            })
+            .collect();
+        cand.spec.return_type = return_type;
+        cand
+    }
+
+    // ── Phase 13: emitter completeness ────────────────────
+    //
+    // The expression emitter's fallthrough arm emitted
+    // `/* UNSUPPORTED */` for 19 of the 28 IRNode variants, and
+    // two handled variants degraded to `UNKNOWN_OP` / `UNKNOWN_UNOP`
+    // operands (BinOp Xor; UnaryOp Head/Tail/Init/Last). Any of
+    // those in expression position (an If condition, a BinOp
+    // operand, a Call argument, a Let value, …) made the whole
+    // generated file unparseable — seen in a Phase 11 winner's
+    // `if /* UNSUPPORTED */`. Every variant must render to a
+    // parseable expression; shapes with no honest expression form
+    // follow the Hole convention (`panic!(...)`, type `!`).
+
+    fn assert_expr_renders(node: &IRNode) -> String {
+        let out = ir_to_rust_expr(node);
+        assert!(
+            !out.trim().is_empty(),
+            "empty expression emission for {:?}",
+            node
+        );
+        assert!(
+            !out.contains("UNSUPPORTED"),
+            "UNSUPPORTED marker for {:?}: {}",
+            node, out
+        );
+        assert!(
+            !out.contains("UNKNOWN_OP") && !out.contains("UNKNOWN_UNOP"),
+            "unknown-op marker for {:?}: {}",
+            node, out
+        );
+        out
+    }
+
+    #[test]
+    fn rust_expr_every_ir_variant_renders_without_markers() {
+        let leaf = || Box::new(IRNode::Literal(IRLiteral::Int(1)));
+        let bool_leaf = || Box::new(IRNode::Literal(IRLiteral::Bool(true)));
+        let lambda = |name: &str| {
+            IRNode::Lambda {
+                params: vec![(name.into(), TypeRef::Int)],
+                body: Box::new(IRNode::Var(name.into())),
+            }
+        };
+        let variants: Vec<IRNode> = vec![
+            IRNode::Hole { id: 7, expected_type: None },
+            IRNode::Block(vec![IRNode::Literal(IRLiteral::Int(1))]),
+            IRNode::Let {
+                name: "x".into(),
+                value: leaf(),
+                body: Box::new(IRNode::Var("x".into())),
+            },
+            IRNode::If {
+                condition: bool_leaf(),
+                then_branch: leaf(),
+                else_branch: leaf(),
+            },
+            IRNode::While {
+                condition: Box::new(IRNode::Literal(IRLiteral::Bool(false))),
+                body: Box::new(IRNode::Block(vec![])),
+                invariant: None,
+            },
+            IRNode::For {
+                var: "i".into(),
+                start: leaf(),
+                end: leaf(),
+                body: Box::new(IRNode::Block(vec![])),
+            },
+            IRNode::Match {
+                scrutinee: Box::new(IRNode::Var("kind".into())),
+                cases: vec![(
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Int(0)),
+                )],
+            },
+            IRNode::Call {
+                function: "check".into(),
+                args: vec![IRNode::Var("kind".into())],
+            },
+            IRNode::Return(leaf()),
+            IRNode::Literal(IRLiteral::Int(3)),
+            IRNode::Var("kind".into()),
+            IRNode::BinOp(
+                IRBinOp::Xor,
+                bool_leaf(),
+                Box::new(IRNode::Literal(IRLiteral::Bool(false))),
+            ),
+            IRNode::UnaryOp(IRUnaryOp::Head, Box::new(IRNode::Var("kind".into()))),
+            IRNode::UnaryOp(IRUnaryOp::Tail, Box::new(IRNode::Var("kind".into()))),
+            IRNode::UnaryOp(IRUnaryOp::Init, Box::new(IRNode::Var("kind".into()))),
+            IRNode::UnaryOp(IRUnaryOp::Last, Box::new(IRNode::Var("kind".into()))),
+            lambda("x"),
+            IRNode::Closure {
+                params: vec![("x".into(), TypeRef::Int)],
+                captures: vec!["kind".into()],
+                body: Box::new(IRNode::Var("x".into())),
+            },
+            IRNode::Collection {
+                kind: CollectionKind::List,
+                elements: vec![IRNode::Literal(IRLiteral::Int(1))],
+            },
+            IRNode::Collection {
+                kind: CollectionKind::Set,
+                elements: vec![IRNode::Literal(IRLiteral::Int(1))],
+            },
+            IRNode::Collection {
+                kind: CollectionKind::Map,
+                elements: vec![],
+            },
+            IRNode::Map {
+                function: Box::new(lambda("x")),
+                over: Box::new(IRNode::Var("kind".into())),
+            },
+            IRNode::Filter {
+                predicate: Box::new(lambda("x")),
+                over: Box::new(IRNode::Var("kind".into())),
+            },
+            IRNode::Fold {
+                operation: Box::new(lambda("a")),
+                initial: leaf(),
+                over: Box::new(IRNode::Var("kind".into())),
+            },
+            IRNode::Sort {
+                comparator: Box::new(lambda("a")),
+                collection: Box::new(IRNode::Var("kind".into())),
+            },
+            IRNode::Alloc {
+                name: "buf".into(),
+                ty: TypeRef::Int,
+                initial: leaf(),
+            },
+            IRNode::Assign {
+                target: Box::new(IRNode::Var("kind".into())),
+                value: leaf(),
+            },
+            IRNode::Typed {
+                node: leaf(),
+                ty: TypeRef::Int,
+            },
+            IRNode::Index(Box::new(IRNode::Var("kind".into())), leaf()),
+            IRNode::Loop {
+                body: Box::new(IRNode::Block(vec![])),
+            },
+            IRNode::Break { value: None },
+            IRNode::Break { value: Some(leaf()) },
+            IRNode::StructDef {
+                name: "Point".into(),
+                fields: vec![("x".into(), TypeRef::Int)],
+                body: leaf(),
+            },
+            IRNode::TryPropagate(Box::new(IRNode::Var("kind".into()))),
+        ];
+        for node in &variants {
+            assert_expr_renders(node);
+        }
+    }
+
+    #[test]
+    fn rust_expr_hole_is_a_panic_not_a_comment() {
+        let out = ir_to_rust_expr(&IRNode::Hole {
+            id: 1,
+            expected_type: None,
+        });
+        assert_eq!(out, "panic!(\"Hole not filled\")");
+    }
+
+    #[test]
+    fn rust_expr_xor_and_list_unary_ops_render() {
+        let xor = ir_to_rust_expr(&IRNode::BinOp(
+            IRBinOp::Xor,
+            Box::new(IRNode::Literal(IRLiteral::Bool(true))),
+            Box::new(IRNode::Literal(IRLiteral::Bool(false))),
+        ));
+        assert_eq!(xor, "(true ^ false)");
+        let var = || Box::new(IRNode::Var("kind".into()));
+        assert!(ir_to_rust_expr(&IRNode::UnaryOp(IRUnaryOp::Head, var())).contains("[0]"));
+        assert!(ir_to_rust_expr(&IRNode::UnaryOp(IRUnaryOp::Tail, var())).contains("[1..]"));
+        assert!(ir_to_rust_expr(&IRNode::UnaryOp(IRUnaryOp::Init, var())).contains("len() - 1"));
+        assert!(ir_to_rust_expr(&IRNode::UnaryOp(IRUnaryOp::Last, var())).contains("len() - 1"));
+    }
+
+    #[test]
+    fn rust_expr_index_try_closure_match_render() {
+        let index = ir_to_rust_expr(&IRNode::Index(
+            Box::new(IRNode::Var("items".into())),
+            Box::new(IRNode::Literal(IRLiteral::Int(0))),
+        ));
+        assert_eq!(index, "(items)[0]");
+        let try_prop = ir_to_rust_expr(&IRNode::TryPropagate(Box::new(IRNode::Var(
+            "kind".into(),
+        ))));
+        assert_eq!(try_prop, "(kind)?");
+        let closure = ir_to_rust_expr(&IRNode::Closure {
+            params: vec![("x".into(), TypeRef::Int)],
+            captures: vec!["kind".into()],
+            body: Box::new(IRNode::Var("x".into())),
+        });
+        assert!(closure.starts_with("|x|"), "closure not lambda-shaped: {}", closure);
+        let mat = ir_to_rust_expr(&IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![(
+                IRPattern::Wildcard,
+                IRNode::Literal(IRLiteral::Int(0)),
+            )],
+        });
+        assert!(mat.contains("match kind {"), "match not rendered: {}", mat);
+        assert!(mat.contains("_ => 0"), "match arm not rendered: {}", mat);
+    }
+
+    #[test]
+    fn rust_expr_return_and_break_are_parenthesized() {
+        // `return`/`break` greedily consume a following expression,
+        // so as an operand they must be parenthesized to keep the
+        // IR's operand boundary: `(return 5) + 1`, not `return 5 + 1`.
+        let ret = ir_to_rust_expr(&IRNode::Return(Box::new(IRNode::Literal(
+            IRLiteral::Int(5),
+        ))));
+        assert_eq!(ret, "(return 5)");
+        let brk = ir_to_rust_expr(&IRNode::Break {
+            value: Some(Box::new(IRNode::Literal(IRLiteral::Int(5)))),
+        });
+        assert_eq!(brk, "(break 5)");
+        let brk_unit = ir_to_rust_expr(&IRNode::Break { value: None });
+        assert_eq!(brk_unit, "(break)");
+    }
+
+    #[test]
+    fn rust_expr_set_and_map_collections_are_fully_qualified() {
+        // No import is generated for winner files, so an unqualified
+        // `HashSet::from(...)` fails E0433. Fully qualified paths
+        // compile standalone.
+        let set = ir_to_rust_expr(&IRNode::Collection {
+            kind: CollectionKind::Set,
+            elements: vec![IRNode::Literal(IRLiteral::Int(1))],
+        });
+        assert!(
+            set.contains("std::collections::HashSet::from"),
+            "set collection not fully qualified: {}",
+            set
+        );
+        let map = ir_to_rust_expr(&IRNode::Collection {
+            kind: CollectionKind::Map,
+            elements: vec![],
+        });
+        assert!(
+            map.contains("std::collections::HashMap::from"),
+            "map collection not fully qualified: {}",
+            map
+        );
+    }
+
+    // The Phase 11 sighting, pinned directly: a Hole in an If
+    // condition was emitted as `if /* UNSUPPORTED */` — a parse
+    // error in the whole file.
+    #[test]
+    fn rust_codegen_hole_in_if_condition_is_a_panic() {
+        let body = IRNode::If {
+            condition: Box::new(IRNode::Hole {
+                id: 99,
+                expected_type: None,
+            }),
+            then_branch: Box::new(IRNode::Literal(IRLiteral::Bool(true))),
+            else_branch: Box::new(IRNode::Literal(IRLiteral::Bool(false))),
+        };
+        let cand = candidate("hole_condition", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            !code.contains("UNSUPPORTED"),
+            "UNSUPPORTED marker in generated code:\n{}",
+            code
+        );
+        assert!(
+            code.contains("if panic!(\"Hole not filled\")"),
+            "hole condition not a panic:\n{}",
+            code
+        );
+    }
+
+    // Statement position (Phase 13): the Call/Map/Filter/Fold/Sort
+    // statement arms emitted unterminated tail shapes — the same
+    // latent hazard the Collection arm carried until Phase 11.
+    // A following statement turns any of these into a syntax error.
+
+    #[test]
+    fn rust_codegen_call_statement_is_terminated() {
+        let body = IRNode::Block(vec![
+            IRNode::Call {
+                function: "check".into(),
+                args: vec![IRNode::Var("kind".into())],
+            },
+            IRNode::Return(Box::new(IRNode::Literal(IRLiteral::Bool(true)))),
+        ]);
+        let cand = candidate("check", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("check(kind);"),
+            "call statement not terminated:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rust_codegen_map_and_filter_statements_are_terminated() {
+        let lambda = |body: IRNode| IRNode::Lambda {
+            params: vec![("x".into(), TypeRef::Int)],
+            body: Box::new(body),
+        };
+        let body = IRNode::Block(vec![
+            IRNode::Map {
+                function: Box::new(lambda(IRNode::Var("x".into()))),
+                over: Box::new(IRNode::Var("kind".into())),
+            },
+            IRNode::Filter {
+                predicate: Box::new(lambda(IRNode::Literal(IRLiteral::Bool(true)))),
+                over: Box::new(IRNode::Var("kind".into())),
+            },
+            IRNode::Return(Box::new(IRNode::Literal(IRLiteral::Bool(true)))),
+        ]);
+        let cand = candidate("map_filter_stmts", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains(".collect();"),
+            "map/filter statement not terminated:\n{}",
+            code
+        );
+        assert_eq!(
+            code.matches(".collect();").count(),
+            2,
+            "both map and filter statements must be terminated:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rust_codegen_fold_statement_is_terminated() {
+        let body = IRNode::Block(vec![
+            IRNode::Fold {
+                operation: Box::new(IRNode::Lambda {
+                    params: vec![("a".into(), TypeRef::Int)],
+                    body: Box::new(IRNode::Var("a".into())),
+                }),
+                initial: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                over: Box::new(IRNode::Var("kind".into())),
+            },
+            IRNode::Return(Box::new(IRNode::Literal(IRLiteral::Bool(true)))),
+        ]);
+        let cand = candidate("fold_stmt", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("fold(0, |a| { a });"),
+            "fold statement not terminated:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rust_codegen_sort_statement_is_terminated() {
+        let body = IRNode::Block(vec![
+            IRNode::Sort {
+                comparator: Box::new(IRNode::Lambda {
+                    params: vec![("a".into(), TypeRef::Int)],
+                    body: Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                }),
+                collection: Box::new(IRNode::Var("kind".into())),
+            },
+            IRNode::Return(Box::new(IRNode::Literal(IRLiteral::Bool(true)))),
+        ]);
+        let cand = candidate("sort_stmt", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("sorted;"),
+            "sort statement's final value not terminated:\n{}",
+            code
+        );
+    }
+
+    // Tail guards: value positions must keep the bare expression —
+    // terminating these would discard the value and break the
+    // function's return type (the Phase 11 tail defect family).
+
+    #[test]
+    fn rust_codegen_bare_call_body_stays_tail() {
+        let body = IRNode::Call {
+            function: "check".into(),
+            args: vec![IRNode::Var("kind".into())],
+        };
+        let cand = candidate("check", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("check(kind)\n}"),
+            "bare call body not a tail expression:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("check(kind);"),
+            "bare call body discarded as statement:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rust_codegen_bare_map_body_stays_tail() {
+        let body = IRNode::Map {
+            function: Box::new(IRNode::Lambda {
+                params: vec![("x".into(), TypeRef::Int)],
+                body: Box::new(IRNode::Var("x".into())),
+            }),
+            over: Box::new(IRNode::Var("kind".into())),
+        };
+        let mut cand = candidate("mapped", body);
+        cand.spec.return_type = TypeRef::List(Box::new(TypeRef::Int));
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains(".collect()\n}"),
+            "bare map body not a tail expression:\n{}",
+            code
+        );
+        assert!(
+            !code.contains(".collect();"),
+            "bare map body discarded as statement:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rust_codegen_bare_fold_body_stays_tail() {
+        let body = IRNode::Fold {
+            operation: Box::new(IRNode::Lambda {
+                params: vec![("a".into(), TypeRef::Int)],
+                body: Box::new(IRNode::Var("a".into())),
+            }),
+            initial: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+            over: Box::new(IRNode::Var("kind".into())),
+        };
+        let mut cand = candidate("folded", body);
+        cand.spec.return_type = TypeRef::Int;
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("fold(0, |a| { a })\n}"),
+            "bare fold body not a tail expression:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("fold(0, |a| { a });"),
+            "bare fold body discarded as statement:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rust_codegen_bare_sort_body_stays_tail() {
+        let body = IRNode::Sort {
+            comparator: Box::new(IRNode::Lambda {
+                params: vec![("a".into(), TypeRef::Int)],
+                body: Box::new(IRNode::Literal(IRLiteral::Int(1))),
+            }),
+            collection: Box::new(IRNode::Var("kind".into())),
+        };
+        let mut cand = candidate("sorted_body", body);
+        cand.spec.return_type = TypeRef::List(Box::new(TypeRef::Int));
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("sorted\n}") || code.contains("sorted }"),
+            "bare sort body does not yield the sorted value:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("sorted;\n}"),
+            "bare sort body discarded as statement:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn rust_codegen_match_arm_call_yields_value() {
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::Call {
+                        function: "check".into(),
+                        args: vec![IRNode::Var("kind".into())],
+                    },
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+            ],
+        };
+        let cand = candidate("check", body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("check(kind)\n"),
+            "match arm call not a tail expression:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("check(kind);"),
+            "match arm call discarded as statement:\n{}",
+            code
+        );
+    }
+
+    // Integration: a synthetic body combining the previously
+    // broken shapes in both positions must compile with rustc
+    // (the probe's method). Before this phase the file did not
+    // even parse: unterminated Call/Fold statements and a
+    // `/* UNSUPPORTED */` If condition.
+    #[test]
+    fn rust_codegen_previously_broken_shapes_compile() {
+        let body = IRNode::Block(vec![
+            // Call in statement position.
+            IRNode::Call {
+                function: "check".into(),
+                args: vec![IRNode::Var("kind".into())],
+            },
+            // Fold in statement position.
+            IRNode::Fold {
+                operation: Box::new(IRNode::Lambda {
+                    params: vec![
+                        ("acc".into(), TypeRef::Int),
+                        ("x".into(), TypeRef::Int),
+                    ],
+                    body: Box::new(IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(IRNode::Var("acc".into())),
+                        Box::new(IRNode::Var("x".into())),
+                    )),
+                }),
+                initial: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                over: Box::new(IRNode::Var("items".into())),
+            },
+            // Collection in statement position (Phase 11 fix,
+            // kept here as company).
+            IRNode::Collection {
+                kind: CollectionKind::List,
+                elements: vec![IRNode::Literal(IRLiteral::Int(1))],
+            },
+            // Hole in an If condition (expression position).
+            IRNode::If {
+                condition: Box::new(IRNode::Hole {
+                    id: 99,
+                    expected_type: None,
+                }),
+                then_branch: Box::new(IRNode::Block(vec![IRNode::Return(Box::new(
+                    IRNode::Literal(IRLiteral::Int(1)),
+                ))])),
+                else_branch: Box::new(IRNode::Block(vec![IRNode::Return(Box::new(
+                    IRNode::Literal(IRLiteral::Int(2)),
+                ))])),
+            },
+            // Index in expression position.
+            IRNode::Return(Box::new(IRNode::BinOp(
+                IRBinOp::Add,
+                Box::new(IRNode::Index(
+                    Box::new(IRNode::Var("items".into())),
+                    Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                )),
+                Box::new(IRNode::Literal(IRLiteral::Int(1))),
+            ))),
+        ]);
+        let cand = candidate_with(
+            "check",
+            vec![
+                ("kind", TypeRef::Int),
+                ("items", TypeRef::List(Box::new(TypeRef::Int))),
+            ],
+            TypeRef::Int,
+            body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            !code.contains("UNSUPPORTED"),
+            "UNSUPPORTED marker in generated code:\n{}",
+            code
+        );
+        compile_rust_lib(&code);
+
+        // A bare Map body is a tail position: it must keep its
+        // value (and compile).
+        let mapped = candidate_with(
+            "mapped",
+            vec![("items", TypeRef::List(Box::new(TypeRef::Int)))],
+            TypeRef::List(Box::new(TypeRef::Int)),
+            IRNode::Map {
+                function: Box::new(IRNode::Lambda {
+                    params: vec![("x".into(), TypeRef::Int)],
+                    body: Box::new(IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(IRNode::Var("x".into())),
+                        Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                    )),
+                }),
+                over: Box::new(IRNode::Var("items".into())),
+            },
+        );
+        compile_rust_lib(&generate(&mapped, "rust").unwrap());
+    }
+
+    /// Compile a generated file with `rustc --edition 2021
+    /// --crate-type lib` (the probe's external check, in-process).
+    /// Skips silently only when no rustc is reachable at all.
+    fn compile_rust_lib(code: &str) {
+        use std::io::Write;
+        let rustc = std::process::Command::new("rustc")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|_| "rustc".to_string())
+            .or_else(|| {
+                let home = std::env::var("HOME").ok()?;
+                let path = format!("{}/.cargo/bin/rustc", home);
+                std::process::Command::new(&path)
+                    .arg("--version")
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|_| path)
+            });
+        let Some(rustc) = rustc else {
+            eprintln!("rustc not reachable; skipping compile check");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_codegen_compile_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("winner.rs");
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all(code.as_bytes()).unwrap();
+        drop(f);
+        let out = std::process::Command::new(rustc)
+            .args(["--edition", "2021", "--crate-type", "lib"])
+            .arg(&file)
+            .arg("-o")
+            .arg(dir.join("libwinner.rlib"))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "generated code does not compile:\n{}\n--- code ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            code
+        );
+    }
 }
