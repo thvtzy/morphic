@@ -14,7 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **M2 proof tests** — `tests/m2_proof.rs`: pure-Rust mirror implementations with golden tests for every spec test case (including the multi-input specs the spec test syntax cannot bind), plus end-to-end `morphic check` pipeline tests with negative controls; the e2e self-host suite now also covers both new spec files
 - **M2 synthesis probe** — `src/m2_synthesis_probe.rs` (test-only): runs the real pipeline (synthesize → Z3 verify → select → codegen) per spec for all 14 M2 specs at opt level 1, the only LLM-free configuration (opt levels 2–4 fail with `LlmError` in the default build — locked in by a unit test). First synthesis run results, recorded in `ROAD_TO_SELF_HOSTING.md`: synthesis completes for 14/14 specs, the pipeline's Z3 stage reports Verified for 4/14 (candidate-independent verdicts — see roadmap root-cause notes), and 0/14 generated implementations compile yet (codegen identifier/match-expression defects, unfilled holes)
 
-Tests: 77 passed / 0 failed, 3 ignored (43 unit + 8 e2e + 21 M2 proof + 5 tokenizer proof; ignored: 2 e2e CLI tests requiring a full binary build, 1 synthesis probe)
+### Fixed
+- **Hole replacement walker** — `replace_at_path` (under `replace_hole`, used by MCTS expansion and rollout) implemented only the `Block` path step; holes under any other node kind (match arms, If branches, Let bodies, …) were silently left in place, so MCTS "completions" were still-holed clones of their parent and were never harvested. All `PathElem` variants are now walked.
+- **MCTS seed-root harvest** — the MCTS built a single tree rooted at one random population member, so completions of the test-induced seed (the only candidate shaped by measured behavior) almost never entered the candidate pool. A second tree is now rooted at each holed test-induced seed. Measured effect (synthesis probe, 3 runs × 14 specs): winners measuring test-pass-ratio 1.000 went from 0/42 to 36/42 (every tested spec, every run; the rest are the two test-less specs at their neutral 0.5), winners at 0.000 from 29/42 to 0/42, and generated winners compiling under rustc from 0/14 to 1/14 per run — the remaining failures are type-blind wildcard fillings (E0308), the next fix in line. Full notes in `ROAD_TO_SELF_HOSTING.md`.
+
+Tests: 116 passed / 0 failed, 3 ignored (82 unit + 8 e2e + 21 M2 proof + 5 tokenizer proof; ignored: 2 e2e CLI tests requiring a full binary build, 1 synthesis probe)
 
 ---
 
