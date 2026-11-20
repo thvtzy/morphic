@@ -632,7 +632,7 @@ impl SynthesisEngine {
 
     /// Seed 3: candidates built from the spec's constraints —
     /// the declared contract, where `seed_from_tests` uses the
-    /// measured examples. Two shapes are admitted, each only
+    /// measured examples. Three shapes are admitted, each only
     /// when the resulting body lies in the verifier's encodable
     /// subset (a seed the verifier cannot judge would be one
     /// more Inconclusive pool member, indistinguishable from
@@ -647,7 +647,15 @@ impl SynthesisEngine {
     ///   one match over the input with an arm per row plus a
     ///   wildcard arm carrying the typed-literal default for
     ///   the return type (the spec is silent off-table; the
-    ///   default is a documented guess).
+    ///   default is a documented guess). The input may be an
+    ///   Int (rows pin by interval scan) or a Bool (rows pin
+    ///   by finite-domain enumeration).
+    /// - **guarded identity**: a two-parameter spec whose rows
+    ///   pin the output to the other parameter
+    ///   (`<guards on g> || output == p`) becomes one match
+    ///   over the guard parameter returning that parameter on
+    ///   the pinned arms, with the same typed-literal wildcard
+    ///   for the combinations no row pins.
     ///
     /// A spec whose constraints fit neither shape gets no
     /// constraint seed and behaves exactly as before. Equations
@@ -677,6 +685,9 @@ impl SynthesisEngine {
         }
         if let Some(body) = guard_table_seed_body(spec, &self.spec_index) {
             admit("guard_table", body);
+        }
+        if let Some(body) = guarded_identity_seed_body(spec, &self.spec_index) {
+            admit("guarded_identity", body);
         }
         seeds
     }
@@ -2601,9 +2612,9 @@ fn parse_rust_into_ir(code: &str, _spec: &FunctionSpec) -> Result<Vec<CandidateI
 
 // ── Constraint-derived seed bodies ────────────────────────
 //
-// The two builders below read the spec's postconditions (the
-// parser stores every `constraint:` line there) and produce a
-// candidate body from the declared contract alone. Both are
+// The builders below read the spec's postconditions (the
+// parser stores every `constraint:` line there) and produce
+// a candidate body from the declared contract alone. All are
 // total and conservative: any shape they do not recognize
 // yields None, never a guessed body.
 
@@ -2767,6 +2778,97 @@ fn guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNod
     }
 }
 
+/// The guarded-identity body: one match over the guard
+/// parameter of a two-parameter spec whose rows pin the
+/// output to the OTHER parameter — the identity target:
+/// `<guards on g> || output == p`. The arm for each pinned
+/// guard value returns the identity parameter itself;
+/// every input combination no row pins falls to the
+/// wildcard arm carrying the typed-literal default — the
+/// guard-table stance, so the complementary branch is a
+/// documented guess, never a claim about the spec.
+///
+/// Conservative in the same way as the other builders:
+/// exactly two parameters (one guard — Int or Bool family —
+/// and one identity target whose type is the return type,
+/// since the pinned arm returns it directly); every
+/// row-shaped postcondition must be an identity row for the
+/// SAME target — a row pinning a literal, a compound
+/// expression, or another parameter is a shape deviation
+/// and yields no seed at all, rather than a body that
+/// silently drops the row — while non-row postconditions
+/// are skipped as in the guard-table builder. Specs with
+/// more than two parameters (a second parameter would have
+/// to be pinned too), two candidate identity targets, or a
+/// guard on the identity parameter itself are not admitted.
+fn guarded_identity_body(spec: &FunctionSpec) -> Option<IRNode> {
+    if spec.params.len() != 2 {
+        return None;
+    }
+    // Either parameter may be the guard; the rows decide.
+    guarded_identity_body_with_roles(spec, 0, 1)
+        .or_else(|| guarded_identity_body_with_roles(spec, 1, 0))
+}
+
+fn guarded_identity_body_with_roles(
+    spec: &FunctionSpec,
+    guard_idx: usize,
+    identity_idx: usize,
+) -> Option<IRNode> {
+    let guard_param = &spec.params[guard_idx];
+    let identity_param = &spec.params[identity_idx];
+    if !is_int_family(&guard_param.ty) && !matches!(guard_param.ty, TypeRef::Bool) {
+        return None;
+    }
+    // The pinned arm returns the identity parameter itself,
+    // so it must BE the return value's type.
+    if identity_param.ty != spec.return_type {
+        return None;
+    }
+    let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+    let mut seen: Vec<GuardPin> = Vec::new();
+    for c in &spec.postconditions {
+        if guard_row_parts(c).is_none() {
+            continue; // not a row: skipped, as in guard_table_body
+        }
+        // Row-shaped: it must be an identity row for this
+        // target, or the spec states a row this body would
+        // not honor — a deviation, so no seed.
+        let pinned = guard_identity_row(c, guard_param, &identity_param.name)?;
+        if seen.contains(&pinned) {
+            continue; // first row wins, as in the guard tables
+        }
+        seen.push(pinned);
+        cases.push((
+            pinned.pattern(),
+            IRNode::Var(identity_param.name.clone()),
+        ));
+    }
+    if cases.is_empty() {
+        return None;
+    }
+    let default = typed_literal_fillings(&spec.return_type)?
+        .into_iter()
+        .next()?;
+    cases.push((IRPattern::Wildcard, default));
+    Some(IRNode::Match {
+        scrutinee: Box::new(IRNode::Var(guard_param.name.clone())),
+        cases,
+    })
+}
+
+/// The guarded-identity seed's body: the identity match,
+/// admitted when the verifier can encode it in the module
+/// context.
+fn guarded_identity_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let body = guarded_identity_body(spec)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
 // ── Spec index: resolving spec-to-spec calls ──────────────
 
 /// How deep spec-call inlining may nest, on both resolution
@@ -2783,14 +2885,16 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 8;
 /// The specs of one module, by name: the shared resolver for
 /// spec-to-spec calls. A spec's body, for resolution purposes,
 /// is exactly the body its constraint seed would be built
-/// from — the first convertible equation's right-hand side, or
-/// the guard-table match for a lookup spec with no equation —
-/// produced by the same builders the seed family uses, minus
-/// the encodability admission (admission is a property of a
+/// from — the first convertible equation's right-hand side,
+/// the guard-table match for a lookup spec with no equation,
+/// or the guarded-identity match for a two-parameter spec
+/// whose rows pin the output to a parameter — produced by
+/// the same builders the seed family uses, minus the
+/// encodability admission (admission is a property of a
 /// body in a caller's context, judged by the verifier; the
 /// resolver only answers "what does this name denote"). A
-/// spec with neither shape denotes nothing here and calls to
-/// it stay unresolvable.
+/// spec with none of these shapes denotes nothing here and
+/// calls to it stay unresolvable.
 #[derive(Debug, Clone, Default)]
 pub struct SpecIndex {
     by_name: HashMap<String, FunctionSpec>,
@@ -2815,13 +2919,16 @@ impl SpecIndex {
     }
 
     /// The body a call to `name` denotes: the callee's first
-    /// equation body, or its guard-table body when it has no
-    /// equation. The body is NOT call-resolved — it may itself
+    /// equation body, its guard-table body when it has no
+    /// equation, or its guarded-identity body when it has
+    /// neither. The body is NOT call-resolved — it may itself
     /// contain calls; resolving those is the consumer's step,
     /// under the consumer's cycle/depth guard.
     pub fn callee_body(&self, name: &str) -> Option<IRNode> {
         let spec = self.by_name.get(name)?;
-        first_equation_body(spec).or_else(|| guard_table_body(spec))
+        first_equation_body(spec)
+            .or_else(|| guard_table_body(spec))
+            .or_else(|| guarded_identity_body(spec))
     }
 
     /// IR-level inlining: replace every call to an indexed
@@ -3141,18 +3248,7 @@ fn guard_row(c: &Constraint, param: &str) -> Option<(i64, IRNode)> {
     for leaf in guard_leaves {
         guards.push(guard_leaf(leaf, param)?);
     }
-    let lo = guards.iter().map(|g| g.2).min()? - 2;
-    let hi = guards.iter().map(|g| g.2).max()? + 2;
-    let mut pinned: Option<i64> = None;
-    for x in lo..=hi {
-        if guards.iter().all(|g| !guard_leaf_holds(g, x)) {
-            if pinned.is_some() {
-                return None; // pins a range, not a single value
-            }
-            pinned = Some(x);
-        }
-    }
-    Some((pinned?, pin))
+    Some((pin_int_value(&guards)?, pin))
 }
 
 /// One Bool guard-table row: the same row shape as
@@ -3178,16 +3274,7 @@ fn guard_row_bool(c: &Constraint, param: &str) -> Option<(bool, IRNode)> {
     for leaf in guard_leaves {
         guards.push(guard_leaf_bool(leaf, param)?);
     }
-    let mut pinned: Option<bool> = None;
-    for x in [false, true] {
-        if guards.iter().all(|g| !guard_leaf_bool_holds(g, x)) {
-            if pinned.is_some() {
-                return None; // pins the whole domain, not a single value
-            }
-            pinned = Some(x);
-        }
-    }
-    Some((pinned?, pin))
+    Some((pin_bool_value(&guards)?, pin))
 }
 
 /// A Bool guard leaf normalized to (operator,
@@ -3221,6 +3308,94 @@ fn guard_leaf_bool_holds(guard: &(BinOp, bool, bool), x: bool) -> bool {
         BinOp::Eq => a == b,
         BinOp::Neq => a != b,
         _ => unreachable!("guard_leaf_bool admits only Eq/Neq"),
+    }
+}
+
+/// The single Int value falsifying EVERY guard leaf, if
+/// exactly one exists — the probe scan `guard_row`
+/// documents: outside the outermost constants each
+/// comparison's truth is stable, and the two extra probe
+/// points on each side expose a false-region extending to
+/// infinity, so exactly one falsifying probe point ⟺ the
+/// guards pin exactly that single value.
+fn pin_int_value(guards: &[(BinOp, bool, i64)]) -> Option<i64> {
+    let lo = guards.iter().map(|g| g.2).min()? - 2;
+    let hi = guards.iter().map(|g| g.2).max()? + 2;
+    let mut pinned: Option<i64> = None;
+    for x in lo..=hi {
+        if guards.iter().all(|g| !guard_leaf_holds(g, x)) {
+            if pinned.is_some() {
+                return None; // pins a range, not a single value
+            }
+            pinned = Some(x);
+        }
+    }
+    pinned
+}
+
+/// The single Bool value falsifying EVERY guard leaf, if
+/// exactly one exists — finite-domain enumeration, the
+/// Bool counterpart of `pin_int_value`'s probe scan.
+fn pin_bool_value(guards: &[(BinOp, bool, bool)]) -> Option<bool> {
+    let mut pinned: Option<bool> = None;
+    for x in [false, true] {
+        if guards.iter().all(|g| !guard_leaf_bool_holds(g, x)) {
+            if pinned.is_some() {
+                return None; // pins the whole domain, not a single value
+            }
+            pinned = Some(x);
+        }
+    }
+    pinned
+}
+
+/// A guard parameter value pinned by a row, in either
+/// guard domain (Int comparisons or Bool equalities).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GuardPin {
+    Int(i64),
+    Bool(bool),
+}
+
+impl GuardPin {
+    fn pattern(&self) -> IRPattern {
+        match self {
+            GuardPin::Int(v) => IRPattern::Literal(IRLiteral::Int(*v)),
+            GuardPin::Bool(b) => IRPattern::Literal(IRLiteral::Bool(*b)),
+        }
+    }
+}
+
+/// One guarded-identity row: row-shaped (see
+/// `guard_row_parts`), its output pin exactly the identity
+/// parameter, and its guard leaves — all on the guard
+/// parameter, parsed by that parameter's domain — pinning a
+/// single guard value. Returns the pinned guard value. Any
+/// deviation (the pin is a literal, a compound expression,
+/// or another parameter; a guard leaf does not parse on the
+/// guard parameter; the guards pin no single value) is
+/// None; the builder treats a row-shaped postcondition
+/// failing here as a shape deviation, not a skippable
+/// non-row.
+fn guard_identity_row(c: &Constraint, guard_param: &Param, identity: &str) -> Option<GuardPin> {
+    let (pin_side, guard_leaves) = guard_row_parts(c)?;
+    if !matches!(pin_side, Expr::Var(v) if v == identity) {
+        return None;
+    }
+    if is_int_family(&guard_param.ty) {
+        let mut guards: Vec<(BinOp, bool, i64)> = Vec::new();
+        for leaf in guard_leaves {
+            guards.push(guard_leaf(leaf, &guard_param.name)?);
+        }
+        Some(GuardPin::Int(pin_int_value(&guards)?))
+    } else if matches!(guard_param.ty, TypeRef::Bool) {
+        let mut guards: Vec<(BinOp, bool, bool)> = Vec::new();
+        for leaf in guard_leaves {
+            guards.push(guard_leaf_bool(leaf, &guard_param.name)?);
+        }
+        Some(GuardPin::Bool(pin_bool_value(&guards)?))
+    } else {
+        None
     }
 }
 
