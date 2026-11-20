@@ -1432,18 +1432,133 @@ fn replace_hole(node: &mut IRNode, hole: &HoleRef, replacement: &IRNode) {
     replace_at_path(node, &hole.path, 0, replacement);
 }
 
+/// Mutable counterpart of `scope_at_path`: descend `path`
+/// (produced by `find_hole_positions` on the same tree, so
+/// node/step pairs always correspond) and substitute the node
+/// at the end of it. Every PathElem variant is handled — the
+/// previous version implemented only the Block step and silently
+/// left holes anywhere else (match arms, If branches, Let
+/// bodies, ...) in place, which made MCTS expansion produce
+/// still-holed clones of the parent and rollouts unable to fill
+/// such holes at all.
 fn replace_at_path(node: &mut IRNode, path: &[PathElem], depth: usize, replacement: &IRNode) {
     if depth >= path.len() {
         *node = replacement.clone();
         return;
     }
-    match &path[depth] {
-        PathElem::Block(i) => {
-            if let IRNode::Block(stmts) = node {
-                replace_at_path(&mut stmts[*i], path, depth + 1, replacement);
+    match (node, &path[depth]) {
+        (IRNode::Block(stmts), PathElem::Block(i)) => {
+            if let Some(next) = stmts.get_mut(*i) {
+                replace_at_path(next, path, depth + 1, replacement);
             }
         }
-        // ... (similar match arms for all PathElem variants)
+        (IRNode::Let { value, .. }, PathElem::LetValue) => {
+            replace_at_path(value, path, depth + 1, replacement)
+        }
+        (IRNode::Let { body, .. }, PathElem::LetBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::If { condition, .. }, PathElem::IfCond) => {
+            replace_at_path(condition, path, depth + 1, replacement)
+        }
+        (IRNode::If { then_branch, .. }, PathElem::IfThen) => {
+            replace_at_path(then_branch, path, depth + 1, replacement)
+        }
+        (IRNode::If { else_branch, .. }, PathElem::IfElse) => {
+            replace_at_path(else_branch, path, depth + 1, replacement)
+        }
+        (IRNode::While { condition, .. }, PathElem::WhileCond) => {
+            replace_at_path(condition, path, depth + 1, replacement)
+        }
+        (IRNode::While { body, .. }, PathElem::WhileBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::For { start, .. }, PathElem::ForStart) => {
+            replace_at_path(start, path, depth + 1, replacement)
+        }
+        (IRNode::For { end, .. }, PathElem::ForEnd) => {
+            replace_at_path(end, path, depth + 1, replacement)
+        }
+        (IRNode::For { body, .. }, PathElem::ForBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::Match { scrutinee, .. }, PathElem::MatchScrutinee) => {
+            replace_at_path(scrutinee, path, depth + 1, replacement)
+        }
+        (IRNode::Match { cases, .. }, PathElem::MatchCase(i)) => {
+            if let Some((_, body)) = cases.get_mut(*i) {
+                replace_at_path(body, path, depth + 1, replacement);
+            }
+        }
+        (IRNode::Call { args, .. }, PathElem::CallArg(i)) => {
+            if let Some(next) = args.get_mut(*i) {
+                replace_at_path(next, path, depth + 1, replacement);
+            }
+        }
+        (IRNode::Return(inner), PathElem::Return) => {
+            replace_at_path(inner, path, depth + 1, replacement)
+        }
+        (IRNode::BinOp(_, l, _), PathElem::BinOpL) => {
+            replace_at_path(l, path, depth + 1, replacement)
+        }
+        (IRNode::BinOp(_, _, r), PathElem::BinOpR) => {
+            replace_at_path(r, path, depth + 1, replacement)
+        }
+        (IRNode::UnaryOp(_, inner), PathElem::UnaryInner) => {
+            replace_at_path(inner, path, depth + 1, replacement)
+        }
+        (IRNode::Lambda { body, .. }, PathElem::LambdaBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::Closure { body, .. }, PathElem::LambdaBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::Collection { elements, .. }, PathElem::CollectionElem(i)) => {
+            if let Some(next) = elements.get_mut(*i) {
+                replace_at_path(next, path, depth + 1, replacement);
+            }
+        }
+        (IRNode::Map { function, .. }, PathElem::MapFunc) => {
+            replace_at_path(function, path, depth + 1, replacement)
+        }
+        (IRNode::Map { over, .. }, PathElem::MapOver) => {
+            replace_at_path(over, path, depth + 1, replacement)
+        }
+        (IRNode::Filter { predicate, .. }, PathElem::FilterPred) => {
+            replace_at_path(predicate, path, depth + 1, replacement)
+        }
+        (IRNode::Filter { over, .. }, PathElem::FilterOver) => {
+            replace_at_path(over, path, depth + 1, replacement)
+        }
+        (IRNode::Fold { operation, .. }, PathElem::FoldOp) => {
+            replace_at_path(operation, path, depth + 1, replacement)
+        }
+        (IRNode::Fold { initial, .. }, PathElem::FoldInit) => {
+            replace_at_path(initial, path, depth + 1, replacement)
+        }
+        (IRNode::Fold { over, .. }, PathElem::FoldOver) => {
+            replace_at_path(over, path, depth + 1, replacement)
+        }
+        (IRNode::Sort { comparator, .. }, PathElem::SortComp) => {
+            replace_at_path(comparator, path, depth + 1, replacement)
+        }
+        (IRNode::Sort { collection, .. }, PathElem::SortColl) => {
+            replace_at_path(collection, path, depth + 1, replacement)
+        }
+        (IRNode::Alloc { initial, .. }, PathElem::AllocInit) => {
+            replace_at_path(initial, path, depth + 1, replacement)
+        }
+        (IRNode::Assign { target, .. }, PathElem::AssignTarget) => {
+            replace_at_path(target, path, depth + 1, replacement)
+        }
+        (IRNode::Assign { value, .. }, PathElem::AssignValue) => {
+            replace_at_path(value, path, depth + 1, replacement)
+        }
+        (IRNode::Typed { node: inner, .. }, PathElem::TypedNode) => {
+            replace_at_path(inner, path, depth + 1, replacement)
+        }
+        // Path does not match this node — leave it unchanged
+        // (defensive; pairs always correspond in practice).
         _ => {}
     }
 }
@@ -2236,6 +2351,80 @@ mod tests {
             "seed tpr was {}",
             seed.scores.test_pass_ratio
         );
+    }
+
+    /// replace_hole must actually substitute the hole wherever
+    /// find_hole_positions found it. The path walker behind it
+    /// used to implement only the Block step — every other
+    /// PathElem fell into a no-op arm — so a hole inside a match
+    /// arm (the TestInduced seed's wildcard), an If branch, or a
+    /// Let body was silently left in place: "expanded" MCTS
+    /// children were clones of their parent, still holed, never
+    /// terminal, never harvested, and rollouts could not fill
+    /// such holes either.
+    #[test]
+    fn replace_hole_fills_holes_beyond_block_paths() {
+        let filling = IRNode::Literal(IRLiteral::Bool(false));
+        let hole = || IRNode::Hole { id: 7, expected_type: None };
+
+        // Path [MatchCase(1)] — the seed's wildcard arm.
+        let mut body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::Literal(IRLiteral::Bool(true)),
+                ),
+                (IRPattern::Wildcard, hole()),
+            ],
+        };
+        let holes = find_hole_positions(&body);
+        assert_eq!(holes.len(), 1);
+        replace_hole(&mut body, &holes[0], &filling);
+        assert_eq!(count_holes(&body), 0, "match-arm hole left: {:?}", body);
+
+        // Path [IfElse].
+        let mut body = IRNode::If {
+            condition: Box::new(IRNode::Literal(IRLiteral::Bool(true))),
+            then_branch: Box::new(IRNode::Literal(IRLiteral::Bool(true))),
+            else_branch: Box::new(hole()),
+        };
+        let holes = find_hole_positions(&body);
+        assert_eq!(holes.len(), 1);
+        replace_hole(&mut body, &holes[0], &filling);
+        assert_eq!(count_holes(&body), 0, "if-else hole left: {:?}", body);
+
+        // Path [LetBody].
+        let mut body = IRNode::Let {
+            name: "x".into(),
+            value: Box::new(IRNode::Literal(IRLiteral::Int(1))),
+            body: Box::new(hole()),
+        };
+        let holes = find_hole_positions(&body);
+        assert_eq!(holes.len(), 1);
+        replace_hole(&mut body, &holes[0], &filling);
+        assert_eq!(count_holes(&body), 0, "let-body hole left: {:?}", body);
+
+        // Nested path [MatchCase(0), BinOpR]: only the addressed
+        // hole is replaced; a second hole elsewhere survives.
+        let mut body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Wildcard,
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                        Box::new(hole()),
+                    ),
+                ),
+                (IRPattern::Literal(IRLiteral::Int(0)), hole()),
+            ],
+        };
+        let holes = find_hole_positions(&body);
+        assert_eq!(holes.len(), 2);
+        replace_hole(&mut body, &holes[0], &IRNode::Literal(IRLiteral::Int(9)));
+        assert_eq!(count_holes(&body), 1, "exactly one hole must remain: {:?}", body);
     }
 
     /// Seed-root harvest, pipeline level: the final pool contains
