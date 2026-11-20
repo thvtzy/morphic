@@ -64,10 +64,12 @@ impl<'a> Parser<'a> {
         self.skip_whitespace_and_comments();
         self.expect_char('{')?;
 
+        let mut closed = false;
         while !self.is_eof() {
             self.skip_whitespace_and_comments();
             if self.peek() == Some('}') {
                 self.advance();
+                closed = true;
                 break;
             }
 
@@ -114,6 +116,13 @@ impl<'a> Parser<'a> {
             }
         }
 
+        if !closed {
+            return self.error(format!(
+                "Unexpected end of file: missing '}}' to close module '{}'",
+                name
+            ));
+        }
+
         Ok(Spec { name, imports, functions, types, invariants })
     }
 
@@ -142,10 +151,12 @@ impl<'a> Parser<'a> {
         let mut tests = Vec::new();
         let mut annotations = HashMap::new();
 
+        let mut closed = false;
         while !self.is_eof() {
             self.skip_whitespace_and_comments();
             if self.peek() == Some('}') {
                 self.advance();
+                closed = true;
                 break;
             }
 
@@ -267,6 +278,13 @@ impl<'a> Parser<'a> {
                     return self.error(format!("Unexpected '{}' in spec body.", keyword));
                 }
             }
+        }
+
+        if !closed {
+            return self.error(format!(
+                "Unexpected end of file: missing '}}' to close spec '{}'",
+                name
+            ));
         }
 
         Ok(FunctionSpec {
@@ -1195,6 +1213,33 @@ mod tests {
             err.message.contains("bogus"),
             "unexpected error message: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn truncated_spec_body_is_rejected() {
+        // Regression: the spec-body loop ends on EOF, so a file cut off
+        // inside a spec (both closing braces missing) parsed as Ok.
+        let src = "TestModule {\n  spec f {\n    input: x: Int\n";
+        let result = parse(src);
+        assert!(
+            result.is_err(),
+            "truncated spec must be a parse error, got: {:?}",
+            result.map(|s| s.name)
+        );
+    }
+
+    #[test]
+    fn truncated_module_is_rejected() {
+        // Regression: same EOF hole one level up — the spec is complete
+        // but the module's closing brace is missing and the file ends
+        // exactly on a token boundary.
+        let src = "TestModule {\n  spec f {\n    input: x: Int\n    output: Int\n    constraint: true\n  }";
+        let result = parse(src);
+        assert!(
+            result.is_err(),
+            "unterminated module must be a parse error, got: {:?}",
+            result.map(|s| s.name)
         );
     }
 
