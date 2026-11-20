@@ -167,9 +167,36 @@ spec test_tokenizer_equivalence {
 
 > **Progress note (2026-11-20):** `examples/self_host/validator.morph` (7 specs: type-tag/node-kind domains, arity table, lite tag compatibility, depth guard) and `examples/self_host/printer.morph` (7 specs: type/kind/operator name lookups, precedence `needs_parens`, line-width rule) are written and are the first self-host specs verified end-to-end by the real pipeline: both pass `morphic check` (parser + typechecker in the compiled binary), enforced by `tests/m2_proof.rs` — which also carries pure-Rust mirror implementations with golden tests for every spec test case (the M0 Phase B pattern), plus negative controls proving `check` rejects invalid specs. Full suite: 59 passed / 0 failed.
 >
-> **Still open for the M2 gate:** no synthesis run yet for these specs (LLM seed → MCTS → Z3 verify → codegen), and no cross-validation of synthesized output against a Rust original — the Rust code in `tests/m2_proof.rs` is a hand-written mirror, not generated code. The gate therefore stays unchecked.
+> **Still open for the M2 gate:** the synthesis run has now been done (see the synthesis-run note below), but it did not produce a single compilable, test-passing implementation, and there is still no cross-validation of synthesized output against a Rust original — the Rust code in `tests/m2_proof.rs` is a hand-written mirror, not generated code. The gate therefore stays unchecked.
 >
 > **Baseline discovery while doing M2:** none of the pre-existing example specs (`sort.morph`, `binary_search.morph`, `functional_tokenizer.morph`, `self_host/is_sorted.morph`, `self_host/count_matching.morph`) currently pass `morphic check` — they use syntax the parser does not implement (no module wrapper, `if/then`, `implies`, record/list literals in tests, spaced operators; two files also trip a byte-boundary panic in the parser's error-snippet code at `src/spec/parser.rs:1094`). The M2 specs are written in the parser's actually-supported dialect, documented in their file headers. Wiring the older examples into `check` (or fixing the parser gaps) is future work, separate from M2.
+
+> **Synthesis run (2026-11-20, branch `m2-synthesis-run`):** all 14 M2 specs were run through the real pipeline (parse → typecheck → synthesize → Z3 `verify_all` → `select_best` → codegen) via the test-only probe in `src/m2_synthesis_probe.rs` (`cargo test -- --ignored --nocapture m2_synthesis_probe`; generated winners are written to `target/m2-synthesis/`). Only opt level 1 can run: it is the sole LLM-free configuration. Opt levels 2–4 set `use_llm = true` and fail immediately in `seed_population` with `LlmError("No LLM backend enabled")` — the default build compiles neither LLM feature (`llm-local` / `llm-remote`), and no Ollama server exists in this environment (verified via CLI `build -O 2` / `-O 3` and locked in by the unit test `synthesis_opt3_blocked_without_llm_backend`). Candidate counts and times below are from one probe run; both vary between runs (randomized engine), while the Z3 verdicts and winner provenance were identical across 3 runs.
+>
+> | Spec | Synth (opt 1) | Candidates | Time | Z3 verdict (pipeline) | Winner | Holes in winner | Generated Rust compiles / passes spec tests |
+> |---|---|---|---|---|---|---|---|
+> | validator `is_known_type_tag` | ok | 18 | 5 ms | 0/18 verified | TestInduced | 1 | no / no |
+> | validator `is_known_node_kind` | ok | 17 | 4 ms | 0/17 verified | TestInduced | 1 | no / no |
+> | validator `node_arity` | ok | 18 | 18 ms | **18/18 Verified** | TestInduced | 1 | no / no |
+> | validator `is_literal_kind` | ok | 19 | 5 ms | 0/19 verified | TestInduced | 1 | no / no |
+> | validator `tags_compatible` | ok | 11 | 202 ms | 0/11 verified | Mutation | 1–3 | no / n-a (no in-spec tests) |
+> | validator `validate_kind_tag` | ok | 15 | 4 ms | 0/15 verified | TestInduced | 1 | no / no |
+> | validator `max_depth_ok` | ok | 19 | 4 ms | 0/19 verified | TestInduced | 1 | no / no |
+> | printer `type_tag_name` | ok | 17 | 215 ms | **17/17 Verified** | TestInduced | 1 | no / no |
+> | printer `node_kind_name` | ok | 19 | 227 ms | **19/19 Verified** | TestInduced | 1 | no / no |
+> | printer `binop_symbol` | ok | 18 | 183 ms | **18/18 Verified** | TestInduced | 1 | no / no |
+> | printer `needs_parens` | ok | 17 | 4 ms | 0/17 verified | Mutation | 0–1 | no / n-a (no in-spec tests) |
+> | printer `is_infix_kind` | ok | 19 | 3 ms | 0/19 verified | TestInduced | 1 | no / no |
+> | printer `line_width_ok` | ok | 17 | 5 ms | 0/17 verified | TestInduced | 1 | no / no |
+> | printer `print_node_kind` | ok | 20 | 4 ms | 0/20 verified | TestInduced | 1 | no / no |
+>
+> **Why the run cannot close the gate — root causes, all verified in the code:**
+> 1. **The Z3 stage is candidate-independent.** `Verifier::verify_one` (`src/verify/verifier.rs`) encodes only the spec's postconditions; the candidate body is never encoded (`is_well_formed` is a stub returning `true`). Its encoder maps boolean-valued subexpressions to int `0` (`encode_expr_int` fallback) and any `Or`-rooted formula to `true` (`encode_expr_bool` fallback), so the verdict is decided by constraint *syntax*: guard-style (`||`) lookup constraints always hold, `output == <bool expr>` equations never hold. The 4 "Verified" specs above are exactly the guard-style ones — a property of the spec text, identical for every candidate, not evidence that a synthesized implementation is correct.
+> 2. **The search never executes tests.** `evaluate_candidate` (`src/synthesis/engine.rs`) returns `test_pass_ratio = 1.0` unconditionally and a constant `constraint_score = 0.7`; ranking is driven by AST-shape heuristics (depth/size) only.
+> 3. **Winners keep their holes.** The test-induced seed's wildcard arm is a `Hole` and no pipeline stage fills it (the template builders also return bare holes); codegen renders holes as `panic!("Hole not filled")`. 13/14 winners carry ≥ 1 hole.
+> 4. **Rust codegen defects (overlaps M3).** Spec test names are emitted verbatim as Rust fn identifiers — hyphens make 12/14 generated files unparseable; `Match` bodies are emitted as statements whose arm values are discarded (`value;`), which is E0308 once names are sanitized (proven on `is_literal_kind` and `node_kind_name`); unsupported IR in expression position becomes `/* UNSUPPORTED */` and unknown calls become `_()` (the two Mutation winners). Net: **0/14 generated files compile**, so 0/14 can be executed against their spec tests or cross-validated against the `tests/m2_proof.rs` mirrors.
+>
+> **Remaining for the M2 gate:** (a) an LLM backend (feature + server) or a scorer that actually executes spec tests, so the M1 pipeline shape (LLM seed → MCTS → Z3 → codegen) can run as described; (b) a verifier that encodes/evaluates the candidate itself, so "Verified" is a statement about the implementation; (c) the codegen fixes in (4) plus hole filling, so generated code compiles; only then (d) cross-validation against the mirrors. Until (a)–(c) land, "Same validation pipeline as M1" and the M2 gate stay unchecked — deliberately, per-spec evidence above.
 
 ### M3: Codegen (biggest risk)
 - [ ] Tulis `codegen.morph` (IR → Rust, 1 target dulu)
