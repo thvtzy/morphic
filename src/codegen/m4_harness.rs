@@ -809,3 +809,320 @@ fn m4_s1_examples_dual_render() {
     std::fs::write(format!("{}/s1-report.md", out_dir), &report).unwrap();
     assert_eq!(records, 4, "every target file must produce a record");
 }
+
+// ── The M4 gate (ignored) ─────────────────────────────────
+//
+// S3: the corpus scale-up. The standing gate test for M4,
+// on the M3 gate precedent (kept ignored, explicit run
+// command, report artifact — this is also the permanent
+// shape S2's self-compile item takes: the S1 proof above
+// stays as the small standing test, and sort.morph is a
+// corpus member here).
+//
+// THE CORPUS, stated before any run (Phase 46 policies):
+// every spec in the repo's .morph inventory whose file
+// passes `morphic check` (parse + typeck — exactly
+// `load_functions` below). The inventory is DERIVED by
+// scanning examples/ at run time, never hardcoded; the
+// Phase 43 audit's enumeration (8 files, 138 specs, 130
+// passing) is asserted as counts, so an inventory change
+// fails this test loudly instead of silently re-scoping
+// the gate. The one excluded file is
+// examples/functional_tokenizer.morph (8 specs), which
+// fails check — its exclusion is recorded here and in the
+// gate note, and is S4's business, not a silent omission.
+// The Codegen module's own 112 specs ARE corpus members:
+// the gate demands 100+ byte-identical specs and the
+// non-Codegen corpus is only 18, so the arithmetic forces
+// inclusion; rendering a Codegen spec's winner through
+// the composed codegen is the M3 gate's own self-reference
+// (its item (iv) rendered all 112 winner files end-to-end
+// through the composed driver), already proven there.
+// The composition judged is the mirror-completed one
+// (mode B), per the Phase 43 ledger: a strict-composition
+// reading would inherit M3's recorded F5 divergences.
+//
+// Per (file, spec): ONE winner extraction through the real
+// pipeline, that single winner rendered by the original
+// `generate` and by the composed codegen, whole files
+// byte-compared (the harness's design rule — winner
+// selection is draw-dependent, so verdicts are per
+// extracted winner, never per double build).
+//
+// Run the gate with:
+//   cargo test -- --ignored --nocapture m4_gate
+// (report at target/m4-harness/gate-report.md, rewritten
+// after each file so a partial run stays informative)
+
+/// The Phase 43 audit's inventory of check-passing files,
+/// as (path, spec count) — asserted against the derived
+/// enumeration so the gate's corpus cannot drift silently.
+const EXPECTED_CORPUS: [(&str, usize); 7] = [
+    ("examples/binary_search.morph", 1),
+    ("examples/self_host/codegen.morph", 112),
+    ("examples/self_host/count_matching.morph", 1),
+    ("examples/self_host/is_sorted.morph", 1),
+    ("examples/self_host/printer.morph", 7),
+    ("examples/self_host/validator.morph", 7),
+    ("examples/sort.morph", 1),
+];
+
+/// Files the scan must find but `morphic check` must
+/// reject (the recorded exclusion).
+const EXPECTED_EXCLUDED: [&str; 1] = ["examples/functional_tokenizer.morph"];
+
+/// Recursively collect the repo's .morph files under
+/// examples/, as crate-relative paths in sorted order.
+fn scan_morph_files() -> Vec<String> {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
+        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot scan {}: {}", dir.display(), e))
+            .filter_map(|e| e.ok())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let rel = format!("{}/{}", prefix, name);
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else if name.ends_with(".morph") {
+                out.push(rel);
+            }
+        }
+    }
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mut found = Vec::new();
+    walk(
+        std::path::Path::new(&format!("{}/examples", root)),
+        "examples",
+        &mut found,
+    );
+    found.sort();
+    found
+}
+
+/// One check-passing corpus file and its spec names, in
+/// module order.
+struct CorpusFile {
+    rel_path: String,
+    spec_names: Vec<String>,
+}
+
+/// Derive the corpus: scan the inventory, keep the files
+/// that pass check (parse + typeck, `load_functions`),
+/// record the rest as excluded. Asserts the derived
+/// corpus IS the audited one — paths, per-file spec
+/// counts, the exclusion, and the 130-spec total.
+fn enumerate_corpus() -> (Vec<CorpusFile>, Vec<String>) {
+    let scanned = scan_morph_files();
+    assert_eq!(
+        scanned.len(),
+        EXPECTED_CORPUS.len() + EXPECTED_EXCLUDED.len(),
+        "the .morph inventory changed (found {:?}); re-audit and re-record before running the gate",
+        scanned,
+    );
+    let mut files: Vec<CorpusFile> = Vec::new();
+    let mut excluded: Vec<String> = Vec::new();
+    for rel in &scanned {
+        match load_functions(rel) {
+            Ok(functions) => files.push(CorpusFile {
+                rel_path: rel.clone(),
+                spec_names: functions.iter().map(|f| f.name.clone()).collect(),
+            }),
+            Err(_) => excluded.push(rel.clone()),
+        }
+    }
+    assert_eq!(
+        excluded,
+        EXPECTED_EXCLUDED
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>(),
+        "the set of check-failing files changed (excluded: {:?}); re-audit and re-record",
+        excluded,
+    );
+    let mut total = 0;
+    for (path, count) in EXPECTED_CORPUS {
+        let file = files
+            .iter()
+            .find(|f| f.rel_path == path)
+            .unwrap_or_else(|| panic!("expected corpus file {} missing", path));
+        assert_eq!(
+            file.spec_names.len(),
+            count,
+            "{}: spec count changed ({} != {}); re-audit and re-record",
+            path,
+            file.spec_names.len(),
+            count,
+        );
+        total += count;
+    }
+    assert_eq!(total, 130, "the gate corpus must hold 130 specs");
+    (files, excluded)
+}
+
+/// Per-file gate tallies.
+#[derive(Default)]
+struct FileTally {
+    attempted: usize,
+    identical: usize,
+    divergent: usize,
+    original_error: usize,
+    composed_error: usize,
+    extraction_error: usize,
+}
+
+#[test]
+#[ignore = "M4 gate: corpus-scale dual render (130 specs, minutes); run explicitly with --ignored --nocapture m4_gate"]
+fn m4_gate_corpus_dual_render() {
+    let started = std::time::Instant::now();
+    let root = env!("CARGO_MANIFEST_DIR");
+    let out_dir = format!("{}/target/m4-harness", root);
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let report_path = format!("{}/gate-report.md", out_dir);
+
+    // The corpus, derived and asserted against the audit.
+    let (corpus, excluded) = enumerate_corpus();
+    let corpus_specs: usize = corpus.iter().map(|f| f.spec_names.len()).sum();
+
+    // The composed side: the M3 winner set, extracted once.
+    let codegen_functions =
+        load_functions("examples/self_host/codegen.morph").expect("codegen module loads");
+    let winners = super::m3_gate::extract_winners(&codegen_functions);
+    assert_eq!(
+        winners.spec_count(),
+        112,
+        "the composed side must be the M3 winner set (112 Codegen specs)"
+    );
+    let mut compiler = ComposedCompiler::new(&winners);
+
+    let mut report = String::new();
+    report.push_str("# M4 gate report (Phase 46)\n\n");
+    report.push_str(
+        "Composition judged: original pipeline (parse → typeck → synthesize → verify → \
+         select) with the M3 mirror-completed composed codegen (mode B) in \
+         `codegen::generate`'s seat. Per spec: one winner extraction, that single \
+         winner rendered by both codegens, whole files byte-compared.\n\n",
+    );
+    report.push_str(&format!(
+        "Corpus: {} specs in {} check-passing files; excluded (fails `morphic check`): {}.\n\n",
+        corpus_specs,
+        corpus.len(),
+        excluded.join(", "),
+    ));
+
+    let mut grand = FileTally::default();
+    for file in &corpus {
+        let mut tally = FileTally::default();
+        report.push_str(&format!(
+            "## {} ({} specs)\n\n",
+            file.rel_path,
+            file.spec_names.len()
+        ));
+        for spec_name in &file.spec_names {
+            tally.attempted += 1;
+            match compiler.dual_render(&file.rel_path, spec_name) {
+                Ok(render) => {
+                    let line = format!(
+                        "- `{}` spec `{}` — winner {} [body {}] — {}",
+                        render.file,
+                        render.spec_name,
+                        render.winner_provenance,
+                        short_hash(&render.winner_body_key),
+                        render.verdict(),
+                    );
+                    println!("{}", line);
+                    report.push_str(&line);
+                    report.push('\n');
+                    match &render.comparison {
+                        Some(FileComparison::Identical) => tally.identical += 1,
+                        Some(FileComparison::Divergent(d)) => {
+                            tally.divergent += 1;
+                            report.push_str(&format!(
+                                "  {}\n",
+                                d.describe().replace('\n', "\n  ")
+                            ));
+                        }
+                        None => {
+                            // A side errored; verdict() already
+                            // named which one.
+                            if render.original.is_err() {
+                                tally.original_error += 1;
+                            } else {
+                                tally.composed_error += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tally.extraction_error += 1;
+                    let line = format!(
+                        "- `{}` spec `{}` — EXTRACTION ERROR — {}",
+                        file.rel_path, spec_name, e
+                    );
+                    println!("{}", line);
+                    report.push_str(&line);
+                    report.push('\n');
+                }
+            }
+        }
+        let file_line = format!(
+            "\nFile tally — attempted {}, identical {}, divergent {}, original errors {}, composed errors {}, extraction errors {}.\n\n",
+            tally.attempted,
+            tally.identical,
+            tally.divergent,
+            tally.original_error,
+            tally.composed_error,
+            tally.extraction_error,
+        );
+        println!("{}", file_line);
+        report.push_str(&file_line);
+        grand.attempted += tally.attempted;
+        grand.identical += tally.identical;
+        grand.divergent += tally.divergent;
+        grand.original_error += tally.original_error;
+        grand.composed_error += tally.composed_error;
+        grand.extraction_error += tally.extraction_error;
+        // Rewrite after each file: a partial run stays
+        // informative.
+        std::fs::write(&report_path, &report).unwrap();
+    }
+
+    let elapsed = started.elapsed();
+    let summary = format!(
+        "## Total\n\nAttempted {}, identical {}, divergent {}, original errors {}, \
+         composed errors {}, extraction errors {}. Pipeline runs: {} (one per spec). \
+         Elapsed: {:.1}s.\n",
+        grand.attempted,
+        grand.identical,
+        grand.divergent,
+        grand.original_error,
+        grand.composed_error,
+        grand.extraction_error,
+        compiler.pipeline_runs(),
+        elapsed.as_secs_f64(),
+    );
+    println!("{}", summary);
+    report.push_str(&summary);
+    std::fs::write(&report_path, &report).unwrap();
+
+    // The instrument contract at scale, then the gate's
+    // numeric floor. Divergence characterization is the
+    // gate record's business (ROAD), not an assertion here:
+    // a divergent record is evidence, not a harness failure.
+    assert_eq!(
+        grand.attempted, 130,
+        "every corpus spec must produce a record"
+    );
+    assert_eq!(
+        compiler.pipeline_runs(),
+        130,
+        "the pipeline must run exactly once per corpus spec"
+    );
+    assert!(
+        grand.identical >= 100,
+        "the M4 gate demands byte-identical output for 100+ specs; got {}",
+        grand.identical,
+    );
+}
