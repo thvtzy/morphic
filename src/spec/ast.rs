@@ -204,6 +204,10 @@ pub enum Expr {
     BoolLit(bool),
     /// String literal
     StringLit(String),
+    /// Character literal (Phase 45, finding F4): the value
+    /// the layers below have always carried as
+    /// `IRLiteral::Char` / `Value::Char`.
+    CharLit(char),
     /// Field access: expr.field
     Field(Box<Expr>, String),
     /// Index access: expr[index]

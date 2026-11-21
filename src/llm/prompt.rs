@@ -187,6 +187,7 @@ fn format_expr(expr: &Expr) -> String {
         Expr::FloatLit(f) => f.to_string(),
         Expr::BoolLit(b) => b.to_string(),
         Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::CharLit(c) => format!("{:?}", c),
         Expr::Var(name) => name.clone(),
         Expr::Field(base, field) => format!("{}.{}", format_expr(base), field),
         Expr::Index(base, idx) => format!("{}[{}]", format_expr(base), format_expr(idx)),

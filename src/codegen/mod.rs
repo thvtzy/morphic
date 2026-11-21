@@ -1357,6 +1357,7 @@ fn expr_to_rust(expr: &Expr) -> String {
         Expr::IntLit(n) => n.to_string(),
         Expr::BoolLit(b) => b.to_string(),
         Expr::StringLit(s) => format!("\"{}\"", escape_rust_str(s)),
+        Expr::CharLit(c) => format!("'{}'", escape_rust_char(*c)),
         Expr::Var(name) => rust_ident(name),
         Expr::Call(name, args) => {
             let args_str: Vec<String> = args.iter().map(expr_to_rust).collect();

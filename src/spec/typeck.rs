@@ -203,6 +203,7 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
         Expr::FloatLit(_) => Ok(TypeRef::Float),
         Expr::BoolLit(_) => Ok(TypeRef::Bool),
         Expr::StringLit(_) => Ok(TypeRef::String),
+        Expr::CharLit(_) => Ok(TypeRef::Char),
         Expr::Field(base, _field) => {
             // Structural typing — we check base exists, field is deferred to runtime
             check_expr(base, env)
@@ -624,6 +625,37 @@ mod tests {
         assert!(
             check(spec).is_err(),
             "List<Int> ++ List<String> must be a type error"
+        );
+    }
+
+    // ── Char literals (Phase 45, finding F4) ────────────────
+
+    #[test]
+    fn char_literal_spec_typechecks() {
+        // A Char classifier in the tokenizer's shape: the
+        // literal types as Char (check_expr's CharLit arm),
+        // so equality and range constraints over a Char
+        // parameter pass `morphic check`.
+        let src = r#"
+        T {
+        spec is_digit {
+            input: c: Char
+            output: Bool
+
+            constraint: output == (c >= '0' && c <= '9')
+
+            test "digit" { input: '5'; expect: true }
+            test "letter" { input: 'a'; expect: false }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "char literal spec must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
         );
     }
 }

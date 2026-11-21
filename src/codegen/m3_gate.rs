@@ -1030,6 +1030,10 @@ impl<'a> Composed<'a> {
             // composes — the escaping here is glue, in BOTH
             // modes (see the module header).
             SpecExpr::StringLit(s) => format!("\"{}\"", escape_rust_str(s)),
+            // The original's CharLit arm (Phase 45): the
+            // escaped character inside single quotes — the
+            // same escape_rust_char the IR Char arm uses.
+            SpecExpr::CharLit(c) => format!("'{}'", escape_rust_char(*c)),
             SpecExpr::Call(name, args) => {
                 let rendered: Result<Vec<String>, String> =
                     args.iter().map(|a| self.sexpr_text(a)).collect();
