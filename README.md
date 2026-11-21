@@ -288,7 +288,7 @@ v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 +
 | **0.3** | LLM module: Ollama client + prompt + parser (local + remote) | ✅ Done |
 | **0.4** | Template library: 9 algorithmic patterns + spec shape detection | ✅ Done |
 | **0.5** | Self-hosting: Morphic compiler written in Morphic | ✅ Done — M0 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 ✅ gates closed · tokenizer measured (M1 formal gate open) |
-| **0.6** | WASM playground: Morphic in the browser | 🚧 In progress — audit ✅ · scope ratified (full client-side, staged) · W1 core extraction + WASM build ✅ · W2 check-playground MVP ✅ (gate passed; W3 synthesis panel next) |
+| **0.6** | WASM playground: Morphic in the browser | 🚧 In progress — audit ✅ · scope ratified (full client-side, staged) · W1 core extraction + WASM build ✅ · W2 check-playground MVP ✅ · W3 interpreter-judged synthesis ✅ (gate passed; W4 worker/perf next) |
 | **1.0** | Production-ready — verified standard library | 🎯 Target |
 
 ---
