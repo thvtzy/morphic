@@ -1675,6 +1675,17 @@ mod m5_s1;
 #[cfg(test)]
 mod m5_s2;
 
+/// M5-S4 (Phase 64): the SC3 recorded measurement for the M5
+/// gate — the codegen render (the only stage that differs
+/// between the configurations) timed for the original emitter
+/// vs the compiled adapter over the M3 gate corpus and the M4
+/// whole-file corpus, median of interleaved rounds, per the
+/// Phase 50 audit's design (item E) and owner decision D3
+/// (a recorded measurement with a mandatory baseline, not a
+/// hard gate item). Test-only.
+#[cfg(test)]
+mod m5_s4;
+
 /// The M3 gate harness (Phase 42): composes the Codegen
 /// module's 112 synthesized winners through the assembly
 /// structure of tests/m3_proof.rs and byte-compares the
