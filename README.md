@@ -5,13 +5,13 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge" alt="Language: Rust"></a>
   <a href="https://github.com/thvtzy/morphic/actions"><img src="https://img.shields.io/github/actions/workflow/status/thvtzy/morphic/ci.yml?branch=master&style=for-the-badge&label=CI" alt="CI Status"></a>
   <br>
-  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v0.5.0-brightgreen?style=for-the-badge" alt="Version: v0.5.0"></a>
+  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v0.6.0-brightgreen?style=for-the-badge" alt="Version: v0.6.0"></a>
   <img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status: Alpha">
   <img src="https://img.shields.io/badge/z3-verified-blue?style=for-the-badge" alt="Z3 Verified">
   <img src="https://img.shields.io/badge/LLM-Ollama-purple?style=for-the-badge" alt="LLM: Ollama">
   <br>
   <a href="https://github.com/thvtzy/morphic/stargazers"><img src="https://img.shields.io/github/stars/thvtzy/morphic?style=for-the-badge&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-410%20passed-green?style=for-the-badge" alt="Tests: 410"></a>
+  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-422%20passed-green?style=for-the-badge" alt="Tests: 422"></a>
 </p>
 
 <p align="center">
@@ -257,17 +257,18 @@ morphic/
 
 | Document | Description |
 |---|---|
+| **[▶ Playground](https://thvtzy.github.io/morphic/)** | Morphic in the browser — write a spec, check it, and synthesize an implementation judged by executed tests, entirely client-side. Capability labels: parse/typecheck + interpreter-judged synthesis run in-browser; Z3 formal verification and compiled-runner scoring are native-only and are labelled unavailable in the UI, never simulated |
 | **[GUIDE.md](GUIDE.md)** | Beginner tutorial — from zero to first synthesized function |
 | **[LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md)** | Complete .morph language specification |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Full compiler pipeline + design decisions |
-| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 self-hosting roadmap — milestones M0–M5; M2, M3, M4 and M5 gates closed 2026-11-20/21 |
+| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 self-hosting roadmap (milestones M0–M5; M2, M3, M4 and M5 gates closed 2026-11-20/21) + the v0.6 WASM-playground road (W1–W5, gate closed 2026-11-21) |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to contribute + good first issues |
 
 ---
 
 ## 📍 Current Status — 2026-11-21
 
-v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 + tokenizer stack (PRs #2–#5) is merged to master; the M5 stack (Phases 50–64) stands on local branches, not yet pushed.
+v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 + tokenizer stack (PRs #2–#5) is merged to master, as is the M5 stack (Phases 50–64, PR #6). v0.6: the **WASM playground is released** — Morphic runs in the browser (last bullet).
 
 - **M2 (validator + printer)** — closed 2026-11-20: Z3-verified winners **42/42**, 0 refuted, cross-validation **64/64 golden + 539/539 pinned**.
 - **M3 (codegen)** — closed 2026-11-21: all 117 Codegen specs specced and measured (114/117 constraint-seeded; verified winners 117/117; executed agreement **354/354 golden + 2997/2997 pinned** at the final re-derivation). The gate: winners composed through the proof assemblies produce **byte-identical output to the original emitter over a 2,573-case corpus** (re-derived as the specs were amended — real operator symbols and closure rendering in Phase 55, the Clone bound on generated signatures in Phase 62), and the synthesized module compiles as a Rust library. Two scoped, owner-approved emitter unfreezes along the way (rendering trio; E0382 clone treatment); the spec language gained the `++` concat operator (F1) and char literals (F4).
@@ -275,7 +276,9 @@ v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 +
 - **M5 (bootstrap)** — closed 2026-11-21: the bootstrap binary is the original compiler with its Rust codegen stage replaced — behind the `bootstrap-codegen` Cargo feature — by the synthesized Codegen module itself (117 winners, checked in as a compiled artifact and called through a hand-written adapter; the original emitter is kept and reachable with the flag off). The synthesized stage is byte-identical to the original over both gate corpora; the flag-on binary synthesized a held-out component it was not built from (RustVisibility, Phase 63); the sort roundtrip is behaviorally correct on every measured draw in both configurations (the generation campaign G1–G3 + G6 and the Clone-bound decision closed it); and the SC3 render cost is recorded at **1.590× the original (≤ 2× threshold)** — measured in the debug profile, the release build being impossible in the measuring sandbox (recorded in the ROAD).
 - **Tokenizer (M1/S4)** — `functional_tokenizer.morph` re-authored into the accepted dialect (it passes `morphic check` for the first time) and measured: the three Char classifiers are **exact** (774/774 executed agreement via the `char_equation` seed family); the remaining specs are blocked on recorded structural gaps (no field access in the IR; method calls not yet in the spec language), so M1's formal gate stays open.
 
-**410 tests passing.** Recorded residue, itemized in the ROAD: binary_search's crowns still do not compile (i64 index typing — G5), is_sorted's correct template still cannot crown through interpreter judging (owner-reserved), the mutation stubs and GA/LLM decoupling (G7), and the open M1 formal gate. Released as **v0.5.0** (2026-11-21, tag `v0.5.0` on master); the formal M1 gate stays open by owner decision until the language has method calls, IR field access, and record literals. Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
+- **Playground (v0.6)** — Morphic in the browser, live at **[thvtzy.github.io/morphic](https://thvtzy.github.io/morphic/)**: the same compiler codebase in its browser profile (a library build — seeded, bounded, LLM-free — compiled to WASM; no Z3, no compiled runner) shipped as a fully static, client-side site. It checks specs with positioned diagnostics and synthesizes implementations judged by executed interpreter tests, with the passed / evaluable / total denominators shown exactly and formal verification labelled unavailable rather than simulated; synthesis runs in Web Workers with cancel, drafts persist on-device only, and the 611,728 B bundle sits under a 673,792 B CI-enforced budget. W1–W5 gates all passed (pinned-corpus agreement with the native CLI at every stage). Browser matrix: Chromium verified end-to-end; the Firefox/WebKit legs were not exercised in the measuring sandbox and are recorded as known-unverified in the release notes.
+
+**422 tests passing.** Recorded residue, itemized in the ROAD: binary_search's crowns still do not compile (i64 index typing — G5), is_sorted's correct template still cannot crown through interpreter judging (owner-reserved), the mutation stubs and GA/LLM decoupling (G7), and the open M1 formal gate. Released as **v0.6.0** (2026-11-21, tag `v0.6.0` on master; v0.5.0 before it); the formal M1 gate stays open by owner decision until the language has method calls, IR field access, and record literals. Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
 
 ---
 
@@ -288,7 +291,7 @@ v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 +
 | **0.3** | LLM module: Ollama client + prompt + parser (local + remote) | ✅ Done |
 | **0.4** | Template library: 9 algorithmic patterns + spec shape detection | ✅ Done |
 | **0.5** | Self-hosting: Morphic compiler written in Morphic | ✅ Done — M0 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 ✅ gates closed · tokenizer measured (M1 formal gate open) |
-| **0.6** | WASM playground: Morphic in the browser | 🚧 In progress — audit ✅ · scope ratified (full client-side, staged) · W1 core extraction + WASM build ✅ · W2 check-playground MVP ✅ · W3 interpreter-judged synthesis ✅ · W4 worker + budget + drafts ✅ (gate passed; W5 public release next) |
+| **0.6** | WASM playground: Morphic in the browser | ✅ Done — audit ✅ · scope ratified (full client-side, staged) · W1 ✅ · W2 ✅ · W3 ✅ · W4 ✅ · W5 public release ✅ — live at [thvtzy.github.io/morphic](https://thvtzy.github.io/morphic/) (Z3 + compiled runner native-only, labelled in the UI) |
 | **1.0** | Production-ready — verified standard library | 🎯 Target |
 
 ---

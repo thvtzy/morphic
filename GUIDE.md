@@ -29,6 +29,14 @@ The compiler finds the best algorithm. Proves it correct. Generates the code.
 
 ---
 
+## Try It in Your Browser (No Install)
+
+The **[Morphic Playground](https://thvtzy.github.io/morphic/)** runs the compiler itself in your browser — nothing to install, and your spec text never leaves your device. You can write a spec, check it (parse + typecheck with positioned diagnostics), and synthesize an implementation judged by executed interpreter tests, with the winner rendered to Rust / C / WAT / Python / JavaScript / IR.
+
+Capability labels, stated plainly: the browser build is the same compiler in a seeded, bounded, LLM-free profile. Two native capabilities do **not** exist in the browser and are labelled unavailable in the UI rather than simulated — **Z3 formal verification** (browser verdicts are honestly *Inconclusive*; the "proves it correct" step above is the native CLI's) and **compiled-runner scoring**. Use the playground to explore the language; use the native install below for the full pipeline.
+
+---
+
 ## Installation
 
 ### Prerequisites
