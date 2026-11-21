@@ -579,9 +579,23 @@ impl SynthesisEngine {
             population.push(random);
         }
 
-        // Deduplicate
+        // Deduplicate — TRUE duplicates only (Phase 59 fix).
+        // This used to dedup by ir_equivalent, which compares
+        // only root-variant discriminants: any two same-root
+        // bodies counted as duplicates, so a Match-rooted
+        // guard_table seed standing next to the Match-rooted
+        // test-induced seed was silently dropped (through
+        // Phase 58 the bare-Hole template seeds happened to
+        // buffer the adjacency; structurally-keyed templates
+        // removed the buffer and the M2/M3 guard-table
+        // winners collapsed — see the regression test
+        // guard_table_seed_survives_seed_population_dedup).
+        // Body identity here is the Debug fingerprint, the
+        // same identity readmit_protected_seeds already uses.
+        // ir_equivalent itself is unchanged: replace_subtree
+        // still uses it as its documented approximation.
         population.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        population.dedup_by(|a, b| ir_equivalent(&a.body, &b.body));
+        population.dedup_by(|a, b| ir_identical(&a.body, &b.body));
         population.truncate(self.config.population_size);
 
         self.candidates = population.clone();
@@ -777,55 +791,35 @@ impl SynthesisEngine {
     }
 
     fn seed_from_templates(&self, spec: &FunctionSpec) -> Result<Vec<CandidateImplementation>, SynthesisError> {
+        // Algorithm templates (Phase 59, campaign slice G2):
+        // the template library (super::templates) is keyed
+        // STRUCTURALLY on the spec's signature — parameter /
+        // return types plus the comparator evidence of a
+        // function-typed parameter, never on spec names — and
+        // returns complete, hole-free bodies for the shapes it
+        // can instantiate cleanly (at most one per spec), or
+        // nothing. Through Phase 58 this function pushed three
+        // bare Holes from local builders and the library had
+        // no production caller; the Phase 57 census measured
+        // the consequence (exactly one template candidate per
+        // pool, always the same hole, collapsed by dedup).
         let mut seeds = Vec::new();
-
-        // Template: Recursive divide-and-conquer (for list types)
-        if has_list_type(spec) {
-            let dc_body = build_divide_and_conquer(spec, self);
+        for (kind, body) in super::templates::generate_templates(spec) {
             seeds.push(CandidateImplementation {
                 id: self.new_id(),
-                body: dc_body,
+                body,
                 spec_name: spec.name.clone(),
                 spec: spec.clone(),
                 score: 0.0,
                 scores: empty_scores(),
                 generation: 0,
-                provenance: Provenance::Template { template_name: "divide_and_conquer".into() },
+                provenance: Provenance::Template {
+                    template_name: kind.name().into(),
+                },
                 verified: false,
                 verification_status: None,
             });
         }
-
-        // Template: Iterator chain (map → filter → fold)
-        let iter_body = build_iterator_chain(spec, self);
-        seeds.push(CandidateImplementation {
-            id: self.new_id(),
-            body: iter_body,
-            spec_name: spec.name.clone(),
-            spec: spec.clone(),
-            score: 0.0,
-            scores: empty_scores(),
-            generation: 0,
-            provenance: Provenance::Template { template_name: "iterator_chain".into() },
-            verified: false,
-            verification_status: None,
-        });
-
-        // Template: Simple loop (for the straightforward approach)
-        let loop_body = build_simple_loop(spec, self);
-        seeds.push(CandidateImplementation {
-            id: self.new_id(),
-            body: loop_body,
-            spec_name: spec.name.clone(),
-            spec: spec.clone(),
-            score: 0.0,
-            scores: empty_scores(),
-            generation: 0,
-            provenance: Provenance::Template { template_name: "simple_loop".into() },
-            verified: false,
-            verification_status: None,
-        });
-
         Ok(seeds)
     }
 
@@ -1864,14 +1858,18 @@ fn random_subtree(node: &IRNode) -> IRNode {
 }
 
 fn ir_equivalent(a: &IRNode, b: &IRNode) -> bool {
-    // Simplified structural equivalence
+    // Simplified structural equivalence (root-variant
+    // discriminant only). Used by replace_subtree as its
+    // documented approximation — NOT by seed_population's
+    // dedup since Phase 59 (see ir_identical).
     std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
-fn has_list_type(spec: &FunctionSpec) -> bool {
-    let is_list = |t: &TypeRef| matches!(t, TypeRef::List(_));
-    spec.params.iter().any(|p| is_list(&p.ty))
-        || is_list(&spec.return_type)
+/// True body identity: the Debug fingerprint, the same
+/// identity readmit_protected_seeds uses. seed_population's
+/// dedup removes only bodies that are actually identical.
+fn ir_identical(a: &IRNode, b: &IRNode) -> bool {
+    format!("{:?}", a) == format!("{:?}", b)
 }
 
 fn build_input_ref(params: &[Param]) -> IRNode {
@@ -1889,18 +1887,11 @@ fn build_input_ref(params: &[Param]) -> IRNode {
 }
 
 // ── Template builders ─────────────────────────────────────
-
-fn build_divide_and_conquer(_spec: &FunctionSpec, engine: &SynthesisEngine) -> IRNode {
-    IRNode::Hole { id: engine.new_id(), expected_type: None }
-}
-
-fn build_iterator_chain(_spec: &FunctionSpec, engine: &SynthesisEngine) -> IRNode {
-    IRNode::Hole { id: engine.new_id(), expected_type: None }
-}
-
-fn build_simple_loop(_spec: &FunctionSpec, engine: &SynthesisEngine) -> IRNode {
-    IRNode::Hole { id: engine.new_id(), expected_type: None }
-}
+//
+// Removed in Phase 59 (G2): the three builders that lived
+// here (build_divide_and_conquer / build_iterator_chain /
+// build_simple_loop) were bare `Hole`s. The real template
+// library is super::templates, wired in seed_from_templates.
 
 // ── Mutation helpers ──────────────────────────────────────
 
@@ -5654,6 +5645,155 @@ mod tests {
         let mut env = crate::synthesis::eval::Env::new();
         env.insert(var.into(), crate::synthesis::eval::Value::Int(value));
         crate::synthesis::eval::eval(body, &env).expect("seed body must evaluate")
+    }
+
+    fn load_example_spec(rel: &str, name: &str) -> FunctionSpec {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/{}", root, rel);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        let checked = crate::spec::typeck::check(parsed).unwrap();
+        checked
+            .spec
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .clone()
+    }
+
+    /// Phase 59 (G2): the dedup hazard, documented as a test.
+    /// `ir_equivalent` compares only root-variant
+    /// discriminants, so two DIFFERENT Block bodies are
+    /// "equivalent" to it. The hazard DID bite — not the
+    /// template set (at most one template per spec, and the
+    /// three target specs have no constraint seeds), but the
+    /// CONSTRAINT seeds: the bare-Hole template seeds had
+    /// been buffering a Match-rooted guard_table seed from
+    /// the Match-rooted test-induced seed, and removing the
+    /// holes exposed it (regression test:
+    /// guard_table_seed_survives_seed_population_dedup,
+    /// written failing-first). The fix moved
+    /// seed_population's dedup to ir_identical (Debug
+    /// fingerprint); ir_equivalent survives only as
+    /// replace_subtree's documented approximation.
+    #[test]
+    fn dedup_equivalence_is_discriminant_only() {
+        let a = IRNode::Block(vec![]);
+        let b = IRNode::Block(vec![IRNode::Return(Box::new(IRNode::Literal(
+            IRLiteral::Int(1),
+        )))]);
+        assert!(ir_equivalent(&a, &b), "discriminant-only: distinct Blocks compare equal");
+        assert!(!ir_equivalent(
+            &a,
+            &IRNode::Sort {
+                comparator: Box::new(IRNode::Var("cmp".into())),
+                collection: Box::new(IRNode::Var("list".into())),
+            }
+        ));
+        // The dedup predicate: distinct bodies are NOT
+        // identical; a body is identical to itself.
+        assert!(!ir_identical(&a, &b), "dedup must keep distinct same-root bodies");
+        assert!(ir_identical(&a, &a.clone()), "dedup removes true duplicates");
+    }
+
+    /// Phase 59 (G2): for each structurally-keyed target
+    /// spec, seed_population (which ends with the
+    /// discriminant dedup) contains EXACTLY ONE template
+    /// candidate — the library's real, hole-free body under
+    /// its recorded name — alongside the test-induced seed.
+    /// Through Phase 58 the same populations contained one
+    /// template candidate that was a bare Hole.
+    #[test]
+    fn template_seeds_are_real_bodies_and_survive_dedup() {
+        let cases = [
+            ("examples/sort.morph", "sort", "sort_primitive"),
+            ("examples/binary_search.morph", "binary_search", "binary_search"),
+            ("examples/self_host/is_sorted.morph", "is_sorted", "adjacent_scan"),
+        ];
+        for (rel, name, template_name) in cases {
+            let spec = load_example_spec(rel, name);
+            let mut engine = SynthesisEngine::new(SynthesisConfig::from_opt_level(1));
+            let population = engine.seed_population(&spec).expect("seed_population");
+            let templates: Vec<&CandidateImplementation> = population
+                .iter()
+                .filter(|c| matches!(c.provenance, Provenance::Template { .. }))
+                .collect();
+            assert_eq!(
+                templates.len(),
+                1,
+                "{}: exactly one template seed must survive dedup, got {}",
+                name,
+                templates.len()
+            );
+            let seed = templates[0];
+            match &seed.provenance {
+                Provenance::Template { template_name: n } => {
+                    assert_eq!(n, template_name, "{}: template name", name)
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                count_holes(&seed.body),
+                0,
+                "{}: the template seed must be a complete body, not a hole",
+                name
+            );
+            assert!(
+                population
+                    .iter()
+                    .any(|c| matches!(c.provenance, Provenance::TestInduced { .. })),
+                "{}: the test-induced seed must also survive",
+                name
+            );
+        }
+    }
+
+    /// Phase 59 (G2): a spec whose shape no template fits
+    /// (count_matching — the forall-fold family's territory,
+    /// slice G3) gets NO template seed: the wiring must not
+    /// resurrect the old always-a-hole behavior.
+    #[test]
+    fn template_seeds_do_not_fire_without_a_fitting_shape() {
+        let spec = load_example_spec("examples/self_host/count_matching.morph", "count_matching");
+        let mut engine = SynthesisEngine::new(SynthesisConfig::from_opt_level(1));
+        let population = engine.seed_population(&spec).expect("seed_population");
+        assert!(
+            !population
+                .iter()
+                .any(|c| matches!(c.provenance, Provenance::Template { .. })),
+            "count_matching must have no template seed in G2"
+        );
+    }
+
+    /// Phase 59 (G2): REGRESSION test, written failing-first.
+    /// seed_population ends with `dedup_by(ir_equivalent)`,
+    /// and ir_equivalent compares only root discriminants.
+    /// Through Phase 58 the three bare-Hole template seeds
+    /// sat between the test-induced seed (a Match) and the
+    /// constraint seeds in seed order, acting as a
+    /// discriminant buffer: a Match-rooted guard_table seed
+    /// was never adjacent to the Match-rooted test-induced
+    /// seed. With real templates keyed structurally, specs
+    /// no template fits have NO buffer, and the dedup eats
+    /// the guard_table seed before the protected-seed
+    /// snapshot is taken — readmission cannot restore what
+    /// the snapshot never saw. (Measured: the M2/M3
+    /// cross-validation winners for guard-table specs —
+    /// type_tag_name, rust_type_name — fell to Mutation
+    /// bodies with 0 agreement the moment the holes left.)
+    #[test]
+    fn guard_table_seed_survives_seed_population_dedup() {
+        let spec = load_m2_spec("printer", "type_tag_name");
+        let mut engine = SynthesisEngine::new(SynthesisConfig::from_opt_level(1));
+        let population = engine.seed_population(&spec).expect("seed_population");
+        assert!(
+            population.iter().any(|c| matches!(
+                &c.provenance,
+                Provenance::ConstraintInduced { kind } if kind == "guard_table"
+            )),
+            "the guard_table seed must survive seed_population's dedup"
+        );
     }
 
     /// Constraint seeds (i): a range spec's equation constraint

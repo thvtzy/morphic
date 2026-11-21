@@ -16,6 +16,8 @@ mod tokenizer_synthesis_probe;
 mod tokenizer_cross_validation;
 mod phase53_measurement;
 mod phase58_measurement;
+mod phase59_measurement;
+
 
 use clap::{Parser, Subcommand};
 use colored::*;
