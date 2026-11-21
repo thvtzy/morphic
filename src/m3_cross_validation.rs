@@ -3336,7 +3336,25 @@ mod xval3 {
         // two-parameter Int guard tables with literal pins,
         // the Bool x Bool region rows, and
         // rust_concat_left_text's territory hole.
-        const RECOGNIZED: [&str; 60] = [
+        //
+        // Phase 33 flip: the pair-keyed guard table (the
+        // guard family's rows, guard leaves ranging over
+        // exactly TWO Int parameters, literal pins only, the
+        // pinned cell recovered by joint falsify-every-leaf
+        // over the pair) recognizes the three two-parameter
+        // tables, so the iterated set grows to 64. It also
+        // recognizes rust_string_ownership, asserted
+        // unrecognized since Phase 28 as a two-parameter
+        // REGION shape: as written its rows are a pair
+        // table (a single true cell at (3, 3), false on both
+        // half-planes) — the region characterization was
+        // the single-key recovery problem, and joint
+        // falsification over the pair recovers the whole
+        // table. What stays unrecognized: rust_ident_empty's
+        // String-equality leaves, the Bool x Bool two-guard
+        // rows of rust_match_scrutinee_form, and
+        // rust_concat_left_text's territory hole.
+        const RECOGNIZED: [&str; 64] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -3363,6 +3381,9 @@ mod xval3 {
             // ── slice 4 (Phase 32): expression-pin guard table ──
             "rust_unary_text", "rust_concat_right_text",
             "rust_match_scrutinee_text",
+            // ── Phase 33: pair-keyed guard table ──
+            "rust_concat_left_owned", "rust_concat_right_form",
+            "rust_match_scrutinee_bare", "rust_string_ownership",
         ];
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 79, "module spec count");
@@ -3381,13 +3402,9 @@ mod xval3 {
             );
         }
         for name in [
-            "rust_string_ownership",
             "rust_ident_empty",
-            // ── slice 4 (Phase 31): measured unrecognized ──
-            "rust_concat_right_form",
+            // ── slice 4: still unrecognized ──
             "rust_match_scrutinee_form",
-            "rust_match_scrutinee_bare",
-            "rust_concat_left_owned",
             "rust_concat_left_text",
         ] {
             assert!(
