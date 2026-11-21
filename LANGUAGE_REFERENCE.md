@@ -65,6 +65,13 @@ test, forall, exists, true, false, O
 | Character | `'a'`, `'\n'` |
 | Unit | `()` |
 
+A character literal is exactly one Unicode scalar value between
+single quotes: `'a'`, `'é'`, `'😀'`. The escape forms are `'\n'`,
+`'\r'`, `'\t'`, `'\\'`, `'\''`, and `'\u{...}'` (1–6 hex digits
+naming a Unicode scalar value, e.g. `'\u{1F600}'`). Empty (`''`),
+multi-character (`'ab'`), and unterminated char literals are parse
+errors.
+
 ---
 
 ## 2. Module

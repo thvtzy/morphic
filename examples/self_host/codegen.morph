@@ -38,9 +38,12 @@
 //  guard rows and Bool test inputs parse and check
 //  (rust_literal_bool); a multi-input identity guard parses
 //  (rust_pattern_ctor_name); string literals may contain
-//  escaped quotes. Char literals do NOT parse in expression
-//  position ('a' is a parse error), though Char-typed inputs
-//  declare fine -- so no spec below writes a Char value.
+//  escaped quotes. Char literals did NOT parse in expression
+//  position then ('a' was a parse error), though Char-typed
+//  inputs declare fine -- so no spec below writes a Char
+//  value. (Phase 45 update: F4 is RESOLVED -- char literals
+//  parse since Phase 45; the specs below still write no Char
+//  value, which is a slice-scope fact, not a language gap.)
 //  Slice-3 probes (2026-11-21) added: F1 is RESOLVED -- the
 //  parser now surfaces BinOp::Concat as the `++` operator
 //  (Phase 25), so template assembly is statable as equations
