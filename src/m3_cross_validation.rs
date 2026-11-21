@@ -4277,7 +4277,33 @@ mod xval3 {
         // PINNED_TOTALS) likewise still covers slices 1–4;
         // extending the sweeps to slice 5 belongs to the
         // measurement phase.
-        const RECOGNIZED: [&str; 66] = [
+        //
+        // Phase 36 flip: the measurement landed. 26 of the
+        // 27 slice-5 specs are recognized — the 19 pure `++`
+        // templates by equation (rust_stmt_collection_text
+        // among them, composing two guard-table calls),
+        // rust_stmt_while_text by composition_guard (the
+        // rust_break_text shape), and the six total Int
+        // classifications by guard_table — and the iterated
+        // set grows to 92. One measured subtlety: recognition
+        // is the mechanism step only. Three of the six
+        // classifications write RANGE rows (rust_stmt_form's
+        // Eq-leaf catch-all; rust_expectation_source's and
+        // rust_stmt_child_indent's inequality bands) whose
+        // falsifying region is not a single value, and
+        // pin_int_value recovers single values only — so
+        // their recognized bodies drop those rows, the
+        // wildcard falls to the typed-literal default, and
+        // Z3 REFUTES the seeds (the probe measures
+        // VerificationFailed in every run). They stay on
+        // this list because a body IS recognized and
+        // encodable; the refutation is a verification
+        // outcome, recorded in the Phase 36 record, not a
+        // recognition failure. rust_stmt_seq_form joins
+        // rust_ident_empty below: its rows range jointly
+        // over an Int key and a Bool key, a mixed two-key
+        // table no admitted family claims.
+        const RECOGNIZED: [&str; 92] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -4310,6 +4336,28 @@ mod xval3 {
             // ── Phase 34: multi-guard truth table + the
             // composition precedence ──
             "rust_match_scrutinee_form", "rust_concat_left_text",
+            // ── slice 5 (Phase 36): the 19 pure `++`
+            // templates via equation ──
+            "rust_stmt_hole_text", "rust_stmt_let_text",
+            "rust_stmt_if_text", "rust_stmt_for_text",
+            "rust_stmt_match_head_text", "rust_stmt_match_arm_text",
+            "rust_stmt_match_close_text", "rust_stmt_call_text",
+            "rust_stmt_return_text", "rust_stmt_alloc_text",
+            "rust_stmt_assign_text", "rust_stmt_collection_text",
+            "rust_stmt_map_text", "rust_stmt_filter_text",
+            "rust_stmt_fold_text", "rust_stmt_sort_text",
+            "rust_stmt_expr_text", "rust_tail_expr_text",
+            "rust_tail_block_text",
+            // ── slice 5 (Phase 36): composition_guard ──
+            "rust_stmt_while_text",
+            // ── slice 5 (Phase 36): the six Int
+            // classifications via guard_table (three of
+            // them recognized-but-refuted on their range
+            // rows — see the Phase 36 note above) ──
+            "rust_stmt_form", "rust_tail_form",
+            "rust_stmt_collection_prefix",
+            "rust_stmt_collection_suffix",
+            "rust_expectation_source", "rust_stmt_child_indent",
         ];
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 106, "module spec count");
@@ -4331,6 +4379,12 @@ mod xval3 {
             "rust_ident_empty",
             // ── Phase 34: the module's only remaining
             // unrecognized shape, by design ──
+            "rust_stmt_seq_form",
+            // ── Phase 36: the mixed Int x Bool two-key
+            // table — no admitted family claims a key set
+            // of two different domains (guard_table arity,
+            // pair_guard_table's Int-family keys,
+            // multi_guard's Bool-expression guards) ──
         ] {
             assert!(
                 index.callee_body(name).is_none(),
