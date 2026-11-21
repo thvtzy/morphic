@@ -1424,6 +1424,37 @@ impl std::error::Error for CodegenError {}
 
 // ── Tests ─────────────────────────────────────────────────
 
+/// The M5-S1 bootstrap artifact (Phase 51): the M3 Codegen
+/// module's 112 synthesized winners, checked in as a versioned
+/// file and compiled into the crate — the compiled codegen the
+/// bootstrap adapter calls. GENERATED FILE (its own header
+/// carries the regeneration command and provenance); not
+/// called by any production path yet — the feature-flag switch
+/// is M5-S2.
+pub(crate) mod synthesized_codegen;
+
+/// The M5-S1 bootstrap adapter (Phase 51): the M3 gate's
+/// composed emitter transcribed from IR-interpreter calls to
+/// direct calls into `synthesized_codegen`'s compiled winner
+/// functions, plus the audit's 9-item shim inventory as
+/// ordinary Rust helpers. Production module, but NOT wired
+/// into `generate` yet — the feature-flag switch is M5-S2;
+/// the default binary's behavior is unchanged. (dead_code
+/// allowed until M5-S2 calls it from a production path; the
+/// M5-S1 tests exercise it under cfg(test).)
+#[allow(dead_code)]
+pub(crate) mod bootstrap_adapter;
+
+/// M5-S1 proof (Phase 51): the checked-in bootstrap artifact's
+/// byte-identity against a fresh gate-style extraction +
+/// render, and the compiled adapter's equivalence with the
+/// original emitter (and with the interpreter composition it
+/// transcribes) over the M3 gate corpus and the M4 whole-file
+/// corpus. Test-only; reuses the M3 gate's and M4 harness's
+/// machinery by reference.
+#[cfg(test)]
+mod m5_s1;
+
 /// The M3 gate harness (Phase 42): composes the Codegen
 /// module's 112 synthesized winners through the assembly
 /// structure of tests/m3_proof.rs and byte-compares the

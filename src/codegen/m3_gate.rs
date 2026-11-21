@@ -319,7 +319,7 @@ fn constraint_kind(cons: &Constraint) -> i64 {
 
 // ── Winner extraction (the real pipeline) ─────────────────
 
-fn load_module(file: &str) -> Vec<FunctionSpec> {
+pub(super) fn load_module(file: &str) -> Vec<FunctionSpec> {
     let root = env!("CARGO_MANIFEST_DIR");
     let path = format!("{}/examples/self_host/{}", root, file);
     let source = std::fs::read_to_string(&path).unwrap();
@@ -344,16 +344,16 @@ fn provenance_name(p: &Provenance) -> String {
 /// whole-file rendering), its raw body, its call-resolved
 /// body (what the executor runs), and the bookkeeping the
 /// gate asserts on.
-struct WinnerEntry {
-    candidate: CandidateImplementation,
+pub(super) struct WinnerEntry {
+    pub(super) candidate: CandidateImplementation,
     resolved: IRNode,
-    provenance: String,
+    pub(super) provenance: String,
     seed_kind: Option<String>,
     verified: bool,
     tpr: f64,
     /// Structural key of the raw body (its Debug text): the
     /// reproducibility evidence across extraction passes.
-    body_key: String,
+    pub(super) body_key: String,
 }
 
 pub(super) struct WinnerSet {
@@ -369,7 +369,7 @@ impl WinnerSet {
         self.order.len()
     }
 
-    fn get(&self, name: &str) -> Result<&WinnerEntry, String> {
+    pub(super) fn get(&self, name: &str) -> Result<&WinnerEntry, String> {
         self.entries
             .get(name)
             .ok_or_else(|| format!("no winner extracted for spec {}", name))
@@ -1865,7 +1865,7 @@ fn is_bare_string_literal(node: &IRNode) -> bool {
 
 // ── Corpus ────────────────────────────────────────────────
 
-enum CaseKind {
+pub(super) enum CaseKind {
     Ty(TypeRef),
     Pat(IRPattern),
     SExpr(SpecExpr),
@@ -1877,19 +1877,19 @@ enum CaseKind {
     Dispatch(String),
 }
 
-struct Case {
-    class: &'static str,
-    label: String,
+pub(super) struct Case {
+    pub(super) class: &'static str,
+    pub(super) label: String,
     /// The tests/m3_proof.rs golden expectation for the
     /// ORIGINAL side, where the proof file states one: the
     /// harness asserts the original reproduces it, so the
     /// transcription itself is verified.
-    expected: Option<&'static str>,
-    original: String,
-    kind: CaseKind,
+    pub(super) expected: Option<&'static str>,
+    pub(super) original: String,
+    pub(super) kind: CaseKind,
 }
 
-fn render(composed: &Composed, case: &Case) -> Result<String, String> {
+pub(super) fn render(composed: &Composed, case: &Case) -> Result<String, String> {
     Ok(match &case.kind {
         CaseKind::Ty(ty) => composed.ty_text(ty)?,
         CaseKind::Pat(p) => composed.pattern_text(p)?,
@@ -1945,7 +1945,7 @@ fn lam(params: &[&str], body: IRNode) -> IRNode {
 /// carries the proof file's expected output; the gate
 /// asserts the original side reproduces it before judging
 /// the composed side.
-fn proof_corpus() -> Vec<Case> {
+pub(super) fn proof_corpus() -> Vec<Case> {
     let mut cases: Vec<Case> = Vec::new();
     let mut push = |class: &'static str,
                     label: &str,
@@ -2954,7 +2954,7 @@ pub(super) fn make_candidate(
 
 /// Corpus (iii): the slice-6 DriverSpec end-to-end cases as
 /// real candidates (original side: the real `generate`).
-fn driver_corpus() -> Vec<Case> {
+pub(super) fn driver_corpus() -> Vec<Case> {
     let mut cases = Vec::new();
     let mut push = |label: &str,
                     expected: &'static str,
@@ -3083,7 +3083,7 @@ fn driver_corpus() -> Vec<Case> {
 }
 
 /// Corpus (v): the dispatch battery.
-fn dispatch_corpus(dummy: &CandidateImplementation) -> Vec<Case> {
+pub(super) fn dispatch_corpus(dummy: &CandidateImplementation) -> Vec<Case> {
     [
         "rust",
         "c",
@@ -3132,7 +3132,7 @@ fn collect_subtrees(node: &IRNode, out: &mut Vec<IRNode>) {
 /// Corpus (ii) + (iv): the winner bodies and their unique
 /// subtrees (three renderings each), and every winner as a
 /// whole candidate file.
-fn winner_corpus(sets: &[(&str, &WinnerSet)]) -> Vec<Case> {
+pub(super) fn winner_corpus(sets: &[(&str, &WinnerSet)]) -> Vec<Case> {
     let mut cases = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for (module, set) in sets {
@@ -3198,7 +3198,7 @@ struct ClassStats {
     a_unreconciled: Vec<String>,
 }
 
-fn diff_detail(label: &str, original: &str, composed: &str) -> String {
+pub(super) fn diff_detail(label: &str, original: &str, composed: &str) -> String {
     let (a, b) = (original.as_bytes(), composed.as_bytes());
     let i = a
         .iter()

@@ -169,13 +169,13 @@ pub(super) fn compare_files(original: &str, composed: &str) -> FileComparison {
 /// counts closure invocations so tests can prove the
 /// extraction happened exactly once.
 #[derive(Default)]
-struct WinnerCache {
+pub(super) struct WinnerCache {
     entries: HashMap<String, CandidateImplementation>,
     pipeline_runs: usize,
 }
 
 impl WinnerCache {
-    fn winner_for(
+    pub(super) fn winner_for(
         &mut self,
         key: &str,
         run: impl FnOnce() -> Result<CandidateImplementation, String>,
@@ -189,21 +189,21 @@ impl WinnerCache {
         Ok(winner)
     }
 
-    fn pipeline_runs(&self) -> usize {
+    pub(super) fn pipeline_runs(&self) -> usize {
         self.pipeline_runs
     }
 }
 
 /// Structural key of a winner body (its Debug text) — the
 /// identity evidence two renderings share.
-fn body_key(winner: &CandidateImplementation) -> String {
+pub(super) fn body_key(winner: &CandidateImplementation) -> String {
     format!("{:?}", winner.body)
 }
 
 /// A short stable hash of a body key, for report lines
 /// (the full Debug text of a real winner body is far too
 /// long to print).
-fn short_hash(text: &str) -> String {
+pub(super) fn short_hash(text: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -218,7 +218,7 @@ fn short_hash(text: &str) -> String {
 /// cheap — NOT part of winner extraction; it may run any
 /// number of times. The expensive, draw-dependent part is
 /// `run_pipeline_once`, and it runs once.
-fn load_functions(rel_path: &str) -> Result<Vec<FunctionSpec>, String> {
+pub(super) fn load_functions(rel_path: &str) -> Result<Vec<FunctionSpec>, String> {
     let root = env!("CARGO_MANIFEST_DIR");
     let path = format!("{}/{}", root, rel_path);
     let source = std::fs::read_to_string(&path)
@@ -235,7 +235,7 @@ fn load_functions(rel_path: &str) -> Result<Vec<FunctionSpec>, String> {
 /// opt level 1 → module-aware Z3 verification → selection),
 /// returning the single selected winner. Synthesis panics
 /// are caught and reported, on the M3 gate's precedent.
-fn run_pipeline_once(
+pub(super) fn run_pipeline_once(
     functions: &[FunctionSpec],
     spec_name: &str,
 ) -> Result<CandidateImplementation, String> {
@@ -275,7 +275,7 @@ fn run_pipeline_once(
         .map_err(|e| format!("{}: select_best error: {}", spec_name, e))
 }
 
-fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
+pub(super) fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -914,9 +914,9 @@ fn scan_morph_files() -> Vec<String> {
 
 /// One check-passing corpus file and its spec names, in
 /// module order.
-struct CorpusFile {
-    rel_path: String,
-    spec_names: Vec<String>,
+pub(super) struct CorpusFile {
+    pub(super) rel_path: String,
+    pub(super) spec_names: Vec<String>,
 }
 
 /// Derive the corpus: scan the inventory, keep the files
@@ -924,7 +924,7 @@ struct CorpusFile {
 /// record the rest as excluded. Asserts the derived
 /// corpus IS the audited one — paths, per-file spec
 /// counts, the exclusion, and the 138-spec total.
-fn enumerate_corpus() -> (Vec<CorpusFile>, Vec<String>) {
+pub(super) fn enumerate_corpus() -> (Vec<CorpusFile>, Vec<String>) {
     let scanned = scan_morph_files();
     assert_eq!(
         scanned.len(),
