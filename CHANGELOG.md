@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **v0.6 opened — WASM playground audit (Phase 65)** — the ROAD gains a v0.6 section: measured `wasm32-unknown-unknown` build inventory (first failure `getrandom`'s missing `js` backend; `z3-sys` build script panics `Unsupported architecture: wasm32`; the verifier has no no-Z3 source seam today), a portable-stage map (parse/typecheck portable; Z3 verification and compiled-runner scoring native-only), four priced shape options with full client-side staged delivery recommended, and a W1–W5 draft roadmap with owner decisions D1–D6. Docs-only; no production code changed.
+
 ## [0.5.0] — 2026-11-21
 
 The v0.5 self-hosting release — the full stack merged to master 2026-11-21 (PRs #2–#6) and tagged `v0.5.0`. Full technical record in [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md); entries below are grouped by milestone. One deliberate omission: the formal M1 gate stays open by owner decision (2026-11-21) until the language has method calls, IR field access, and record literals, so the tokenizer gate can pass in full without a standards compromise; the three Char classifiers stand exact by executed agreement (774/774) meanwhile.
