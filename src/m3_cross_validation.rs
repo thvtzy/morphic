@@ -1,12 +1,14 @@
 // ─────────────────────────────────────────────────────────────
-//  M3 CROSS-VALIDATION HARNESS (test-only) — slices 1–4
+//  M3 CROSS-VALIDATION HARNESS (test-only) — slices 1–5
 //
 //  Generalizes the M2 cross-validation harness
 //  (src/m2_cross_validation.rs) to the Codegen module. For
-//  every one of the 79 specs in
+//  every one of the 106 specs in
 //  examples/self_host/codegen.morph (slice 1: 8 leaf mappings;
 //  slice 2: 20 small template families; slice 3: 16 name/text
-//  assembly specs; slice 4: 35 expression-walker specs) this
+//  assembly specs; slice 4: 35 expression-walker specs;
+//  slice 5: 27 statement-walker specs — 7 classifications
+//  and 20 templates) this
 //  harness runs the
 //  real pipeline at opt level 1 — parse → typecheck →
 //  synthesize_with_module → Z3 verify_all (module-aware) →
@@ -59,7 +61,17 @@
 //         pinned), including inputs that are themselves
 //         one template's output — the two-level nestings
 //         the proof file's assembly mirror golden-tests,
-//         stated per spec.
+//         stated per spec. For slice 5: the six Int-keyed
+//         classifications over the full -2..=30 band (the
+//         two dispatch tables are total by their catch-all
+//         rows; the affixes pin kinds 0..=4, the site
+//         tables their stated sites); rust_stmt_seq_form
+//         over position -2..=3 x last in {false, true}
+//         (the spec decides every pair — see the mirror's
+//         comment); and the 20 templates over batteries of
+//         pad strings and pre-rendered statement/part texts
+//         (the proof file's stmt_templates assertions ride
+//         the batteries as golden cases).
 //
 //  Pinned vs spec-silent is defined by the SPEC's constraints
 //  (the Phase 23 rule, generalizing slice 1's partial-table
@@ -125,6 +137,27 @@
 //  node the original recurses into — so its sweep reports
 //  the pinned half (352 of 363) and the silent half
 //  separately.
+//
+//  Slice 5 adds three bookkeeping shapes of its own.
+//  (i) Stated-domain extensions, the slice-4 pattern
+//  again: rust_stmt_form and rust_tail_form carry
+//  catch-all rows (any unnamed kind -> 17 / -> 0), so
+//  under the pinned-by-constraint rule the whole band is
+//  pinned, where the proof mirrors state only the 28
+//  reachable kinds and abstain off-domain;
+//  rust_stmt_seq_form's rows likewise decide every
+//  (position, last) pair — position != 1 pins 0 by its
+//  second row, last == false pins 0 by its third — where
+//  the proof mirror states only positions 0 and 1. On
+//  every input both mirrors state, they state the same
+//  value. (ii) One composed spec: rust_stmt_collection_
+//  text states its equation over CALLS to the two affix
+//  classifications, so it is pinned exactly where they
+//  are (kinds 0..=4) and spec-silent off-table — the
+//  rust_binop_infix_text precedent. (iii) The remaining
+//  partial tables (the two affixes, expectation_source,
+//  child_indent) pin exactly their stated rows and are
+//  spec-silent elsewhere in the band, as in slices 1–2.
 //
 //  The assembly mirrors of tests/m3_proof.rs
 //  (composed behavior: nested types, joined patterns,
@@ -218,7 +251,11 @@ mod xval3 {
     /// (rust_break_text), a (Bool, String, String) triple
     /// (rust_concat_left_text), a Bool pair
     /// (rust_match_scrutinee_form), and a String triple (the
-    /// three-text templates).
+    /// three-text templates). Slice 5 adds: an (Int, Bool)
+    /// pair (rust_stmt_seq_form's position x last), a (Bool,
+    /// String, String, String, String) 5-tuple
+    /// (rust_stmt_while_text), and a String 5-tuple
+    /// (rust_stmt_for_text).
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     enum In {
         Int(i64),
@@ -235,6 +272,9 @@ mod xval3 {
         BoolStrStr(bool, &'static str, &'static str),
         BoolPair(bool, bool),
         Str3(&'static str, &'static str, &'static str),
+        IntBool(i64, bool),
+        BoolStr4(bool, &'static str, &'static str, &'static str, &'static str),
+        Str5(&'static str, &'static str, &'static str, &'static str, &'static str),
     }
 
     impl In {
@@ -256,6 +296,13 @@ mod xval3 {
                 In::BoolStrStr(b, s, t) => format!("({}, \"{}\", \"{}\")", b, s, t),
                 In::BoolPair(a, b) => format!("({}, {})", a, b),
                 In::Str3(a, b, c) => format!("(\"{}\", \"{}\", \"{}\")", a, b, c),
+                In::IntBool(a, b) => format!("({}, {})", a, b),
+                In::BoolStr4(h, a, b, c, d) => {
+                    format!("({}, \"{}\", \"{}\", \"{}\", \"{}\")", h, a, b, c, d)
+                }
+                In::Str5(a, b, c, d, e) => {
+                    format!("(\"{}\", \"{}\", \"{}\", \"{}\", \"{}\")", a, b, c, d, e)
+                }
             }
         }
     }
@@ -1086,6 +1133,262 @@ mod xval3 {
         ))
     }
 
+    // ── Slice-5 mirrors (same copying rule) ───────────────
+    //
+    //  Divergence audit against tests/m3_proof.rs (the task
+    //  of this extension): every mirror below is a literal
+    //  transcription of its proof counterpart — the proof
+    //  Option::None rows become Mirror::Unpinned, Some/plain
+    //  values become the value — with exactly THREE stated-
+    //  domain extensions, all following this harness's
+    //  pinned-by-constraint precedent (rust_condition_wrap,
+    //  rust_typed_form, rust_concat_right_form):
+    //  rust_stmt_form and rust_tail_form, whose specs carry
+    //  catch-all rows deciding EVERY code outside the named
+    //  sets (17 and 0 respectively), where the proof
+    //  mirrors state the walkers' domain (the 28 kinds)
+    //  and abstain off it; and rust_stmt_seq_form, whose
+    //  second and third rows decide every (position, last)
+    //  pair outside the decisive one (position != 1 -> 0;
+    //  last == false -> 0), where the proof mirror states
+    //  positions 0 and 1 only. On every input both mirrors
+    //  state, they state the same value — the extensions
+    //  follow the specs' own constraint text, never a
+    //  decided value of the proof file's. One composition
+    //  is worth naming: rust_stmt_collection_text composes
+    //  the two affix mirrors exactly as its spec composes
+    //  the affix specs by call, so it is pinned exactly
+    //  where they are (kinds 0..=4) and abstains off-table,
+    //  as the proof mirror returns None there.
+
+    fn rust_stmt_form(kind: i64) -> Mirror {
+        // Total over Int: the named kinds take their arm
+        // codes; the catch-all row pins 17 for every other
+        // code, in or out of the reachable 0..=27.
+        match kind {
+            0..=8 => Mirror::Int(kind),
+            15 => Mirror::Int(11),
+            16 => Mirror::Int(12),
+            17 => Mirror::Int(13),
+            18 => Mirror::Int(14),
+            19 => Mirror::Int(15),
+            20 => Mirror::Int(9),
+            21 => Mirror::Int(10),
+            22 => Mirror::Int(16),
+            _ => Mirror::Int(17),
+        }
+    }
+
+    fn rust_tail_form(kind: i64) -> Mirror {
+        // Total over Int: the catch-all row pins 0 (the
+        // statement fallthrough) for every unnamed code.
+        match kind {
+            1 => Mirror::Int(2),
+            22 => Mirror::Int(3),
+            7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 23 | 27 => {
+                Mirror::Int(1)
+            }
+            _ => Mirror::Int(0),
+        }
+    }
+
+    fn rust_stmt_collection_prefix(kind: i64) -> Mirror {
+        match kind {
+            0 => Mirror::Text("vec!["),
+            1 => Mirror::Text("vec!["),
+            2 => Mirror::Text("vec!["),
+            3 => Mirror::Text("["),
+            4 => Mirror::Text("("),
+            _ => Mirror::Unpinned,
+        }
+    }
+
+    fn rust_stmt_collection_suffix(kind: i64) -> Mirror {
+        match kind {
+            0 => Mirror::Text("]"),
+            1 => Mirror::Text("]"),
+            2 => Mirror::Text("]"),
+            3 => Mirror::Text("]"),
+            4 => Mirror::Text(")"),
+            _ => Mirror::Unpinned,
+        }
+    }
+
+    fn rust_expectation_source(site: i64) -> Mirror {
+        match site {
+            0..=4 => Mirror::Int(0),
+            5..=6 => Mirror::Int(1),
+            7 => Mirror::Int(2),
+            _ => Mirror::Unpinned,
+        }
+    }
+
+    fn rust_stmt_child_indent(site: i64) -> Mirror {
+        match site {
+            0 | 1 | 7 | 8 => Mirror::Int(0),
+            2..=5 => Mirror::Int(1),
+            6 => Mirror::Int(2),
+            _ => Mirror::Unpinned,
+        }
+    }
+
+    fn rust_stmt_seq_form(position: i64, last: bool) -> Mirror {
+        // Total over Int x Bool (see the audit above): the
+        // tail position's last statement takes the tail
+        // renderer; every other pair takes the statement
+        // renderer — position != 1 by the second row,
+        // last == false by the third.
+        Mirror::Int(if position == 1 && last { 1 } else { 0 })
+    }
+
+    fn rust_stmt_hole_text(pad: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "{}// TODO: synthesis incomplete\n{}panic!(\"Hole not filled\");\n",
+            pad, pad
+        ))
+    }
+
+    fn rust_stmt_let_text(pad: &str, name: &str, value: &str, body: &str) -> Mirror {
+        Mirror::Owned(format!("{}let {} = {};\n{}", pad, name, value, body))
+    }
+
+    fn rust_stmt_if_text(
+        pad: &str,
+        cond: &str,
+        then_text: &str,
+        else_text: &str,
+    ) -> Mirror {
+        Mirror::Owned(format!(
+            "{}if {} {{\n{}}} else {{\n{}}}\n",
+            pad, cond, then_text, else_text
+        ))
+    }
+
+    fn rust_stmt_while_text(
+        has_inv: bool,
+        inv: &str,
+        pad: &str,
+        cond: &str,
+        body: &str,
+    ) -> Mirror {
+        let inv_comment = if has_inv {
+            format!("{}// invariant: {}\n", pad, inv)
+        } else {
+            String::new()
+        };
+        Mirror::Owned(format!(
+            "{}{}while {} {{\n{}{}}}\n",
+            inv_comment, pad, cond, body, pad
+        ))
+    }
+
+    fn rust_stmt_for_text(
+        pad: &str,
+        var: &str,
+        start: &str,
+        end: &str,
+        body: &str,
+    ) -> Mirror {
+        Mirror::Owned(format!(
+            "{}for {} in {}..{} {{\n{}{}}}\n",
+            pad, var, start, end, body, pad
+        ))
+    }
+
+    fn rust_stmt_match_head_text(pad: &str, scrutinee: &str) -> Mirror {
+        Mirror::Owned(format!("{}match {} {{\n", pad, scrutinee))
+    }
+
+    fn rust_stmt_match_arm_text(pad_inner: &str, pat: &str, body: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "{}{} => {{\n{}{}}},\n",
+            pad_inner, pat, body, pad_inner
+        ))
+    }
+
+    fn rust_stmt_match_close_text(pad: &str) -> Mirror {
+        Mirror::Owned(format!("{}}}\n", pad))
+    }
+
+    fn rust_stmt_call_text(pad: &str, func: &str, args: &str) -> Mirror {
+        Mirror::Owned(format!("{}{}({});\n", pad, func, args))
+    }
+
+    fn rust_stmt_return_text(pad: &str, rendered: &str) -> Mirror {
+        Mirror::Owned(format!("{}return {};\n", pad, rendered))
+    }
+
+    fn rust_stmt_alloc_text(pad: &str, name: &str, ty: &str, initial: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "{}let mut {}: {} = {};\n",
+            pad, name, ty, initial
+        ))
+    }
+
+    fn rust_stmt_assign_text(pad: &str, target: &str, value: &str) -> Mirror {
+        Mirror::Owned(format!("{}{} = {};\n", pad, target, value))
+    }
+
+    fn rust_stmt_collection_text(kind: i64, pad: &str, elems: &str) -> Mirror {
+        // Composed over the two affix mirrors exactly as
+        // the spec composes the affix specs by call:
+        // pinned exactly where both affixes are (kinds
+        // 0..=4), spec-silent off-table.
+        let (prefix, suffix) = match (
+            rust_stmt_collection_prefix(kind),
+            rust_stmt_collection_suffix(kind),
+        ) {
+            (Mirror::Text(p), Mirror::Text(s)) => (p, s),
+            _ => return Mirror::Unpinned,
+        };
+        Mirror::Owned(format!("{}{}{}{};\n", pad, prefix, elems, suffix))
+    }
+
+    fn rust_stmt_map_text(pad: &str, over: &str, func: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "{}({}).iter().map({}).collect();\n",
+            pad, over, func
+        ))
+    }
+
+    fn rust_stmt_filter_text(pad: &str, over: &str, pred: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "{}({}).iter().filter({}).collect();\n",
+            pad, over, pred
+        ))
+    }
+
+    fn rust_stmt_fold_text(
+        pad: &str,
+        over: &str,
+        initial: &str,
+        operation: &str,
+    ) -> Mirror {
+        Mirror::Owned(format!(
+            "{}({}).iter().fold({}, {});\n",
+            pad, over, initial, operation
+        ))
+    }
+
+    fn rust_stmt_sort_text(pad: &str, coll: &str, cmp: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "{}let mut sorted = {};\nsorted.sort_by({});\nsorted;\n",
+            pad, coll, cmp
+        ))
+    }
+
+    fn rust_stmt_expr_text(pad: &str, rendered: &str) -> Mirror {
+        Mirror::Owned(format!("{}{};\n", pad, rendered))
+    }
+
+    fn rust_tail_expr_text(pad: &str, rendered: &str) -> Mirror {
+        Mirror::Owned(format!("{}{}\n", pad, rendered))
+    }
+
+    fn rust_tail_block_text(rest: &str, last: &str) -> Mirror {
+        Mirror::Owned(format!("{}{}", rest, last))
+    }
+
     fn mirror(spec: &str, input: &In) -> Mirror {
         match (spec, input) {
             ("rust_type_name", In::Int(a)) => rust_type_name(*a),
@@ -1198,6 +1501,70 @@ mod xval3 {
             ("rust_break_text", In::BoolStr(h, v)) => rust_break_text(*h, v),
             ("rust_hole_text", In::Int(a)) => rust_hole_text(*a),
             ("rust_unsupported_text", In::Text(s)) => rust_unsupported_text(s),
+            // ── slice 5 ──
+            ("rust_stmt_form", In::Int(a)) => rust_stmt_form(*a),
+            ("rust_tail_form", In::Int(a)) => rust_tail_form(*a),
+            ("rust_stmt_collection_prefix", In::Int(a)) => {
+                rust_stmt_collection_prefix(*a)
+            }
+            ("rust_stmt_collection_suffix", In::Int(a)) => {
+                rust_stmt_collection_suffix(*a)
+            }
+            ("rust_expectation_source", In::Int(a)) => rust_expectation_source(*a),
+            ("rust_stmt_child_indent", In::Int(a)) => rust_stmt_child_indent(*a),
+            ("rust_stmt_seq_form", In::IntBool(p, l)) => rust_stmt_seq_form(*p, *l),
+            ("rust_stmt_hole_text", In::Text(s)) => rust_stmt_hole_text(s),
+            ("rust_stmt_let_text", In::Str4(p, n, v, b)) => {
+                rust_stmt_let_text(p, n, v, b)
+            }
+            ("rust_stmt_if_text", In::Str4(p, c, t, e)) => {
+                rust_stmt_if_text(p, c, t, e)
+            }
+            ("rust_stmt_while_text", In::BoolStr4(h, i, p, c, b)) => {
+                rust_stmt_while_text(*h, i, p, c, b)
+            }
+            ("rust_stmt_for_text", In::Str5(p, v, s, e, b)) => {
+                rust_stmt_for_text(p, v, s, e, b)
+            }
+            ("rust_stmt_match_head_text", In::StrPair(p, s)) => {
+                rust_stmt_match_head_text(p, s)
+            }
+            ("rust_stmt_match_arm_text", In::Str3(p, a, b)) => {
+                rust_stmt_match_arm_text(p, a, b)
+            }
+            ("rust_stmt_match_close_text", In::Text(s)) => {
+                rust_stmt_match_close_text(s)
+            }
+            ("rust_stmt_call_text", In::Str3(p, f, a)) => {
+                rust_stmt_call_text(p, f, a)
+            }
+            ("rust_stmt_return_text", In::StrPair(p, r)) => {
+                rust_stmt_return_text(p, r)
+            }
+            ("rust_stmt_alloc_text", In::Str4(p, n, t, i)) => {
+                rust_stmt_alloc_text(p, n, t, i)
+            }
+            ("rust_stmt_assign_text", In::Str3(p, t, v)) => {
+                rust_stmt_assign_text(p, t, v)
+            }
+            ("rust_stmt_collection_text", In::IntStrStr(k, p, e)) => {
+                rust_stmt_collection_text(*k, p, e)
+            }
+            ("rust_stmt_map_text", In::Str3(p, o, f)) => rust_stmt_map_text(p, o, f),
+            ("rust_stmt_filter_text", In::Str3(p, o, r)) => {
+                rust_stmt_filter_text(p, o, r)
+            }
+            ("rust_stmt_fold_text", In::Str4(p, o, i, op)) => {
+                rust_stmt_fold_text(p, o, i, op)
+            }
+            ("rust_stmt_sort_text", In::Str3(p, c, m)) => {
+                rust_stmt_sort_text(p, c, m)
+            }
+            ("rust_stmt_expr_text", In::StrPair(p, r)) => rust_stmt_expr_text(p, r),
+            ("rust_tail_expr_text", In::StrPair(p, r)) => rust_tail_expr_text(p, r),
+            ("rust_tail_block_text", In::StrPair(r, l)) => {
+                rust_tail_block_text(r, l)
+            }
             _ => panic!("no mirror for spec {} with input {:?}", spec, input),
         }
     }
@@ -1246,12 +1613,13 @@ mod xval3 {
         "returns",
     ];
 
-    /// Every spec of slices 1–4, in file order. (Phase 31:
+    /// Every spec of slices 1–5, in file order. (Phase 31:
     /// slice 4's 35 walker specs join the sweeps — 79 in
     /// total — so this list and PINNED_TOTALS cover the
     /// whole module and the grand totals below are module
-    /// totals.)
-    const ALL_SPECS: [&str; 79] = [
+    /// totals. Phase 36: slice 5's 27 statement-walker specs
+    /// join — 106 in total.)
+    const ALL_SPECS: [&str; 106] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -1332,13 +1700,41 @@ mod xval3 {
         "rust_break_text",
         "rust_hole_text",
         "rust_unsupported_text",
+        // ── slice 5 ──
+        "rust_stmt_form",
+        "rust_tail_form",
+        "rust_stmt_collection_prefix",
+        "rust_stmt_collection_suffix",
+        "rust_expectation_source",
+        "rust_stmt_child_indent",
+        "rust_stmt_seq_form",
+        "rust_stmt_hole_text",
+        "rust_stmt_let_text",
+        "rust_stmt_if_text",
+        "rust_stmt_while_text",
+        "rust_stmt_for_text",
+        "rust_stmt_match_head_text",
+        "rust_stmt_match_arm_text",
+        "rust_stmt_match_close_text",
+        "rust_stmt_call_text",
+        "rust_stmt_return_text",
+        "rust_stmt_alloc_text",
+        "rust_stmt_assign_text",
+        "rust_stmt_collection_text",
+        "rust_stmt_map_text",
+        "rust_stmt_filter_text",
+        "rust_stmt_fold_text",
+        "rust_stmt_sort_text",
+        "rust_stmt_expr_text",
+        "rust_tail_expr_text",
+        "rust_tail_block_text",
     ];
 
     /// The Int-code specs swept over the full -2..=30 band
     /// (every spec whose single input is an Int code: 7 from
     /// slice 1, 18 from slice 2, 2 from slice 3, 4 from
-    /// slice 4).
-    const INT_BAND_SPECS: [&str; 31] = [
+    /// slice 4, 6 from slice 5).
+    const INT_BAND_SPECS: [&str; 37] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -1371,6 +1767,13 @@ mod xval3 {
         "rust_collection_prefix",
         "rust_collection_suffix",
         "rust_hole_text",
+        // ── slice 5 ──
+        "rust_stmt_form",
+        "rust_tail_form",
+        "rust_stmt_collection_prefix",
+        "rust_stmt_collection_suffix",
+        "rust_expectation_source",
+        "rust_stmt_child_indent",
     ];
 
     /// Constructor names for the rust_pattern_ctor_name grid:
@@ -1673,6 +2076,162 @@ mod xval3 {
     /// Shape names for rust_unsupported_text (total).
     const SHAPE_INPUTS: [&str; 2] = ["Alloc", "Weird"];
 
+    // ── Slice-5 sweep batteries ────────────────────────────
+
+    /// Pad strings for the single-pad templates
+    /// (rust_stmt_hole_text, rust_stmt_match_close_text):
+    /// indent levels 0, 1 and 2. The pad string is "    "
+    /// repeated — the repetition is mirror-only; the
+    /// templates take the pad as an input.
+    const STMT_PADS: [&str; 3] = ["", "    ", "        "];
+
+    /// (pad, name, value, body) cases for rust_stmt_let_text
+    /// (total). The first case is the proof file's
+    /// assertion; the bodies arrive tail-rendered, trailing
+    /// newline included, as the assembly produces them.
+    const LET_CASES: [(&str, &str, &str, &str); 3] = [
+        ("    ", "x", "1", "    x\n"),
+        ("", "buf", "\"hi\"", "return buf\n"),
+        ("        ", "type_", "f(1)", ""),
+    ];
+
+    /// (pad, cond, then, else) cases for rust_stmt_if_text
+    /// (total). The first case is the proof file's
+    /// assertion (the unpadded closing braces show at
+    /// indent 1).
+    const IF_CASES: [(&str, &str, &str, &str); 2] = [
+        ("    ", "c", "        5\n", "        6\n"),
+        ("", "(a && b)", "    1\n", "    2\n"),
+    ];
+
+    /// (has_inv, inv, pad, cond, body) cases for
+    /// rust_stmt_while_text (total over the Bool: both
+    /// branches decided for every text tuple). The first
+    /// two are the proof file's assertions.
+    const WHILE_CASES: [(bool, &str, &str, &str, &str); 3] = [
+        (false, "", "    ", "c", "        body;\n"),
+        (true, "x > 0", "    ", "c", "        body;\n"),
+        (true, "n > 0", "", "ok", "    step;\n"),
+    ];
+
+    /// (pad, var, start, end, body) cases for
+    /// rust_stmt_for_text (total). The first case is the
+    /// proof file's assertion.
+    const FOR_CASES: [(&str, &str, &str, &str, &str); 2] = [
+        ("    ", "i", "0", "10", "        body;\n"),
+        ("", "k", "lo", "hi", "    go();\n"),
+    ];
+
+    /// (pad, scrutinee) pairs for rust_stmt_match_head_text
+    /// (total). The second case's scrutinee arrives
+    /// .as_str()-treated, as the assembly's string-pattern
+    /// match produces it.
+    const MATCH_HEAD_PAIRS: [(&str, &str); 2] =
+        [("    ", "v"), ("", "s.as_str()")];
+
+    /// (pad_inner, pat, body) triples for
+    /// rust_stmt_match_arm_text (total). The first case is
+    /// the proof file's assertion.
+    const STMT_MATCH_ARM_TRIPLES: [(&str, &str, &str); 2] = [
+        ("        ", "Some(x)", "            x\n"),
+        ("    ", "_", "        g()\n"),
+    ];
+
+    /// (pad, func, args) triples for rust_stmt_call_text
+    /// (total). The first case is the proof file's
+    /// assertion.
+    const STMT_CALL_TRIPLES: [(&str, &str, &str); 2] =
+        [("    ", "f", "a, b"), ("", "g", "")];
+
+    /// (pad, rendered) pairs for rust_stmt_return_text
+    /// (total). The first case's rendering is the owned
+    /// form — the Return arm's typed call is what the
+    /// assembly supplies.
+    const RETURN_PAIRS: [(&str, &str); 2] =
+        [("    ", "\"s\".to_string()"), ("", "5")];
+
+    /// (pad, name, ty, initial) cases for
+    /// rust_stmt_alloc_text (total). The first case is the
+    /// proof file's assertion.
+    const ALLOC_CASES: [(&str, &str, &str, &str); 2] = [
+        ("    ", "buf", "String", "\"s\".to_string()"),
+        ("", "n", "i64", "0"),
+    ];
+
+    /// (pad, target, value) triples for
+    /// rust_stmt_assign_text (total). The first case is
+    /// the proof file's assertion.
+    const STMT_ASSIGN_TRIPLES: [(&str, &str, &str); 2] =
+        [("    ", "x", "(x + 1)"), ("", "y", "2")];
+
+    /// (kind, pad, elems) cases for
+    /// rust_stmt_collection_text: the five pinned kinds
+    /// (the proof file's assembled assertions) plus one
+    /// off-table kind (spec-silent — the composed spec
+    /// decides nothing its affix callees do not).
+    const STMT_COLLECTION_CASES: [(i64, &str, &str); 6] = [
+        (0, "", "a, b"),
+        (1, "", "a, b"),
+        (2, "    ", "a, b"),
+        (3, "", "a, b"),
+        (4, "", "a, b"),
+        (5, "", "a"),
+    ];
+
+    /// (pad, over, func) triples for rust_stmt_map_text
+    /// (total).
+    const STMT_MAP_TRIPLES: [(&str, &str, &str); 2] =
+        [("    ", "xs", "f"), ("", "ys", "|x| { x }")];
+
+    /// (pad, over, pred) triples for
+    /// rust_stmt_filter_text (total).
+    const STMT_FILTER_TRIPLES: [(&str, &str, &str); 2] =
+        [("    ", "xs", "p"), ("", "ys", "ok")];
+
+    /// (pad, over, initial, operation) cases for
+    /// rust_stmt_fold_text (total; text order is initial,
+    /// operation, as in slice 4's fold).
+    const STMT_FOLD_CASES: [(&str, &str, &str, &str); 2] = [
+        ("    ", "xs", "0", "add"),
+        ("", "ys", "init", "op"),
+    ];
+
+    /// (pad, coll, cmp) triples for rust_stmt_sort_text
+    /// (total).
+    const STMT_SORT_TRIPLES: [(&str, &str, &str); 2] =
+        [("    ", "xs", "cmp"), ("", "ys", "by_key")];
+
+    /// (pad, rendered) pairs for rust_stmt_expr_text
+    /// (total). The first case's rendering is a block form
+    /// — the fallback terminates even those with ';'.
+    const STMT_EXPR_PAIRS: [(&str, &str); 2] =
+        [("    ", "loop {\n}"), ("", "5")];
+
+    /// (pad, rendered) pairs for rust_tail_expr_text
+    /// (total).
+    const TAIL_EXPR_PAIRS: [(&str, &str); 2] =
+        [("    ", "x"), ("", "\"s\".to_string()")];
+
+    /// (rest, last) pairs for rust_tail_block_text
+    /// (total). The first case is the proof file's
+    /// assertion; the third is the assembly's tail Block
+    /// (a statement rendering, then the bare tail).
+    const TAIL_BLOCK_PAIRS: [(&str, &str); 3] = [
+        ("a;\n", "b\n"),
+        ("", "    5\n"),
+        ("    f(1);\n", "    5\n"),
+    ];
+
+    /// (position, last) cases for rust_stmt_seq_form: the
+    /// two real positions plus margin on both sides, over
+    /// the complete Bool domain — 12 cases, all pinned
+    /// (the spec decides every pair).
+    fn seq_form_cases() -> Vec<In> {
+        (-2..=3)
+            .flat_map(|p| [In::IntBool(p, false), In::IntBool(p, true)])
+            .collect()
+    }
+
     fn sweep(spec: &str) -> Vec<In> {
         match spec {
             "rust_keyword" => KEYWORD_POSITIVES
@@ -1840,6 +2399,83 @@ mod xval3 {
             "rust_unsupported_text" => {
                 SHAPE_INPUTS.iter().map(|s| In::Text(s)).collect()
             },
+            // ── slice 5 ──
+            "rust_stmt_seq_form" => seq_form_cases(),
+            "rust_stmt_hole_text" | "rust_stmt_match_close_text" => {
+                STMT_PADS.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_stmt_let_text" => LET_CASES
+                .iter()
+                .map(|(p, n, v, b)| In::Str4(p, n, v, b))
+                .collect(),
+            "rust_stmt_if_text" => IF_CASES
+                .iter()
+                .map(|(p, c, t, e)| In::Str4(p, c, t, e))
+                .collect(),
+            "rust_stmt_while_text" => WHILE_CASES
+                .iter()
+                .map(|(h, i, p, c, b)| In::BoolStr4(*h, i, p, c, b))
+                .collect(),
+            "rust_stmt_for_text" => FOR_CASES
+                .iter()
+                .map(|(p, v, s, e, b)| In::Str5(p, v, s, e, b))
+                .collect(),
+            "rust_stmt_match_head_text" => MATCH_HEAD_PAIRS
+                .iter()
+                .map(|(p, s)| In::StrPair(p, s))
+                .collect(),
+            "rust_stmt_match_arm_text" => STMT_MATCH_ARM_TRIPLES
+                .iter()
+                .map(|(p, a, b)| In::Str3(p, a, b))
+                .collect(),
+            "rust_stmt_call_text" => STMT_CALL_TRIPLES
+                .iter()
+                .map(|(p, f, a)| In::Str3(p, f, a))
+                .collect(),
+            "rust_stmt_return_text" => RETURN_PAIRS
+                .iter()
+                .map(|(p, r)| In::StrPair(p, r))
+                .collect(),
+            "rust_stmt_alloc_text" => ALLOC_CASES
+                .iter()
+                .map(|(p, n, t, i)| In::Str4(p, n, t, i))
+                .collect(),
+            "rust_stmt_assign_text" => STMT_ASSIGN_TRIPLES
+                .iter()
+                .map(|(p, t, v)| In::Str3(p, t, v))
+                .collect(),
+            "rust_stmt_collection_text" => STMT_COLLECTION_CASES
+                .iter()
+                .map(|(k, p, e)| In::IntStrStr(*k, p, e))
+                .collect(),
+            "rust_stmt_map_text" => STMT_MAP_TRIPLES
+                .iter()
+                .map(|(p, o, f)| In::Str3(p, o, f))
+                .collect(),
+            "rust_stmt_filter_text" => STMT_FILTER_TRIPLES
+                .iter()
+                .map(|(p, o, r)| In::Str3(p, o, r))
+                .collect(),
+            "rust_stmt_fold_text" => STMT_FOLD_CASES
+                .iter()
+                .map(|(p, o, i, op)| In::Str4(p, o, i, op))
+                .collect(),
+            "rust_stmt_sort_text" => STMT_SORT_TRIPLES
+                .iter()
+                .map(|(p, c, m)| In::Str3(p, c, m))
+                .collect(),
+            "rust_stmt_expr_text" => STMT_EXPR_PAIRS
+                .iter()
+                .map(|(p, r)| In::StrPair(p, r))
+                .collect(),
+            "rust_tail_expr_text" => TAIL_EXPR_PAIRS
+                .iter()
+                .map(|(p, r)| In::StrPair(p, r))
+                .collect(),
+            "rust_tail_block_text" => TAIL_BLOCK_PAIRS
+                .iter()
+                .map(|(r, l)| In::StrPair(r, l))
+                .collect(),
             "rust_test_module" => MODULE_INPUTS.iter().map(|s| In::Text(s)).collect(),
             s if INT_BAND_SPECS.contains(&s) => (-2..=30).map(In::Int).collect(),
             _ => panic!("no sweep defined for spec {}", spec),
@@ -2123,6 +2759,91 @@ mod xval3 {
             "rust_hole_text" => ints(&[0]),
             // test: alloc-text
             "rust_unsupported_text" => vec![In::Text("Alloc")],
+            // ── slice 5 ──
+            // tests: hole-arm 0, match-arm 6, collection-arm
+            // 15, alloc-arm 20, typed-arm 22, loop-fallback 24
+            "rust_stmt_form" => ints(&[0, 6, 15, 20, 22, 24]),
+            // tests: block-split 1, call-bare 7,
+            // let-fallthrough 2, typed-reentry 22
+            "rust_tail_form" => ints(&[1, 7, 2, 22]),
+            // tests: list-prefix 0, set-collapses 1,
+            // array-prefix 3, tuple-prefix 4
+            "rust_stmt_collection_prefix" => ints(&[0, 1, 3, 4]),
+            // tests: set-collapses 1, tuple-suffix 4
+            "rust_stmt_collection_suffix" => ints(&[1, 4]),
+            // tests: let-tail-fn-ret 0, alloc-own-type 5,
+            // block-last-inherits 7
+            "rust_expectation_source" => ints(&[0, 5, 7]),
+            // tests: block-same 0, if-branch-in 2,
+            // match-arm-body-in2 6
+            "rust_stmt_child_indent" => ints(&[0, 2, 6]),
+            // No in-spec tests (multi-input spec); the
+            // proof file's table assertions — the complete
+            // stated domain (positions 0 and 1 x both Bools).
+            "rust_stmt_seq_form" => vec![
+                In::IntBool(0, false),
+                In::IntBool(0, true),
+                In::IntBool(1, false),
+                In::IntBool(1, true),
+            ],
+            // tests: hole-at-zero, hole-padded
+            "rust_stmt_hole_text" => vec![In::Text(""), In::Text("    ")],
+            // No in-spec tests (multi-input specs from here
+            // on); golden cases are the proof file's
+            // stmt_templates assertions, one per spec (the
+            // assembled collection assertions are five).
+            "rust_stmt_let_text" => {
+                vec![In::Str4("    ", "x", "1", "    x\n")]
+            }
+            "rust_stmt_if_text" => {
+                vec![In::Str4("    ", "c", "        5\n", "        6\n")]
+            }
+            "rust_stmt_while_text" => vec![
+                In::BoolStr4(false, "", "    ", "c", "        body;\n"),
+                In::BoolStr4(true, "x > 0", "    ", "c", "        body;\n"),
+            ],
+            "rust_stmt_for_text" => {
+                vec![In::Str5("    ", "i", "0", "10", "        body;\n")]
+            }
+            "rust_stmt_match_head_text" => vec![In::StrPair("    ", "v")],
+            "rust_stmt_match_arm_text" => {
+                vec![In::Str3("        ", "Some(x)", "            x\n")]
+            }
+            // tests: close-at-zero, close-padded
+            "rust_stmt_match_close_text" => {
+                vec![In::Text(""), In::Text("    ")]
+            }
+            "rust_stmt_call_text" => vec![In::Str3("    ", "f", "a, b")],
+            "rust_stmt_return_text" => {
+                vec![In::StrPair("    ", "\"s\".to_string()")]
+            }
+            "rust_stmt_alloc_text" => vec![In::Str4(
+                "    ",
+                "buf",
+                "String",
+                "\"s\".to_string()",
+            )],
+            "rust_stmt_assign_text" => {
+                vec![In::Str3("    ", "x", "(x + 1)")]
+            }
+            "rust_stmt_collection_text" => vec![
+                In::IntStrStr(0, "", "a, b"),
+                In::IntStrStr(1, "", "a, b"),
+                In::IntStrStr(2, "    ", "a, b"),
+                In::IntStrStr(3, "", "a, b"),
+                In::IntStrStr(4, "", "a, b"),
+            ],
+            "rust_stmt_map_text" => vec![In::Str3("    ", "xs", "f")],
+            "rust_stmt_filter_text" => vec![In::Str3("    ", "xs", "p")],
+            "rust_stmt_fold_text" => {
+                vec![In::Str4("    ", "xs", "0", "add")]
+            }
+            "rust_stmt_sort_text" => vec![In::Str3("    ", "xs", "cmp")],
+            "rust_stmt_expr_text" => {
+                vec![In::StrPair("    ", "loop {\n}")]
+            }
+            "rust_tail_expr_text" => vec![In::StrPair("    ", "x")],
+            "rust_tail_block_text" => vec![In::StrPair("a;\n", "b\n")],
             _ => panic!("no golden cases defined for spec {}", spec),
         }
     }
@@ -2147,6 +2868,10 @@ mod xval3 {
     //  rust_match_scrutinee_form, and (String, String,
     //  String) for the three-text templates — each matching
     //  the emitted multi-param signature the same way.
+    //  Slice 5 adds (i64, bool) for rust_stmt_seq_form,
+    //  (bool, String, String, String, String) for
+    //  rust_stmt_while_text, and (String, String, String,
+    //  String, String) for rust_stmt_for_text.
     // ─────────────────────────────────────────────────────────
 
     fn rust_str_literal(s: &str) -> String {
@@ -2405,6 +3130,65 @@ mod xval3 {
                     name = func.name,
                 )
             }
+            In::IntBool(_, _) => {
+                let vals: Vec<String> = inputs
+                    .iter()
+                    .map(|i| match i {
+                        In::IntBool(a, b) => format!("({}, {})", a, b),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                format!(
+                    "{code}\n\nfn main() {{\n    let __inputs: &[(i64, bool)] = &[{vals}];\n    for &(__a, __b) in __inputs {{\n        let __out = {name}(__a, __b);\n        println!(\"{{:?}}\", __out);\n    }}\n}}\n",
+                    code = winner_code,
+                    vals = vals.join(", "),
+                    name = func.name,
+                )
+            }
+            In::BoolStr4(_, _, _, _, _) => {
+                let vals: Vec<String> = inputs
+                    .iter()
+                    .map(|i| match i {
+                        In::BoolStr4(h, a, b, c, d) => format!(
+                            "({}, {}, {}, {}, {})",
+                            h,
+                            rust_str_literal(a),
+                            rust_str_literal(b),
+                            rust_str_literal(c),
+                            rust_str_literal(d)
+                        ),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                format!(
+                    "{code}\n\nfn main() {{\n    let __inputs: &[(bool, &str, &str, &str, &str)] = &[{vals}];\n    for &(__a, __b, __c, __d, __e) in __inputs {{\n        let __out = {name}(__a, __b.to_string(), __c.to_string(), __d.to_string(), __e.to_string());\n        println!(\"{{:?}}\", __out);\n    }}\n}}\n",
+                    code = winner_code,
+                    vals = vals.join(", "),
+                    name = func.name,
+                )
+            }
+            In::Str5(_, _, _, _, _) => {
+                let vals: Vec<String> = inputs
+                    .iter()
+                    .map(|i| match i {
+                        In::Str5(a, b, c, d, e) => format!(
+                            "({}, {}, {}, {}, {})",
+                            rust_str_literal(a),
+                            rust_str_literal(b),
+                            rust_str_literal(c),
+                            rust_str_literal(d),
+                            rust_str_literal(e)
+                        ),
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                format!(
+                    "{code}\n\nfn main() {{\n    let __inputs: &[(&str, &str, &str, &str, &str)] = &[{vals}];\n    for &(__a, __b, __c, __d, __e) in __inputs {{\n        let __out = {name}(__a.to_string(), __b.to_string(), __c.to_string(), __d.to_string(), __e.to_string());\n        println!(\"{{:?}}\", __out);\n    }}\n}}\n",
+                    code = winner_code,
+                    vals = vals.join(", "),
+                    name = func.name,
+                )
+            }
         }
     }
 
@@ -2657,7 +3441,7 @@ mod xval3 {
     // ─────────────────────────────────────────────────────────
 
     #[test]
-    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 79 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
+    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 106 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
     fn m3_cross_validation() {
         let root = env!("CARGO_MANIFEST_DIR");
         let out_dir = format!("{}/target/m3-synthesis", root);
@@ -2670,9 +3454,9 @@ mod xval3 {
         let functions = checked.spec.functions.clone();
 
         let mut md = String::new();
-        let _ = writeln!(md, "# M3 cross-validation (slices 1–4): synthesized winners vs tests/m3_proof.rs mirrors");
+        let _ = writeln!(md, "# M3 cross-validation (slices 1–5): synthesized winners vs tests/m3_proof.rs mirrors");
         let _ = writeln!(md);
-        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the complete finite domain (Int codes -2..=30 for the 31 Int-code specs; rust_keyword: 51 positives + 24 near-miss negatives; rust_literal_bool and rust_test_name_form: the full Bool domain; rust_pattern_ctor_name: 7 names × has_subs; slice 3: rust_string_ownership over the full -2..=30 × -2..=30 cross product, the `++` equation templates over string batteries, rust_ident_suffix over its sanitized-string contract domain plus out-of-contract names reported separately; slice 4: the (kind, lit) code specs over the full 33 × 11 grid, rust_match_scrutinee_form over the full Bool × Bool domain, the walker templates over batteries of pre-rendered child texts incl. composed two-level inputs). See src/m3_cross_validation.rs for sweep definitions and mirror semantics: a case is pinned exactly where the spec's constraints decide it.");
+        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the complete finite domain (Int codes -2..=30 for the 37 Int-code specs; rust_keyword: 51 positives + 24 near-miss negatives; rust_literal_bool and rust_test_name_form: the full Bool domain; rust_pattern_ctor_name: 7 names × has_subs; slice 3: rust_string_ownership over the full -2..=30 × -2..=30 cross product, the `++` equation templates over string batteries, rust_ident_suffix over its sanitized-string contract domain plus out-of-contract names reported separately; slice 4: the (kind, lit) code specs over the full 33 × 11 grid, rust_match_scrutinee_form over the full Bool × Bool domain, the walker templates over batteries of pre-rendered child texts incl. composed two-level inputs; slice 5: the six statement classifications over the same band, rust_stmt_seq_form over positions -2..=3 × the full Bool domain, the statement/tail templates over batteries of pad strings and pre-rendered statement parts). See src/m3_cross_validation.rs for sweep definitions and mirror semantics: a case is pinned exactly where the spec's constraints decide it.");
         let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL) — except a rustc failure at the emitter's rendering layer (the family measured in Phases 25/27/28 and fixed in Phase 29: E0369 Concat-operand ownership; E0308 string-boundary rendering; parse-level unescaped-literal failures), which is recorded as COMPILE_EDGE: not executed, not a behavioral disagreement. Spec-silent (unpinned) cases are reported separately and never counted as disagreements; out-of-contract cases (rust_ident_suffix) are reported separately and counted in no bucket.");
         let _ = writeln!(md);
         let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 verified | Winner prov | Golden agree | Sweep pinned agree | Unpinned cases | Exec |");
@@ -2985,10 +3769,19 @@ mod xval3 {
     /// rust_binop_infix_text pins exactly the symbol
     /// table's range, 5 of its 8 battery cases;
     /// rust_condition_text is total over its 36 cases
-    /// because the classification it composes is total).
+    /// because the classification it composes is total;
+    /// slice 5: the two dispatch tables are total over
+    /// the band by their catch-all rows (33 each),
+    /// rust_stmt_seq_form is total over its 12-case
+    /// position x Bool sweep, the affix and site tables
+    /// pin exactly their stated rows (5, 5, 8, 9), the
+    /// composed rust_stmt_collection_text pins exactly
+    /// the affixes' kinds (5 of its 6 battery cases), and
+    /// the remaining templates are total equations over
+    /// their batteries).
     /// The harness's bookkeeping stands or falls with these
-    /// numbers, so they are pinned here, per spec, all 79.
-    const PINNED_TOTALS: [(&str, usize); 79] = [
+    /// numbers, so they are pinned here, per spec, all 106.
+    const PINNED_TOTALS: [(&str, usize); 106] = [
         ("rust_type_name", 14),
         ("rust_binop_symbol", 17),
         ("rust_unaryop_symbol", 2),
@@ -3069,6 +3862,34 @@ mod xval3 {
         ("rust_break_text", 4),
         ("rust_hole_text", 1),
         ("rust_unsupported_text", 2),
+        // ── slice 5 ──
+        ("rust_stmt_form", 33),
+        ("rust_tail_form", 33),
+        ("rust_stmt_collection_prefix", 5),
+        ("rust_stmt_collection_suffix", 5),
+        ("rust_expectation_source", 8),
+        ("rust_stmt_child_indent", 9),
+        ("rust_stmt_seq_form", 12),
+        ("rust_stmt_hole_text", 3),
+        ("rust_stmt_let_text", 3),
+        ("rust_stmt_if_text", 2),
+        ("rust_stmt_while_text", 3),
+        ("rust_stmt_for_text", 2),
+        ("rust_stmt_match_head_text", 2),
+        ("rust_stmt_match_arm_text", 2),
+        ("rust_stmt_match_close_text", 3),
+        ("rust_stmt_call_text", 2),
+        ("rust_stmt_return_text", 2),
+        ("rust_stmt_alloc_text", 2),
+        ("rust_stmt_assign_text", 2),
+        ("rust_stmt_collection_text", 5),
+        ("rust_stmt_map_text", 2),
+        ("rust_stmt_filter_text", 2),
+        ("rust_stmt_fold_text", 2),
+        ("rust_stmt_sort_text", 2),
+        ("rust_stmt_expr_text", 2),
+        ("rust_tail_expr_text", 2),
+        ("rust_tail_block_text", 3),
     ];
 
     #[test]
@@ -3208,17 +4029,59 @@ mod xval3 {
         assert_eq!(it.len(), 8);
         let (_, pinned, unpinned) = totals("rust_binop_infix_text", &it);
         assert_eq!((pinned, unpinned), (5, 3));
-        // Grand totals across the module: 3548 cases per
-        // run, 2761 pinned, 780 spec-silent, 7 out of
+        // ── slice 5 ──
+        // The two dispatch tables are total over the band
+        // (their catch-all rows decide every code).
+        for name in ["rust_stmt_form", "rust_tail_form"] {
+            let sw = sweep(name);
+            assert_eq!(sw.len(), 33, "{}: band sweep", name);
+            let (_, pinned, unpinned) = totals(name, &sw);
+            assert_eq!((pinned, unpinned), (33, 0), "{}", name);
+        }
+        // The statement affix tables pin kinds 0..=4 only.
+        for name in [
+            "rust_stmt_collection_prefix",
+            "rust_stmt_collection_suffix",
+        ] {
+            let (_, pinned, unpinned) = totals(name, &sweep(name));
+            assert_eq!((pinned, unpinned), (5, 28), "{}", name);
+        }
+        // The site tables pin exactly their stated sites:
+        // expectation sources 0..=7, child indents 0..=8.
+        let (_, pinned, unpinned) =
+            totals("rust_expectation_source", &sweep("rust_expectation_source"));
+        assert_eq!((pinned, unpinned), (8, 25));
+        let (_, pinned, unpinned) =
+            totals("rust_stmt_child_indent", &sweep("rust_stmt_child_indent"));
+        assert_eq!((pinned, unpinned), (9, 24));
+        // rust_stmt_seq_form: positions -2..=3 x the Bool
+        // domain, and the spec decides every pair.
+        let sq = sweep("rust_stmt_seq_form");
+        assert_eq!(sq.len(), 12);
+        let (_, pinned, unpinned) = totals("rust_stmt_seq_form", &sq);
+        assert_eq!((pinned, unpinned), (12, 0));
+        // rust_stmt_collection_text pins exactly the
+        // affixes' kinds: 5 of its 6 battery cases.
+        let ct5 = sweep("rust_stmt_collection_text");
+        assert_eq!(ct5.len(), 6);
+        let (_, pinned, unpinned) = totals("rust_stmt_collection_text", &ct5);
+        assert_eq!((pinned, unpinned), (5, 1));
+        // Grand totals across the module: 3807 cases per
+        // run, 2914 pinned, 886 spec-silent, 7 out of
         // contract. (Slices 1–3: 2196 cases, 1533 pinned,
         // 656 silent — Phase 29 moved the literal specs'
         // three special-contents cases each from pinned to
         // spec-silent, 1539 - 6 / 650 + 6. Slice 4 adds
-        // 1352 cases, 1228 pinned, 124 silent.)
+        // 1352 cases, 1228 pinned, 124 silent. Slice 5 adds
+        // 259 cases, 153 pinned, 106 silent: the six band
+        // classifications contribute 198 cases / 93 pinned,
+        // rust_stmt_seq_form 12 / 12, and the templates
+        // 49 / 48 — the one silent template case is
+        // rust_stmt_collection_text's off-table kind.)
         let total_cases: usize = ALL_SPECS.iter().map(|n| sweep(n).len()).sum();
         let total_pinned: usize = PINNED_TOTALS.iter().map(|(_, t)| t).sum();
-        assert_eq!(total_cases, 3548);
-        assert_eq!(total_pinned, 2761);
+        assert_eq!(total_cases, 3807);
+        assert_eq!(total_pinned, 2914);
     }
 
     #[test]
@@ -3662,6 +4525,42 @@ mod xval3 {
         let ag = compare("rust_match_scrutinee_bare", &inputs, &outs);
         assert_eq!(ag.disagreements.len(), 1);
         assert_eq!(ag.disagreements[0].input, In::IntPair(9, 3));
+
+        // ── slice 5 ──
+        // rust_stmt_seq_form: the decisive cell (1, true)
+        // pins 1, (1, false) pins 0, and an off-domain
+        // position pins 0 by the second row — the
+        // stated-domain extension is load-bearing, so a
+        // winner returning 1 there IS a disagreement.
+        let inputs = vec![
+            In::IntBool(1, true),
+            In::IntBool(1, false),
+            In::IntBool(2, true),
+        ];
+        let outs = vec![Out::Int(1), Out::Int(0), Out::Int(1)];
+        let ag = compare("rust_stmt_seq_form", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 3);
+        assert_eq!(ag.sweep_pinned_agree, 2);
+        assert_eq!(ag.disagreements.len(), 1);
+        assert_eq!(ag.disagreements[0].input, In::IntBool(2, true));
+
+        // rust_stmt_collection_text: kind 5 is spec-silent
+        // (the composed spec decides nothing its affix
+        // callees do not) — any winner output there is
+        // recorded, never a disagreement.
+        let inputs = vec![
+            In::IntStrStr(1, "", "a, b"),
+            In::IntStrStr(5, "", "a"),
+        ];
+        let outs = vec![
+            Out::Text("vec![a, b];\n".to_string()),
+            Out::Text("anything".to_string()),
+        ];
+        let ag = compare("rust_stmt_collection_text", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 1);
+        assert_eq!(ag.sweep_pinned_agree, 1);
+        assert_eq!(ag.unpinned, 1);
+        assert!(ag.disagreements.is_empty());
     }
 
     #[test]
@@ -3852,6 +4751,55 @@ mod xval3 {
         let ag = compare("rust_concat_left_text", &inputs, &outs);
         assert_eq!(ag.sweep_pinned_total, 2);
         assert_eq!(ag.sweep_pinned_agree, 2);
+        assert!(ag.disagreements.is_empty());
+
+        // (Int, bool) spec (slice 5): the runner passes an
+        // i64 code and a bool, matching
+        // `pub fn rust_stmt_seq_form(position: i64, last:
+        // bool) -> i64`.
+        let sq_func = dummy_func("rust_stmt_seq_form", TypeRef::Int, TypeRef::Int);
+        let inputs = vec![
+            In::IntBool(1, true),
+            In::IntBool(1, false),
+            In::IntBool(0, true),
+        ];
+        let sq = "pub fn rust_stmt_seq_form(position: i64, last: bool) -> i64 {\n    if position == 1 && last { 1 } else { 0 }\n}\n";
+        let outs = execute_winner(0, &sq_func, sq, &inputs).expect("seq-form winner must run");
+        let ag = compare("rust_stmt_seq_form", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 3);
+        assert_eq!(ag.sweep_pinned_agree, 3);
+        assert!(ag.disagreements.is_empty());
+
+        // (Bool, String, String, String, String) spec
+        // (slice 5): the runner passes the bool and four
+        // owned Strings, matching `pub fn
+        // rust_stmt_while_text(has_inv: bool, inv: String,
+        // pad: String, cond: String, body: String)
+        // -> String`.
+        let wh_func = dummy_func("rust_stmt_while_text", TypeRef::Bool, TypeRef::String);
+        let inputs = vec![
+            In::BoolStr4(true, "x > 0", "    ", "c", "        body;\n"),
+            In::BoolStr4(false, "", "    ", "c", "        body;\n"),
+        ];
+        let wh = "pub fn rust_stmt_while_text(has_inv: bool, inv: String, pad: String, cond: String, body: String) -> String {\n    if has_inv { format!(\"{}// invariant: {}\\n{}while {} {{\\n{}{}}}\\n\", pad, inv, pad, cond, body, pad) } else { format!(\"{}while {} {{\\n{}{}}}\\n\", pad, cond, body, pad) }\n}\n";
+        let outs = execute_winner(0, &wh_func, wh, &inputs).expect("while winner must run");
+        let ag = compare("rust_stmt_while_text", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 2);
+        assert_eq!(ag.sweep_pinned_agree, 2);
+        assert!(ag.disagreements.is_empty());
+
+        // (String, String, String, String, String) spec
+        // (slice 5): the runner passes five owned Strings,
+        // matching `pub fn rust_stmt_for_text(pad: String,
+        // var: String, start: String, end: String, body:
+        // String) -> String`.
+        let fo_func = dummy_func("rust_stmt_for_text", TypeRef::String, TypeRef::String);
+        let inputs = vec![In::Str5("    ", "i", "0", "10", "        body;\n")];
+        let fo = "pub fn rust_stmt_for_text(pad: String, var: String, start: String, end: String, body: String) -> String {\n    format!(\"{}for {} in {}..{} {{\\n{}{}}}\\n\", pad, var, start, end, body, pad)\n}\n";
+        let outs = execute_winner(0, &fo_func, fo, &inputs).expect("for winner must run");
+        let ag = compare("rust_stmt_for_text", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 1);
+        assert_eq!(ag.sweep_pinned_agree, 1);
         assert!(ag.disagreements.is_empty());
     }
 }
