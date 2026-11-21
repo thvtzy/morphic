@@ -573,6 +573,35 @@ pub fn run_spec_tests(body: &IRNode, spec: &FunctionSpec) -> TestRun {
     run
 }
 
+/// How many of the spec's bindable tests produce a VALUE
+/// under `body` — `eval` returns Ok — regardless of whether
+/// the value matches the expected output. `run_spec_tests`
+/// deliberately does not draw this distinction (a body that
+/// cannot be evaluated fails the test, like a wrong body);
+/// this count exists for the runner's Phase 60 trigger
+/// extension (synthesis::runner), which must tell "the body
+/// evaluated and answered wrong" (valued > 0 — the
+/// interpreter's 0.0 is behavioral truth) from "the body
+/// cannot be evaluated at all" (valued == 0 while tests
+/// bind — the 0.0 is a coverage fact about the
+/// interpreter's subset, e.g. a For/Alloc/Assign scan body,
+/// and the compiled vehicle is the honest judge).
+pub fn valued_test_count(body: &IRNode, spec: &FunctionSpec) -> usize {
+    let mut valued = 0;
+    for test in &spec.tests {
+        let (Some(env), Some(_)) = (
+            bind_test_env(&spec.params, &test.input),
+            value_of_expr(&test.expected_output),
+        ) else {
+            continue;
+        };
+        if eval(body, &env).is_ok() {
+            valued += 1;
+        }
+    }
+    valued
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,6 +987,41 @@ mod tests {
         let body = IRNode::Hole { id: 0, expected_type: None };
         let run = run_spec_tests(&body, &spec);
         assert_eq!(run, TestRun { evaluable: 3, passed: 0 });
+    }
+
+    /// Phase 60: `valued_test_count` separates "the body
+    /// evaluated and answered wrong" from "the body cannot
+    /// be evaluated at all" — the distinction
+    /// `run_spec_tests` deliberately does not draw (both
+    /// score 0 on the test). The runner's Phase 60 trigger
+    /// extension reads it: a candidate valued on ZERO
+    /// bindable tests is interpreter-unevaluable, so its 0.0
+    /// is a coverage fact, not a behavioral one.
+    #[test]
+    fn valued_test_count_distinguishes_wrong_from_unevaluable() {
+        let spec = is_literal_kind_spec();
+        // Evaluable and correct: valued everywhere.
+        let correct = binop(IRBinOp::Eq, var("kind"), int(0));
+        assert_eq!(valued_test_count(&correct, &spec), 3);
+        // Evaluable and wrong: still valued — it produced an
+        // answer on every test.
+        assert_eq!(valued_test_count(&boolean(false), &spec), 3);
+        // Unevaluable (unbound variable / hole / a loop body
+        // over the parameter): valued nowhere.
+        assert_eq!(valued_test_count(&var("result"), &spec), 0);
+        assert_eq!(
+            valued_test_count(&IRNode::Hole { id: 0, expected_type: None }, &spec),
+            0
+        );
+        let loop_body = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "acc".into(),
+                ty: crate::spec::ast::TypeRef::Int,
+                initial: Box::new(int(0)),
+            },
+            IRNode::Return(Box::new(var("acc"))),
+        ]);
+        assert_eq!(valued_test_count(&loop_body, &spec), 0);
     }
 
     #[test]

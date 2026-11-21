@@ -22,7 +22,15 @@
 //    specs; the Phase 53 compiled vehicle for is_sorted),
 //    and the crown's identity, recorded tpr, and compiled
 //    verdict. 2 control draws of count_matching (no
-//    template may fire; the runner must not trigger).
+//    template may fire for it — its shape is the
+//    forall-fold constraint family's, not a template's).
+//    Through Phase 59 the control also asserted the
+//    runner never triggers for count_matching; Phase 60
+//    (G3) re-records that line: the forall-fold seed is
+//    interpreter-unevaluable, so the runner's trigger
+//    extension now scores the pool and crowns the seed —
+//    the control below asserts the new reality (and the
+//    Phase 60 instrument carries the full measurement).
 //
 //  Asserted (deterministic): the Part A firing set; the
 //  template seed's presence in every verified pool; the
@@ -476,8 +484,13 @@ fn main() {
         }
 
         // ── Control: count_matching ──
+        // G2's invariant stands (no template seed — the
+        // shape is the forall-fold family's). The runner
+        // line is Phase 60's re-record: the stage now
+        // triggers via the unevaluable constraint seed and
+        // the crown is that seed at a measured tpr 1.000.
         let cm_functions = load_functions("examples/self_host/count_matching.morph");
-        report.push_str("\n## Control — count_matching (no template in G2)\n");
+        report.push_str("\n## Control — count_matching (no template in G2; forall-fold crown since Phase 60)\n");
         for draw in 0..2 {
             let (func, pool) = verified_pool(&cm_functions, "count_matching");
             assert!(
@@ -485,13 +498,37 @@ fn main() {
                 "count_matching draw {}: no template seed may exist in G2",
                 draw
             );
-            let (rescored, outcome) = rescore_finalists_report(pool, &func);
             assert!(
-                matches!(outcome, RunnerOutcome::NotTriggered),
-                "count_matching draw {}: the runner stage must not trigger",
+                pool.iter().any(|c| matches!(
+                    &c.provenance,
+                    Provenance::ConstraintInduced { kind } if kind == "forall_fold"
+                )),
+                "count_matching draw {}: the forall-fold seed must be in the pool (Phase 60)",
                 draw
             );
+            let seed_key = pool
+                .iter()
+                .find(|c| matches!(
+                    &c.provenance,
+                    Provenance::ConstraintInduced { kind } if kind == "forall_fold"
+                ))
+                .map(|c| body_key(c))
+                .unwrap();
+            let (rescored, outcome) = rescore_finalists_report(pool, &func);
+            assert!(
+                matches!(outcome, RunnerOutcome::Scored { .. }),
+                "count_matching draw {}: the runner stage must score via the Phase 60 trigger extension, got {:?}",
+                draw,
+                outcome
+            );
             let crown = selector::select_best(rescored, &func).expect("select_best");
+            assert!(
+                body_key(&crown) == seed_key,
+                "count_matching draw {}: the crown must be the forall-fold seed's body (Phase 60), got {} [{}]",
+                draw,
+                short_hash(&body_key(&crown)),
+                provenance_name(&crown)
+            );
             let (_, tests) = judge_compiled(&crown, COUNT_MAIN, &dir, &format!("cm_crown_{}", draw));
             report.push_str(&format!(
                 "- draw {}: crown {} [{}] recorded tpr {:.3}, compiled verdict {:?}\n",

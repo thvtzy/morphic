@@ -26,18 +26,53 @@
 //  there); this stage runs once, after verification, on a
 //  bounded finalist set.
 //
-//  TRIGGER (hard invariant): the stage is a no-op unless the
-//  spec HAS in-spec tests and the interpreter cannot bind all
-//  of them (`eval::bindable_test_count(spec) < tests.len()`).
-//  When every test binds, the returned pool is byte-identical
-//  to the input — the M2/M3 instruments' measurements rest on
-//  this, and their specs never trigger the stage.
+//  TRIGGER (hard invariant): the stage is a no-op unless
+//  the spec HAS in-spec tests and the interpreter cannot
+//  bind all of them (`eval::bindable_test_count(spec) <
+//  tests.len()`). When every test binds, the returned pool
+//  is byte-identical to the input — the M2/M3 instruments'
+//  measurements rest on this, and their specs never trigger
+//  the stage.
+//
+//  TRIGGER EXTENSION (Phase 60, campaign slice G3): the
+//  invariant above covers specs whose TESTS the
+//  interpreter cannot bind. A second, disjoint coverage
+//  gap exists on the BODY side: a constraint-constructed
+//  seed (the forall-fold scan is the measured case) whose
+//  body the interpreter cannot evaluate on ANY bindable
+//  test — its interpreter test_pass_ratio is 0.0 by
+//  coverage, not by behavior, so selection ranks it below
+//  bodies the interpreter merely scores low (count_matching's
+//  seed at 0.0 beside constant-0's measured 1/3), and Z3
+//  cannot crown it either (loop bodies are Inconclusive
+//  by construction). The stage therefore ALSO triggers
+//  when every test binds but the pool holds such a seed
+//  (`Provenance::ConstraintInduced` and
+//  `eval::valued_test_count(body, spec) == 0`); the
+//  triggering seeds are guaranteed finalist slots, like
+//  the would-be winner. Scope, recorded: CONSTRUCTED
+//  CONSTRAINT SEEDS ONLY. Template-provenance bodies are
+//  NOT a trigger — is_sorted's adjacent-scan template
+//  sits behind the same interpreter wall, and extending
+//  compiled judging to it is a judging-policy decision
+//  deliberately left for a separate slice (Phase 59's
+//  record); arbitrary candidates (Mutation/MCTS bodies)
+//  are the broader wall beyond that. Specs whose
+//  constructed seeds the interpreter CAN evaluate are
+//  untouched: their seeds' scores are behavioral truth
+//  already, and the M2/M3/tokenizer winner rows — every
+//  one an interpreter-evaluable constraint seed — stay
+//  byte-identical.
 //
 //  FINALISTS: the top `RUNNER_FINALISTS` candidates by the
-//  existing composite ranking, with the would-be winner (what
-//  `select_best` crowns on the un-rescored pool) guaranteed a
-//  slot — it takes the last finalist's place if it ranked
-//  outside the top-k.
+//  existing composite ranking, with the would-be winner
+//  (what `select_best` crowns on the un-rescored pool)
+//  guaranteed a slot — it takes the last finalist's place
+//  if it ranked outside the top-k. Under the Phase 60
+//  extension the triggering seeds are guaranteed slots by
+//  the same rule, displacing the lowest-ranked unprotected
+//  finalists (never the would-be winner, never another
+//  guaranteed seed).
 //
 //  RANKING SEMANTICS (explicit): a finalist's runner ratio
 //  replaces its test_pass_ratio (times the same per-hole
@@ -64,7 +99,9 @@
 
 use crate::codegen;
 use crate::spec::ast::{Expr, FunctionSpec};
-use crate::synthesis::engine::{composite_score, count_holes, CandidateImplementation};
+use crate::synthesis::engine::{
+    composite_score, count_holes, CandidateImplementation, Provenance,
+};
 use crate::synthesis::selector;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -111,6 +148,52 @@ enum RunnerVerdict {
     InfraFailure,
 }
 
+/// Why the stage runs for a pool (see the module header's
+/// TRIGGER sections). Pure and eval-only — unit-tested
+/// without rustc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trigger {
+    /// Phase 58: some in-spec tests cannot bind in the
+    /// interpreter, so every candidate sits at the FALLBACK
+    /// test_pass_ratio.
+    UnbindableTests,
+    /// Phase 60: every test binds, but these pool indices
+    /// are constraint-constructed seeds the interpreter
+    /// cannot evaluate on any test. They are guaranteed
+    /// finalist slots.
+    ConstructedSeeds(Vec<usize>),
+}
+
+/// The stage's trigger decision. `None` — the hard
+/// invariant's no-op — unless the spec has tests and one
+/// of the two recorded coverage gaps holds.
+pub fn trigger(candidates: &[CandidateImplementation], spec: &FunctionSpec) -> Option<Trigger> {
+    if candidates.is_empty() || spec.tests.is_empty() {
+        return None;
+    }
+    if super::eval::bindable_test_count(spec) < spec.tests.len() {
+        return Some(Trigger::UnbindableTests);
+    }
+    // Phase 60 extension: all tests bind, so a candidate's
+    // interpreter score is behavioral truth — EXCEPT a
+    // constraint-constructed seed whose body the
+    // interpreter cannot evaluate at all (valued on zero
+    // bindable tests): its 0.0 records the interpreter's
+    // subset, not the body's behavior.
+    let seeds: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c.provenance, Provenance::ConstraintInduced { .. }))
+        .filter(|(_, c)| super::eval::valued_test_count(&c.body, spec) == 0)
+        .map(|(i, _)| i)
+        .collect();
+    if seeds.is_empty() {
+        None
+    } else {
+        Some(Trigger::ConstructedSeeds(seeds))
+    }
+}
+
 /// The pipeline stage, as wired into `main.rs` between
 /// verification and selection (the `verify_all` precedent: a
 /// stage that takes the pool and returns a re-scored pool).
@@ -126,13 +209,13 @@ pub fn rescore_finalists_report(
     candidates: Vec<CandidateImplementation>,
     spec: &FunctionSpec,
 ) -> (Vec<CandidateImplementation>, RunnerOutcome) {
-    // Trigger (hard invariant — see the module header).
-    if candidates.is_empty() || spec.tests.is_empty() {
-        return (candidates, RunnerOutcome::NotTriggered);
-    }
-    if super::eval::bindable_test_count(spec) >= spec.tests.len() {
-        return (candidates, RunnerOutcome::NotTriggered);
-    }
+    // Trigger (hard invariant + Phase 60 extension — see
+    // the module header).
+    let guaranteed: Vec<usize> = match trigger(&candidates, spec) {
+        None => return (candidates, RunnerOutcome::NotTriggered),
+        Some(Trigger::UnbindableTests) => Vec::new(),
+        Some(Trigger::ConstructedSeeds(indices)) => indices,
+    };
 
     let started = Instant::now();
     let dir = std::env::temp_dir().join(format!(
@@ -144,7 +227,7 @@ pub fn rescore_finalists_report(
         return (candidates, RunnerOutcome::Degraded);
     }
 
-    let finalist_idx = choose_finalists(&candidates, spec);
+    let finalist_idx = choose_finalists(&candidates, spec, &guaranteed);
     let mut verdicts: Vec<(usize, usize, usize)> = Vec::new();
     let mut degraded = false;
     for &idx in &finalist_idx {
@@ -174,8 +257,17 @@ pub fn rescore_finalists_report(
 
 /// The finalist set: top `RUNNER_FINALISTS` by the existing
 /// composite ranking (stable — ties keep pool order), with
-/// the would-be winner guaranteed a slot.
-fn choose_finalists(candidates: &[CandidateImplementation], spec: &FunctionSpec) -> Vec<usize> {
+/// the would-be winner guaranteed a slot, and — under the
+/// Phase 60 trigger extension — each triggering seed in
+/// `guaranteed` guaranteed one too. A guarantee displaces
+/// the lowest-ranked finalist that is neither the would-be
+/// winner nor another guaranteed seed; with a pool smaller
+/// than k everyone is a finalist anyway.
+fn choose_finalists(
+    candidates: &[CandidateImplementation],
+    spec: &FunctionSpec,
+    guaranteed: &[usize],
+) -> Vec<usize> {
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     order.sort_by(|&a, &b| {
         composite_score(&candidates[b].scores)
@@ -184,15 +276,40 @@ fn choose_finalists(candidates: &[CandidateImplementation], spec: &FunctionSpec)
     });
     let mut chosen: Vec<usize> =
         order.iter().take(RUNNER_FINALISTS).cloned().collect();
+    let mut protected: Vec<usize> = Vec::new();
     if let Ok(winner) = selector::select_best(candidates.to_vec(), spec) {
-        if !chosen.iter().any(|&i| candidates[i].id == winner.id) {
-            if let Some(pos) = candidates.iter().position(|c| c.id == winner.id) {
+        if let Some(pos) = candidates.iter().position(|c| c.id == winner.id) {
+            protected.push(pos);
+            if !chosen.contains(&pos) {
                 if chosen.len() >= RUNNER_FINALISTS {
                     chosen.pop();
                 }
                 chosen.push(pos);
             }
         }
+    }
+    for &idx in guaranteed {
+        if chosen.contains(&idx) {
+            if !protected.contains(&idx) {
+                protected.push(idx);
+            }
+            continue;
+        }
+        if chosen.len() >= RUNNER_FINALISTS {
+            // Displace the lowest-ranked unprotected
+            // finalist; if every finalist is protected
+            // (a degenerate pool), the guarantee yields —
+            // it cannot evict the winner or a fellow seed.
+            let Some(displace) = chosen
+                .iter()
+                .rposition(|i| !protected.contains(i))
+            else {
+                continue;
+            };
+            chosen.remove(displace);
+        }
+        chosen.push(idx);
+        protected.push(idx);
     }
     chosen
 }
@@ -681,6 +798,104 @@ spec add_one {
 }
 "#;
 
+    /// The count_matching shape (Phase 60): two parameters,
+    /// tuple tests of first-order values — every test binds
+    /// in the interpreter (Phase 53), so the Phase 58
+    /// trigger stays silent; only the Phase 60 extension
+    /// (a constraint-constructed seed the interpreter
+    /// cannot evaluate) may fire.
+    const COUNT_SHAPED: &str = r#"
+Mini {
+spec count_above {
+    input: values: List<Int>, limit: Int
+    output: Int
+
+    constraint: forall x: Int in values:
+        x > limit implies output > 0
+    constraint: output >= 0
+
+    test "all" { input: ([10, 20, 30], 5); expect: 3 }
+    test "none" { input: ([1, 2, 3], 5); expect: 0 }
+    test "mixed" { input: ([1, 10, 2, 20], 5); expect: 2 }
+}
+}
+"#;
+
+    /// The forall-fold scan body for COUNT_SHAPED — the
+    /// Phase 60 family's construction (Alloc + For + Index
+    /// + conditional increment). The interpreter binds the
+    /// spec's tests but cannot evaluate this body on any of
+    /// them (For/Alloc/Assign are outside its subset).
+    fn scan_body() -> IRNode {
+        let var = |n: &str| IRNode::Var(n.to_string());
+        let int = |n: i64| {
+            IRNode::Literal(crate::synthesis::engine::IRLiteral::Int(n))
+        };
+        IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "count".into(),
+                ty: crate::spec::ast::TypeRef::Int,
+                initial: Box::new(int(0)),
+            },
+            IRNode::For {
+                var: "i".into(),
+                start: Box::new(int(0)),
+                end: Box::new(IRNode::UnaryOp(
+                    crate::synthesis::engine::IRUnaryOp::Len,
+                    Box::new(var("values")),
+                )),
+                body: Box::new(IRNode::Assign {
+                    target: Box::new(var("count")),
+                    value: Box::new(IRNode::BinOp(
+                        crate::synthesis::engine::IRBinOp::Add,
+                        Box::new(var("count")),
+                        Box::new(IRNode::If {
+                            condition: Box::new(IRNode::BinOp(
+                                crate::synthesis::engine::IRBinOp::Gt,
+                                Box::new(IRNode::Index(
+                                    Box::new(var("values")),
+                                    Box::new(var("i")),
+                                )),
+                                Box::new(var("limit")),
+                            )),
+                            then_branch: Box::new(int(1)),
+                            else_branch: Box::new(int(0)),
+                        }),
+                    )),
+                }),
+            },
+            IRNode::Return(Box::new(var("count"))),
+        ])
+    }
+
+    fn candidate_with_provenance(
+        id: u64,
+        spec: &FunctionSpec,
+        body: IRNode,
+        tpr: f64,
+        provenance: Provenance,
+    ) -> CandidateImplementation {
+        let scores = ScoreBreakdown {
+            test_pass_ratio: tpr,
+            constraint_score: 0.0,
+            complexity_score: 0.8,
+            quality_score: 0.8,
+            synthesis_time_us: 0,
+        };
+        CandidateImplementation {
+            id,
+            body,
+            spec_name: spec.name.clone(),
+            spec: spec.clone(),
+            score: composite_score(&scores),
+            scores,
+            generation: 0,
+            provenance,
+            verified: false,
+            verification_status: None,
+        }
+    }
+
     const NO_TESTS: &str = r#"
 Mini {
 spec add_one {
@@ -746,6 +961,167 @@ spec add_one {
         assert_eq!(tprs(&out), vec![1.0, 0.5]);
     }
 
+    /// Phase 60 trigger extension: all tests bind, but the
+    /// pool holds a constraint-constructed seed the
+    /// interpreter cannot evaluate on any test — the stage
+    /// must fire, naming the seed's pool index.
+    #[test]
+    fn trigger_fires_for_unevaluable_constraint_seed() {
+        let spec = spec_from(COUNT_SHAPED);
+        assert_eq!(crate::synthesis::eval::bindable_test_count(&spec), 3);
+        let seed = candidate_with_provenance(
+            1,
+            &spec,
+            scan_body(),
+            0.0,
+            Provenance::ConstraintInduced { kind: "forall_fold".into() },
+        );
+        let constant = candidate_with_provenance(
+            2,
+            &spec,
+            IRNode::Literal(crate::synthesis::engine::IRLiteral::Int(0)),
+            1.0 / 3.0,
+            Provenance::Mutation { parent_id: 0, mutation_kind: "test".into() },
+        );
+        match trigger(&[seed, constant], &spec) {
+            Some(Trigger::ConstructedSeeds(indices)) => {
+                assert_eq!(indices, vec![0], "the seed's pool index must be named");
+            }
+            other => panic!("expected ConstructedSeeds trigger, got {:?}", other),
+        }
+    }
+
+    /// The extension's scope limits, recorded as tests:
+    /// an EVALUABLE constraint seed needs no bridge; an
+    /// unevaluable body of any other provenance — a
+    /// template seed (is_sorted's wall, reserved for a
+    /// separate decision) or an arbitrary mutation — does
+    /// not fire the stage.
+    #[test]
+    fn trigger_ignores_evaluable_seeds_and_other_provenances() {
+        let spec = spec_from(COUNT_SHAPED);
+        // Evaluable constraint seed (an expression body the
+        // interpreter judges directly).
+        let evaluable_seed = candidate_with_provenance(
+            1,
+            &spec,
+            IRNode::Literal(crate::synthesis::engine::IRLiteral::Int(0)),
+            1.0 / 3.0,
+            Provenance::ConstraintInduced { kind: "equation".into() },
+        );
+        assert!(trigger(&[evaluable_seed], &spec).is_none());
+        // The same unevaluable scan body under Template
+        // provenance: no trigger (the recorded scope limit).
+        let template = candidate_with_provenance(
+            2,
+            &spec,
+            scan_body(),
+            0.0,
+            Provenance::Template { template_name: "adjacent_scan".into() },
+        );
+        assert!(trigger(&[template], &spec).is_none());
+        // Under Mutation provenance: no trigger either —
+        // arbitrary candidates are the broader wall, not
+        // this extension's.
+        let mutation = candidate_with_provenance(
+            3,
+            &spec,
+            scan_body(),
+            0.0,
+            Provenance::Mutation { parent_id: 0, mutation_kind: "test".into() },
+        );
+        assert!(trigger(&[mutation], &spec).is_none());
+        // No candidates / the Phase 58 trigger: unchanged.
+        let mini = spec_from(MINI_SORT);
+        let any = candidate(1, &mini, IRNode::Var("list".into()), 1.0, 0.0);
+        assert!(matches!(trigger(&[any], &mini), Some(Trigger::UnbindableTests)));
+    }
+
+    /// The guaranteed-slot rule: a triggering seed outside
+    /// the top-k (and not the would-be winner) still becomes
+    /// a finalist, displacing the lowest-ranked unprotected
+    /// finalist — never the would-be winner and never
+    /// another guaranteed seed.
+    #[test]
+    fn choose_finalists_guarantees_triggering_seeds() {
+        let spec = spec_from(COUNT_SHAPED);
+        // Ten candidates, composite strictly decreasing in
+        // id; the seed sits last with the worst scores, so
+        // it is neither top-k nor the would-be winner.
+        let mut pool = Vec::new();
+        for i in 0..10u64 {
+            let mut c = candidate_with_provenance(
+                i + 1,
+                &spec,
+                IRNode::Literal(crate::synthesis::engine::IRLiteral::Int(0)),
+                1.0,
+                Provenance::Mutation { parent_id: 0, mutation_kind: "test".into() },
+            );
+            c.scores.quality_score = 1.0 - (i as f64) * 0.05;
+            c.score = composite_score(&c.scores);
+            pool.push(c);
+        }
+        pool[9] = candidate_with_provenance(
+            10,
+            &spec,
+            scan_body(),
+            0.0,
+            Provenance::ConstraintInduced { kind: "forall_fold".into() },
+        );
+        let winner = selector::select_best(pool.clone(), &spec).unwrap();
+        assert_ne!(winner.id, 10, "setup: the seed must not be the would-be winner");
+        let chosen = choose_finalists(&pool, &spec, &[9]);
+        assert_eq!(chosen.len(), RUNNER_FINALISTS);
+        assert!(chosen.contains(&9), "the triggering seed must be a finalist");
+        assert!(
+            chosen.iter().any(|&i| pool[i].id == winner.id),
+            "the would-be winner keeps its guaranteed slot"
+        );
+        // Without the guarantee the seed is not chosen.
+        let plain = choose_finalists(&pool, &spec, &[]);
+        assert!(!plain.contains(&9));
+    }
+
+    /// End-to-end in miniature (ignored: drives real rustc):
+    /// the scan seed sits at interpreter tpr 0.0 and the
+    /// constant body at a measured 1/3 before the stage;
+    /// after it, the seed's recorded ratio is the runner's
+    /// 3/3 and selection crowns the seed.
+    #[test]
+    #[ignore = "Phase 60 end-to-end: compiles count-shaped finalists with rustc; run explicitly with --ignored runner_scores_forall_fold_seed"]
+    fn runner_scores_forall_fold_seed_and_crowns_it() {
+        let spec = spec_from(COUNT_SHAPED);
+        let seed = candidate_with_provenance(
+            1,
+            &spec,
+            scan_body(),
+            0.0,
+            Provenance::ConstraintInduced { kind: "forall_fold".into() },
+        );
+        let constant = candidate_with_provenance(
+            2,
+            &spec,
+            IRNode::Literal(crate::synthesis::engine::IRLiteral::Int(0)),
+            1.0 / 3.0,
+            Provenance::Mutation { parent_id: 0, mutation_kind: "test".into() },
+        );
+        let (pool, outcome) = rescore_finalists_report(vec![seed, constant], &spec);
+        match outcome {
+            RunnerOutcome::Scored { finalists, .. } => {
+                assert_eq!(finalists.len(), 2, "both candidates are finalists");
+            }
+            other => panic!("expected Scored, got {:?}", other),
+        }
+        let by_id: HashMap<u64, f64> = pool
+            .iter()
+            .map(|c| (c.id, c.scores.test_pass_ratio))
+            .collect();
+        assert!((by_id[&1] - 1.0).abs() < 1e-9, "seed tpr {}", by_id[&1]);
+        assert!((by_id[&2] - 1.0 / 3.0).abs() < 1e-9, "constant tpr {}", by_id[&2]);
+        let winner = selector::select_best(pool, &spec).unwrap();
+        assert_eq!(winner.id, 1, "the forall-fold seed must crown");
+    }
+
     #[test]
     fn choose_finalists_takes_top_k_and_always_the_would_be_winner() {
         let spec = spec_from(MINI_SORT);
@@ -762,7 +1138,7 @@ spec add_one {
             c.score = composite_score(&c.scores);
             pool.push(c);
         }
-        let chosen = choose_finalists(&pool, &spec);
+        let chosen = choose_finalists(&pool, &spec, &[]);
         assert_eq!(chosen.len(), RUNNER_FINALISTS);
         let winner = selector::select_best(pool.clone(), &spec).unwrap();
         assert!(
@@ -771,7 +1147,7 @@ spec add_one {
         );
         // A pool smaller than k: everyone is a finalist.
         let small = pool[..3].to_vec();
-        assert_eq!(choose_finalists(&small, &spec).len(), 3);
+        assert_eq!(choose_finalists(&small, &spec, &[]).len(), 3);
     }
 
     #[test]

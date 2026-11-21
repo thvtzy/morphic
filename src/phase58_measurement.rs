@@ -12,11 +12,16 @@
 //    by the Phase 53 compiled vehicle (winner function as a
 //    lib + a hand-written runner main), the stage's own
 //    finalist verdicts, and its wall time.
-//  - examples/self_host/count_matching.morph and
-//    examples/self_host/is_sorted.morph — controls: their
+//  - examples/self_host/is_sorted.morph — control: its
 //    tests fully bind in the interpreter, so the stage must
 //    be a byte-identical no-op (asserted: outcome
 //    NotTriggered, every score unchanged).
+//  - examples/self_host/count_matching.morph was the
+//    second control through Phase 59. Phase 60 (G3) moved
+//    it out of the control set BY DESIGN: its forall-fold
+//    constraint seed is interpreter-unevaluable, so the
+//    runner's trigger extension now scores it — measured
+//    by the Phase 60 instrument, not here.
 //
 //  Asserted: the stage triggers (Scored) for sort and
 //  binary_search on every draw; the controls never trigger.
@@ -420,7 +425,7 @@ fn main() {
     }
 
     #[test]
-    #[ignore = "Phase 58 measurement: 5 draws each of sort + binary_search through the full pipeline with G1 rescoring, crowns judged by compiled runners, plus 2 control draws each; run explicitly with --ignored --nocapture phase58_measurement"]
+    #[ignore = "Phase 58 measurement: 5 draws each of sort + binary_search through the full pipeline with G1 rescoring, crowns judged by compiled runners, plus 2 is_sorted control draws; run explicitly with --ignored --nocapture phase58_measurement"]
     fn phase58_measurement() {
         let root = env!("CARGO_MANIFEST_DIR");
         let dir = format!("{}/target/phase58", root);
@@ -430,8 +435,9 @@ fn main() {
         report.push_str(
             "Pipeline per draw: synthesize_with_module (opt 1) → verify_all → \
              [crown BEFORE] → runner::rescore_finalists → [crown AFTER]. Crowns \
-             judged by the Phase 53 compiled vehicle. Controls assert the stage \
-             is a byte-identical no-op for fully-bindable specs.\n\n",
+             judged by the Phase 53 compiled vehicle. The is_sorted control \
+             asserts the stage is a byte-identical no-op for a fully-bindable \
+             spec with no interpreter-unevaluable constraint seed.\n\n",
         );
         measure_spec(&mut report, "examples/sort.morph", "sort", SORT_RUNNER_MAIN, 5, &dir);
         measure_spec(
@@ -443,7 +449,9 @@ fn main() {
             &dir,
         );
         scan_binary_search_pool(&mut report, 2, &dir);
-        measure_control(&mut report, "examples/self_host/count_matching.morph", "count_matching", 2);
+        // count_matching is no longer a control (Phase 60 —
+        // see the header): the stage triggers for it by
+        // design since the forall-fold seed landed.
         measure_control(&mut report, "examples/self_host/is_sorted.morph", "is_sorted", 2);
         std::fs::write(format!("{}/measurement-report.md", dir), &report).unwrap();
         print!("{}", report);

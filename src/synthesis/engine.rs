@@ -746,7 +746,13 @@ impl SynthesisEngine {
     /// by the same admission rule.
     fn seed_from_constraints(&self, spec: &FunctionSpec) -> Vec<CandidateImplementation> {
         let mut seeds = Vec::new();
+        // Whether any family has claimed the spec — read by
+        // the forall-fold precedence gate below (a Cell so
+        // the flag is readable between `admit` calls; the
+        // closure's mutable borrow of `seeds` is not).
+        let claimed = std::cell::Cell::new(false);
         let mut admit = |kind: &str, body: IRNode| {
+            claimed.set(true);
             seeds.push(CandidateImplementation {
                 id: self.new_id(),
                 body,
@@ -787,7 +793,34 @@ impl SynthesisEngine {
         if let Some(body) = char_equation_seed_body(spec, &self.spec_index) {
             admit("char_equation", body);
         }
+        // Phase 60 (campaign slice G3): the forall-fold
+        // family runs LAST and claims only a spec no
+        // earlier family seeded — its territory rule,
+        // enforced here (the char_equation right of first
+        // refusal generalized to all nine families), so
+        // the families never produce two constructed
+        // bodies for one spec.
+        if !claimed.get() {
+            if let Some(body) = forall_fold_seed_body(spec, &self.spec_index) {
+                admit("forall_fold", body);
+            }
+        }
         seeds
+    }
+
+    /// Instrument surface: the kinds of the constraint
+    /// seeds this engine builds for `spec`, in family
+    /// order. The Phase 60 firing inventory reads the
+    /// family census directly instead of inferring it
+    /// from synthesis pools.
+    pub(crate) fn constraint_seed_kinds(&self, spec: &FunctionSpec) -> Vec<String> {
+        self.seed_from_constraints(spec)
+            .iter()
+            .map(|c| match &c.provenance {
+                Provenance::ConstraintInduced { kind } => kind.clone(),
+                _ => unreachable!("constraint seeds carry ConstraintInduced provenance"),
+            })
+            .collect()
     }
 
     fn seed_from_templates(&self, spec: &FunctionSpec) -> Result<Vec<CandidateImplementation>, SynthesisError> {
@@ -4363,6 +4396,272 @@ fn char_equation_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRN
     None
 }
 
+/// A constraint read as a single comparison between two
+/// expressions: (operator, lhs, rhs). Two parser encodings
+/// denote the same shape — `Constraint::Order`, and the
+/// `Constraint::Expr(BinOp)` form the parser actually
+/// produces for `a > b` in constraint position (its
+/// expression parser consumes the comparison before the
+/// constraint layer can claim it; measured on
+/// count_matching, whose postconditions all arrive in the
+/// Expr form) — so readers normalize both. Only the six
+/// comparison operators qualify.
+fn constraint_comparison(c: &Constraint) -> Option<(IRBinOp, &Expr, &Expr)> {
+    match c {
+        Constraint::Order(op, l, r) => {
+            let ir = match op {
+                OrderOp::LessThan => IRBinOp::Lt,
+                OrderOp::LessThanOrEqual => IRBinOp::Le,
+                OrderOp::GreaterThan => IRBinOp::Gt,
+                OrderOp::GreaterThanOrEqual => IRBinOp::Ge,
+            };
+            Some((ir, l, r))
+        }
+        Constraint::Expr(Expr::BinOp(op, l, r)) => match op {
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Neq => {
+                Some((binop_to_ir(*op), l, r))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a constraint mentions a variable anywhere in
+/// its expressions (the constraint-level companion of
+/// `expr_mentions_var`).
+fn constraint_mentions_var(c: &Constraint, name: &str) -> bool {
+    match c {
+        Constraint::True => false,
+        Constraint::Expr(e) => expr_mentions_var(e, name),
+        Constraint::Forall { body, .. } | Constraint::Exists { body, .. } => {
+            constraint_mentions_var(body, name)
+        }
+        Constraint::Implies(a, b) => {
+            constraint_mentions_var(a, name) || constraint_mentions_var(b, name)
+        }
+        Constraint::And(cs) | Constraint::Or(cs) => {
+            cs.iter().any(|c| constraint_mentions_var(c, name))
+        }
+        Constraint::Not(inner) => constraint_mentions_var(inner, name),
+        Constraint::Eq(l, r) | Constraint::Order(_, l, r) => {
+            expr_mentions_var(l, name) || expr_mentions_var(r, name)
+        }
+        Constraint::Predicate(_, args) => args.iter().any(|a| expr_mentions_var(a, name)),
+    }
+}
+
+/// The forall-fold seed's body: a counting scan built from
+/// the quantified predicate a `Forall` postcondition
+/// states — the tenth constraint-seed family, and the one
+/// standalone spec shape with a derivable construction
+/// (Phase 57 answer 3).
+///
+/// The measured shape is count_matching: an Int return;
+/// exactly two parameters, one a `List<E>`; a postcondition
+/// `forall x: E in <list>: <pred> implies <consequent
+/// mentioning output>`, where <pred> is ONE comparison
+/// between the quantified element variable and a scalar
+/// parameter of the same type (`x > threshold`). The
+/// parser discards the Forall's collection expression
+/// (`parse_forall` reads and drops it), so the iterated
+/// list is inferred: the spec's unique List parameter,
+/// whose element type must equal the quantified variable's
+/// declared type — two List parameters make the inference
+/// ambiguous and are refused, as is any other arity than
+/// the measured two-parameter signature.
+///
+/// The construction (see `forall_fold_scan`) mines the
+/// predicate and builds the scan the Phase 59 support
+/// matrix proved compilable — Alloc accumulator, For over
+/// `0..len(list)`, the element read by Index, a conditional
+/// increment — NOT the IR Fold node, which renders E0308
+/// (its closure binds `&i64` where the IR body uses the
+/// element by value, and the IR has no Deref node).
+///
+/// Admission, exactly: the return is in the Int family (a
+/// count); the element type is a concrete ordered scalar
+/// (the templates' discipline — a generic element's
+/// comparison cannot render under the bound-free generated
+/// signature); the spec's in-spec tests are non-empty and
+/// ALL bind in the interpreter (the family's judging
+/// bridge re-reads them from the generated test module —
+/// see below). The first Forall postcondition in spec
+/// order decides: a deviating one is this family's shape
+/// refused (the guard families' row discipline), not a
+/// skippable non-row. NOT admitted, by design and
+/// recorded here: compound predicates (conjunctions,
+/// disjunctions, negations of comparisons), literal
+/// thresholds, arithmetic on either side of the
+/// comparison, predicate calls, Index-form element access
+/// (is_sorted's adjacent-index shape — a different
+/// construction, owned by the adjacent-scan template),
+/// a Forall without the implication, a consequent that
+/// does not mention `output`, and an `Exists`.
+///
+/// The admission standard differs from the equation
+/// family's, as char_equation's does: the scan body is a
+/// loop, Z3 encodes none of the loop/mutation nodes, so
+/// the seed's verdict is Inconclusive BY CONSTRUCTION
+/// (measured, Phase 60 probe) and no constraint score can
+/// crown it; and the interpreter binds the spec's tests
+/// but cannot evaluate For/Alloc/Assign bodies, so its
+/// interpreter tpr is 0.0 by coverage, not by behavior
+/// (measured: evaluable 3, passed 0, beside constant-0's
+/// measured 1/3). The seed's evidence standard is
+/// therefore the compiled vehicle, reached through the
+/// runner's Phase 60 trigger extension: where a
+/// constraint-constructed seed is present but
+/// interpreter-unevaluable, the compiled runner judges
+/// the finalists. Absent that bridge this family would
+/// seed a body selection can never crown.
+///
+/// Territory: the family claims only specs no earlier
+/// family seeded — the precedence is enforced in
+/// `seed_from_constraints` (the char_equation right of
+/// first refusal, generalized to all nine families), and
+/// the Phase 60 inventory over the 142-spec corpus
+/// measures the firing set as exactly {count_matching}:
+/// every earlier family's signature region (scalar
+/// equations and guard rows over Int/Bool/Char keys) is
+/// disjoint from a two-parameter List signature carrying
+/// a Forall, and the three other standalone specs fail
+/// the return/List gates outright.
+fn forall_fold_seed_body(spec: &FunctionSpec, _index: &SpecIndex) -> Option<IRNode> {
+    if !is_int_family(&spec.return_type) {
+        return None;
+    }
+    if spec.params.len() != 2 {
+        return None;
+    }
+    let list_param = spec.params.iter().find(|p| matches!(p.ty, TypeRef::List(_)))?;
+    let TypeRef::List(elem_box) = &list_param.ty else {
+        return None;
+    };
+    let elem: &TypeRef = elem_box.as_ref();
+    if !super::templates::is_concrete_ordered_scalar(elem) {
+        return None;
+    }
+    if spec.tests.is_empty() || super::eval::bindable_test_count(spec) != spec.tests.len() {
+        return None;
+    }
+    for c in &spec.postconditions {
+        let Constraint::Forall { vars, body } = c else {
+            continue;
+        };
+        return forall_fold_scan(spec, list_param, elem, vars, body);
+    }
+    None
+}
+
+/// The scan for one admitted Forall (see
+/// `forall_fold_seed_body` for the admission record): the
+/// implication's antecedent is the counting predicate,
+/// its consequent must mention `output` (the quantified
+/// statement is evidence about the result, not a bare
+/// element property), and the constructed body counts the
+/// elements satisfying the predicate — the construction
+/// the Phase 57 audit derived from the shape, whose
+/// stated constraints (a one-way implication plus bounds)
+/// constrain but do not by themselves determine a count.
+fn forall_fold_scan(
+    spec: &FunctionSpec,
+    list_param: &Param,
+    elem: &TypeRef,
+    vars: &[(String, TypeRef)],
+    body: &Constraint,
+) -> Option<IRNode> {
+    if vars.len() != 1 {
+        return None;
+    }
+    let (elem_name, elem_ty) = &vars[0];
+    if elem_ty != elem {
+        return None;
+    }
+    let Constraint::Implies(antecedent, consequent) = body else {
+        return None;
+    };
+    if !constraint_mentions_var(consequent, OUTPUT_VAR) {
+        return None;
+    }
+    let (op, lhs, rhs) = constraint_comparison(antecedent)?;
+    // One side of the comparison is exactly the quantified
+    // element variable; the other is exactly one scalar
+    // parameter of the element's type. The written
+    // orientation is preserved (no operator normalization:
+    // `limit >= x` builds `limit >= list[i]`).
+    let (elem_on_left, scalar_expr) = if matches!(lhs, Expr::Var(v) if v == elem_name) {
+        (true, rhs)
+    } else if matches!(rhs, Expr::Var(v) if v == elem_name) {
+        (false, lhs)
+    } else {
+        return None;
+    };
+    let Expr::Var(scalar_name) = scalar_expr else {
+        return None;
+    };
+    if scalar_name == elem_name {
+        return None;
+    }
+    let scalar_param = spec.params.iter().find(|p| &p.name == scalar_name)?;
+    if scalar_param.name == list_param.name || &scalar_param.ty != elem {
+        return None;
+    }
+    // Construction (Phase 59's proven scan form; shape A
+    // of the Phase 60 probe — both shapes compiled and
+    // passed 3/3, this one folds the condition into the
+    // assigned value exactly as the adjacent scan folds
+    // its comparison into the accumulator's update):
+    // Alloc the accumulator, walk `0..len(list)`, add
+    // `if <pred> { 1 } else { 0 }` per element — the
+    // predicate with the element variable replaced by the
+    // indexed access — and return the accumulator.
+    let taken: Vec<&str> = spec.params.iter().map(|p| p.name.as_str()).collect();
+    let acc = super::templates::fresh_name("count", &taken);
+    let mut idx_taken: Vec<&str> = taken.clone();
+    idx_taken.push(acc.as_str());
+    let idx = super::templates::fresh_name("i", &idx_taken);
+    let elem_access = IRNode::Index(
+        Box::new(IRNode::Var(list_param.name.clone())),
+        Box::new(IRNode::Var(idx.clone())),
+    );
+    let scalar_ref = IRNode::Var(scalar_name.clone());
+    let (pred_l, pred_r) = if elem_on_left {
+        (elem_access, scalar_ref)
+    } else {
+        (scalar_ref, elem_access)
+    };
+    let int = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+    Some(IRNode::Block(vec![
+        IRNode::Alloc {
+            name: acc.clone(),
+            ty: spec.return_type.clone(),
+            initial: Box::new(int(0)),
+        },
+        IRNode::For {
+            var: idx,
+            start: Box::new(int(0)),
+            end: Box::new(IRNode::UnaryOp(
+                IRUnaryOp::Len,
+                Box::new(IRNode::Var(list_param.name.clone())),
+            )),
+            body: Box::new(IRNode::Assign {
+                target: Box::new(IRNode::Var(acc.clone())),
+                value: Box::new(IRNode::BinOp(
+                    IRBinOp::Add,
+                    Box::new(IRNode::Var(acc.clone())),
+                    Box::new(IRNode::If {
+                        condition: Box::new(IRNode::BinOp(op, Box::new(pred_l), Box::new(pred_r))),
+                        then_branch: Box::new(int(1)),
+                        else_branch: Box::new(int(0)),
+                    }),
+                )),
+            }),
+        },
+        IRNode::Return(Box::new(IRNode::Var(acc))),
+    ]))
+}
+
 /// One composition-guard row: row-shaped (see
 /// `guard_row_parts`), its guard leaves all comparing ONE
 /// guard expression against BoolLit constants and pinning a
@@ -7316,6 +7615,378 @@ spec exclaim {
         let seeds = engine.seed_from_constraints(&module[0]);
         assert_eq!(seeds.len(), 1, "precedence case: exactly the equation seed");
         let _ = constraint_seed(&engine, &module[0], "equation");
+    }
+
+    // ── Phase 60: forall-fold seeds (campaign slice G3) ───
+    //
+    // The tenth constraint-seed family. count_matching is
+    // the one standalone spec whose construction is
+    // derivable from its constraints (Phase 57 answer 3):
+    // a Forall over the list parameter whose implication
+    // antecedent is a comparison of the quantified element
+    // against a scalar parameter — the counting predicate.
+    // The family mines that predicate and builds the scan
+    // (Alloc accumulator + For + Index + conditional
+    // increment, the Phase 59-proven compilable form — NOT
+    // the Fold node, which renders E0308). The seed is
+    // admitted knowing Z3 cannot judge it (Inconclusive by
+    // construction, the char_equation admission standard):
+    // its evidence is the compiled vehicle, reached through
+    // the runner's Phase 60 trigger extension.
+
+    /// The expected scan body for a count-shaped spec, in
+    /// the family's construction: Alloc the accumulator,
+    /// walk `0..len(list)`, add `if <pred> { 1 } else { 0 }`
+    /// per element (the predicate with the element variable
+    /// replaced by the indexed access, orientation as
+    /// written), return the accumulator.
+    fn forall_fold_expected_body(
+        list: &str,
+        scalar: &str,
+        op: IRBinOp,
+        elem_on_left: bool,
+    ) -> IRNode {
+        let var = |n: &str| IRNode::Var(n.to_string());
+        let int = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+        let elem = IRNode::Index(Box::new(var(list)), Box::new(var("i")));
+        let (l, r) = if elem_on_left {
+            (elem, var(scalar))
+        } else {
+            (var(scalar), elem)
+        };
+        IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "count".into(),
+                ty: TypeRef::Int,
+                initial: Box::new(int(0)),
+            },
+            IRNode::For {
+                var: "i".into(),
+                start: Box::new(int(0)),
+                end: Box::new(IRNode::UnaryOp(IRUnaryOp::Len, Box::new(var(list)))),
+                body: Box::new(IRNode::Assign {
+                    target: Box::new(var("count")),
+                    value: Box::new(IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(var("count")),
+                        Box::new(IRNode::If {
+                            condition: Box::new(IRNode::BinOp(op, Box::new(l), Box::new(r))),
+                            then_branch: Box::new(int(1)),
+                            else_branch: Box::new(int(0)),
+                        }),
+                    )),
+                }),
+            },
+            IRNode::Return(Box::new(var("count"))),
+        ])
+    }
+
+    #[test]
+    fn forall_fold_seed_for_count_matching() {
+        let spec = load_example_spec(
+            "examples/self_host/count_matching.morph",
+            "count_matching",
+        );
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the forall_fold seed");
+        let seed = constraint_seed(&engine, &spec, "forall_fold");
+        assert_eq!(count_holes(&seed.body), 0, "the scan body must be complete");
+        assert_eq!(
+            format!("{:?}", seed.body),
+            format!(
+                "{:?}",
+                forall_fold_expected_body("list", "threshold", IRBinOp::Gt, true)
+            ),
+            "the seed body must be the scan built from the mined predicate `x > threshold`"
+        );
+        // Judging reality, recorded: the interpreter binds
+        // the tests (Phase 53) but cannot evaluate a
+        // For/Alloc/Assign body, so the seed's interpreter
+        // run is evaluable-but-zero — a coverage fact the
+        // runner's Phase 60 trigger extension exists to
+        // bridge. Z3 is Inconclusive by construction (loop
+        // bodies are outside its encodable subset).
+        let run = crate::synthesis::eval::run_spec_tests(&seed.body, &spec);
+        assert_eq!(
+            run,
+            crate::synthesis::eval::TestRun { evaluable: 3, passed: 0 },
+            "the interpreter must bind all 3 tests and evaluate none of the scan body"
+        );
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Inconclusive,
+            "Z3 cannot judge a loop body — Inconclusive by construction"
+        );
+    }
+
+    #[test]
+    fn forall_fold_seed_is_structural_not_nominal() {
+        // The same shape under unrelated names fires, with
+        // the spec's own parameter names in the body.
+        let src = r#"
+        T {
+        spec count_above {
+            input: values: List<Int>, limit: Int
+            output: Int
+            constraint: forall x: Int in values:
+                x > limit implies output > 0
+            constraint: output >= 0
+            constraint: output <= len(values)
+            test "all" { input: ([10, 20, 30], 5); expect: 3 }
+            test "none" { input: ([1, 2, 3], 5); expect: 0 }
+            test "mixed" { input: ([1, 10, 2, 20], 5); expect: 2 }
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &module[0], "forall_fold");
+        assert_eq!(
+            format!("{:?}", seed.body),
+            format!(
+                "{:?}",
+                forall_fold_expected_body("values", "limit", IRBinOp::Gt, true)
+            ),
+        );
+        // The flagship name over a scalar signature does not
+        // fire: keying is the shape, never the name.
+        let src = r#"
+        T {
+        spec count_matching {
+            input: x: Int
+            output: Int
+            constraint: output >= 0
+            test "one" { input: 1; expect: 1 }
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        assert!(
+            !engine
+                .seed_from_constraints(&module[0])
+                .iter()
+                .any(|c| matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == "forall_fold")),
+            "a scalar spec named count_matching must not gain a forall_fold seed"
+        );
+    }
+
+    #[test]
+    fn forall_fold_seed_mirrored_predicate_keeps_orientation() {
+        // The scalar on the left, the element on the right:
+        // the construction preserves the written comparison
+        // (it does not normalize the operator).
+        let src = r#"
+        T {
+        spec count_at_least {
+            input: values: List<Int>, limit: Int
+            output: Int
+            constraint: forall x: Int in values:
+                limit >= x implies output > 0
+            test "some" { input: ([1, 10, 2], 5); expect: 2 }
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &module[0], "forall_fold");
+        assert_eq!(
+            format!("{:?}", seed.body),
+            format!(
+                "{:?}",
+                forall_fold_expected_body("values", "limit", IRBinOp::Ge, false)
+            ),
+        );
+    }
+
+    #[test]
+    fn forall_fold_near_misses_get_no_seed() {
+        let head = "input: values: List<Int>, limit: Int\n            output: Int\n";
+        let tests = "            test \"a\" { input: ([10, 20], 5); expect: 2 }\n";
+        let cases: Vec<(&str, String)> = vec![
+            (
+                "literal threshold (not a scalar parameter)",
+                format!(
+                    "{}{}            constraint: forall x: Int in values:\n                x > 5 implies output > 0\n{}",
+                    head, "", tests
+                ),
+            ),
+            (
+                "compound predicate (a conjunction, not one comparison)",
+                format!(
+                    "{}            constraint: forall x: Int in values:\n                x > limit && x < 100 implies output > 0\n{}",
+                    head, tests
+                ),
+            ),
+            (
+                "consequent silent about the output",
+                format!(
+                    "{}            constraint: forall x: Int in values:\n                x > limit implies limit > 0\n{}",
+                    head, tests
+                ),
+            ),
+            (
+                "element on both sides of the comparison",
+                format!(
+                    "{}            constraint: forall x: Int in values:\n                x > x implies output > 0\n{}",
+                    head, tests
+                ),
+            ),
+            (
+                "forall without the implication",
+                format!(
+                    "{}            constraint: forall x: Int in values:\n                x > limit\n{}",
+                    head, tests
+                ),
+            ),
+            (
+                "exists instead of forall",
+                format!(
+                    "{}            constraint: exists x: Int in values:\n                x > limit implies output > 0\n{}",
+                    head, tests
+                ),
+            ),
+            (
+                "a deviating first forall blocks a matching second",
+                format!(
+                    "{}            constraint: forall x: Int in values:\n                x > 5 implies output > 0\n            constraint: forall y: Int in values:\n                y > limit implies output > 0\n{}",
+                    head, tests
+                ),
+            ),
+            (
+                "scalar parameter of a different type than the element",
+                "input: values: List<Int>, limit: Float\n            output: Int\n            constraint: forall x: Int in values:\n                x > limit implies output > 0\n            test \"a\" { input: ([10, 20], 5); expect: 2 }\n".to_string(),
+            ),
+            (
+                "two list parameters (the iterated list is ambiguous)",
+                "input: values: List<Int>, others: List<Int>, limit: Int\n            output: Int\n            constraint: forall x: Int in values:\n                x > limit implies output > 0\n            test \"a\" { input: ([10, 20], [1], 5); expect: 2 }\n".to_string(),
+            ),
+            (
+                "no in-spec tests (nothing for the compiled vehicle to judge)",
+                format!(
+                    "{}            constraint: forall x: Int in values:\n                x > limit implies output > 0\n",
+                    head
+                ),
+            ),
+            (
+                "a test the interpreter cannot bind (a variable input)",
+                format!(
+                    "{}            constraint: forall x: Int in values:\n                x > limit implies output > 0\n            test \"a\" {{ input: ([10, 20], limit); expect: 2 }}\n",
+                    head
+                ),
+            ),
+        ];
+        for (label, body) in cases {
+            let src = format!("\n        T {{\n        spec near_miss {{\n            {}\n        }}\n        }}\n        ", body);
+            let module = crate::spec::parser::parse(&src).unwrap().functions;
+            let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+            let seeds = engine.seed_from_constraints(&module[0]);
+            assert!(
+                !seeds.iter().any(|c| matches!(
+                    &c.provenance,
+                    Provenance::ConstraintInduced { kind } if kind == "forall_fold"
+                )),
+                "{}: must not gain a forall_fold seed (got {:?})",
+                label,
+                seeds.iter().map(|c| format!("{:?}", c.provenance)).collect::<Vec<_>>()
+            );
+        }
+        // Generic element: the comparison cannot render
+        // under the bound-free generated signature (the
+        // templates' recorded discipline).
+        let src = r#"
+        T {
+        spec count_generic<T> {
+            input: values: List<T>, limit: T
+            output: Int
+            constraint: forall x: T in values:
+                x > limit implies output > 0
+            test "a" { input: ([10, 20], 5); expect: 2 }
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        assert!(
+            !engine
+                .seed_from_constraints(&module[0])
+                .iter()
+                .any(|c| matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == "forall_fold")),
+            "generic element: must not gain a forall_fold seed"
+        );
+    }
+
+    #[test]
+    fn forall_fold_yields_to_earlier_families() {
+        // Precedence (the family's territory rule, enforced
+        // in seed_from_constraints): a spec an earlier
+        // family can state — here an encodable equation —
+        // belongs to that family even though it also
+        // carries the forall-fold shape.
+        let src = r#"
+        T {
+        spec count_or_const {
+            input: values: List<Int>, limit: Int
+            output: Int
+            constraint: output == limit
+            constraint: forall x: Int in values:
+                x > limit implies output > 0
+            test "a" { input: ([10, 20], 5); expect: 2 }
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&module[0]);
+        assert_eq!(seeds.len(), 1, "exactly the earlier family's seed");
+        let _ = constraint_seed(&engine, &module[0], "equation");
+    }
+
+    #[test]
+    fn forall_fold_fires_nowhere_else_in_the_corpus() {
+        // Territory disjointness over every module the
+        // instruments measure: no M2/M3/tokenizer spec and
+        // none of the other standalone specs may gain the
+        // seed. (The full 142-spec inventory, standalone
+        // files included, is the Phase 60 instrument's
+        // Part A.)
+        let mut modules: Vec<Vec<FunctionSpec>> = ["validator", "printer"]
+            .iter()
+            .map(|f| load_m2_module(f))
+            .collect();
+        modules.push(load_codegen_module());
+        modules.push(load_tokenizer_module());
+        for module in &modules {
+            let engine = SynthesisEngine::with_module(SynthesisConfig::default(), module);
+            for spec in module {
+                assert!(
+                    !engine
+                        .seed_from_constraints(spec)
+                        .iter()
+                        .any(|c| matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == "forall_fold")),
+                    "{}: must not gain a forall_fold seed",
+                    spec.name
+                );
+            }
+        }
+        for (rel, name) in [
+            ("examples/sort.morph", "sort"),
+            ("examples/binary_search.morph", "binary_search"),
+            ("examples/self_host/is_sorted.morph", "is_sorted"),
+        ] {
+            let spec = load_example_spec(rel, name);
+            let engine = SynthesisEngine::new(SynthesisConfig::default());
+            assert!(
+                !engine
+                    .seed_from_constraints(&spec)
+                    .iter()
+                    .any(|c| matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == "forall_fold")),
+                "{}: must not gain a forall_fold seed",
+                name
+            );
+        }
     }
 
     /// Guard generalizations (regression): the generalizations

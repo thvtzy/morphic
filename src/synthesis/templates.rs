@@ -189,7 +189,10 @@ fn scan_shape(spec: &FunctionSpec) -> Option<ScanShape> {
 /// (Bool is excluded: an adjacency ordering over booleans is
 /// not the scan's meaning. Generic/Named elements are
 /// excluded: unbounded type parameters have no order.)
-fn is_concrete_ordered_scalar(ty: &TypeRef) -> bool {
+/// `pub(crate)` since Phase 60: the forall-fold constraint
+/// family (synthesis::engine) applies the same admission
+/// discipline to the elements its mined predicate compares.
+pub(crate) fn is_concrete_ordered_scalar(ty: &TypeRef) -> bool {
     matches!(
         ty,
         TypeRef::Int
@@ -361,7 +364,10 @@ fn build_binary_search(shape: &SearchShape) -> IRNode {
 /// A local name that does not collide with any of the
 /// spec's parameter names (a template local shadowing the
 /// parameter it reads would silently change the body).
-fn fresh_name(base: &str, taken: &[&str]) -> String {
+/// `pub(crate)` since Phase 60: the forall-fold constraint
+/// family (synthesis::engine) names its scan locals by the
+/// same discipline.
+pub(crate) fn fresh_name(base: &str, taken: &[&str]) -> String {
     let mut name = base.to_string();
     while taken.iter().any(|t| *t == name) {
         name.push('_');
