@@ -667,6 +667,17 @@ impl SynthesisEngine {
     ///   shapes the earlier families cannot state (a call
     ///   guard, or a compound pin), so the families never
     ///   produce two seeds for one spec.
+    /// - **expression-pin guard table**: a set of rows guarded
+    ///   on ONE Int parameter (the key) whose output pins are
+    ///   arbitrary expressions over the parameters
+    ///   (`op<2||op>2||output==inner ++ ".len()"`) becomes one
+    ///   match over the key with an arm per row plus the
+    ///   typed-literal wildcard. It claims only shapes the
+    ///   earlier families cannot state — at least one pin must
+    ///   be a compound expression, where the guard table
+    ///   admits only literals and guarded identity only the
+    ///   one bare variable — so the families never produce two
+    ///   seeds for one spec.
     ///
     /// A spec whose constraints fit neither shape gets no
     /// constraint seed and behaves exactly as before. Equations
@@ -702,6 +713,9 @@ impl SynthesisEngine {
         }
         if let Some(body) = composition_guard_seed_body(spec, &self.spec_index) {
             admit("composition_guard", body);
+        }
+        if let Some(body) = expr_pin_guard_seed_body(spec, &self.spec_index) {
+            admit("expr_pin_guard", body);
         }
         seeds
     }
@@ -3002,6 +3016,169 @@ fn composition_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
     }
 }
 
+/// The expression-pin guard-table body: the guard-table
+/// shape with the pin test generalized. Rows are recognized
+/// exactly as the guard family's rows are (see
+/// `guard_row_parts`): an Or of guard leaves plus one output
+/// pin. Every row's guard leaves compare ONE shared Int
+/// parameter — the key — against Int constants
+/// (`guard_leaf`), and the key value a row pins is recovered
+/// by `pin_int_value`'s falsify-every-leaf scan, exactly as
+/// in `guard_row`. What changes is the pin: where
+/// `guard_row` requires an `IRNode::Literal`, this family
+/// admits any pin `composition_pin` admits — a hole-free,
+/// output-free expression over the spec's parameters calling
+/// only indexed specs (a concatenation template, a bare
+/// variable, a call). The measured shapes are the slice-4
+/// text templates: `rust_unary_text` (ten Concat pins under
+/// `op`), `rust_concat_right_text` and
+/// `rust_match_scrutinee_text` (a bare-Var pin beside Concat
+/// pins under `form`).
+///
+/// The key is nominated by the first row-shaped
+/// postcondition: the one Int-family parameter under which
+/// all of its leaves parse and pin a single value. (A row's
+/// leaves name their parameter, so at most one parameter can
+/// qualify; zero — the row is guarded on two keys, on a Bool
+/// or String parameter, or on no parameter — is not this
+/// family, and two would be ambiguous: both yield no seed.)
+/// Every later row-shaped postcondition must then be a row
+/// under THAT key, or the spec states a row this body would
+/// not honor — a deviation, so no seed at all (all rows or
+/// none, the guarded-identity rule); non-row postconditions
+/// are skipped as in the guard-table builder.
+///
+/// Territory (the pin test keeps the families disjoint, so
+/// no spec ever gains a second seed): at least one row's pin
+/// must be a COMPOUND expression — not a literal and not a
+/// bare variable. A set of all-literal pins is a guard table
+/// (or, at an arity the guard table does not take, the
+/// recorded pair-keyed generalization's open shape) and a
+/// set of all-bare-variable pins is guarded identity's exact
+/// shape; mixed sets — a literal or bare-Var pin beside a
+/// compound one — ARE admitted wholesale: those rows are
+/// just pins, and the measured specs both carry a bare-Var
+/// row beside their Concat rows.
+///
+/// The emitted body is one match over the key parameter,
+/// one arm per pinned key value returning the row's pin
+/// expression, and the typed-literal wildcard for key values
+/// no row pins: the guard-table stance, a documented guess
+/// the spec is silent about. Rows pinning an already-pinned
+/// key value are skipped (the first row wins), as in the
+/// guard tables. The raw builder stops at constructing the
+/// match; admission is the seed builder's step.
+fn expr_pin_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let mut key: Option<&Param> = None;
+    let mut rows: Vec<(i64, IRNode, Expr)> = Vec::new();
+    let mut seen: Vec<i64> = Vec::new();
+    for c in &spec.postconditions {
+        if guard_row_parts(c).is_none() {
+            continue; // not a row: skipped, as in guard_table_body
+        }
+        // Row-shaped: it must be an expression-pin row under
+        // the one shared key, or the spec states a row this
+        // body would not honor — a deviation, so no seed.
+        let (pinned, pin, pin_side) = match key {
+            Some(k) => expr_pin_guard_row(c, k, index)?,
+            None => {
+                let mut found: Option<(&Param, (i64, IRNode, Expr))> = None;
+                for param in &spec.params {
+                    if !is_int_family(&param.ty) {
+                        continue;
+                    }
+                    if let Some(row) = expr_pin_guard_row(c, param, index) {
+                        if found.is_some() {
+                            return None; // two keys parse one row: ambiguous
+                        }
+                        found = Some((param, row));
+                    }
+                }
+                let (param, row) = found?;
+                key = Some(param);
+                row
+            }
+        };
+        if seen.contains(&pinned) {
+            continue; // first row wins, as in the guard tables
+        }
+        seen.push(pinned);
+        rows.push((pinned, pin, pin_side));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    let key = key?;
+    // Territory (see the doc comment): at least one pin must
+    // be a compound expression — the test the composition
+    // builder applies to its pin sides.
+    let any_compound_pin = rows.iter().any(|(_, _, side)| {
+        !matches!(
+            side,
+            Expr::Var(_)
+                | Expr::IntLit(_)
+                | Expr::FloatLit(_)
+                | Expr::BoolLit(_)
+                | Expr::StringLit(_)
+        )
+    });
+    if !any_compound_pin {
+        return None;
+    }
+    let mut cases: Vec<(IRPattern, IRNode)> = rows
+        .into_iter()
+        .map(|(pinned, pin, _)| (IRPattern::Literal(IRLiteral::Int(pinned)), pin))
+        .collect();
+    let default = typed_literal_fillings(&spec.return_type)?
+        .into_iter()
+        .next()?;
+    cases.push((IRPattern::Wildcard, default));
+    Some(IRNode::Match {
+        scrutinee: Box::new(IRNode::Var(key.name.clone())),
+        cases,
+    })
+}
+
+/// One expression-pin guard row: row-shaped (see
+/// `guard_row_parts`), its guard leaves all comparing the
+/// key parameter against Int constants and pinning a single
+/// key value (`pin_int_value`), and its output pin an
+/// admissible expression (see `composition_pin`). Returns
+/// the pinned key value, the pin as IR, and the pin's source
+/// expression (the builder's territory rule reads it). Any
+/// deviation is None; the builder treats a row-shaped
+/// postcondition failing here as a shape deviation, not a
+/// skippable non-row.
+fn expr_pin_guard_row(
+    c: &Constraint,
+    key: &Param,
+    index: &SpecIndex,
+) -> Option<(i64, IRNode, Expr)> {
+    let (pin_side, guard_leaves) = guard_row_parts(c)?;
+    let pin = composition_pin(pin_side, index)?;
+    let mut guards: Vec<(BinOp, bool, i64)> = Vec::new();
+    for leaf in guard_leaves {
+        guards.push(guard_leaf(leaf, &key.name)?);
+    }
+    Some((pin_int_value(&guards)?, pin, pin_side.clone()))
+}
+
+/// The expression-pin guard-table seed's body: the match
+/// with any spec-to-spec calls in its pins resolved against
+/// the module (the composition seed's admission precedent —
+/// a raw call body could not be executed by the interpreter
+/// or emitted standalone), admitted when the verifier can
+/// encode the resolved body in the module context.
+fn expr_pin_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = expr_pin_guard_body(spec, index)?;
+    let body = index.inline_calls(&raw)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
 /// One composition-guard row: row-shaped (see
 /// `guard_row_parts`), its guard leaves all comparing ONE
 /// guard expression against BoolLit constants and pinning a
@@ -3205,10 +3382,12 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 8;
 /// from — the first convertible equation's right-hand side,
 /// the guard-table match for a lookup spec with no equation,
 /// the guarded-identity match for a two-parameter spec
-/// whose rows pin the output to a parameter, or the
+/// whose rows pin the output to a parameter, the
 /// composition-guard match for a spec whose rows are
 /// guarded by a shared Bool expression (a call, or a Bool
-/// parameter with expression pins) — produced by
+/// parameter with expression pins), or the expression-pin
+/// guard-table match for a spec whose rows pin expressions
+/// under one Int key — produced by
 /// the same builders the seed family uses, minus the
 /// encodability admission (admission is a property of a
 /// body in a caller's context, judged by the verifier; the
@@ -3241,8 +3420,9 @@ impl SpecIndex {
     /// The body a call to `name` denotes: the callee's first
     /// equation body, its guard-table body when it has no
     /// equation, its guarded-identity body when it has
-    /// neither, or its composition-guard body when it has
-    /// none of those. The body is NOT call-resolved — it may
+    /// neither, its composition-guard body when it has none
+    /// of those, or its expression-pin guard-table body when
+    /// it has none of those either. The body is NOT call-resolved — it may
     /// itself contain calls; resolving those is the consumer's
     /// step, under the consumer's cycle/depth guard.
     pub fn callee_body(&self, name: &str) -> Option<IRNode> {
@@ -3251,6 +3431,7 @@ impl SpecIndex {
             .or_else(|| guard_table_body(spec))
             .or_else(|| guarded_identity_body(spec))
             .or_else(|| composition_guard_body(spec, self))
+            .or_else(|| expr_pin_guard_body(spec, self))
     }
 
     /// IR-level inlining: replace every call to an indexed
@@ -5339,7 +5520,11 @@ spec exclaim {
     /// Debug rendering matches exactly. Phase 28 extended the
     /// fixture with the two composition-guard bodies
     /// (rust_ident_suffix, rust_generics_text): 28 Codegen
-    /// bodies now.
+    /// bodies now. Phase 32 extends it with the three
+    /// expression-pin guard-table bodies (rust_unary_text,
+    /// rust_concat_right_text, rust_match_scrutinee_text):
+    /// 31 Codegen bodies, 45 total — the 42 prior bodies are
+    /// asserted byte-identical below, unchanged.
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -5352,7 +5537,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 42, "28 Codegen + 14 M2 golden bodies");
+        assert_eq!(expected.len(), 45, "31 Codegen + 14 M2 golden bodies");
         for file in ["validator", "printer", "codegen"] {
             let module = load_m2_module(file);
             let index = SpecIndex::from_specs(&module);
@@ -5800,6 +5985,496 @@ spec exclaim {
                 name
             );
         }
+    }
+
+    // ── Phase 32: expression-pin guard-table seeds ────────
+    //
+    // The fifth builder family, specified by the Phase 31
+    // measurement: rows guarded on ONE Int key parameter
+    // whose output pins are EXPRESSIONS over the parameters
+    // — the shape of rust_unary_text (ten Concat pins under
+    // `op`), rust_concat_right_text (a bare-Var pin and two
+    // Concat pins under `form`) and rust_match_scrutinee_text
+    // (a bare-Var pin and one Concat pin under `form`). Each
+    // earlier family refused them on a measured predicate:
+    // guard_table's `guard_row` requires the pin to be an
+    // IRNode::Literal; guarded_identity requires the pin to
+    // be exactly the one remaining parameter; composition
+    // guard's `guard_leaf_on_expr` is Bool-domain only. Their
+    // pools held zero Verified candidates in every Phase 31
+    // run and the crowned winners scored executed-pinned
+    // 0/10, at best 1/4, and 0/3.
+
+    /// One Int-keyed guard row in the spec dialect:
+    /// `key<v || key>v || output==pin` — the row binds
+    /// exactly at key == v.
+    fn int_key_row(key: &str, v: i64, pin: Expr) -> Constraint {
+        or_row(vec![
+            Expr::BinOp(
+                BinOp::Lt,
+                Box::new(var_expr(key)),
+                Box::new(Expr::IntLit(v)),
+            ),
+            Expr::BinOp(
+                BinOp::Gt,
+                Box::new(var_expr(key)),
+                Box::new(Expr::IntLit(v)),
+            ),
+            eq_expr(var_expr("output"), pin),
+        ])
+    }
+
+    fn concat_pin(l: Expr, r: &str) -> Expr {
+        Expr::BinOp(
+            BinOp::Concat,
+            Box::new(l),
+            Box::new(Expr::StringLit(r.into())),
+        )
+    }
+
+    /// Expression-pin guard table (i): rust_unary_text's ten
+    /// rows pin Concat templates under the Int key `op`. The
+    /// seed must exist (kind `expr_pin_guard`), be one match
+    /// over `op` with an arm per row plus the typed-literal
+    /// wildcard, execute to the pinned template at every op
+    /// code, be Verified in module context, and win
+    /// module-aware synthesis deterministically.
+    #[test]
+    fn constraint_expr_pin_guard_seed_for_unary_text() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_unary_text");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the expression-pin seed");
+        let seed = constraint_seed(&engine, &spec, "expr_pin_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let IRNode::Match { scrutinee, cases } = &seed.body else {
+            panic!("seed body must be a match, got {:?}", seed.body);
+        };
+        assert_eq!(
+            format!("{:?}", **scrutinee),
+            format!("{:?}", IRNode::Var("op".into()))
+        );
+        assert_eq!(cases.len(), 11, "ten row arms plus the wildcard");
+        for (i, (pat, _)) in cases.iter().enumerate().take(10) {
+            assert_eq!(
+                format!("{:?}", pat),
+                format!("{:?}", IRPattern::Literal(IRLiteral::Int(i as i64))),
+                "arm {} must pin op == {}",
+                i,
+                i
+            );
+        }
+        assert_eq!(
+            format!("{:?}", cases[10]),
+            format!(
+                "{:?}",
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::String(String::new()))
+                )
+            ),
+            "the wildcard carries the typed-literal default"
+        );
+
+        // Every pinned op code executes to its template; an
+        // off-table code falls to the wildcard default.
+        let expected = [
+            "(- x)",
+            "(! x)",
+            "x.abs()",
+            "x.len()",
+            "(x)[0]",
+            "(x)[1..].to_vec()",
+            "(x)[..(x).len() - 1].to_vec()",
+            "(x)[(x).len() - 1]",
+            "x.reverse()",
+            "x.clone()",
+        ];
+        for (op, want) in expected.iter().enumerate() {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("op", crate::synthesis::eval::Value::Int(op as i64)),
+                    ("inner", crate::synthesis::eval::Value::Str("x".into())),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str((*want).into()),
+                "op {} must render its pinned template",
+                op
+            );
+        }
+        let v = eval_seed_body(
+            &seed.body,
+            &[
+                ("op", crate::synthesis::eval::Value::Int(42)),
+                ("inner", crate::synthesis::eval::Value::Str("x".into())),
+            ],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Str(String::new()));
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        // Deterministic across draws: the same winning body
+        // in three independent synthesis runs.
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the expression-pin seed must win verified");
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the expression-pin seed in every draw"
+            );
+        }
+    }
+
+    /// Expression-pin guard table (ii): the two mixed-pin
+    /// specs — a bare-Var pin alongside Concat pins under the
+    /// Int key `form`. Mixed pin sets are admitted wholesale
+    /// (see the synthetic test below): the Var rows are just
+    /// pins that happen to be variables.
+    #[test]
+    fn constraint_expr_pin_guard_seed_for_mixed_pin_specs() {
+        let module = load_codegen_module();
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+
+        let spec = module_spec(&module, "rust_concat_right_text");
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the expression-pin seed");
+        let seed = constraint_seed(&engine, &spec, "expr_pin_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+        for (form, want) in [(0, "r"), (1, "&(r)"), (2, "&r"), (9, "")] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("form", crate::synthesis::eval::Value::Int(form)),
+                    ("rendered", crate::synthesis::eval::Value::Str("r".into())),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(want.into()),
+                "form {} must render its pinned text",
+                form
+            );
+        }
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let spec = module_spec(&module, "rust_match_scrutinee_text");
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the expression-pin seed");
+        let seed = constraint_seed(&engine, &spec, "expr_pin_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+        for (form, want) in [(0, "r"), (1, "r.as_str()"), (9, "")] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("form", crate::synthesis::eval::Value::Int(form)),
+                    ("rendered", crate::synthesis::eval::Value::Str("r".into())),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(want.into()),
+                "form {} must render its pinned text",
+                form
+            );
+        }
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Expression-pin guard table (iii): the admission
+    /// semantics on synthetic shapes. Mixed pin sets are
+    /// admitted WHOLESALE — a literal pin or a bare-Var pin
+    /// among compound pins is just a pin — provided at least
+    /// one pin is a compound expression; that single compound
+    /// requirement is the territory rule (all-literal sets
+    /// stay with the guard tables and the recorded pair-keyed
+    /// generalization, all-Var sets with guarded identity).
+    /// A pin calling an indexed spec is admitted and resolved
+    /// before admission, like a composition pin.
+    #[test]
+    fn constraint_expr_pin_guard_seed_synthetic_shapes() {
+        // Basic: two Concat pins under one Int key.
+        let spec = guard_spec(
+            "expr_pin_basic",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                int_key_row(
+                    "code",
+                    0,
+                    Expr::BinOp(
+                        BinOp::Concat,
+                        Box::new(Expr::StringLit("<".into())),
+                        Box::new(var_expr("text")),
+                    ),
+                ),
+                int_key_row("code", 1, concat_pin(var_expr("text"), ">")),
+            ],
+        );
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seed = constraint_seed(&engine, &spec, "expr_pin_guard");
+        for (code, want) in [(0, "<m"), (1, "m>"), (5, "")] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("code", crate::synthesis::eval::Value::Int(code)),
+                    ("text", crate::synthesis::eval::Value::Str("m".into())),
+                ],
+            );
+            assert_eq!(v, crate::synthesis::eval::Value::Str(want.into()));
+        }
+
+        // Mixed wholesale: a literal pin beside a Concat pin.
+        let spec = guard_spec(
+            "expr_pin_mixed_literal",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                int_key_row("code", 0, Expr::StringLit("none".into())),
+                int_key_row("code", 1, concat_pin(var_expr("text"), "!")),
+            ],
+        );
+        let seed = constraint_seed(&engine, &spec, "expr_pin_guard");
+        for (code, want) in [(0, "none"), (1, "m!")] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("code", crate::synthesis::eval::Value::Int(code)),
+                    ("text", crate::synthesis::eval::Value::Str("m".into())),
+                ],
+            );
+            assert_eq!(v, crate::synthesis::eval::Value::Str(want.into()));
+        }
+
+        // A pin calling an indexed spec: admitted, and the
+        // admitted body has the call resolved (the
+        // composition seed's precedent — a raw call body
+        // could not be executed by the interpreter).
+        let wrap = guard_spec(
+            "wrap_q",
+            vec![("s", TypeRef::String)],
+            TypeRef::String,
+            vec![Constraint::Eq(
+                var_expr("output"),
+                concat_pin(var_expr("s"), "?"),
+            )],
+        );
+        let spec = guard_spec(
+            "expr_pin_call",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                int_key_row(
+                    "code",
+                    0,
+                    Expr::Call("wrap_q".into(), vec![var_expr("text")]),
+                ),
+                int_key_row("code", 1, concat_pin(var_expr("text"), ">")),
+            ],
+        );
+        let engine = SynthesisEngine::with_module(
+            SynthesisConfig::default(),
+            &[wrap, spec.clone()],
+        );
+        let seed = constraint_seed(&engine, &spec, "expr_pin_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+        let v = eval_seed_body(
+            &seed.body,
+            &[
+                ("code", crate::synthesis::eval::Value::Int(0)),
+                ("text", crate::synthesis::eval::Value::Str("m".into())),
+            ],
+        );
+        assert_eq!(
+            v,
+            crate::synthesis::eval::Value::Str("m?".into()),
+            "the call pin must be resolved to the callee's body"
+        );
+    }
+
+    /// Expression-pin guard table (iv): near misses. Each
+    /// shape is refused by a stated predicate — territory
+    /// (no compound pin), pin admissibility (a pin mentioning
+    /// `output`, converting through a Hole, or calling an
+    /// unindexed spec), or key discipline (rows guarded on
+    /// two different Int parameters, one row spanning two
+    /// keys, a row pinning a range rather than one value).
+    #[test]
+    fn constraint_expr_pin_guard_near_misses_get_no_seed() {
+        let plain = || SynthesisEngine::new(SynthesisConfig::default());
+        let mut empty_cases: Vec<FunctionSpec> = Vec::new();
+
+        // All-literal pins under one Int key, at arity two:
+        // not a guard table (its arity is one), not this
+        // family (no compound pin — the pin test keeps the
+        // families disjoint; single-key literal tables at
+        // other arities belong to the recorded pair-keyed
+        // generalization's territory discussion, not here).
+        empty_cases.push(guard_spec(
+            "expr_pin_all_literal",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                int_key_row("code", 0, Expr::StringLit("a".into())),
+                int_key_row("code", 1, Expr::StringLit("b".into())),
+            ],
+        ));
+
+        // Bare-Var and literal pins only, no compound pin:
+        // guarded identity deviates on the literal row, and
+        // this family requires a compound pin.
+        empty_cases.push(guard_spec(
+            "expr_pin_var_and_literal",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                int_key_row("code", 0, var_expr("text")),
+                int_key_row("code", 1, Expr::StringLit("x".into())),
+            ],
+        ));
+
+        // The pin mentions `output` itself.
+        empty_cases.push(guard_spec(
+            "expr_pin_mentions_output",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![int_key_row(
+                "code",
+                0,
+                concat_pin(var_expr("output"), "!"),
+            )],
+        ));
+
+        // The pin converts through a Hole (a Length the
+        // expression converter drops): not a whole pin.
+        empty_cases.push(guard_spec(
+            "expr_pin_hole",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![int_key_row(
+                "code",
+                0,
+                concat_pin(Expr::Length(Box::new(var_expr("text"))), "!"),
+            )],
+        ));
+
+        // The pin calls a spec the index does not hold.
+        empty_cases.push(guard_spec(
+            "expr_pin_calls_unindexed",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![int_key_row(
+                "code",
+                0,
+                Expr::Call("ghost".into(), vec![var_expr("text")]),
+            )],
+        ));
+
+        // Rows guarded on two DIFFERENT Int keys: the table
+        // has one key or none.
+        empty_cases.push(guard_spec(
+            "expr_pin_two_keys",
+            vec![
+                ("a", TypeRef::Int),
+                ("b", TypeRef::Int),
+                ("text", TypeRef::String),
+            ],
+            TypeRef::String,
+            vec![
+                int_key_row("a", 0, concat_pin(var_expr("text"), "!")),
+                int_key_row("b", 1, concat_pin(var_expr("text"), "?")),
+            ],
+        ));
+
+        // One row whose guard leaves span two keys.
+        empty_cases.push(guard_spec(
+            "expr_pin_row_spans_keys",
+            vec![
+                ("a", TypeRef::Int),
+                ("b", TypeRef::Int),
+                ("text", TypeRef::String),
+            ],
+            TypeRef::String,
+            vec![or_row(vec![
+                Expr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var_expr("a")),
+                    Box::new(Expr::IntLit(0)),
+                ),
+                Expr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var_expr("b")),
+                    Box::new(Expr::IntLit(0)),
+                ),
+                eq_expr(var_expr("output"), concat_pin(var_expr("text"), "!")),
+            ])],
+        ));
+
+        // A row pinning a range, not a single key value:
+        // `code<0||code>2` is falsified by 0, 1 and 2 alike.
+        empty_cases.push(guard_spec(
+            "expr_pin_range",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![or_row(vec![
+                Expr::BinOp(
+                    BinOp::Lt,
+                    Box::new(var_expr("code")),
+                    Box::new(Expr::IntLit(0)),
+                ),
+                Expr::BinOp(
+                    BinOp::Gt,
+                    Box::new(var_expr("code")),
+                    Box::new(Expr::IntLit(2)),
+                ),
+                eq_expr(var_expr("output"), concat_pin(var_expr("text"), "!")),
+            ])],
+        ));
+
+        for spec in &empty_cases {
+            assert!(
+                plain().seed_from_constraints(spec).is_empty(),
+                "{}: near-miss shape must get no constraint seed",
+                spec.name
+            );
+        }
+
+        // All-bare-Var pins under an Int key: guarded
+        // identity's exact shape — it claims the spec, and
+        // this family must not add a second seed.
+        let spec = guard_spec(
+            "expr_pin_all_var",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                int_key_row("code", 0, var_expr("text")),
+                int_key_row("code", 1, var_expr("text")),
+            ],
+        );
+        let seeds = plain().seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the guarded-identity seed");
+        assert!(
+            matches!(
+                &seeds[0].provenance,
+                Provenance::ConstraintInduced { kind } if kind == "guarded_identity"
+            ),
+            "the one seed must be guarded identity's, got {:?}",
+            seeds[0].provenance
+        );
     }
 
     /// replace_hole must actually substitute the hole wherever
