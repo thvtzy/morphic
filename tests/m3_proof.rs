@@ -3211,11 +3211,12 @@ spec bad {
     fn spec_file_has_expected_shape() {
         // Supplementary shape check (the pipeline test above is the
         // real validation): the file declares the 8 slice-1 specs
-        // plus the 20 slice-2 specs plus the 16 slice-3 specs.
+        // plus the 20 slice-2 specs plus the 16 slice-3 specs plus
+        // the 35 slice-4 specs.
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 44, "codegen.morph should declare 44 specs");
+        assert_eq!(spec_decls, 79, "codegen.morph should declare 79 specs");
         assert!(src.matches("test \"").count() >= 118, "codegen.morph should carry in-spec tests");
     }
 }

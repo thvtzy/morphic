@@ -853,7 +853,11 @@ mod xval3 {
         "returns",
     ];
 
-    /// Every spec in the module, in file order (slices 1–3).
+    /// Every spec of slices 1–3, in file order. (Phase 30:
+    /// slice 4 added 35 walker specs to the module — 79 in
+    /// total; the sweeps extend to them in the measurement
+    /// phase, so this list and PINNED_TOTALS stay at 44 and
+    /// the grand totals below are slices 1–3 totals.)
     const ALL_SPECS: [&str; 44] = [
         "rust_type_name",
         "rust_binop_symbol",
@@ -2211,6 +2215,21 @@ mod xval3 {
         // asserted as such below: rust_string_ownership's
         // two-parameter region rows and rust_ident_empty's
         // String-equality leaf family.
+        //
+        // Phase 30 scoping (the Phase 26 precedent): slice 4
+        // added 35 specs to the module (79 total) — the
+        // expression walker's arm templates. Which of their
+        // shapes the builders recognize (the `++` equations
+        // over pre-rendered children, the Int-guard rows with
+        // expression pins, the call-guarded rows) is the next
+        // phase's measurement question, not something to
+        // assert ahead of the evidence. The recognition
+        // assertions below therefore keep iterating the same
+        // 30 names; only the module count assertion moves,
+        // to 79. The sweep harness above (ALL_SPECS /
+        // PINNED_TOTALS) likewise still covers slices 1–3;
+        // extending the sweeps to slice 4 belongs to the
+        // measurement phase.
         const RECOGNIZED: [&str; 30] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
@@ -2226,7 +2245,7 @@ mod xval3 {
             "rust_ident_suffix", "rust_generics_text",
         ];
         let functions = load_codegen_module();
-        assert_eq!(functions.len(), 44, "module spec count");
+        assert_eq!(functions.len(), 79, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
             if !RECOGNIZED.contains(&func.name.as_str()) {
