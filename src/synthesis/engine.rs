@@ -2767,58 +2767,265 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
     }
 }
 
-/// The guard-table body: one match over the spec's
-/// single parameter, with one literal arm per usable
-/// guard row and a wildcard arm carrying the typed-literal
-/// default for the return type (the Phase 10 menu's first
-/// entry — the spec is silent off-table, so the default is a
-/// documented guess; the Phase 15 classification showed the
-/// mirrors return exactly that default on unpinned cases).
-/// The parameter is an Int (rows recognized by `guard_row`'s
-/// interval scan) or a Bool (rows recognized by
-/// `guard_row_bool`'s finite-domain enumeration — a total
-/// Bool table pins both domain values, so its wildcard arm
-/// is unreachable, but the match convention keeps it: the
-/// verifier's symbolic match requires a final unconditional
-/// arm). Rows pinning an already-pinned input are skipped
-/// (the first row wins). The raw builder stops at
-/// constructing the match; admission is the seed builder's
-/// step.
+/// The guard-table body: one match over the spec's single
+/// parameter, with literal arms for the inputs its guard
+/// rows pin and a wildcard arm for the rest. The parameter
+/// is an Int (rows recognized by their guard leaves against
+/// Int constants) or a Bool (rows over the finite domain —
+/// a total Bool table pins both domain values, so its
+/// wildcard arm is unreachable, but the match convention
+/// keeps it: the verifier's symbolic match requires a final
+/// unconditional arm).
+///
+/// Rows are recognized exactly as the guard family's rows
+/// are (see `guard_row_parts`): an Or of guard leaves plus
+/// one output pin. Every pin must convert to an
+/// `IRNode::Literal` — the pin test that keeps this family
+/// disjoint from the expression-pin guard table (compound
+/// pins) and from guarded identity (a bare-variable pin).
+/// A row-shaped postcondition deviating on any of this —
+/// a non-literal pin, a guard leaf that does not parse on
+/// the parameter — yields no seed at all (all rows or
+/// none, the guarded-identity rule); non-row
+/// postconditions are skipped, as they always have been.
+///
+/// The pinned cells are recovered by JOINT
+/// falsify-every-leaf — the pair-keyed family's recovery
+/// lifted to one key (Phase 37, closing Phase 36's
+/// Finding 1). Before Phase 37 a row was recovered only
+/// where `pin_int_value` found exactly ONE falsifying
+/// value, and a row pinning a SET of values — a band
+/// (`site<0||site>4||output==0`) or an Eq-leaf catch-all
+/// pinning a complement — was silently SKIPPED: the
+/// builder emitted a body contradicting the row wherever
+/// its pin differed from the wildcard's default, and the
+/// seed was Z3-refuted in every run. Now each row
+/// contributes its whole falsifying REGION: the candidate
+/// span is the leaf constants' range widened by two on
+/// each side — outside the outermost constants every
+/// leaf's truth is stable, so the span's endpoints double
+/// as the two unbounded tail classes and the finite span
+/// describes the whole (infinite) table. A cell is pinned
+/// exactly where every row firing there agrees on the
+/// value; rows pinning one cell to two different values
+/// are jointly inconsistent — not a table, no seed. A row
+/// whose guards are jointly always true fires nowhere and
+/// is subsumed vacuously.
+///
+/// Arm materialization keeps the builder's standing
+/// convention — arms in row order, a single-value row
+/// arming its value exactly as it always has (even where
+/// its pin equals the wildcard's value: node_arity arms
+/// 0 → 0 and 1 → 0 beside a 0 wildcard) — and adds the
+/// pair family's fall-through discipline for the cells
+/// only a band or catch-all row pins: the wildcard carries
+/// the pinned fall-through value when the tail classes
+/// agree on one (rust_stmt_form's catch-all pins both
+/// tails to 17, so its wildcard IS 17, not the typed
+/// default 0), else the typed-literal default (the Phase
+/// 10 menu's first entry — the spec is silent off-table,
+/// so the default is a documented guess; the Phase 15
+/// classification showed the mirrors return exactly that
+/// default on unpinned cases). A band row's interior cells
+/// pinning the wildcard's own value need no arm — the
+/// wildcard already yields it — and its tail cells ride
+/// the wildcard, which carries their value by the
+/// fall-through rule; the two tails pinning different
+/// values is not this body's shape (no seed). Every body
+/// the pre-Phase-37 builder produced is reproduced
+/// byte-identically (the golden-fixture discipline): a
+/// single-value row's region is a single interior cell —
+/// the ±2 widening puts two probe points on each side, so
+/// a region reaching a tail always shows at least two
+/// span cells — and specs without band rows recover the
+/// same cells, the same arms, and the same default
+/// wildcard. The raw builder stops at constructing the
+/// match; admission is the seed builder's step.
 fn guard_table_body(spec: &FunctionSpec) -> Option<IRNode> {
     if spec.params.len() != 1 {
         return None;
     }
     let param = &spec.params[0];
-    let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
     if is_int_family(&param.ty) {
-        for c in &spec.postconditions {
-            if let Some((pinned, output)) = guard_row(c, &param.name) {
-                if cases
-                    .iter()
-                    .any(|(p, _)| matches!(p, IRPattern::Literal(IRLiteral::Int(v)) if *v == pinned))
-                {
-                    continue;
-                }
-                cases.push((IRPattern::Literal(IRLiteral::Int(pinned)), output));
-            }
-        }
+        guard_table_body_int(spec, param)
     } else if matches!(param.ty, TypeRef::Bool) {
-        for c in &spec.postconditions {
-            if let Some((pinned, output)) = guard_row_bool(c, &param.name) {
-                if cases
-                    .iter()
-                    .any(|(p, _)| matches!(p, IRPattern::Literal(IRLiteral::Bool(v)) if *v == pinned))
-                {
-                    continue;
-                }
-                cases.push((IRPattern::Literal(IRLiteral::Bool(pinned)), output));
-            }
-        }
+        guard_table_body_bool(spec, param)
     } else {
+        None
+    }
+}
+
+/// The Int guard table (see `guard_table_body`): joint
+/// region recovery over the candidate span.
+fn guard_table_body_int(spec: &FunctionSpec, param: &Param) -> Option<IRNode> {
+    // Pass one: parse every row-shaped postcondition into
+    // (guard leaves, literal pin), collecting the leaf
+    // constants the candidate span is built from.
+    let mut rows: Vec<(Vec<(BinOp, bool, i64)>, IRNode)> = Vec::new();
+    let mut constants: Vec<i64> = Vec::new();
+    for c in &spec.postconditions {
+        let Some((pin_side, guard_leaves)) = guard_row_parts(c) else {
+            continue; // not a row: skipped, as in every guard builder
+        };
+        // Row-shaped: it must be an Int guard row of this
+        // table, or the spec states a row this body would
+        // not honor — a deviation, so no seed.
+        let pin = expr_to_ir(pin_side);
+        if !matches!(pin, IRNode::Literal(_)) {
+            return None; // the pin test: literal pins only
+        }
+        let mut guards: Vec<(BinOp, bool, i64)> = Vec::new();
+        for leaf in guard_leaves {
+            guards.push(guard_leaf(leaf, &param.name)?);
+        }
+        constants.extend(guards.iter().map(|g| g.2));
+        rows.push((guards, pin));
+    }
+    if rows.is_empty() {
         return None;
     }
-    if cases.is_empty() {
+    // The candidate span (see the doc comment): the leaf
+    // constants' range widened by two on each side.
+    // Constants at the i64 extremes leave no room for the
+    // widening — refused rather than scanned wrongly.
+    let lo = constants.iter().min().copied()?.checked_sub(2)?;
+    let hi = constants.iter().max().copied()?.checked_add(2)?;
+    if hi as i128 - lo as i128 + 1 > 100_000 {
+        return None; // a span too wide for the scan to state
+    }
+    // Each row's falsifying region over the span, and the
+    // joint table: a cell is pinned exactly where every
+    // row firing there agrees on the value.
+    let mut regions: Vec<Vec<i64>> = Vec::new();
+    let mut pinned: HashMap<i64, IRNode> = HashMap::new();
+    for (guards, pin) in &rows {
+        let region: Vec<i64> = (lo..=hi)
+            .filter(|x| guards.iter().all(|g| !guard_leaf_holds(g, *x)))
+            .collect();
+        for cell in &region {
+            match pinned.get(cell) {
+                None => {
+                    pinned.insert(*cell, pin.clone());
+                }
+                Some(p) if literal_pin_eq(p, pin) => {}
+                Some(_) => return None, // conflicting pins: not a table
+            }
+        }
+        regions.push(region);
+    }
+    if pinned.is_empty() {
         return None;
+    }
+    // The wildcard's value: the pinned fall-through value
+    // when the tail classes agree on one, else the
+    // typed-literal default.
+    let default = typed_literal_fillings(&spec.return_type)?
+        .into_iter()
+        .next()?;
+    let mut fall: Vec<&IRNode> = Vec::new();
+    for endpoint in [lo, hi] {
+        if let Some(p) = pinned.get(&endpoint) {
+            if !fall.iter().any(|q| literal_pin_eq(q, p)) {
+                fall.push(p);
+            }
+        }
+    }
+    if fall.len() > 1 {
+        return None; // the two tails disagree: no single wildcard states this table
+    }
+    let wildcard = fall
+        .first()
+        .map(|p| (*p).clone())
+        .unwrap_or_else(|| default.clone());
+    // Arms in row order (see the doc comment): a
+    // single-value row arms its cell unconditionally; a
+    // band row arms each interior cell the wildcard does
+    // not already yield.
+    let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+    let mut armed: Vec<i64> = Vec::new();
+    for ((_, pin), region) in rows.iter().zip(regions.iter()) {
+        for cell in region {
+            if armed.contains(cell) {
+                continue;
+            }
+            if region.len() > 1
+                && (*cell == lo || *cell == hi || literal_pin_eq(pin, &wildcard))
+            {
+                continue; // the wildcard already yields this cell's value
+            }
+            armed.push(*cell);
+            cases.push((IRPattern::Literal(IRLiteral::Int(*cell)), pin.clone()));
+        }
+    }
+    if cases.is_empty() {
+        return None; // every pinned cell rides the wildcard: a constant, not a table
+    }
+    cases.push((IRPattern::Wildcard, wildcard));
+    Some(IRNode::Match {
+        scrutinee: Box::new(IRNode::Var(param.name.clone())),
+        cases,
+    })
+}
+
+/// The Bool guard table (see `guard_table_body`): the same
+/// joint recovery over the finite domain. A Bool guard
+/// leaf (Eq/Neq against a BoolLit) is false at exactly one
+/// domain value, so a row's falsifying region is a
+/// singleton or empty — band rows cannot arise here — but
+/// the deviation discipline is the same: a row-shaped
+/// postcondition with a non-literal pin or an unparseable
+/// leaf, and two rows pinning one domain value to
+/// different literals, refuse the seed instead of being
+/// silently skipped / dropped first-wins (Phase 37).
+/// Materialization is unchanged: one arm per pinned value
+/// in row order, the typed-literal default on the
+/// wildcard.
+fn guard_table_body_bool(spec: &FunctionSpec, param: &Param) -> Option<IRNode> {
+    let mut rows: Vec<(Vec<bool>, IRNode)> = Vec::new();
+    let mut pinned: HashMap<bool, IRNode> = HashMap::new();
+    for c in &spec.postconditions {
+        let Some((pin_side, guard_leaves)) = guard_row_parts(c) else {
+            continue; // not a row: skipped, as in every guard builder
+        };
+        // Row-shaped: it must be a Bool guard row of this
+        // table, or the spec states a row this body would
+        // not honor — a deviation, so no seed.
+        let pin = expr_to_ir(pin_side);
+        if !matches!(pin, IRNode::Literal(_)) {
+            return None; // the pin test: literal pins only
+        }
+        let mut guards: Vec<(BinOp, bool, bool)> = Vec::new();
+        for leaf in guard_leaves {
+            guards.push(guard_leaf_bool(leaf, &param.name)?);
+        }
+        let region: Vec<bool> = [false, true]
+            .into_iter()
+            .filter(|x| guards.iter().all(|g| !guard_leaf_bool_holds(g, *x)))
+            .collect();
+        for cell in &region {
+            match pinned.get(cell) {
+                None => {
+                    pinned.insert(*cell, pin.clone());
+                }
+                Some(p) if literal_pin_eq(p, &pin) => {}
+                Some(_) => return None, // conflicting pins: not a table
+            }
+        }
+        rows.push((region, pin));
+    }
+    if pinned.is_empty() {
+        return None;
+    }
+    let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+    let mut seen: Vec<bool> = Vec::new();
+    for (region, pin) in &rows {
+        for cell in region {
+            if seen.contains(cell) {
+                continue; // an agreeing duplicate: subsumed
+            }
+            seen.push(*cell);
+            cases.push((IRPattern::Literal(IRLiteral::Bool(*cell)), pin.clone()));
+        }
     }
     let default = typed_literal_fillings(&spec.return_type)?
         .into_iter()
@@ -2900,7 +3107,7 @@ fn guarded_identity_body_with_roles(
         // not honor — a deviation, so no seed.
         let pinned = guard_identity_row(c, guard_param, &identity_param.name)?;
         if seen.contains(&pinned) {
-            continue; // first row wins, as in the guard tables
+            continue; // an agreeing duplicate: every identity row pins the same Var, so it is subsumed
         }
         seen.push(pinned);
         cases.push((
@@ -2994,7 +3201,6 @@ fn guarded_identity_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<
 fn composition_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
     let mut guard_expr: Option<Expr> = None;
     let mut rows: Vec<(bool, IRNode, Expr)> = Vec::new();
-    let mut seen: Vec<bool> = Vec::new();
     for c in &spec.postconditions {
         if guard_row_parts(c).is_none() {
             continue; // not a row: skipped, as in guard_table_body
@@ -3009,10 +3215,16 @@ fn composition_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNo
             Some(g) if expr_same(g, &target) => {}
             Some(_) => return None, // two guard expressions: not one guard
         }
-        if seen.contains(&pinned) {
-            continue; // first row wins, as in the guard tables
+        if let Some((_, existing_pin, _)) = rows.iter().find(|(p, _, _)| *p == pinned) {
+            // A second row pinning this guard value: an
+            // agreeing pin is subsumed; a different one is a
+            // row this body would not honor — a deviation,
+            // not a first-wins drop (Phase 37).
+            if !literal_pin_eq(existing_pin, &pin) {
+                return None;
+            }
+            continue;
         }
-        seen.push(pinned);
         rows.push((pinned, pin, pin_side));
     }
     if rows.is_empty() {
@@ -3319,9 +3531,10 @@ fn multi_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNod
 /// pin. Every row's guard leaves compare ONE shared Int
 /// parameter — the key — against Int constants
 /// (`guard_leaf`), and the key value a row pins is recovered
-/// by `pin_int_value`'s falsify-every-leaf scan, exactly as
-/// in `guard_row`. What changes is the pin: where
-/// `guard_row` requires an `IRNode::Literal`, this family
+/// by `pin_int_value`'s falsify-every-leaf scan, the
+/// single-value recovery the guard table's region recovery
+/// generalizes. What changes is the pin: where the guard
+/// table requires an `IRNode::Literal`, this family
 /// admits any pin `composition_pin` admits — a hole-free,
 /// output-free expression over the spec's parameters calling
 /// only indexed specs (a concatenation template, a bare
@@ -3360,14 +3573,15 @@ fn multi_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNod
 /// one arm per pinned key value returning the row's pin
 /// expression, and the typed-literal wildcard for key values
 /// no row pins: the guard-table stance, a documented guess
-/// the spec is silent about. Rows pinning an already-pinned
-/// key value are skipped (the first row wins), as in the
-/// guard tables. The raw builder stops at constructing the
+/// the spec is silent about. A second row pinning an
+/// already-pinned key value is skipped only when its pin
+/// agrees with the first row's — an agreeing duplicate is
+/// subsumed; a conflicting one is a deviation (Phase 37).
+/// The raw builder stops at constructing the
 /// match; admission is the seed builder's step.
 fn expr_pin_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
     let mut key: Option<&Param> = None;
     let mut rows: Vec<(i64, IRNode, Expr)> = Vec::new();
-    let mut seen: Vec<i64> = Vec::new();
     for c in &spec.postconditions {
         if guard_row_parts(c).is_none() {
             continue; // not a row: skipped, as in guard_table_body
@@ -3395,10 +3609,16 @@ fn expr_pin_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode>
                 row
             }
         };
-        if seen.contains(&pinned) {
-            continue; // first row wins, as in the guard tables
+        if let Some((_, existing_pin, _)) = rows.iter().find(|(p, _, _)| *p == pinned) {
+            // A second row pinning this key value: an
+            // agreeing pin is subsumed; a different one is a
+            // row this body would not honor — a deviation,
+            // not a first-wins drop (Phase 37).
+            if !literal_pin_eq(existing_pin, &pin) {
+                return None;
+            }
+            continue;
         }
-        seen.push(pinned);
         rows.push((pinned, pin, pin_side));
     }
     if rows.is_empty() {
@@ -4291,65 +4511,6 @@ fn guard_row_parts<'a>(c: &'a Constraint) -> Option<(&'a Expr, Vec<&'a Expr>)> {
     Some((pin?, guards))
 }
 
-/// One Int guard-table row, from a postcondition of the form
-/// `<guard on the input> || output == <literal>` — the shape
-/// the spec dialect writes lookup tables in ("param<v ||
-/// param>v || output==lit" reads as "param == v implies
-/// output == lit": the constraint can only hold at param == v
-/// if the output pin does). Returns the pinned input value
-/// and the pinned output as an IR literal.
-///
-/// Recognition is by evaluation, not by pattern-matching one
-/// exact guard spelling: the Or's leaves must be exactly one
-/// output pin plus comparisons of the single parameter
-/// against Int constants, and the row pins a value only where
-/// EVERY guard leaf is false. The integers around the guard
-/// constants are probed: outside the outermost constants each
-/// comparison's truth is stable, and the two extra probe
-/// points on each side expose a false-region extending to
-/// infinity, so exactly one falsifying probe point ⟺ the
-/// guard pins exactly that single value. A row pinning a
-/// range, carrying two output pins, or mentioning anything
-/// else is not a row.
-fn guard_row(c: &Constraint, param: &str) -> Option<(i64, IRNode)> {
-    let (pin_side, guard_leaves) = guard_row_parts(c)?;
-    let pin = expr_to_ir(pin_side);
-    if !matches!(pin, IRNode::Literal(_)) {
-        return None; // the pin must be a literal value
-    }
-    let mut guards: Vec<(BinOp, bool, i64)> = Vec::new();
-    for leaf in guard_leaves {
-        guards.push(guard_leaf(leaf, param)?);
-    }
-    Some((pin_int_value(&guards)?, pin))
-}
-
-/// One Bool guard-table row: the same row shape as
-/// `guard_row`, over the finite Bool domain. The guard
-/// leaves compare the parameter against BoolLit constants
-/// (Eq/Neq only — the domain has no order to state), and
-/// the pinned value is recovered by enumeration instead of
-/// the integer-interval scan: the unique domain value
-/// falsifying EVERY guard leaf. An Eq/Neq leaf is false at
-/// exactly one of the two domain values, so the falsifying
-/// set is a singleton or empty; empty — the guard leaves
-/// jointly cover the domain — pins nothing and is not a
-/// row. (The two-falsifying-values check below is therefore
-/// unreachable for admitted leaves; it stays as the Int
-/// scan's structural mirror.)
-fn guard_row_bool(c: &Constraint, param: &str) -> Option<(bool, IRNode)> {
-    let (pin_side, guard_leaves) = guard_row_parts(c)?;
-    let pin = expr_to_ir(pin_side);
-    if !matches!(pin, IRNode::Literal(_)) {
-        return None; // the pin must be a literal value
-    }
-    let mut guards: Vec<(BinOp, bool, bool)> = Vec::new();
-    for leaf in guard_leaves {
-        guards.push(guard_leaf_bool(leaf, param)?);
-    }
-    Some((pin_bool_value(&guards)?, pin))
-}
-
 /// A Bool guard leaf normalized to (operator,
 /// constant_on_left, constant): an Eq/Neq between the
 /// parameter and a BoolLit constant, in either operand
@@ -4385,8 +4546,8 @@ fn guard_leaf_bool_holds(guard: &(BinOp, bool, bool), x: bool) -> bool {
 }
 
 /// The single Int value falsifying EVERY guard leaf, if
-/// exactly one exists — the probe scan `guard_row`
-/// documents: outside the outermost constants each
+/// exactly one exists — the probe scan: outside the
+/// outermost constants each
 /// comparison's truth is stable, and the two extra probe
 /// points on each side expose a false-region extending to
 /// infinity, so exactly one falsifying probe point ⟺ the
@@ -5655,7 +5816,7 @@ spec exclaim {
     // pinned value came from an integer-interval scan) and a
     // guarded identity (rust_pattern_ctor_name — two params,
     // a Bool-equality guard leaf, and an output pin that is a
-    // parameter Var where guard_row required a literal).
+    // parameter Var where the guard table required a literal).
 
     fn load_codegen_module() -> Vec<FunctionSpec> {
         load_m2_module("codegen")
@@ -6090,6 +6251,18 @@ spec exclaim {
     /// proof that the multi-guard generalization reduces to
     /// nothing at one guard (it requires two) and that the
     /// precedence amendment moved no earlier family's body.
+    /// Phase 37 extends it with the three guard-table bodies
+    /// the range-row recovery CORRECTED (rust_stmt_form,
+    /// rust_expectation_source, rust_stmt_child_indent):
+    /// their pre-fix bodies were the silently-wrong ones of
+    /// Phase 36's Finding 1 — refuted in every run — so they
+    /// were never fixture material before; the corrected
+    /// bodies join now: 40 Codegen bodies, 54 total. The 51
+    /// prior bodies are asserted byte-identical below,
+    /// unchanged — the recovery materializes arms only for
+    /// cells the old builder dropped, and the survey diff
+    /// over every spec's resolver-visible body shows exactly
+    /// the three corrections and nothing else.
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -6102,7 +6275,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 51, "37 Codegen + 14 M2 golden bodies");
+        assert_eq!(expected.len(), 54, "40 Codegen + 14 M2 golden bodies");
         for file in ["validator", "printer", "codegen"] {
             let module = load_m2_module(file);
             let index = SpecIndex::from_specs(&module);
@@ -6575,7 +6748,7 @@ spec exclaim {
     // Concat pins under `form`) and rust_match_scrutinee_text
     // (a bare-Var pin and one Concat pin under `form`). Each
     // earlier family refused them on a measured predicate:
-    // guard_table's `guard_row` requires the pin to be an
+    // the guard table requires the pin to be an
     // IRNode::Literal; guarded_identity requires the pin to
     // be exactly the one remaining parameter; composition
     // guard's `guard_leaf_on_expr` is Bool-domain only. Their
@@ -9018,6 +9191,518 @@ spec exclaim {
                 );
             }
         }
+    }
+
+    // ── Phase 37: range rows in the single-key guard ──────
+    //    table (Phase 36, Finding 1)
+    //
+    // `pin_int_value` recovers a guard row's pin only when
+    // exactly ONE value falsifies every guard leaf. Slice 5
+    // writes BAND rows — `site<0||site>4||output==0` pins
+    // {0..=4} at once — and an Eq-leaf CATCH-ALL pinning the
+    // complement of the single-value rows. For such a row
+    // `guard_row` returned None — the NON-row outcome, not a
+    // deviation — so the builder silently SKIPPED it and the
+    // wildcard carried the typed-literal default,
+    // contradicting the skipped rows wherever they pin a
+    // non-default value. Three slice-5 seeds were therefore
+    // Z3-refuted in every Phase 36 run (tpr 0.833 / 0.667 /
+    // 0.667) and their specs crowned Inconclusive lotteries.
+    // The fix lifts the pair family's cell recovery to one
+    // key: rows contribute their whole falsifying REGION to
+    // a joint table over the candidate span, and a
+    // row-shaped postcondition the recovered table does not
+    // subsume is a deviation, never a skip.
+
+    /// Finding 1, spec (i): rust_expectation_source's bands
+    /// {0..=4} → 0 and {5, 6} → 1 beside the single row
+    /// {7} → 2. Before the fix the seed was {7 → 2, _ → 0} —
+    /// sites 5 and 6 contradicted — and Z3 refuted it.
+    #[test]
+    fn constraint_guard_table_seed_for_expectation_source() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_expectation_source");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the guard-table seed");
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        // The {5, 6} band materializes as arms; the {0..=4}
+        // band pins the wildcard's own value (the tails are
+        // unpinned, so the wildcard is the typed default 0)
+        // and needs no arm.
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("site".into())),
+            cases: vec![
+                (IRPattern::Literal(IRLiteral::Int(5)), IRNode::Literal(IRLiteral::Int(1))),
+                (IRPattern::Literal(IRLiteral::Int(6)), IRNode::Literal(IRLiteral::Int(1))),
+                (IRPattern::Literal(IRLiteral::Int(7)), IRNode::Literal(IRLiteral::Int(2))),
+                (IRPattern::Wildcard, IRNode::Literal(IRLiteral::Int(0))),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+
+        for (site, want) in [(-1, 0), (0, 0), (4, 0), (5, 1), (6, 1), (7, 2), (8, 0)] {
+            let v = eval_int_body(&seed.body, "site", site);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want),
+                "site {} must follow the spec's bands",
+                site
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the guard-table seed must win verified");
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the guard-table seed in every draw"
+            );
+        }
+    }
+
+    /// Finding 1, spec (ii): rust_stmt_form's Eq-leaf
+    /// catch-all pins the complement of {0..=8, 15..=22} to
+    /// 17 — both tails included — so the wildcard must carry
+    /// the pinned fall-through value 17, not the typed
+    /// default 0 the skipped row left behind (the seed's
+    /// in-spec loop-fallback test, kind 24 → 17, failed:
+    /// tpr 0.833, refuted every run).
+    #[test]
+    fn constraint_guard_table_seed_for_stmt_form() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_stmt_form");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the guard-table seed");
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        // Every pinned kind, in the spec's row order, with
+        // the catch-all riding the wildcard at 17.
+        let want = |kind: i64| match kind {
+            0..=8 => kind,
+            15 => 11,
+            16 => 12,
+            17 => 13,
+            18 => 14,
+            19 => 15,
+            20 => 9,
+            21 => 10,
+            22 => 16,
+            _ => 17,
+        };
+        for kind in -2..=30 {
+            let v = eval_int_body(&seed.body, "kind", kind);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want(kind)),
+                "kind {} must follow the spec's dispatch",
+                kind
+            );
+        }
+        // The wildcard is the fall-through value itself.
+        let IRNode::Match { cases, .. } = &seed.body else {
+            panic!("the seed body must be a match");
+        };
+        let (last_pat, last_body) = cases.last().expect("a match has a last arm");
+        assert!(
+            matches!(last_pat, IRPattern::Wildcard),
+            "the last arm must be the wildcard"
+        );
+        assert_eq!(
+            format!("{:?}", last_body),
+            format!("{:?}", IRNode::Literal(IRLiteral::Int(17))),
+            "the wildcard must carry the catch-all's pinned value"
+        );
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the guard-table seed must win verified");
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the guard-table seed in every draw"
+            );
+        }
+    }
+
+    /// Finding 1, spec (iii): rust_stmt_child_indent's bands
+    /// {0, 1} → 0, {7, 8} → 0 and {2..=5} → 1 beside the
+    /// single row {6} → 2. Before the fix only {6} → 2 was
+    /// armed; the {2..=5} band fell to the default 0 and Z3
+    /// refuted the seed (tpr 0.667).
+    #[test]
+    fn constraint_guard_table_seed_for_stmt_child_indent() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_stmt_child_indent");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the guard-table seed");
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("site".into())),
+            cases: vec![
+                (IRPattern::Literal(IRLiteral::Int(2)), IRNode::Literal(IRLiteral::Int(1))),
+                (IRPattern::Literal(IRLiteral::Int(3)), IRNode::Literal(IRLiteral::Int(1))),
+                (IRPattern::Literal(IRLiteral::Int(4)), IRNode::Literal(IRLiteral::Int(1))),
+                (IRPattern::Literal(IRLiteral::Int(5)), IRNode::Literal(IRLiteral::Int(1))),
+                (IRPattern::Literal(IRLiteral::Int(6)), IRNode::Literal(IRLiteral::Int(2))),
+                (IRPattern::Wildcard, IRNode::Literal(IRLiteral::Int(0))),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+
+        for (site, want) in [
+            (-1, 0), (0, 0), (1, 0), (2, 1), (3, 1), (4, 1), (5, 1),
+            (6, 2), (7, 0), (8, 0), (9, 0),
+        ] {
+            let v = eval_int_body(&seed.body, "site", site);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want),
+                "site {} must follow the spec's bands",
+                site
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// The two catch-alls that escaped Finding 1 by luck —
+    /// rust_typed_form's and rust_tail_form's complement rows
+    /// pin 0, the typed default their wildcards already
+    /// carried. The joint recovery must reproduce their
+    /// bodies BYTE-IDENTICALLY: the fall-through value the
+    /// tails determine is 0, the catch-all's cells all pin
+    /// the wildcard's own value and materialize no arm, and
+    /// the single-value rows arm in row order as always.
+    #[test]
+    fn constraint_guard_table_catch_all_at_default_unchanged() {
+        let module = load_codegen_module();
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+
+        let spec = module_spec(&module, "rust_typed_form");
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (IRPattern::Literal(IRLiteral::Int(9)), IRNode::Literal(IRLiteral::Int(1))),
+                (IRPattern::Literal(IRLiteral::Int(22)), IRNode::Literal(IRLiteral::Int(2))),
+                (IRPattern::Wildcard, IRNode::Literal(IRLiteral::Int(0))),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let spec = module_spec(&module, "rust_tail_form");
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        let mut cases: Vec<(IRPattern, IRNode)> = [
+            (1, 2), (22, 3), (7, 1), (9, 1), (10, 1), (11, 1), (12, 1), (13, 1),
+            (14, 1), (15, 1), (16, 1), (17, 1), (18, 1), (19, 1), (23, 1), (27, 1),
+        ]
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                IRPattern::Literal(IRLiteral::Int(k)),
+                IRNode::Literal(IRLiteral::Int(v)),
+            )
+        })
+        .collect();
+        cases.push((IRPattern::Wildcard, IRNode::Literal(IRLiteral::Int(0))));
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases,
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Range recovery on synthetic shapes: a band row and an
+    /// Eq-leaf catch-all in one table. The catch-all pins
+    /// both tails, so the wildcard carries ITS value (9);
+    /// the band's cells pin 5 and materialize as arms.
+    #[test]
+    fn constraint_guard_table_bands_and_catch_all_recovered() {
+        let spec = guard_spec(
+            "banded_catch_all",
+            vec![("x", TypeRef::Int)],
+            TypeRef::Int,
+            vec![
+                // {0, 1, 2} → 5
+                pair_row(
+                    vec![cmp_leaf("x", BinOp::Lt, 0), cmp_leaf("x", BinOp::Gt, 2)],
+                    Expr::IntLit(5),
+                ),
+                // complement of {0, 1, 2} → 9
+                pair_row(
+                    vec![
+                        cmp_leaf("x", BinOp::Eq, 0),
+                        cmp_leaf("x", BinOp::Eq, 1),
+                        cmp_leaf("x", BinOp::Eq, 2),
+                    ],
+                    Expr::IntLit(9),
+                ),
+            ],
+        );
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("x".into())),
+            cases: vec![
+                (IRPattern::Literal(IRLiteral::Int(0)), IRNode::Literal(IRLiteral::Int(5))),
+                (IRPattern::Literal(IRLiteral::Int(1)), IRNode::Literal(IRLiteral::Int(5))),
+                (IRPattern::Literal(IRLiteral::Int(2)), IRNode::Literal(IRLiteral::Int(5))),
+                (IRPattern::Wildcard, IRNode::Literal(IRLiteral::Int(9))),
+            ],
+        };
+        assert_eq!(format!("{:?}", seed.body), format!("{:?}", expected));
+        for (x, want) in [(-100, 9), (-1, 9), (0, 5), (1, 5), (2, 5), (3, 9), (100, 9)] {
+            let v = eval_int_body(&seed.body, "x", x);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want),
+                "x {} must follow the band/catch-all table",
+                x
+            );
+        }
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Conflicting band pins are not a table: two bands
+    /// overlapping on {2, 3, 4} with different pins jointly
+    /// determine no value there — no seed, not a first-wins
+    /// body.
+    #[test]
+    fn constraint_guard_table_conflicting_bands_refused() {
+        let spec = guard_spec(
+            "conflicting_bands",
+            vec![("x", TypeRef::Int)],
+            TypeRef::Int,
+            vec![
+                pair_row(
+                    vec![cmp_leaf("x", BinOp::Lt, 0), cmp_leaf("x", BinOp::Gt, 4)],
+                    Expr::IntLit(1),
+                ),
+                pair_row(
+                    vec![cmp_leaf("x", BinOp::Lt, 2), cmp_leaf("x", BinOp::Gt, 6)],
+                    Expr::IntLit(2),
+                ),
+            ],
+        );
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        assert!(
+            engine.seed_from_constraints(&spec).is_empty(),
+            "overlapping bands with different pins must get no constraint seed"
+        );
+    }
+
+    /// The structural kill: a row-shaped postcondition the
+    /// recovered table does not subsume is a DEVIATION (no
+    /// seed), never a silent skip — where before Phase 37
+    /// each spec below still seeded from its one good row,
+    /// with the deviating row dropped unremarked.
+    #[test]
+    fn constraint_guard_table_row_shaped_deviations_refused() {
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let mut cases: Vec<FunctionSpec> = Vec::new();
+
+        // A good single-value row beside a row-shaped row
+        // whose pin is not a literal (`output == x` at
+        // x == 5): the guard table's pin test refuses it,
+        // and no other family states the pair (the
+        // expression-pin family's territory requires a
+        // compound pin; a bare Var is not one).
+        cases.push(guard_spec(
+            "row_with_var_pin",
+            vec![("x", TypeRef::Int)],
+            TypeRef::Int,
+            vec![
+                int_key_row("x", 0, Expr::IntLit(1)),
+                pair_row(
+                    vec![cmp_leaf("x", BinOp::Lt, 5), cmp_leaf("x", BinOp::Gt, 5)],
+                    var_expr("x"),
+                ),
+            ],
+        ));
+
+        // A good row beside a row-shaped row whose guard leaf
+        // does not parse on the parameter (`x == x`).
+        cases.push(guard_spec(
+            "row_with_unparseable_leaf",
+            vec![("x", TypeRef::Int)],
+            TypeRef::Int,
+            vec![
+                int_key_row("x", 0, Expr::IntLit(1)),
+                or_row(vec![
+                    eq_expr(var_expr("x"), var_expr("x")),
+                    eq_expr(var_expr("output"), Expr::IntLit(2)),
+                ]),
+            ],
+        ));
+
+        // Bool domain: a good row beside a row-shaped row
+        // whose pin is the parameter itself (not a literal).
+        cases.push(guard_spec(
+            "bool_row_with_var_pin",
+            vec![("value", TypeRef::Bool)],
+            TypeRef::String,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("value"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), Expr::StringLit("a".into())),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("value"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), var_expr("value")),
+                ]),
+            ],
+        ));
+
+        // Bool domain: two rows pinning the SAME domain value
+        // to different literals — a conflict, not first-wins.
+        // (The composition family's duplicate handling is the
+        // same rule; see the Phase 37 audit note on its
+        // builder.)
+        cases.push(guard_spec(
+            "bool_conflicting_rows",
+            vec![("value", TypeRef::Bool)],
+            TypeRef::String,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("value"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), Expr::StringLit("a".into())),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("value"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), Expr::StringLit("b".into())),
+                ]),
+            ],
+        ));
+
+        for spec in &cases {
+            assert!(
+                engine.seed_from_constraints(spec).is_empty(),
+                "{}: a row-shaped deviation must get no constraint seed",
+                spec.name
+            );
+        }
+    }
+
+    /// A genuinely NON-row postcondition stays skipped, as
+    /// before — it is not a deviation. node_arity's
+    /// `output >= 0` floor is the measured case; here a band
+    /// row carries the same floor beside it.
+    #[test]
+    fn constraint_guard_table_band_row_with_non_row_postcondition() {
+        let spec = guard_spec(
+            "band_with_floor",
+            vec![("x", TypeRef::Int)],
+            TypeRef::Int,
+            vec![
+                // {0, 1} → 3
+                pair_row(
+                    vec![cmp_leaf("x", BinOp::Lt, 0), cmp_leaf("x", BinOp::Gt, 1)],
+                    Expr::IntLit(3),
+                ),
+                Constraint::Expr(Expr::BinOp(
+                    BinOp::Ge,
+                    Box::new(var_expr("output")),
+                    Box::new(Expr::IntLit(0)),
+                )),
+            ],
+        );
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        for (x, want) in [(-5, 0), (0, 3), (1, 3), (2, 0)] {
+            let v = eval_int_body(&seed.body, "x", x);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want),
+                "x {} must follow the band, with the floor skipped as a non-row",
+                x
+            );
+        }
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// The Phase 37 audit's two dedup hardenings: in the
+    /// composition and expression-pin builders a second row
+    /// pinning an already-pinned guard/key value was dropped
+    /// first-wins even when its pin DIFFERED — a row-shaped
+    /// row contributing no arm and not subsumed, the
+    /// Finding 1 disease in miniature. An identical pin is
+    /// subsumed and still skipped; a different one is now a
+    /// deviation.
+    #[test]
+    fn constraint_duplicate_pin_conflicts_refused() {
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+
+        // Expression-pin: two rows pin key 0 to different
+        // Concat templates.
+        let spec = guard_spec(
+            "expr_pin_duplicate_key",
+            vec![("code", TypeRef::Int), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                int_key_row("code", 0, concat_pin(var_expr("text"), "a")),
+                int_key_row("code", 0, concat_pin(var_expr("text"), "b")),
+            ],
+        );
+        assert!(
+            engine.seed_from_constraints(&spec).is_empty(),
+            "conflicting duplicate key rows must get no constraint seed"
+        );
+
+        // Composition: two rows pin guard value false (under
+        // a plain Bool parameter) to different Concat pins.
+        let spec = guard_spec(
+            "composition_duplicate_value",
+            vec![("flag", TypeRef::Bool), ("text", TypeRef::String)],
+            TypeRef::String,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), concat_pin(var_expr("text"), "a")),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), concat_pin(var_expr("text"), "b")),
+                ]),
+            ],
+        );
+        assert!(
+            engine.seed_from_constraints(&spec).is_empty(),
+            "conflicting duplicate guard-value rows must get no constraint seed"
+        );
     }
 
     // ── Generation-side type discipline (Phase 12) ─────────
