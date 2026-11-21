@@ -8,6 +8,8 @@ mod llm;
 mod synthesis;
 mod verify;
 mod codegen;
+mod m2_synthesis_probe;
+mod m2_cross_validation;
 
 use clap::{Parser, Subcommand};
 use colored::*;
@@ -99,19 +101,25 @@ fn main() -> anyhow::Result<()> {
             println!("  {} Type checking...", "→".dimmed());
             let type_checked = spec::typeck::check(spec)?;
 
-            // Extract the first function spec for synthesis
-            // A .morph file may contain multiple specs; we synthesize one at a time
-            let spec = type_checked.spec.functions.first()
+            // The whole module stays in scope for synthesis and
+            // verification: a spec's constraints may call sibling
+            // specs, and those calls resolve against the module
+            // (SpecIndex) — the same module-aware pipeline the M2
+            // probe and cross-validation harness run. We still
+            // build one spec at a time: the file's first spec.
+            let functions = &type_checked.spec.functions;
+            let spec = functions.first()
                 .ok_or_else(|| anyhow::anyhow!("No spec functions found"))?
                 .clone();
 
             // Phase 3: Synthesize
             println!("  {} Synthesizing implementations...", "→".dimmed());
-            let candidates = synthesis::engine::synthesize(&spec, opt_level)?;
+            let candidates = synthesis::engine::synthesize_with_module(&spec, opt_level, functions)?;
 
             // Phase 4: Verify
             println!("  {} Verifying candidates...", "→".dimmed());
-            let verified = verify::verifier::verify_all(candidates, &spec)?;
+            let verified = verify::verifier::Verifier::with_specs(functions)
+                .verify_all(candidates, &spec)?;
 
             if verified.is_empty() {
                 anyhow::bail!("No implementation satisfied all constraints");

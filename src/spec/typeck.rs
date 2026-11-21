@@ -165,6 +165,24 @@ fn check_constraint(constraint: &Constraint, env: &TypeEnv) -> Result<(), TypeEr
     }
 }
 
+/// Return type of a standard library function, if `name` is one.
+///
+/// The names and signatures are those of LANGUAGE_REFERENCE
+/// Appendix A. Types are coarse, matching the precision of the
+/// rest of this checker (cf. Index returning `Named("_")`).
+fn stdlib_return_type(name: &str) -> Option<TypeRef> {
+    match name {
+        "len" | "sum" | "product" => Some(TypeRef::Int),
+        "is_sorted" | "is_permutation" | "contains" | "all" | "any" => Some(TypeRef::Bool),
+        "range" => Some(TypeRef::List(Box::new(TypeRef::Int))),
+        "reverse" | "sort" | "filter" | "map" | "zip" | "take" | "drop" => {
+            Some(TypeRef::List(Box::new(TypeRef::Named("_".into()))))
+        }
+        "fold" | "min" | "max" => Some(TypeRef::Named("_".into())),
+        _ => None,
+    }
+}
+
 fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
     match expr {
         Expr::Var(name) => {
@@ -196,17 +214,48 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
             Ok(TypeRef::Named("_".into()))
         }
         Expr::Call(name, args) => {
+            let mut arg_tys = Vec::new();
             for arg in args {
-                check_expr(arg, env)?;
+                arg_tys.push(check_expr(arg, env)?);
             }
-            // Return type from function sig if known
-            env.function_sigs.get(name)
-                .map(|f| f.return_type.clone())
-                .ok_or_else(|| TypeError {
-                    message: format!("Called undefined function: '{}'", name),
-                    function: None,
-                    span: None,
-                })
+            // Constructors the parser itself generates for literals:
+            // "List" for [a, b, c] and "__tuple__" for (a, b, ...).
+            // These are not user-called functions.
+            match name.as_str() {
+                "List" => {
+                    return Ok(TypeRef::List(Box::new(TypeRef::Named("_".into()))));
+                }
+                "__tuple__" => return Ok(TypeRef::Tuple(arg_tys)),
+                // Option constructors (LANGUAGE_REFERENCE section 4):
+                // `Option<Int>` values are written Some(5) / None().
+                "Some" => {
+                    let inner = arg_tys
+                        .into_iter()
+                        .next()
+                        .unwrap_or(TypeRef::Named("_".into()));
+                    return Ok(TypeRef::Option(Box::new(inner)));
+                }
+                "None" => {
+                    return Ok(TypeRef::Option(Box::new(TypeRef::Named("_".into()))));
+                }
+                _ => {}
+            }
+            // A spec defined in this module wins over the standard
+            // library fallback below.
+            if let Some(f) = env.function_sigs.get(name) {
+                return Ok(f.return_type.clone());
+            }
+            // Standard library functions are assumed to be available
+            // (LANGUAGE_REFERENCE Appendix A) — the same assumption
+            // check_constraint already makes for predicate names.
+            if let Some(ty) = stdlib_return_type(name) {
+                return Ok(ty);
+            }
+            Err(TypeError {
+                message: format!("Called undefined function: '{}'", name),
+                function: None,
+                span: None,
+            })
         }
         Expr::BinOp(_op, lhs, rhs) => {
             let _lty = check_expr(lhs, env)?;
@@ -266,3 +315,116 @@ impl std::fmt::Display for TypeError {
 }
 
 impl std::error::Error for TypeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::parser::parse;
+
+    #[test]
+    fn stdlib_calls_typecheck() {
+        // LANGUAGE_REFERENCE Appendix A lists standard library
+        // functions "assumed to be available in constraints", and
+        // predicate names are already trusted unchecked — but calls
+        // like len(...) inside expressions were rejected as undefined
+        // functions, so no spec using len/range could pass `check`.
+        let src = r#"
+        T {
+        spec f {
+            input: list: List<Int>
+            output: Bool
+
+            constraint: len(list) >= 0
+            constraint: forall i: Int in range(0, len(list)):
+                list[i] > 0 implies output == true
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "stdlib calls must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn option_constructors_typecheck() {
+        // Some(v) / None() are the documented Option constructors
+        // (LANGUAGE_REFERENCE section 4), used by binary_search in
+        // constraints and test expectations. The parser lowers them
+        // to Call nodes and the checker rejected them as undefined
+        // functions.
+        let src = r#"
+        T {
+        spec f {
+            input: list: List<Int>, needle: Int
+            output: Option<Int>
+
+            constraint: output == None() implies len(list) == 0
+
+            test "missing" { input: ([1, 2], 5); expect: None() }
+            test "found" { input: ([1, 2], 2); expect: Some(1) }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "Option constructors must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn list_and_tuple_test_inputs_typecheck() {
+        // The parser lowers list literals to Call("List", ...) and
+        // tuples to Call("__tuple__", ...). The checker rejected its
+        // own parser's output as undefined functions, so any spec
+        // with a list or tuple test input failed `check`.
+        let src = r#"
+        T {
+        spec f {
+            input: list: List<Int>, threshold: Int
+            output: Int
+
+            constraint: output >= 0
+
+            test "a" { input: ([10, 20, 30], 5); expect: 3 }
+            test "b" { input: []; expect: 0 }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "list/tuple test inputs must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn unknown_function_call_still_rejected() {
+        // Only the documented standard library names are assumed;
+        // anything else must still resolve to a spec in the module.
+        let src = r#"
+        T {
+        spec f {
+            input: kind: Int
+            output: Bool
+
+            constraint: output == nosuchfn(kind)
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert!(check(spec).is_err(), "unknown function was accepted");
+    }
+}

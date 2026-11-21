@@ -19,6 +19,26 @@ mod tests {
     }
 
     #[test]
+    fn e2e_parse_validator() {
+        let src = std::fs::read_to_string("examples/self_host/validator.morph").unwrap();
+        assert!(src.contains("Validator"));
+        assert!(src.contains("is_known_node_kind"));
+        assert!(src.contains("tags_compatible"));
+        assert!(src.contains("constraint"));
+        assert!(src.contains("test"));
+    }
+
+    #[test]
+    fn e2e_parse_printer() {
+        let src = std::fs::read_to_string("examples/self_host/printer.morph").unwrap();
+        assert!(src.contains("Printer"));
+        assert!(src.contains("node_kind_name"));
+        assert!(src.contains("needs_parens"));
+        assert!(src.contains("constraint"));
+        assert!(src.contains("test"));
+    }
+
+    #[test]
     fn e2e_parse_sort_example() {
         let src = std::fs::read_to_string("examples/sort.morph").unwrap();
         assert!(src.contains("sort"));
@@ -62,6 +82,8 @@ mod tests {
             "examples/functional_tokenizer.morph",
             "examples/self_host/is_sorted.morph",
             "examples/self_host/count_matching.morph",
+            "examples/self_host/validator.morph",
+            "examples/self_host/printer.morph",
         ];
         for path in &examples {
             let src = std::fs::read_to_string(path)
@@ -77,6 +99,8 @@ mod tests {
         let specs = vec![
             ("is_sorted", "examples/self_host/is_sorted.morph"),
             ("count_matching", "examples/self_host/count_matching.morph"),
+            ("Validator", "examples/self_host/validator.morph"),
+            ("Printer", "examples/self_host/printer.morph"),
             ("sort", "examples/sort.morph"),
             ("binary_search", "examples/binary_search.morph"),
         ];

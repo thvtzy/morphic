@@ -64,10 +64,12 @@ impl<'a> Parser<'a> {
         self.skip_whitespace_and_comments();
         self.expect_char('{')?;
 
+        let mut closed = false;
         while !self.is_eof() {
             self.skip_whitespace_and_comments();
             if self.peek() == Some('}') {
                 self.advance();
+                closed = true;
                 break;
             }
 
@@ -114,6 +116,13 @@ impl<'a> Parser<'a> {
             }
         }
 
+        if !closed {
+            return self.error(format!(
+                "Unexpected end of file: missing '}}' to close module '{}'",
+                name
+            ));
+        }
+
         Ok(Spec { name, imports, functions, types, invariants })
     }
 
@@ -142,10 +151,12 @@ impl<'a> Parser<'a> {
         let mut tests = Vec::new();
         let mut annotations = HashMap::new();
 
+        let mut closed = false;
         while !self.is_eof() {
             self.skip_whitespace_and_comments();
             if self.peek() == Some('}') {
                 self.advance();
+                closed = true;
                 break;
             }
 
@@ -223,16 +234,45 @@ impl<'a> Parser<'a> {
                 }
 
                 "resource" => {
+                    self.expect_char(':')?;
                     let res_name = self.parse_identifier()?;
-                    let max = if self.peek() == Some('<') {
+                    self.skip_whitespace_and_comments();
+                    let mut max = None;
+                    let mut predicate = None;
+                    if self.peek() == Some('<') {
                         self.advance();
-                        let n = self.parse_integer()?;
                         self.skip_whitespace_and_comments();
-                        self.expect_char('>')?;
-                        Some(n as u64)
-                    } else {
-                        None
-                    };
+                        if self.peek() == Some('O') && self.peek_ahead() == Some('(') {
+                            // Big-O bound, e.g. `allocations < O(n)`
+                            // (LANGUAGE_REFERENCE section 8). Not a
+                            // plain amount, so keep it as the predicate.
+                            let bound = self.parse_big_o()?;
+                            predicate = Some(bound.to_string());
+                        } else {
+                            let n = self.parse_integer()?;
+                            // Optional unit suffix (section 8):
+                            // KB / MB / GB scale the amount.
+                            self.skip_whitespace_and_comments();
+                            let multiplier = if self.is_ident_start(self.peek()) {
+                                match self.parse_identifier()?.as_str() {
+                                    "KB" => 1024u64,
+                                    "MB" => 1024 * 1024,
+                                    "GB" => 1024 * 1024 * 1024,
+                                    u => {
+                                        return self.error(format!(
+                                            "Unknown resource unit: {}. Use KB/MB/GB.",
+                                            u
+                                        ))
+                                    }
+                                }
+                            } else {
+                                1
+                            };
+                            max = Some((n as u64) * multiplier);
+                        }
+                        // No closing '>': in the section 8 grammar the
+                        // '<' is a comparison, not a bracket.
+                    }
 
                     let resource_kind = match res_name.as_str() {
                         "memory" => Resource::MemoryBytes,
@@ -246,7 +286,7 @@ impl<'a> Parser<'a> {
                     resource = Some(ResourceBound {
                         resource: resource_kind,
                         max_amount: max,
-                        predicate: None,
+                        predicate,
                     });
                 }
 
@@ -269,6 +309,13 @@ impl<'a> Parser<'a> {
             }
         }
 
+        if !closed {
+            return self.error(format!(
+                "Unexpected end of file: missing '}}' to close spec '{}'",
+                name
+            ));
+        }
+
         Ok(FunctionSpec {
             name,
             doc,
@@ -288,6 +335,21 @@ impl<'a> Parser<'a> {
     // ── Parsing Helpers ──────────────────────────────────
 
     fn parse_constraint(&mut self) -> Result<Constraint, ParseError> {
+        let lhs = self.parse_simple_constraint()?;
+        // `a implies b` — documented in LANGUAGE_REFERENCE section 6
+        // and supported by the AST, type checker, verifier and
+        // synthesis engine, but never produced by the parser.
+        // Implication binds loosest and associates to the right.
+        self.skip_whitespace_and_comments();
+        if self.peek() == Some('i') && self.peek_n(7) == "implies" {
+            self.eat_keyword("implies")?;
+            let rhs = self.parse_constraint()?;
+            return Ok(Constraint::Implies(Box::new(lhs), Box::new(rhs)));
+        }
+        Ok(lhs)
+    }
+
+    fn parse_simple_constraint(&mut self) -> Result<Constraint, ParseError> {
         self.skip_whitespace_and_comments();
 
         if self.peek() == Some('t') {
@@ -314,14 +376,19 @@ impl<'a> Parser<'a> {
 
         if self.peek() == Some('!') {
             self.advance();
-            let inner = self.parse_constraint()?;
+            // Negation binds tighter than implication, so the operand
+            // is a simple constraint, not a full one.
+            let inner = self.parse_simple_constraint()?;
             return Ok(Constraint::Not(Box::new(inner)));
         }
 
         if self.peek() == Some('(') {
             self.advance();
             let mut parts = vec![self.parse_constraint()?];
-            while self.peek() == Some('&') || self.peek() == Some('|') {
+            while {
+                self.skip_whitespace_and_comments();
+                self.peek() == Some('&') || self.peek() == Some('|')
+            } {
                 let is_and = self.peek() == Some('&');
                 self.advance();
                 if is_and { self.advance(); } // consume &&
@@ -433,7 +500,11 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_or(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_and()?;
-        while self.peek_n(2) == "||" {
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.peek_n(2) != "||" {
+                break;
+            }
             self.eat_str("||")?;
             let right = self.parse_expr_and()?;
             left = Expr::BinOp(BinOp::Or, Box::new(left), Box::new(right));
@@ -443,7 +514,11 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_and(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_compare()?;
-        while self.peek_n(2) == "&&" {
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.peek_n(2) != "&&" {
+                break;
+            }
             self.eat_str("&&")?;
             let right = self.parse_expr_compare()?;
             left = Expr::BinOp(BinOp::And, Box::new(left), Box::new(right));
@@ -453,7 +528,12 @@ impl<'a> Parser<'a> {
 
     fn parse_expr_compare(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_add()?;
-        if self.peek() == Some('<') || self.peek() == Some('>') || self.peek() == Some('=') {
+        self.skip_whitespace_and_comments();
+        if self.peek() == Some('<')
+            || self.peek() == Some('>')
+            || self.peek() == Some('=')
+            || self.peek() == Some('!')
+        {
             let op = match self.peek_n(2).as_str() {
                 "<=" => { self.eat_str("<=")?; BinOp::Le }
                 ">=" => { self.eat_str(">=")?; BinOp::Ge }
@@ -478,6 +558,7 @@ impl<'a> Parser<'a> {
     fn parse_expr_add(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_mul()?;
         loop {
+            self.skip_whitespace_and_comments();
             match self.peek() {
                 Some('+') => {
                     self.advance();
@@ -498,6 +579,7 @@ impl<'a> Parser<'a> {
     fn parse_expr_mul(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_expr_atom()?;
         loop {
+            self.skip_whitespace_and_comments();
             match self.peek() {
                 Some('*') => {
                     self.advance();
@@ -607,7 +689,11 @@ impl<'a> Parser<'a> {
             }
             self.expect_char('|')?;
             self.skip_whitespace_and_comments();
-            self.eat_str("->")?;
+            // The arrow is optional: LANGUAGE_REFERENCE section 11
+            // documents both `|x, y| x + y` and `|a, b| -> a > b`.
+            if self.peek_n(2) == "->" {
+                self.eat_str("->")?;
+            }
             let body = self.parse_expr()?;
             return Ok(Expr::Lambda(params, Box::new(body)));
         }
@@ -658,6 +744,23 @@ impl<'a> Parser<'a> {
         let name = self.parse_identifier()?;
 
         match name.as_str() {
+            "fn" => {
+                // Function type: fn(T1, T2) -> R
+                // (LANGUAGE_REFERENCE section 4)
+                self.expect_char('(')?;
+                self.skip_whitespace_and_comments();
+                let args = if self.peek() == Some(')') {
+                    Vec::new()
+                } else {
+                    self.parse_type_args()?
+                };
+                self.expect_char(')')?;
+                self.skip_whitespace_and_comments();
+                self.eat_str("->")?;
+                let ret = self.parse_type_ref()?;
+                Ok(TypeRef::Function(args, Box::new(ret)))
+            }
+
             "Int" => Ok(TypeRef::Int),
             "Float" => Ok(TypeRef::Float),
             "Bool" => Ok(TypeRef::Bool),
@@ -756,7 +859,21 @@ impl<'a> Parser<'a> {
             return Err(self.simple_error("Expected O(...) for complexity bound"));
         }
         self.expect_char('(')?;
-        let inner = self.parse_identifier()?;
+        // Read the bound token verbatim up to ')': forms like `1`,
+        // `n^2` and `2^n` are not identifiers, so parse_identifier
+        // rejected them and the match arms below were unreachable.
+        let mut inner = String::new();
+        while let Some(c) = self.peek() {
+            if c == ')' {
+                break;
+            }
+            inner.push(c);
+            self.advance();
+        }
+        let inner = inner.trim().to_string();
+        if inner.is_empty() {
+            return Err(self.simple_error("Expected complexity bound inside O(...)"));
+        }
         self.expect_char(')')?;
 
         match inner.as_str() {
@@ -803,6 +920,9 @@ impl<'a> Parser<'a> {
         while !self.is_eof() {
             self.skip_whitespace_and_comments();
             if self.peek() == Some('}') { self.advance(); break; }
+            // Optional ';' field separator, as used in the
+            // LANGUAGE_REFERENCE examples (section 2 and 3).
+            if self.peek() == Some(';') { self.advance(); continue; }
 
             let key = self.parse_identifier()?;
             self.expect_char(':')?;
@@ -1089,9 +1209,13 @@ impl<'a> Parser<'a> {
     }
 
     fn context_snippet(&self) -> String {
+        // `pos` is a char index into `chars`, not a byte index into
+        // `source`. Slicing `source` with it panics whenever a
+        // multi-byte character straddles the window edge, so build
+        // the snippet from `chars` instead.
         let start = self.pos.saturating_sub(20);
-        let end = (self.pos + 20).min(self.source.len());
-        let snippet = &self.source[start..end];
+        let end = (self.pos + 20).min(self.chars.len());
+        let snippet: String = self.chars[start..end].iter().collect();
         let marker = " ".repeat(self.pos - start) + "^";
         format!("{}\n{}", snippet, marker)
     }
@@ -1169,5 +1293,345 @@ mod tests {
 
         let spec = parse(src).unwrap();
         assert_eq!(spec.functions[0].invariants.len(), 2);
+    }
+
+    #[test]
+    fn error_snippet_survives_unicode_before_error() {
+        // Regression: context_snippet() used the char index `pos` as a
+        // byte index into the source. With multi-byte characters (the
+        // box-drawing comment art in the bundled examples) before the
+        // error position, building the error snippet panicked with
+        // "byte index is not a char boundary" instead of returning
+        // the parse error.
+        let dashes = "─".repeat(40);
+        let src = format!(
+            "// {}\nTestModule {{\n  spec f {{\n    input: x: Int\n    output: Int\n    bogus: true\n  }}\n}}\n",
+            dashes
+        );
+        let result = parse(&src);
+        assert!(result.is_err(), "expected a parse error for 'bogus'");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("bogus"),
+            "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parse_constant_big_o() {
+        // `O(1)` is documented (LANGUAGE_REFERENCE section 7) and
+        // used by is_sorted/count_matching/binary_search, but
+        // parse_big_o read the bound with parse_identifier, which
+        // rejects digits — the `BigO::Constant` match arm was
+        // unreachable and every `O(1)` failed to parse.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>
+            output: Int
+
+            constraint: true
+            optimize: space < O(1)
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let complexity = spec.functions[0]
+            .complexity
+            .as_ref()
+            .expect("complexity bound");
+        assert!(
+            matches!(complexity.bound, BigO::Constant),
+            "expected O(1), got: {:?}",
+            complexity.bound
+        );
+    }
+
+    #[test]
+    fn parse_test_with_semicolon_separators() {
+        // The reference's own examples write test fields separated by
+        // ';' (section 2: `test { input: (2, 3); expect: 5 }`), and
+        // count_matching.morph does the same, but parse_test rejected
+        // the separator. Accept it as optional.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: x: Int
+            output: Int
+
+            test "one" { input: 1; expect: 1 }
+            test "two" {
+                input: 2;
+                expect: 2
+            }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert_eq!(spec.functions[0].tests.len(), 2);
+    }
+
+    #[test]
+    fn parse_resource_bounds() {
+        // Documented forms (LANGUAGE_REFERENCE section 8):
+        // `resource: memory < 10MB` and `resource: allocations < O(n)`.
+        // The parser expected neither the ':' after `resource`, nor a
+        // unit suffix, nor a Big-O amount, so both forms failed.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>
+            output: List<Int>
+
+            constraint: true
+            resource: memory < 10MB
+        }
+
+        spec g {
+            input: list: List<Int>
+            output: List<Int>
+
+            constraint: true
+            resource: allocations < O(n)
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let mem = spec.functions[0]
+            .resource
+            .as_ref()
+            .expect("memory resource bound");
+        assert_eq!(mem.max_amount, Some(10 * 1024 * 1024));
+        assert_eq!(mem.predicate, None);
+
+        let alloc = spec.functions[1]
+            .resource
+            .as_ref()
+            .expect("allocations resource bound");
+        assert_eq!(alloc.max_amount, None);
+        assert_eq!(alloc.predicate.as_deref(), Some("O(n)"));
+    }
+
+    #[test]
+    fn parse_function_type_param() {
+        // Function types are documented (LANGUAGE_REFERENCE section 4:
+        // `fn(T1, T2) -> R`) and TypeRef::Function exists, but
+        // parse_type_ref treated `fn` as a plain named type and then
+        // choked on the '('. Blocks sort/binary_search, whose specs
+        // take a comparator parameter.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>, cmp: fn(Int, Int) -> Bool
+            output: List<Int>
+
+            constraint: true
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let params = &spec.functions[0].params;
+        assert_eq!(params.len(), 2);
+        match &params[1].ty {
+            TypeRef::Function(args, ret) => {
+                assert_eq!(args.len(), 2);
+                assert!(matches!(**ret, TypeRef::Bool));
+            }
+            other => panic!("expected Function type, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_lambda_with_and_without_arrow() {
+        // LANGUAGE_REFERENCE section 11 documents both lambda forms:
+        // `|x, y| x + y` and `|a, b| -> a > b`. The parser required
+        // the arrow, so the arrow-less form used by the bundled
+        // examples (sort, binary_search) failed to parse.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>
+            output: List<Int>
+
+            test "no arrow" {
+                input: ([3, 1, 2], |a, b| a < b)
+                expect: [1, 2, 3]
+            }
+
+            test "with arrow" {
+                input: ([3, 1, 2], |a, b| -> a < b)
+                expect: [1, 2, 3]
+            }
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert_eq!(spec.functions[0].tests.len(), 2);
+    }
+
+    #[test]
+    fn parse_implies_constraint() {
+        // `a implies b` is documented (LANGUAGE_REFERENCE section 6)
+        // and Constraint::Implies is handled by the type checker, the
+        // Z3 verifier and the synthesis engine — but the parser never
+        // produced it, so any spec using it failed to parse.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: list: List<Int>
+            output: Bool
+
+            constraint: is_sorted(list) implies output == true
+            constraint: forall i: Int in range(0, len(list)):
+                list[i] > 0 implies output == true
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let func = &spec.functions[0];
+        assert_eq!(func.postconditions.len(), 2);
+        assert!(
+            matches!(func.postconditions[0], Constraint::Implies(_, _)),
+            "expected Implies, got: {:?}",
+            func.postconditions[0]
+        );
+        match &func.postconditions[1] {
+            Constraint::Forall { body, .. } => assert!(
+                matches!(**body, Constraint::Implies(_, _)),
+                "expected Implies forall body, got: {:?}",
+                body
+            ),
+            other => panic!("expected Forall, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_spaced_binary_operators() {
+        // The reference writes operators with spaces (section 6:
+        // `x > 0 && y > 0`), but the expression operator loops never
+        // skipped whitespace before peeking, so a spaced operator only
+        // parsed when the left operand happened to be an identifier
+        // (whose atom consumes trailing whitespace). Literal operands
+        // and spaced && / || / arithmetic failed.
+        let src = r#"
+        TestMod {
+        spec f {
+            input: x: Int, y: Int
+            output: Int
+
+            constraint: x > 0 && y > 0
+            constraint: output == len(list) - 1
+            constraint: 1 + 2 == 3
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let func = &spec.functions[0];
+        assert_eq!(func.postconditions.len(), 3);
+        assert!(
+            matches!(
+                func.postconditions[0],
+                Constraint::Expr(Expr::BinOp(BinOp::And, _, _))
+            ),
+            "expected And constraint, got: {:?}",
+            func.postconditions[0]
+        );
+        assert!(
+            matches!(
+                func.postconditions[1],
+                Constraint::Expr(Expr::BinOp(
+                    BinOp::Eq,
+                    _,
+                    _
+                )) | Constraint::Eq(_, _)
+            ),
+            "expected equality constraint, got: {:?}",
+            func.postconditions[1]
+        );
+    }
+
+    #[test]
+    fn parse_not_equal_operator() {
+        // '!=' is documented (LANGUAGE_REFERENCE section 6:
+        // `require: b != 0`) and parse_expr_compare has a "!=" arm,
+        // but its guard only entered on '<', '>' or '=', so the
+        // operator was unreachable and the parse failed on '!'.
+        let src = r#"
+        TestMod {
+        spec divide {
+            input: a: Int, b: Int
+            output: Int
+
+            require: b != 0
+            constraint: output != a
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let func = &spec.functions[0];
+        assert_eq!(func.preconditions.len(), 1);
+        assert!(
+            matches!(
+                func.preconditions[0],
+                Constraint::Expr(Expr::BinOp(BinOp::Neq, _, _))
+            ),
+            "expected Neq constraint, got: {:?}",
+            func.preconditions[0]
+        );
+        assert_eq!(func.postconditions.len(), 1);
+        assert!(
+            matches!(
+                func.postconditions[0],
+                Constraint::Expr(Expr::BinOp(BinOp::Neq, _, _))
+            ),
+            "expected Neq constraint, got: {:?}",
+            func.postconditions[0]
+        );
+    }
+
+    #[test]
+    fn truncated_spec_body_is_rejected() {
+        // Regression: the spec-body loop ends on EOF, so a file cut off
+        // inside a spec (both closing braces missing) parsed as Ok.
+        let src = "TestModule {\n  spec f {\n    input: x: Int\n";
+        let result = parse(src);
+        assert!(
+            result.is_err(),
+            "truncated spec must be a parse error, got: {:?}",
+            result.map(|s| s.name)
+        );
+    }
+
+    #[test]
+    fn truncated_module_is_rejected() {
+        // Regression: same EOF hole one level up — the spec is complete
+        // but the module's closing brace is missing and the file ends
+        // exactly on a token boundary.
+        let src = "TestModule {\n  spec f {\n    input: x: Int\n    output: Int\n    constraint: true\n  }";
+        let result = parse(src);
+        assert!(
+            result.is_err(),
+            "unterminated module must be a parse error, got: {:?}",
+            result.map(|s| s.name)
+        );
+    }
+
+    #[test]
+    fn error_snippet_survives_unicode_after_error() {
+        // Same regression, opposite direction: the error is at the very
+        // start of the file and the multi-byte characters fall inside
+        // the forward-looking half of the snippet window.
+        let src = format!("{} garbage", "─".repeat(10));
+        let result = parse(&src);
+        assert!(result.is_err(), "expected a parse error");
     }
 }

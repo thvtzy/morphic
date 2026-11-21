@@ -4,7 +4,7 @@ spec count_matching {
     output: Int
 
     constraint: forall x: Int in list:
-        if x > threshold then output > 0
+        x > threshold implies output > 0
     constraint: output >= 0
     constraint: output <= len(list)
 

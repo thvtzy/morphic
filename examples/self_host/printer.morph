@@ -1,0 +1,171 @@
+// =================================================================
+//  M2: Pretty-Printer -- IR to text
+//  Self-host spec for printing Morphic AST nodes as text.
+//
+//  Same pattern as M0/M1: ADTs are simulated with Int codes
+//  (see functional_tokenizer.morph -- TokenKind = Int), and every
+//  print decision is a pure function. The printer is specified
+//  as lookup + precedence rules over node kinds; string assembly
+//  itself is a sequence of these decisions.
+//
+//  DIALECT NOTE (verified against the real parser, 2026-11-20):
+//  these specs are written in the subset the current parser +
+//  typechecker actually accept, and are verified end-to-end by
+//  `morphic check` in tests/m2_proof.rs. Two parser realities
+//  shape the style below:
+//    1. Operator loops in the expression parser do not skip
+//       whitespace, so operators inside expressions are written
+//       tight: (op==0||op==1)&&(parent_op==2||parent_op==3).
+//    2. A constraint may not start with '(' and there is no
+//       if/implies syntax ('!=' is also unreachable in the
+//       expression parser), so lookup tables are written as
+//       per-row guards: tag<1||tag>1||output=="Int" reads as
+//       "tag == 1 implies output == Int".
+//  Specs with more than one input cannot bind a tuple test input
+//  in the current test syntax, so their executable golden tests
+//  live in tests/m2_proof.rs (same approach as M0 Phase B).
+// =================================================================
+
+Printer {
+
+// -- Types ---------------------------------------------------
+
+// AST node kinds, coded exactly as in validator.morph.
+// 0=Literal, 1=Variable, 2=BinaryOp, 3=UnaryOp, 4=Call,
+// 5=Index, 6=FieldAccess, 7=Lambda, 8=ListLiteral, 9=Comprehension
+type NodeKind = Int;
+
+// Binary operator codes.
+// 0=Add, 1=Sub, 2=Mul, 3=Div, 4=Mod,
+// 5=Eq, 6=Neq, 7=Lt, 8=Le, 9=Gt, 10=Ge,
+// 11=And, 12=Or
+type OpCode = Int;
+
+// Printer state, passed explicitly (never mutated).
+type PrintState = {
+    indent: Int,
+    col: Int
+}
+
+// -- Name lookups ---------------------------------------------
+
+spec type_tag_name {
+    doc: "Printed name of a type tag (tag codes as in validator.morph)."
+    input: tag: Int
+    output: String
+
+    constraint: tag<1||tag>1||output=="Int"
+    constraint: tag<2||tag>2||output=="Float"
+    constraint: tag<3||tag>3||output=="Bool"
+    constraint: tag<4||tag>4||output=="String"
+    constraint: tag<6||tag>6||output=="List"
+    constraint: tag<7||tag>7||output=="Option"
+
+    optimize: time < O(n)
+
+    test "int-name" { input: 1 expect: "Int" }
+    test "string-name" { input: 4 expect: "String" }
+    test "list-name" { input: 6 expect: "List" }
+}
+
+spec node_kind_name {
+    doc: "Printed name of an AST node kind -- the head word of its text form."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="Literal"
+    constraint: kind<1||kind>1||output=="Variable"
+    constraint: kind<2||kind>2||output=="BinaryOp"
+    constraint: kind<3||kind>3||output=="UnaryOp"
+    constraint: kind<4||kind>4||output=="Call"
+    constraint: kind<5||kind>5||output=="Index"
+    constraint: kind<6||kind>6||output=="FieldAccess"
+    constraint: kind<7||kind>7||output=="Lambda"
+
+    optimize: time < O(n)
+
+    test "literal-name" { input: 0 expect: "Literal" }
+    test "binary-name" { input: 2 expect: "BinaryOp" }
+    test "call-name" { input: 4 expect: "Call" }
+    test "lambda-name" { input: 7 expect: "Lambda" }
+}
+
+spec binop_symbol {
+    doc: "Printed symbol of a binary operator code."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output=="+"
+    constraint: op<1||op>1||output=="-"
+    constraint: op<2||op>2||output=="*"
+    constraint: op<3||op>3||output=="/"
+    constraint: op<5||op>5||output=="=="
+    constraint: op<7||op>7||output=="<"
+
+    optimize: time < O(n)
+
+    test "add-symbol" { input: 0 expect: "+" }
+    test "mul-symbol" { input: 2 expect: "*" }
+    test "eq-symbol" { input: 5 expect: "==" }
+    test "lt-symbol" { input: 7 expect: "<" }
+}
+
+// -- Layout rules ---------------------------------------------
+
+spec needs_parens {
+    doc: "A child binary op needs parentheses when it binds looser than its parent: additive (0,1) inside multiplicative (2,3)."
+    input: op: Int, parent_op: Int
+    output: Bool
+
+    constraint: output == ((op==0||op==1)&&(parent_op==2||parent_op==3))
+
+    optimize: time < O(n)
+
+    // Executable golden tests: tests/m2_proof.rs (multi-input specs
+    // cannot bind a tuple test input in the current spec syntax).
+}
+
+spec is_infix_kind {
+    doc: "Only BinaryOp (2) prints infix, padded with spaces on both sides."
+    input: kind: Int
+    output: Bool
+
+    constraint: output == (kind==2)
+
+    optimize: time < O(n)
+
+    test "binary-is-infix" { input: 2 expect: true }
+    test "call-not-infix" { input: 4 expect: false }
+    test "literal-not-infix" { input: 0 expect: false }
+}
+
+spec line_width_ok {
+    doc: "Printed lines are capped at 100 columns before the printer must break."
+    input: width: Int
+    output: Bool
+
+    constraint: output == (width>=0&&width<=100)
+
+    optimize: time < O(n)
+
+    test "normal-line" { input: 80 expect: true }
+    test "at-cap" { input: 100 expect: true }
+    test "over-cap" { input: 101 expect: false }
+}
+
+// -- Composition ----------------------------------------------
+
+spec print_node_kind {
+    doc: "Composition proof: the header of a printed node is its kind name."
+    input: kind: Int
+    output: String
+
+    constraint: output == node_kind_name(kind)
+
+    optimize: time < O(n)
+
+    test "print-binary" { input: 2 expect: "BinaryOp" }
+    test "print-lambda" { input: 7 expect: "Lambda" }
+}
+
+}

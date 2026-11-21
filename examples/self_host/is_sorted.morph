@@ -9,7 +9,7 @@ spec is_sorted {
     input: list: List<Int>
     output: Bool
 
-    constraint: if len(list) <= 1 then output == true
+    constraint: len(list) <= 1 implies output == true
     constraint: forall i: Int in range(0, len(list) - 1):
         output == true implies list[i] <= list[i + 1]
     constraint: forall i: Int in range(0, len(list) - 1):

@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::spec::ast::*;
+use crate::verify::verifier::VerificationStatus;
 use rand::Rng;
 
 // ── Global synthesis statistics ──────────────────────────
@@ -62,6 +63,14 @@ pub struct CandidateImplementation {
 
     /// Whether this candidate passed verification
     pub verified: bool,
+
+    /// The verifier's full verdict on this candidate, recorded
+    /// by `verify_all` at the moment it is computed (the single
+    /// source of truth — selection reads it, never recomputes
+    /// it). `None` until the candidate has been through
+    /// verification. `verified` above is the collapsed form
+    /// (`status == Verified`) kept for existing consumers.
+    pub verification_status: Option<VerificationStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +97,12 @@ pub enum Provenance {
     Crossover { parent_a: u64, parent_b: u64 },
     /// Seeded from test cases (inductive synthesis)
     TestInduced { num_tests: usize },
+    /// Seeded from the spec's constraints — the declared
+    /// contract rather than measured examples: an equation
+    /// constraint used directly as the body, or a set of
+    /// guard-table constraints compiled into a match. `kind`
+    /// is "equation" or "guard_table".
+    ConstraintInduced { kind: String },
     /// Built from predefined template
     Template { template_name: String },
     /// Human-provided partial implementation
@@ -438,6 +453,13 @@ pub struct SynthesisEngine {
     config: SynthesisConfig,
     candidates: Vec<CandidateImplementation>,
     next_id: AtomicU64,
+    /// The module the synthesized spec lives in, consulted when
+    /// admitting constraint seeds whose bodies call other specs.
+    /// Empty unless the engine was built with `with_module` —
+    /// a spec synthesized standalone behaves exactly as before
+    /// (composition equations simply do not resolve, hence do
+    /// not seed).
+    spec_index: SpecIndex,
 }
 
 impl SynthesisEngine {
@@ -446,7 +468,17 @@ impl SynthesisEngine {
             config,
             candidates: Vec::new(),
             next_id: AtomicU64::new(1),
+            spec_index: SpecIndex::empty(),
         }
+    }
+
+    /// An engine that knows the whole module the target spec
+    /// belongs to, so spec-to-spec calls in its constraints can
+    /// resolve (see `SpecIndex`).
+    pub fn with_module(config: SynthesisConfig, specs: &[FunctionSpec]) -> Self {
+        let mut engine = Self::new(config);
+        engine.spec_index = SpecIndex::from_specs(specs);
+        engine
     }
 
     fn new_id(&self) -> u64 {
@@ -459,6 +491,28 @@ impl SynthesisEngine {
         // Phase 1: Seed the population
         let mut population = self.seed_population(spec)?;
 
+        // Protect the spec-derived seeds (test-induced and
+        // constraint-induced). They are the only candidates
+        // whose shape is derived from the spec itself — its
+        // measured behavior or its declared contract — and the
+        // search phases are free to lose them: the GA's elitism
+        // keeps only the top 10% by composite score per
+        // generation, and nothing else in Phases 2–3 guarantees
+        // their survival. They are re-admitted just before
+        // final scoring (Phase 4), so selection always sees
+        // them; whether they WIN is still up to their scores
+        // and the selector's gates.
+        let protected_seeds: Vec<CandidateImplementation> = population
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.provenance,
+                    Provenance::TestInduced { .. } | Provenance::ConstraintInduced { .. }
+                )
+            })
+            .cloned()
+            .collect();
+
         // Phase 2: MCTS-guided exploration
         population = self.mcts_search(population, spec)?;
 
@@ -466,6 +520,10 @@ impl SynthesisEngine {
         if self.config.opt_level >= 3 {
             population = self.genetic_refine(population, spec)?;
         }
+
+        // Re-admit any protected seed the search dropped, then
+        // Phase 4 scores it on the same footing as everyone else.
+        readmit_protected_seeds(&mut population, &protected_seeds);
 
         // Phase 4: Scoring & ranking
         self.score_and_rank(&mut population, spec);
@@ -498,13 +556,24 @@ impl SynthesisEngine {
         let template = self.seed_from_templates(spec)?;
         population.extend(template);
 
-        // Seed 3: From LLM (if enabled)
+        // Seed 3: From constraints (spec-derived bodies: an
+        // equation constraint used directly as the body, or a
+        // guard-table constraint set compiled into a match).
+        // These are the only seeds that can be spec-exact on
+        // inputs no test exercises — the range/lookup/test-less
+        // pools previously contained no Verified candidate in
+        // any measured draw, so the refutation gate had nothing
+        // spec-exact to crown there.
+        let constraint_seeds = self.seed_from_constraints(spec);
+        population.extend(constraint_seeds);
+
+        // Seed 4: From LLM (if enabled)
         if self.config.use_llm {
             let llm_seeds = self.seed_from_llm(spec)?;
             population.extend(llm_seeds);
         }
 
-        // Seed 4: Random AST generation (bootstrap diversity)
+        // Seed 5: Random AST generation (bootstrap diversity)
         while population.len() < self.config.population_size {
             let random = self.seed_random(spec);
             population.push(random);
@@ -555,9 +624,61 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::TestInduced { num_tests: spec.tests.len() },
             verified: false,
+            verification_status: None,
         };
 
         Ok(vec![candidate])
+    }
+
+    /// Seed 3: candidates built from the spec's constraints —
+    /// the declared contract, where `seed_from_tests` uses the
+    /// measured examples. Two shapes are admitted, each only
+    /// when the resulting body lies in the verifier's encodable
+    /// subset (a seed the verifier cannot judge would be one
+    /// more Inconclusive pool member, indistinguishable from
+    /// the junk this family exists to displace):
+    ///
+    /// - **equation**: a postcondition `output == <expr>` whose
+    ///   right-hand side converts to IR whole (no dropped
+    ///   subexpressions) becomes a candidate whose body is that
+    ///   expression — the spec states its body outright.
+    /// - **guard table**: a set of postconditions of the form
+    ///   `<guard on the input> || output == <literal>` becomes
+    ///   one match over the input with an arm per row plus a
+    ///   wildcard arm carrying the typed-literal default for
+    ///   the return type (the spec is silent off-table; the
+    ///   default is a documented guess).
+    ///
+    /// A spec whose constraints fit neither shape gets no
+    /// constraint seed and behaves exactly as before. Equations
+    /// whose bodies call other specs are resolved against the
+    /// engine's module index first (see `SpecIndex`): with a
+    /// module they can seed like any other equation; without
+    /// one — or when the call cannot resolve — they are skipped
+    /// by the same admission rule.
+    fn seed_from_constraints(&self, spec: &FunctionSpec) -> Vec<CandidateImplementation> {
+        let mut seeds = Vec::new();
+        let mut admit = |kind: &str, body: IRNode| {
+            seeds.push(CandidateImplementation {
+                id: self.new_id(),
+                body,
+                spec_name: spec.name.clone(),
+                spec: spec.clone(),
+                score: 0.0,
+                scores: empty_scores(),
+                generation: 0,
+                provenance: Provenance::ConstraintInduced { kind: kind.into() },
+                verified: false,
+                verification_status: None,
+            });
+        };
+        if let Some(body) = equation_seed_body(spec, &self.spec_index) {
+            admit("equation", body);
+        }
+        if let Some(body) = guard_table_seed_body(spec, &self.spec_index) {
+            admit("guard_table", body);
+        }
+        seeds
     }
 
     fn seed_from_templates(&self, spec: &FunctionSpec) -> Result<Vec<CandidateImplementation>, SynthesisError> {
@@ -576,6 +697,7 @@ impl SynthesisEngine {
                 generation: 0,
                 provenance: Provenance::Template { template_name: "divide_and_conquer".into() },
                 verified: false,
+                verification_status: None,
             });
         }
 
@@ -591,6 +713,7 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::Template { template_name: "iterator_chain".into() },
             verified: false,
+            verification_status: None,
         });
 
         // Template: Simple loop (for the straightforward approach)
@@ -605,6 +728,7 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::Template { template_name: "simple_loop".into() },
             verified: false,
+            verification_status: None,
         });
 
         Ok(seeds)
@@ -624,7 +748,13 @@ impl SynthesisEngine {
     }
 
     fn seed_random(&self, spec: &FunctionSpec) -> CandidateImplementation {
-        let body = random_ir_tree(spec, 3, self);
+        // Fresh bodies are generated type-aware (see
+        // random_ir_tree_typed): the seeds are the pool's
+        // foundation — MCTS completions inherit their root
+        // shape — so a type-blind seed poisons every completion
+        // drawn from it, and the selector's return-type gate
+        // cannot crown a sound body the pool does not contain.
+        let body = random_ir_tree_typed(spec, 3, self);
         CandidateImplementation {
             id: self.new_id(),
             body,
@@ -635,6 +765,7 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::Mutation { parent_id: 0, mutation_kind: "random_seed".into() },
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -645,30 +776,73 @@ impl SynthesisEngine {
         population: Vec<CandidateImplementation>,
         spec: &FunctionSpec,
     ) -> Result<Vec<CandidateImplementation>, SynthesisError> {
-        let mut tree: Vec<MCTSNode> = Vec::new();
         let mut population = population;
 
-        for _ in 0..self.config.max_iterations {
-            // Selection
-            let node_idx = self.mcts_select(&tree);
-            if node_idx.is_none() {
-                // Initialize from population member
-                let parent = population[rand::thread_rng().gen_range(0..population.len())].clone();
-                let node = MCTSNode {
-                    state: parent.body.clone(),
-                    parent: None,
-                    children: Vec::new(),
-                    visits: 0,
-                    total_reward: 0.0,
-                    is_terminal: count_holes(&parent.body) == 0,
-                    hole_count: count_holes(&parent.body),
-                };
-                let idx = tree.len();
-                tree.push(node);
-                continue;
-            }
+        // Pass 1: a tree rooted at one random population member —
+        // the historical behavior. It explores completions of that
+        // one body only: selection always descends from tree[0],
+        // so no other member's completions are ever harvested.
+        let root_body =
+            population[rand::thread_rng().gen_range(0..population.len())].body.clone();
+        let harvested = self.mcts_harvest_tree(&root_body, spec, "mcts_harvest");
+        population.extend(harvested);
 
-            let idx = node_idx.unwrap();
+        // Pass 2: one tree per test-induced seed, rooted at the
+        // seed itself. The seed is the only candidate whose shape
+        // is derived from the spec's measured behavior, yet under
+        // pass 1 alone it was expanded only when it happened to be
+        // the random root (~1 in population_size runs) — its
+        // completions (the wildcard hole filled → hole-free bodies
+        // passing every test the literal arms reach) never entered
+        // the pool, and the holed seed itself is barred from
+        // winning by the selector's completeness gate whenever any
+        // hole-free candidate exists. Rooting a tree at the seed
+        // guarantees its completions are harvested too; whether
+        // they WIN is still up to scoring and the gate.
+        let seed_bodies: Vec<IRNode> = population
+            .iter()
+            .filter(|c| matches!(c.provenance, Provenance::TestInduced { .. }))
+            .map(|c| c.body.clone())
+            .collect();
+        for seed_body in &seed_bodies {
+            if count_holes(seed_body) == 0 {
+                continue; // Already complete — nothing to harvest.
+            }
+            let harvested = self.mcts_harvest_tree(seed_body, spec, "mcts_seed_harvest");
+            population.extend(harvested);
+        }
+
+        Ok(population)
+    }
+
+    /// Run one MCTS tree rooted at `root_state` for the configured
+    /// iteration budget and harvest the terminal nodes the search
+    /// actually visited. `mutation_kind` labels the harvested
+    /// candidates' provenance so seed-rooted harvests stay
+    /// distinguishable from the general one.
+    fn mcts_harvest_tree(
+        &mut self,
+        root_state: &IRNode,
+        spec: &FunctionSpec,
+        mutation_kind: &str,
+    ) -> Vec<CandidateImplementation> {
+        let root_holes = count_holes(root_state);
+        let mut tree: Vec<MCTSNode> = vec![MCTSNode {
+            state: root_state.clone(),
+            parent: None,
+            children: Vec::new(),
+            visits: 0,
+            total_reward: 0.0,
+            is_terminal: root_holes == 0,
+            hole_count: root_holes,
+        }];
+
+        for _ in 0..self.config.max_iterations {
+            // Selection — the tree is never empty (the root is
+            // pushed before the loop), so this always finds a node.
+            let idx = self
+                .mcts_select(&tree)
+                .expect("a rooted MCTS tree is never empty");
 
             // Expansion
             if !tree[idx].is_terminal && tree[idx].children.is_empty() {
@@ -728,16 +902,16 @@ impl SynthesisEngine {
                         generation: 1,
                         provenance: Provenance::Mutation {
                             parent_id: 0,
-                            mutation_kind: "mcts_harvest".into(),
+                            mutation_kind: mutation_kind.into(),
                         },
                         verified: false,
+                        verification_status: None,
                     });
                 }
             }
         }
 
-        population.extend(harvested);
-        Ok(population)
+        harvested
     }
 
     fn mcts_select(&self, tree: &[MCTSNode]) -> Option<usize> {
@@ -769,7 +943,7 @@ impl SynthesisEngine {
         }
     }
 
-    fn mcts_expand(&self, node: &MCTSNode, _spec: &FunctionSpec) -> Vec<IRNode> {
+    fn mcts_expand(&self, node: &MCTSNode, spec: &FunctionSpec) -> Vec<IRNode> {
         let mut children = Vec::new();
 
         // Find first hole in the tree
@@ -780,7 +954,7 @@ impl SynthesisEngine {
 
         // Generate multiple fillings for the first hole
         let hole = &holes[0];
-        let fillings = generate_hole_fillings(hole, node);
+        let fillings = generate_hole_fillings(hole, node, spec);
 
         for filling in fillings {
             let mut new_state = node.state.clone();
@@ -791,17 +965,20 @@ impl SynthesisEngine {
         children
     }
 
-    fn mcts_rollout(&self, node: &IRNode, _spec: &FunctionSpec) -> IRNode {
+    fn mcts_rollout(&self, node: &IRNode, spec: &FunctionSpec) -> IRNode {
         let mut current = node.clone();
         let max_iterations = 100; // Prevent infinite loops
+        let params: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
 
         for _ in 0..max_iterations {
             let holes = find_hole_positions(&current);
             if holes.is_empty() { break; }
 
             let hole = &holes[0];
-            // Random filling for rollout
-            let filling = random_filling(hole);
+            // Random filling for rollout — variables only from
+            // the scope at the hole's position, never invented.
+            let scope = scope_at_path(&current, &hole.path, &params);
+            let filling = random_filling(hole, &scope);
             replace_hole(&mut current, hole, &filling);
         }
 
@@ -819,14 +996,14 @@ impl SynthesisEngine {
             generation: 0,
             provenance: Provenance::Template { template_name: "eval".into() },
             verified: false,
+            verification_status: None,
         };
 
         let scores = evaluate_candidate(&candidate, spec);
-        // Weighted composite score
-        0.4 * scores.test_pass_ratio
-            + 0.3 * scores.constraint_score
-            + 0.2 * scores.complexity_score
-            + 0.1 * scores.quality_score
+        // The MCTS reward is the same composite used everywhere
+        // else, so the search is steered by measured test
+        // behavior with the same dominance invariant.
+        composite_score(&scores)
     }
 
     fn mcts_backpropagate(&self, tree: &mut Vec<MCTSNode>, leaf_idx: usize, reward: f64) {
@@ -918,6 +1095,7 @@ impl SynthesisEngine {
                 parent_b: parent_b.id,
             },
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -974,6 +1152,7 @@ impl SynthesisEngine {
                 mutation_kind: kind.into(),
             },
             verified: false,
+            verification_status: None,
         }
     }
 
@@ -1093,6 +1272,40 @@ pub fn synthesize(spec: &FunctionSpec, opt_level: u8) -> Result<Vec<CandidateImp
     engine.run(spec)
 }
 
+/// Synthesize with the spec's whole module in scope, so
+/// constraints that call sibling specs can seed (and be
+/// judged) like any other constraint. `specs` is the module's
+/// full spec list, including `spec` itself.
+pub fn synthesize_with_module(
+    spec: &FunctionSpec,
+    opt_level: u8,
+    specs: &[FunctionSpec],
+) -> Result<Vec<CandidateImplementation>, SynthesisError> {
+    let config = SynthesisConfig::from_opt_level(opt_level);
+    let mut engine = SynthesisEngine::with_module(config, specs);
+    engine.run(spec)
+}
+
+/// Re-admit protected seeds that the search phases dropped, so
+/// the final pool always contains them (they are re-scored by
+/// the caller's scoring phase like every other candidate).
+/// Presence is judged by structural body equality: `IRNode`
+/// has no `PartialEq`, so the `Debug` representation serves as
+/// the fingerprint — it is structural and deterministic, hole
+/// ids included, so a surviving clone of a seed matches exactly
+/// and is not duplicated.
+fn readmit_protected_seeds(
+    population: &mut Vec<CandidateImplementation>,
+    seeds: &[CandidateImplementation],
+) {
+    for seed in seeds {
+        let fingerprint = format!("{:?}", seed.body);
+        if !population.iter().any(|c| format!("{:?}", c.body) == fingerprint) {
+            population.push(seed.clone());
+        }
+    }
+}
+
 // ── Error Types ───────────────────────────────────────────
 
 #[derive(Debug)]
@@ -1132,14 +1345,29 @@ fn empty_scores() -> ScoreBreakdown {
     }
 }
 
+/// Composite fitness/selection score.
+///
+/// Measured test behavior dominates by construction: with
+/// test_pass_ratio weighted 0.85 and every other dimension 0.05,
+/// a tpr gap of 0.25 contributes 0.2125 while the other three
+/// dimensions together can swing at most 0.15 (each is bounded
+/// by 1.0) — so a ≥0.25 tpr gap ALWAYS decides the ranking, and
+/// the remaining dimensions act only as tie-breakers. The old
+/// weights (0.4/0.3/0.2/0.1) let the flat placeholder constraint
+/// score (0.7 for every hole-free body) plus shape heuristics
+/// crown candidates that pass no test at all; the probe measured
+/// exactly that (winner tpr 0.000 in 34/42 runs). Every consumer
+/// — score_and_rank, the GA, verify_all's re-scoring, and the
+/// MCTS reward — goes through this one function so the invariant
+/// holds across the whole pipeline.
 pub fn composite_score(scores: &ScoreBreakdown) -> f64 {
-    0.4 * scores.test_pass_ratio
-        + 0.3 * scores.constraint_score
-        + 0.2 * scores.complexity_score
-        + 0.1 * scores.quality_score
+    0.85 * scores.test_pass_ratio
+        + 0.05 * scores.constraint_score
+        + 0.05 * scores.complexity_score
+        + 0.05 * scores.quality_score
 }
 
-fn count_holes(node: &IRNode) -> usize {
+pub(crate) fn count_holes(node: &IRNode) -> usize {
     match node {
         IRNode::Hole { .. } => 1,
         IRNode::Block(stmts) => stmts.iter().map(count_holes).sum(),
@@ -1216,12 +1444,23 @@ enum PathElem {
 #[derive(Debug, Clone)]
 struct HoleRef {
     path: HolePath,
+    /// The type the hole declares for its filling
+    /// (`IRNode::Hole::expected_type`), captured when the hole
+    /// was found. Holes are only ever located through
+    /// `find_hole_positions`, so this is always the type of the
+    /// actual hole at `path` in the tree the ref was taken from.
+    /// Filling generation reads it to stay type-directed; before
+    /// this field existed the fillers never saw the type at all.
+    expected_type: Option<TypeRef>,
 }
 
 fn find_holes_rec(node: &IRNode, path: &mut HolePath, holes: &mut Vec<HoleRef>) {
     match node {
-        IRNode::Hole { .. } => {
-            holes.push(HoleRef { path: path.clone() });
+        IRNode::Hole { expected_type, .. } => {
+            holes.push(HoleRef {
+                path: path.clone(),
+                expected_type: expected_type.clone(),
+            });
         }
         IRNode::Block(stmts) => {
             for (i, stmt) in stmts.iter().enumerate() {
@@ -1376,18 +1615,133 @@ fn replace_hole(node: &mut IRNode, hole: &HoleRef, replacement: &IRNode) {
     replace_at_path(node, &hole.path, 0, replacement);
 }
 
+/// Mutable counterpart of `scope_at_path`: descend `path`
+/// (produced by `find_hole_positions` on the same tree, so
+/// node/step pairs always correspond) and substitute the node
+/// at the end of it. Every PathElem variant is handled — the
+/// previous version implemented only the Block step and silently
+/// left holes anywhere else (match arms, If branches, Let
+/// bodies, ...) in place, which made MCTS expansion produce
+/// still-holed clones of the parent and rollouts unable to fill
+/// such holes at all.
 fn replace_at_path(node: &mut IRNode, path: &[PathElem], depth: usize, replacement: &IRNode) {
     if depth >= path.len() {
         *node = replacement.clone();
         return;
     }
-    match &path[depth] {
-        PathElem::Block(i) => {
-            if let IRNode::Block(stmts) = node {
-                replace_at_path(&mut stmts[*i], path, depth + 1, replacement);
+    match (node, &path[depth]) {
+        (IRNode::Block(stmts), PathElem::Block(i)) => {
+            if let Some(next) = stmts.get_mut(*i) {
+                replace_at_path(next, path, depth + 1, replacement);
             }
         }
-        // ... (similar match arms for all PathElem variants)
+        (IRNode::Let { value, .. }, PathElem::LetValue) => {
+            replace_at_path(value, path, depth + 1, replacement)
+        }
+        (IRNode::Let { body, .. }, PathElem::LetBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::If { condition, .. }, PathElem::IfCond) => {
+            replace_at_path(condition, path, depth + 1, replacement)
+        }
+        (IRNode::If { then_branch, .. }, PathElem::IfThen) => {
+            replace_at_path(then_branch, path, depth + 1, replacement)
+        }
+        (IRNode::If { else_branch, .. }, PathElem::IfElse) => {
+            replace_at_path(else_branch, path, depth + 1, replacement)
+        }
+        (IRNode::While { condition, .. }, PathElem::WhileCond) => {
+            replace_at_path(condition, path, depth + 1, replacement)
+        }
+        (IRNode::While { body, .. }, PathElem::WhileBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::For { start, .. }, PathElem::ForStart) => {
+            replace_at_path(start, path, depth + 1, replacement)
+        }
+        (IRNode::For { end, .. }, PathElem::ForEnd) => {
+            replace_at_path(end, path, depth + 1, replacement)
+        }
+        (IRNode::For { body, .. }, PathElem::ForBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::Match { scrutinee, .. }, PathElem::MatchScrutinee) => {
+            replace_at_path(scrutinee, path, depth + 1, replacement)
+        }
+        (IRNode::Match { cases, .. }, PathElem::MatchCase(i)) => {
+            if let Some((_, body)) = cases.get_mut(*i) {
+                replace_at_path(body, path, depth + 1, replacement);
+            }
+        }
+        (IRNode::Call { args, .. }, PathElem::CallArg(i)) => {
+            if let Some(next) = args.get_mut(*i) {
+                replace_at_path(next, path, depth + 1, replacement);
+            }
+        }
+        (IRNode::Return(inner), PathElem::Return) => {
+            replace_at_path(inner, path, depth + 1, replacement)
+        }
+        (IRNode::BinOp(_, l, _), PathElem::BinOpL) => {
+            replace_at_path(l, path, depth + 1, replacement)
+        }
+        (IRNode::BinOp(_, _, r), PathElem::BinOpR) => {
+            replace_at_path(r, path, depth + 1, replacement)
+        }
+        (IRNode::UnaryOp(_, inner), PathElem::UnaryInner) => {
+            replace_at_path(inner, path, depth + 1, replacement)
+        }
+        (IRNode::Lambda { body, .. }, PathElem::LambdaBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::Closure { body, .. }, PathElem::LambdaBody) => {
+            replace_at_path(body, path, depth + 1, replacement)
+        }
+        (IRNode::Collection { elements, .. }, PathElem::CollectionElem(i)) => {
+            if let Some(next) = elements.get_mut(*i) {
+                replace_at_path(next, path, depth + 1, replacement);
+            }
+        }
+        (IRNode::Map { function, .. }, PathElem::MapFunc) => {
+            replace_at_path(function, path, depth + 1, replacement)
+        }
+        (IRNode::Map { over, .. }, PathElem::MapOver) => {
+            replace_at_path(over, path, depth + 1, replacement)
+        }
+        (IRNode::Filter { predicate, .. }, PathElem::FilterPred) => {
+            replace_at_path(predicate, path, depth + 1, replacement)
+        }
+        (IRNode::Filter { over, .. }, PathElem::FilterOver) => {
+            replace_at_path(over, path, depth + 1, replacement)
+        }
+        (IRNode::Fold { operation, .. }, PathElem::FoldOp) => {
+            replace_at_path(operation, path, depth + 1, replacement)
+        }
+        (IRNode::Fold { initial, .. }, PathElem::FoldInit) => {
+            replace_at_path(initial, path, depth + 1, replacement)
+        }
+        (IRNode::Fold { over, .. }, PathElem::FoldOver) => {
+            replace_at_path(over, path, depth + 1, replacement)
+        }
+        (IRNode::Sort { comparator, .. }, PathElem::SortComp) => {
+            replace_at_path(comparator, path, depth + 1, replacement)
+        }
+        (IRNode::Sort { collection, .. }, PathElem::SortColl) => {
+            replace_at_path(collection, path, depth + 1, replacement)
+        }
+        (IRNode::Alloc { initial, .. }, PathElem::AllocInit) => {
+            replace_at_path(initial, path, depth + 1, replacement)
+        }
+        (IRNode::Assign { target, .. }, PathElem::AssignTarget) => {
+            replace_at_path(target, path, depth + 1, replacement)
+        }
+        (IRNode::Assign { value, .. }, PathElem::AssignValue) => {
+            replace_at_path(value, path, depth + 1, replacement)
+        }
+        (IRNode::Typed { node: inner, .. }, PathElem::TypedNode) => {
+            replace_at_path(inner, path, depth + 1, replacement)
+        }
+        // Path does not match this node — leave it unchanged
+        // (defensive; pairs always correspond in practice).
         _ => {}
     }
 }
@@ -1455,57 +1809,770 @@ fn build_simple_loop(_spec: &FunctionSpec, engine: &SynthesisEngine) -> IRNode {
 
 // ── Mutation helpers ──────────────────────────────────────
 
-fn generate_hole_fillings(hole: &HoleRef, node: &MCTSNode) -> Vec<IRNode> {
-    // Generate diverse fillings for the hole
+/// Literal fillings whose type is exactly `ty` — the menu for a
+/// hole that knows its expected type. Returns None for types
+/// with no literal menu: named/generic types, functions, maps,
+/// sets (codegen emits them unimported), arrays, and Option —
+/// the IR has no Option literal node, so there is no honest
+/// `None` filling to offer. Callers fall back to the legacy
+/// type-blind menu on None.
+fn typed_literal_fillings(ty: &TypeRef) -> Option<Vec<IRNode>> {
+    fn lit(l: IRLiteral) -> IRNode {
+        IRNode::Literal(l)
+    }
+    Some(match ty {
+        TypeRef::Bool => vec![lit(IRLiteral::Bool(true)), lit(IRLiteral::Bool(false))],
+        TypeRef::Int
+        | TypeRef::I8
+        | TypeRef::I16
+        | TypeRef::I32
+        | TypeRef::I64
+        | TypeRef::U8
+        | TypeRef::U16
+        | TypeRef::U32
+        | TypeRef::U64 => vec![lit(IRLiteral::Int(0)), lit(IRLiteral::Int(1))],
+        TypeRef::Float => vec![lit(IRLiteral::Float(0.0))],
+        TypeRef::String => vec![lit(IRLiteral::String(String::new()))],
+        TypeRef::Char => vec![lit(IRLiteral::Char('a'))],
+        TypeRef::Unit => vec![lit(IRLiteral::Unit)],
+        TypeRef::List(_) => vec![IRNode::Collection {
+            kind: CollectionKind::List,
+            elements: Vec::new(),
+        }],
+        TypeRef::Tuple(parts) => {
+            let mut elements = Vec::new();
+            for part in parts {
+                elements.push(typed_literal_fillings(part)?.into_iter().next()?);
+            }
+            vec![IRNode::Collection {
+                kind: CollectionKind::Tuple,
+                elements,
+            }]
+        }
+        _ => return None,
+    })
+}
+
+/// Does this node have type `ty` by construction? Only the
+/// shapes `expr_to_ir` can produce for a test's expected output
+/// (literals and collections of literals) are recognized;
+/// anything else — Vars, Calls, BinOps, Holes — is conservatively
+/// rejected, so a value is only admitted to a typed menu when
+/// its type is certain.
+fn node_matches_type(node: &IRNode, ty: &TypeRef) -> bool {
+    match (node, ty) {
+        (IRNode::Literal(IRLiteral::Bool(_)), TypeRef::Bool) => true,
+        (
+            IRNode::Literal(IRLiteral::Int(_)),
+            TypeRef::Int
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64,
+        ) => true,
+        (IRNode::Literal(IRLiteral::Float(_)), TypeRef::Float) => true,
+        (IRNode::Literal(IRLiteral::String(_)), TypeRef::String) => true,
+        (IRNode::Literal(IRLiteral::Char(_)), TypeRef::Char) => true,
+        (IRNode::Literal(IRLiteral::Unit), TypeRef::Unit) => true,
+        (IRNode::Collection { kind: CollectionKind::List, elements }, TypeRef::List(elem)) => {
+            elements.iter().all(|e| node_matches_type(e, elem))
+        }
+        (IRNode::Collection { kind: CollectionKind::Tuple, elements }, TypeRef::Tuple(parts)) => {
+            elements.len() == parts.len()
+                && elements
+                    .iter()
+                    .zip(parts.iter())
+                    .all(|(e, t)| node_matches_type(e, t))
+        }
+        _ => false,
+    }
+}
+
+fn generate_hole_fillings(hole: &HoleRef, node: &MCTSNode, spec: &FunctionSpec) -> Vec<IRNode> {
+    // Type-directed menu: when the hole knows its expected type
+    // (the TestInduced seed's wildcard hole carries the spec's
+    // return type), every filling must be an expression of that
+    // type. The legacy menu below is type-blind — it always led
+    // with Int(0) — so seed completions put `_ => 0` in Bool and
+    // String functions: honest tpr 1.0 (the arm is unreachable
+    // by the tests) but rejected by rustc (E0308).
+    if let Some(ty) = &hole.expected_type {
+        if let Some(mut fillings) = typed_literal_fillings(ty) {
+            // A test's expected output is return-typed by
+            // construction, so the distinct outputs belong in
+            // the menu too (e.g. the real Int/String values the
+            // spec already names).
+            for test in &spec.tests {
+                let output = expr_to_ir(&test.expected_output);
+                if node_matches_type(&output, ty)
+                    && !fillings
+                        .iter()
+                        .any(|f| format!("{:?}", f) == format!("{:?}", output))
+                {
+                    fillings.push(output);
+                }
+            }
+            return fillings;
+        }
+    }
+    // Generate diverse fillings for the hole. Every variable a
+    // filling references must be in scope at the hole's position:
+    // the previous version hardcoded Var("x") and `a + b` — names
+    // bound nowhere — so expanded children could never evaluate
+    // or compile, whatever the search did with them.
     // In production: use LLM, type-directed search, library functions
+    let params: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
+    let scope = scope_at_path(&node.state, &hole.path, &params);
     vec![
         IRNode::Literal(IRLiteral::Int(0)),
         IRNode::Literal(IRLiteral::Bool(true)),
-        IRNode::Var("x".into()),
+        random_scoped_leaf(&scope),
         IRNode::BinOp(IRBinOp::Add,
-            Box::new(IRNode::Var("a".into())),
-            Box::new(IRNode::Var("b".into()))),
+            Box::new(random_scoped_leaf(&scope)),
+            Box::new(random_scoped_leaf(&scope))),
     ]
 }
 
-fn random_filling(_hole: &HoleRef) -> IRNode {
+/// Collect the names a match pattern binds (variable patterns,
+/// recursively through constructors and guards).
+fn pattern_bindings(pattern: &IRPattern, out: &mut Vec<String>) {
+    match pattern {
+        IRPattern::Variable(name) => out.push(name.clone()),
+        IRPattern::Constructor(_, subs) => {
+            for sub in subs {
+                pattern_bindings(sub, out);
+            }
+        }
+        IRPattern::Guard(inner, _) => pattern_bindings(inner, out),
+        IRPattern::Wildcard | IRPattern::Literal(_) => {}
+    }
+}
+
+/// The variable names in scope at position `path` inside `root`:
+/// the spec's parameter names, plus every binder enclosing the
+/// position (a `Let` name in its body, a `For` variable in its
+/// body, lambda/closure parameters, match-arm pattern bindings).
+/// Paths come from `find_hole_positions` on the same tree, so
+/// node/step pairs always correspond; on any mismatch the walk
+/// stops defensively with the scope accumulated so far.
+fn scope_at_path(root: &IRNode, path: &[PathElem], params: &[String]) -> Vec<String> {
+    let mut scope: Vec<String> = params.to_vec();
+    let mut current = root;
+    for elem in path {
+        match (current, elem) {
+            (IRNode::Block(stmts), PathElem::Block(i)) => match stmts.get(*i) {
+                Some(next) => current = next,
+                None => break,
+            },
+            (IRNode::Let { value, .. }, PathElem::LetValue) => current = value,
+            (IRNode::Let { name, body, .. }, PathElem::LetBody) => {
+                scope.push(name.clone());
+                current = body;
+            }
+            (IRNode::If { condition, .. }, PathElem::IfCond) => current = condition,
+            (IRNode::If { then_branch, .. }, PathElem::IfThen) => current = then_branch,
+            (IRNode::If { else_branch, .. }, PathElem::IfElse) => current = else_branch,
+            (IRNode::While { condition, .. }, PathElem::WhileCond) => current = condition,
+            (IRNode::While { body, .. }, PathElem::WhileBody) => current = body,
+            (IRNode::For { start, .. }, PathElem::ForStart) => current = start,
+            (IRNode::For { end, .. }, PathElem::ForEnd) => current = end,
+            (IRNode::For { var, body, .. }, PathElem::ForBody) => {
+                scope.push(var.clone());
+                current = body;
+            }
+            (IRNode::Match { scrutinee, .. }, PathElem::MatchScrutinee) => current = scrutinee,
+            (IRNode::Match { cases, .. }, PathElem::MatchCase(i)) => match cases.get(*i) {
+                Some((pattern, body)) => {
+                    pattern_bindings(pattern, &mut scope);
+                    current = body;
+                }
+                None => break,
+            },
+            (IRNode::Call { args, .. }, PathElem::CallArg(i)) => match args.get(*i) {
+                Some(next) => current = next,
+                None => break,
+            },
+            (IRNode::Return(inner), PathElem::Return) => current = inner,
+            (IRNode::BinOp(_, l, _), PathElem::BinOpL) => current = l,
+            (IRNode::BinOp(_, _, r), PathElem::BinOpR) => current = r,
+            (IRNode::UnaryOp(_, inner), PathElem::UnaryInner) => current = inner,
+            (IRNode::Lambda { params, body }, PathElem::LambdaBody) => {
+                scope.extend(params.iter().map(|(n, _)| n.clone()));
+                current = body;
+            }
+            (IRNode::Closure { params, body, .. }, PathElem::LambdaBody) => {
+                scope.extend(params.iter().map(|(n, _)| n.clone()));
+                current = body;
+            }
+            (IRNode::Collection { elements, .. }, PathElem::CollectionElem(i)) => {
+                match elements.get(*i) {
+                    Some(next) => current = next,
+                    None => break,
+                }
+            }
+            (IRNode::Map { function, .. }, PathElem::MapFunc) => current = function,
+            (IRNode::Map { over, .. }, PathElem::MapOver) => current = over,
+            (IRNode::Filter { predicate, .. }, PathElem::FilterPred) => current = predicate,
+            (IRNode::Filter { over, .. }, PathElem::FilterOver) => current = over,
+            (IRNode::Fold { operation, .. }, PathElem::FoldOp) => current = operation,
+            (IRNode::Fold { initial, .. }, PathElem::FoldInit) => current = initial,
+            (IRNode::Fold { over, .. }, PathElem::FoldOver) => current = over,
+            (IRNode::Sort { comparator, .. }, PathElem::SortComp) => current = comparator,
+            (IRNode::Sort { collection, .. }, PathElem::SortColl) => current = collection,
+            (IRNode::Alloc { initial, .. }, PathElem::AllocInit) => current = initial,
+            (IRNode::Assign { target, .. }, PathElem::AssignTarget) => current = target,
+            (IRNode::Assign { value, .. }, PathElem::AssignValue) => current = value,
+            (IRNode::Typed { node, .. }, PathElem::TypedNode) => current = node,
+            // Path does not match this node — stop with what we have.
+            _ => break,
+        }
+    }
+    scope
+}
+
+/// A random leaf that is valid wherever it lands: a variable
+/// drawn from `scope` when the scope is non-empty, otherwise a
+/// literal. Generation must never invent a name — a `Var` that
+/// nothing binds can neither evaluate nor compile.
+fn random_scoped_leaf(scope: &[String]) -> IRNode {
     use rand::Rng;
+    if scope.is_empty() {
+        IRNode::Literal(IRLiteral::Int(0))
+    } else {
+        let idx = rand::thread_rng().gen_range(0..scope.len());
+        IRNode::Var(scope[idx].clone())
+    }
+}
+
+fn random_filling(hole: &HoleRef, scope: &[String]) -> IRNode {
+    use rand::Rng;
+    // Type-directed draw: a hole that knows its expected type is
+    // filled from the typed literal menu — never with a
+    // wrong-typed literal, a Return wrapper, or a fresh Hole
+    // (the legacy arms below, kept exactly for untyped holes).
+    if let Some(ty) = &hole.expected_type {
+        if let Some(fillings) = typed_literal_fillings(ty) {
+            let idx = rand::thread_rng().gen_range(0..fillings.len());
+            return fillings.into_iter().nth(idx).unwrap();
+        }
+    }
     match rand::thread_rng().gen_range(0u32..5) {
         0 => IRNode::Literal(IRLiteral::Int(0)),
         1 => IRNode::Literal(IRLiteral::Bool(true)),
-        2 => IRNode::Var("result".into()),
-        3 => IRNode::Return(Box::new(IRNode::Var("output".into()))),
+        2 => random_scoped_leaf(scope),
+        3 => IRNode::Return(Box::new(random_scoped_leaf(scope))),
         _ => IRNode::Hole { id: 0, expected_type: None },
     }
 }
 
-fn random_ir_tree(_spec: &FunctionSpec, depth: u32, engine: &SynthesisEngine) -> IRNode {
+fn random_ir_tree(spec: &FunctionSpec, depth: u32, engine: &SynthesisEngine) -> IRNode {
+    // Generation starts in the scope of the spec's parameters;
+    // binders the generator itself creates extend it on the way
+    // down (see random_ir_tree_scoped).
+    let scope: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
+    random_ir_tree_scoped(spec, depth, engine, &scope)
+}
+
+fn random_ir_tree_scoped(
+    spec: &FunctionSpec,
+    depth: u32,
+    engine: &SynthesisEngine,
+    scope: &[String],
+) -> IRNode {
     if depth == 0 {
         return IRNode::Hole { id: engine.new_id(), expected_type: None };
     }
     use rand::Rng;
     match rand::thread_rng().gen_range(0u32..8) {
         0 => IRNode::Block(vec![
-            random_ir_tree(_spec, depth - 1, engine),
-            IRNode::Return(Box::new(
-                IRNode::Var("result".into())
-            )),
+            random_ir_tree_scoped(spec, depth - 1, engine, scope),
+            // The trailing value used to be a hardcoded
+            // Var("result") — a name bound nowhere, so every tree
+            // containing this arm was unevaluable dead weight.
+            IRNode::Return(Box::new(random_scoped_leaf(scope))),
         ]),
         1 => IRNode::If {
-            condition: Box::new(random_ir_tree(_spec, depth - 1, engine)),
-            then_branch: Box::new(random_ir_tree(_spec, depth - 1, engine)),
-            else_branch: Box::new(random_ir_tree(_spec, depth - 1, engine)),
+            condition: Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope)),
+            then_branch: Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope)),
+            else_branch: Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope)),
         },
-        2 => IRNode::For {
-            var: "i".into(),
-            start: Box::new(IRNode::Literal(IRLiteral::Int(0))),
-            end: Box::new(IRNode::Literal(IRLiteral::Int(10))),
-            body: Box::new(random_ir_tree(_spec, depth - 1, engine)),
-        },
-        3 => IRNode::Call { function: "_".into(), args: vec![] },
-        4 => IRNode::Return(Box::new(random_ir_tree(_spec, depth - 1, engine))),
+        2 => {
+            // The loop variable is in scope in the body only.
+            let mut body_scope = scope.to_vec();
+            body_scope.push("i".into());
+            IRNode::For {
+                var: "i".into(),
+                start: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                end: Box::new(IRNode::Literal(IRLiteral::Int(10))),
+                body: Box::new(random_ir_tree_scoped(spec, depth - 1, engine, &body_scope)),
+            }
+        }
+        // An unfilled leaf is an honest Hole (tracked by count_holes
+        // and penalized at evaluation) — never a fake `Call` to "_",
+        // which codegen would emit as a call to a nonexistent function.
+        3 => IRNode::Hole { id: engine.new_id(), expected_type: None },
+        4 => IRNode::Return(Box::new(random_ir_tree_scoped(spec, depth - 1, engine, scope))),
         5 => IRNode::Collection { kind: CollectionKind::List, elements: vec![] },
         _ => IRNode::Hole { id: engine.new_id(), expected_type: None },
+    }
+}
+
+// ── Type-directed random generation ─────────────────────
+//
+// The typed counterpart of random_ir_tree, used by seed_random
+// (the one call site that creates fresh candidate bodies). The
+// legacy generator above is type-blind: measured over the M2
+// signatures, 31.4% of its seed bodies were PROVABLY mistyped
+// for their spec and only 1.3% provably matching (see the
+// property test). Those seeds are not a cosmetic problem —
+// MCTS only fills holes, so completions inherit the seed's
+// root shape, and the selector's return-type gate (Phase 11)
+// can only crown what the pool contains: in roughly half of
+// draws a test-less spec's hole-free pool was uniformly
+// mistyped and the gate's documented fallback crowned a
+// mistyped winner anyway.
+//
+// This generator threads the spec's declared return type
+// through generation, reusing the verdict's own certainty
+// rules (selector::certainly_equal / int_family — no second
+// inference is written here). The discipline:
+//   * the ROOT shape is generated in the return type's
+//     context, from shapes the conservative inference can
+//     type as that type (Matches) or cannot type at all
+//     (Unknown, neutral) — never one it can prove wrong;
+//   * a statement-only tree (For/While root, a Block whose
+//     tail is a statement) is never the entire body of a
+//     non-Unit function — loops appear only as statements
+//     inside a Block that ends in a typed tail;
+//   * every Return the generator emits wraps an expression
+//     generated in the return type's context (Returns are
+//     produced only by the tail generator, whose target is
+//     always the return type; expression/statement positions
+//     never produce one).
+//
+// The shape menu is additionally restricted to what the Rust
+// codegen can actually render — a stricter filter than the
+// verdict's: no Call (emitted as a call to a nonexistent free
+// function — `len(x)` is E0425), no Index/Head/Tail/Init
+// (unsupported in the expression emitter), no Reverse (emits
+// `.reverse()`, which returns ()), no Concat (emitted as
+// String + String, which Rust rejects), no Len unary (emits
+// `.len()` → usize, but the signature's Int is i64). Those
+// shapes remain available to the legacy generator and to
+// hole fillings; fresh bodies are simply not built from them.
+
+/// A name in scope together with its declared type — the
+/// generation-time mirror of the verdict's type environment.
+type TypedScope = Vec<(String, TypeRef)>;
+
+/// Generate a fresh candidate body for `spec` in the context
+/// of its declared return type. Counterpart of random_ir_tree
+/// for callers that HAVE a type context (seed_random);
+/// random_ir_tree itself is unchanged for callers without one.
+fn random_ir_tree_typed(spec: &FunctionSpec, depth: u32, engine: &SynthesisEngine) -> IRNode {
+    let scope: TypedScope = spec
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.clone()))
+        .collect();
+    gen_typed_tail(&spec.return_type, depth, engine, &scope)
+}
+
+/// Can a collection literal's elements be generated for this
+/// element type without risking a render/type mismatch?
+/// Literal elements of these types are inferred by rustc in
+/// exactly the position the verdict claims for them; String
+/// elements would render as `&str` inside a `vec![…]` (the
+/// typed-literal rewrite only fires for a bare literal node),
+/// so non-empty collections are generated only for these.
+fn literal_safe_element(ty: &TypeRef) -> bool {
+    super::selector::int_family(ty) || matches!(ty, TypeRef::Bool | TypeRef::Char)
+}
+
+/// Generate an expression of target type `ty` for an
+/// EXPRESSION position (operand, condition, scrutinee, Let
+/// value, Return value, collection element): shapes the
+/// expression emitter can render and the verdict can type as
+/// `ty` or not at all. For the types with a literal menu
+/// (Bool, the integer family, Float, String, Char, Unit,
+/// List, Tuple of menufull parts) every shape emitted here is
+/// in fact certainly `ty` under the verdict's rules — the
+/// menu, Var and operator rules below are exactly the shapes
+/// infer_ir_type can type. For types with no menu (Named,
+/// Option, Map, …) the only honest leaf is a typed Hole
+/// (Unknown to the verdict), which hole filling can later
+/// complete with the Phase 10 typed menu.
+fn gen_typed_expr(
+    ty: &TypeRef,
+    depth: u32,
+    engine: &SynthesisEngine,
+    scope: &TypedScope,
+) -> IRNode {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+
+    // Applicable shapes, as option codes. Composite shapes are
+    // depth-gated; leaves are always available.
+    let mut options: Vec<u8> = Vec::new();
+    let literals = typed_literal_fillings(ty);
+    if literals.is_some() {
+        options.push(0); // literal of exactly this type
+    }
+    let matching_vars: Vec<&str> = scope
+        .iter()
+        .filter(|(_, vty)| super::selector::certainly_equal(vty, ty))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !matching_vars.is_empty() {
+        options.push(1); // a variable of exactly this type
+    }
+    let binop_ok = matches!(ty, TypeRef::Bool | TypeRef::Float)
+        || super::selector::int_family(ty);
+    let unop_ok = matches!(ty, TypeRef::Bool) || super::selector::int_family(ty);
+    let collection_ok = match ty {
+        TypeRef::List(elem) => literal_safe_element(elem),
+        TypeRef::Tuple(parts) => parts.iter().all(literal_safe_element),
+        _ => false,
+    };
+    if depth > 0 {
+        if binop_ok {
+            options.push(2);
+        }
+        if unop_ok {
+            options.push(3);
+        }
+        if collection_ok {
+            options.push(4);
+        }
+    }
+    if options.is_empty() {
+        // No honest shape for this type in expression
+        // position: an explicitly typed Hole (Unknown), never
+        // a wrong-typed guess.
+        return IRNode::Hole {
+            id: engine.new_id(),
+            expected_type: Some(ty.clone()),
+        };
+    }
+
+    match options[rng.gen_range(0..options.len())] {
+        0 => {
+            let menu = literals.unwrap();
+            let idx = rng.gen_range(0..menu.len());
+            menu.into_iter().nth(idx).unwrap()
+        }
+        1 => {
+            let idx = rng.gen_range(0..matching_vars.len());
+            IRNode::Var(matching_vars[idx].to_string())
+        }
+        2 => gen_typed_binop(ty, depth, engine, scope),
+        3 => {
+            // Unary operators whose result the verdict types as
+            // the operand's family: Not on Bool, Neg/Abs on
+            // integers. (Len/Head/Tail/Reverse are excluded —
+            // see the section header for the codegen reasons.)
+            if *ty == TypeRef::Bool {
+                IRNode::UnaryOp(
+                    IRUnaryOp::Not,
+                    Box::new(gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope)),
+                )
+            } else {
+                let inner = gen_typed_expr(&TypeRef::Int, depth - 1, engine, scope);
+                let op = if rng.gen_bool(0.5) {
+                    IRUnaryOp::Neg
+                } else {
+                    IRUnaryOp::Abs
+                };
+                IRNode::UnaryOp(op, Box::new(inner))
+            }
+        }
+        _ => {
+            // Non-empty collection of certainly-typed elements.
+            match ty {
+                TypeRef::List(elem) => {
+                    let n = rng.gen_range(0..=3usize);
+                    let elements = (0..n)
+                        .map(|_| gen_typed_expr(elem, depth - 1, engine, scope))
+                        .collect();
+                    IRNode::Collection {
+                        kind: CollectionKind::List,
+                        elements,
+                    }
+                }
+                TypeRef::Tuple(parts) => {
+                    let elements = parts
+                        .iter()
+                        .map(|p| gen_typed_expr(p, depth - 1, engine, scope))
+                        .collect();
+                    IRNode::Collection {
+                        kind: CollectionKind::Tuple,
+                        elements,
+                    }
+                }
+                _ => unreachable!("collection option gated on List/Tuple"),
+            }
+        }
+    }
+}
+
+/// A binary operation whose result the verdict types as `ty`:
+/// comparisons and logical ops for Bool (operands of one
+/// certain type — Int or Bool, the operand types whose
+/// literals and variables render and compare soundly in
+/// Rust), arithmetic for the integer family and Float.
+/// Div/Mod never take a constant-zero divisor (rustc's
+/// unconditional_panic lint rejects `x / 0` at compile time).
+fn gen_typed_binop(
+    ty: &TypeRef,
+    depth: u32,
+    engine: &SynthesisEngine,
+    scope: &TypedScope,
+) -> IRNode {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let bin = |op: IRBinOp, l: IRNode, r: IRNode| {
+        IRNode::BinOp(op, Box::new(l), Box::new(r))
+    };
+    // A divisor that cannot be a compile-time zero: a nonzero
+    // literal, or a variable (its value is not a constant).
+    let divisor = |rng: &mut rand::rngs::ThreadRng, scope: &TypedScope| -> IRNode {
+        let int_vars: Vec<&str> = scope
+            .iter()
+            .filter(|(_, vty)| super::selector::int_family(vty))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !int_vars.is_empty() && rng.gen_bool(0.5) {
+            IRNode::Var(int_vars[rng.gen_range(0..int_vars.len())].to_string())
+        } else {
+            IRNode::Literal(IRLiteral::Int(if rng.gen_bool(0.5) { 1 } else { 2 }))
+        }
+    };
+
+    if *ty == TypeRef::Bool {
+        if rng.gen_bool(0.5) {
+            // Logical: both operands Bool.
+            let op = if rng.gen_bool(0.5) { IRBinOp::And } else { IRBinOp::Or };
+            let l = gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope);
+            let r = gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope);
+            bin(op, l, r)
+        } else {
+            // Comparison: both operands of one certain type.
+            let ot = if rng.gen_bool(0.5) {
+                TypeRef::Int
+            } else {
+                TypeRef::Bool
+            };
+            let op = [
+                IRBinOp::Eq,
+                IRBinOp::Neq,
+                IRBinOp::Lt,
+                IRBinOp::Le,
+                IRBinOp::Gt,
+                IRBinOp::Ge,
+            ][rng.gen_range(0..6)];
+            let l = gen_typed_expr(&ot, depth - 1, engine, scope);
+            let r = gen_typed_expr(&ot, depth - 1, engine, scope);
+            bin(op, l, r)
+        }
+    } else if *ty == TypeRef::Float {
+        let op = [IRBinOp::Add, IRBinOp::Sub, IRBinOp::Mul][rng.gen_range(0..3)];
+        let l = gen_typed_expr(&TypeRef::Float, depth - 1, engine, scope);
+        let r = gen_typed_expr(&TypeRef::Float, depth - 1, engine, scope);
+        bin(op, l, r)
+    } else {
+        // Integer family: arithmetic on Int operands (the
+        // family unifies under the verdict's rules).
+        let op = [
+            IRBinOp::Add,
+            IRBinOp::Sub,
+            IRBinOp::Mul,
+            IRBinOp::Div,
+            IRBinOp::Mod,
+        ][rng.gen_range(0..5)];
+        let l = gen_typed_expr(&TypeRef::Int, depth - 1, engine, scope);
+        let r = if matches!(op, IRBinOp::Div | IRBinOp::Mod) {
+            divisor(&mut rng, scope)
+        } else {
+            gen_typed_expr(&TypeRef::Int, depth - 1, engine, scope)
+        };
+        bin(op, l, r)
+    }
+}
+
+/// Generate a body for a TAIL position (function body, Block
+/// tail, If branch, Match arm, Let body) whose value must be
+/// of type `ty`. In this generator `ty` is always the spec's
+/// return type — the only place Returns are emitted, each
+/// wrapping an expression generated for that same type.
+/// Everything gen_typed_expr produces is also a valid tail;
+/// the structural shapes (If/Match/Let/Block/Return) exist
+/// only here, because the expression emitter cannot render
+/// them in operand positions.
+fn gen_typed_tail(
+    ty: &TypeRef,
+    depth: u32,
+    engine: &SynthesisEngine,
+    scope: &TypedScope,
+) -> IRNode {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    if depth == 0 {
+        return gen_typed_expr(ty, 0, engine, scope);
+    }
+    // Scrutinee candidates for a Match: in-scope Int/Bool
+    // variables (literal patterns of those types render and
+    // match soundly; a String scrutinee would need &str
+    // patterns the emitter does not produce).
+    let scrutinees: Vec<&(String, TypeRef)> = scope
+        .iter()
+        .filter(|(_, vty)| super::selector::int_family(vty) || *vty == TypeRef::Bool)
+        .collect();
+
+    let mut options: Vec<u8> = vec![0]; // plain expression tail
+    options.push(1); // If with typed branches
+    if !scrutinees.is_empty() {
+        options.push(2); // Match on an in-scope variable
+    }
+    options.push(3); // Let with a simply-typed value
+    options.push(4); // Block: statements, then a typed tail
+    options.push(5); // Return of a typed expression
+
+    match options[rng.gen_range(0..options.len())] {
+        0 => gen_typed_expr(ty, depth, engine, scope),
+        1 => IRNode::If {
+            condition: Box::new(gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope)),
+            then_branch: Box::new(gen_typed_tail(ty, depth - 1, engine, scope)),
+            else_branch: Box::new(gen_typed_tail(ty, depth - 1, engine, scope)),
+        },
+        2 => {
+            let (name, sty) = scrutinees[rng.gen_range(0..scrutinees.len())];
+            let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+            if *sty == TypeRef::Bool {
+                cases.push((
+                    IRPattern::Literal(IRLiteral::Bool(true)),
+                    gen_typed_tail(ty, depth - 1, engine, scope),
+                ));
+            } else {
+                let first = rng.gen_range(0..3i64);
+                cases.push((
+                    IRPattern::Literal(IRLiteral::Int(first)),
+                    gen_typed_tail(ty, depth - 1, engine, scope),
+                ));
+                if rng.gen_bool(0.5) {
+                    cases.push((
+                        IRPattern::Literal(IRLiteral::Int(first + 1)),
+                        gen_typed_tail(ty, depth - 1, engine, scope),
+                    ));
+                }
+            }
+            cases.push((
+                IRPattern::Wildcard,
+                gen_typed_tail(ty, depth - 1, engine, scope),
+            ));
+            IRNode::Match {
+                scrutinee: Box::new(IRNode::Var(name.clone())),
+                cases,
+            }
+        }
+        3 => {
+            // The value's type is one the emitter types
+            // exactly (an Int/Bool/Char literal or expression
+            // binds at that type in Rust as in the verdict);
+            // String values are excluded — a `let` value
+            // renders untyped, so a String literal would bind
+            // as &str while the verdict binds String.
+            let vt = [TypeRef::Int, TypeRef::Bool, TypeRef::Char]
+                [rng.gen_range(0..3)]
+            .clone();
+            let value = gen_typed_expr(&vt, depth - 1, engine, scope);
+            let name = format!("v{}", engine.new_id());
+            let mut body_scope = scope.clone();
+            body_scope.push((name.clone(), vt));
+            IRNode::Let {
+                name,
+                value: Box::new(value),
+                body: Box::new(gen_typed_tail(ty, depth - 1, engine, &body_scope)),
+            }
+        }
+        4 => {
+            let n = rng.gen_range(1..=3usize);
+            let mut stmts: Vec<IRNode> = (0..n)
+                .map(|_| gen_typed_stmt(depth - 1, engine, scope))
+                .collect();
+            stmts.push(gen_typed_tail(ty, depth - 1, engine, scope));
+            IRNode::Block(stmts)
+        }
+        _ => IRNode::Return(Box::new(gen_typed_expr(ty, depth - 1, engine, scope))),
+    }
+}
+
+/// An expression used as a statement: its value is
+/// discarded, so it is generated for a simple type (Int or
+/// Bool) whose shapes are always available and render as a
+/// terminated expression statement.
+fn gen_typed_expr_stmt(depth: u32, engine: &SynthesisEngine, scope: &TypedScope) -> IRNode {
+    use rand::Rng;
+    let ty = if rand::thread_rng().gen_bool(0.5) {
+        TypeRef::Int
+    } else {
+        TypeRef::Bool
+    };
+    gen_typed_expr(&ty, depth, engine, scope)
+}
+
+/// Generate a STATEMENT: a node whose value is discarded.
+/// Statements never contain a Return (a mistyped or even
+/// well-typed stray Return in statement position would hijack
+/// the body's value flow and its verdict); loops live here,
+/// as statements inside a Block — never as a whole body.
+fn gen_typed_stmt(depth: u32, engine: &SynthesisEngine, scope: &TypedScope) -> IRNode {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    if depth == 0 {
+        return gen_typed_expr_stmt(depth, engine, scope);
+    }
+    match rng.gen_range(0..4u32) {
+        0 => gen_typed_expr_stmt(depth, engine, scope),
+        1 => {
+            // For over a literal range; the loop variable is
+            // Int-typed inside the body, as the verdict's
+            // range rule also concludes.
+            let var = format!("i{}", engine.new_id());
+            let int_vars: Vec<&str> = scope
+                .iter()
+                .filter(|(_, vty)| super::selector::int_family(vty))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let end = if !int_vars.is_empty() && rng.gen_bool(0.5) {
+                IRNode::Var(int_vars[rng.gen_range(0..int_vars.len())].to_string())
+            } else {
+                IRNode::Literal(IRLiteral::Int(10))
+            };
+            let mut body_scope = scope.clone();
+            body_scope.push((var.clone(), TypeRef::Int));
+            IRNode::For {
+                var,
+                start: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                end: Box::new(end),
+                body: Box::new(gen_typed_stmt(depth - 1, engine, &body_scope)),
+            }
+        }
+        2 => IRNode::While {
+            condition: Box::new(gen_typed_expr(&TypeRef::Bool, depth - 1, engine, scope)),
+            body: Box::new(gen_typed_stmt(depth - 1, engine, scope)),
+            invariant: None,
+        },
+        _ => {
+            let n = rng.gen_range(1..=2usize);
+            let stmts: Vec<IRNode> = (0..n)
+                .map(|_| gen_typed_stmt(depth - 1, engine, scope))
+                .collect();
+            IRNode::Block(stmts)
+        }
     }
 }
 
@@ -1528,7 +2595,579 @@ fn parse_rust_into_ir(code: &str, _spec: &FunctionSpec) -> Result<Vec<CandidateI
             prompt_hash: 0,
         },
         verified: false,
+        verification_status: None,
     }])
+}
+
+// ── Constraint-derived seed bodies ────────────────────────
+//
+// The two builders below read the spec's postconditions (the
+// parser stores every `constraint:` line there) and produce a
+// candidate body from the declared contract alone. Both are
+// total and conservative: any shape they do not recognize
+// yields None, never a guessed body.
+
+/// The variable postconditions state the result with. The
+/// verifier binds the candidate's symbolic value under exactly
+/// this name (see verify::verifier::verify_constraint), and
+/// every spec in the tree writes it so.
+const OUTPUT_VAR: &str = "output";
+
+/// One postcondition read as an equation body: if it has the
+/// form `output == <expr>` (either orientation), <expr> does
+/// not mention `output` itself, and the conversion via the
+/// same `expr_to_ir` the test-induced seed uses is whole
+/// (`expr_to_ir` drops subexpressions it cannot represent into
+/// Holes, and a holed body is not the spec's body), the
+/// converted body; otherwise None. Shared by the equation seed
+/// builder and by the resolver (`SpecIndex::callee_body`), so
+/// both read the same "first equation" of a spec.
+fn equation_rhs(c: &Constraint) -> Option<IRNode> {
+    let (lhs, rhs) = match c {
+        Constraint::Expr(Expr::BinOp(BinOp::Eq, l, r)) => (l.as_ref(), r.as_ref()),
+        Constraint::Eq(l, r) => (l, r),
+        _ => return None,
+    };
+    let body_expr = if matches!(lhs, Expr::Var(v) if v == OUTPUT_VAR) {
+        rhs
+    } else if matches!(rhs, Expr::Var(v) if v == OUTPUT_VAR) {
+        lhs
+    } else {
+        return None;
+    };
+    if expr_mentions_var(body_expr, OUTPUT_VAR) {
+        return None;
+    }
+    let body = expr_to_ir(body_expr);
+    if count_holes(&body) > 0 {
+        return None;
+    }
+    Some(body)
+}
+
+/// The first convertible equation body of a spec, if any —
+/// the resolver's view of "the spec's body" when the spec is
+/// stated as an equation.
+fn first_equation_body(spec: &FunctionSpec) -> Option<IRNode> {
+    spec.postconditions.iter().find_map(equation_rhs)
+}
+
+/// The equation seed's body: the first equation whose body —
+/// with any spec-to-spec calls resolved against the module
+/// (`SpecIndex::inline_calls`) — the verifier can encode.
+/// Resolution is what admits the composition specs: their
+/// equations are calls (`output == is_known_node_kind(kind)`),
+/// and the admitted seed body is the resolved callee body, so
+/// the interpreter can measure it, selection can crown it, and
+/// codegen can emit it standalone. An equation that does not
+/// resolve (unknown callee, cycle, depth) or does not encode
+/// is skipped like any other unusable shape.
+fn equation_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    for c in &spec.postconditions {
+        let Some(raw) = equation_rhs(c) else { continue };
+        let Some(body) = index.inline_calls(&raw) else { continue };
+        if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+            return Some(body);
+        }
+    }
+    None
+}
+
+fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Var(v) => v == name,
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => false,
+        Expr::Field(inner, _) => expr_mentions_var(inner, name),
+        Expr::Index(coll, idx) => {
+            expr_mentions_var(coll, name) || expr_mentions_var(idx, name)
+        }
+        Expr::Call(_, args) => args.iter().any(|a| expr_mentions_var(a, name)),
+        Expr::BinOp(_, l, r) => expr_mentions_var(l, name) || expr_mentions_var(r, name),
+        Expr::UnaryOp(_, inner) => expr_mentions_var(inner, name),
+        Expr::Lambda(_, body) => expr_mentions_var(body, name),
+        Expr::Length(inner) => expr_mentions_var(inner, name),
+        Expr::Comprehension { collection, body, .. } => {
+            expr_mentions_var(collection, name) || expr_mentions_var(body, name)
+        }
+    }
+}
+
+/// The guard-table body: one match over the spec's
+/// single Int parameter, with one literal arm per usable
+/// guard row and a wildcard arm carrying the typed-literal
+/// default for the return type (the Phase 10 menu's first
+/// entry — the spec is silent off-table, so the default is a
+/// documented guess; the Phase 15 classification showed the
+/// mirrors return exactly that default on unpinned cases).
+/// Rows pinning an already-pinned input are skipped (the
+/// first row wins). The raw builder stops at constructing the
+/// match; admission is the seed builder's step.
+fn guard_table_body(spec: &FunctionSpec) -> Option<IRNode> {
+    if spec.params.len() != 1 {
+        return None;
+    }
+    let param = &spec.params[0];
+    if !is_int_family(&param.ty) {
+        return None;
+    }
+    let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+    for c in &spec.postconditions {
+        if let Some((pinned, output)) = guard_row(c, &param.name) {
+            if cases
+                .iter()
+                .any(|(p, _)| matches!(p, IRPattern::Literal(IRLiteral::Int(v)) if *v == pinned))
+            {
+                continue;
+            }
+            cases.push((IRPattern::Literal(IRLiteral::Int(pinned)), output));
+        }
+    }
+    if cases.is_empty() {
+        return None;
+    }
+    let default = typed_literal_fillings(&spec.return_type)?
+        .into_iter()
+        .next()?;
+    cases.push((IRPattern::Wildcard, default));
+    Some(IRNode::Match {
+        scrutinee: Box::new(IRNode::Var(param.name.clone())),
+        cases,
+    })
+}
+
+/// The guard-table seed's body: the guard-table match,
+/// admitted when the verifier can encode it in the module
+/// context.
+fn guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let body = guard_table_body(spec)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+// ── Spec index: resolving spec-to-spec calls ──────────────
+
+/// How deep spec-call inlining may nest, on both resolution
+/// paths (IR substitution here, symbolic evaluation in the
+/// verifier). Composition in the M2 modules is one level deep;
+/// the cap exists so a pathological call graph — diamonds that
+/// duplicate a callee body at every level — stays bounded
+/// instead of expanding without limit. A call that would
+/// exceed the cap, or that closes a cycle, is unresolvable:
+/// callers treat the body containing it as unencodable
+/// (Inconclusive), never as a guessed value.
+pub(crate) const MAX_INLINE_DEPTH: usize = 8;
+
+/// The specs of one module, by name: the shared resolver for
+/// spec-to-spec calls. A spec's body, for resolution purposes,
+/// is exactly the body its constraint seed would be built
+/// from — the first convertible equation's right-hand side, or
+/// the guard-table match for a lookup spec with no equation —
+/// produced by the same builders the seed family uses, minus
+/// the encodability admission (admission is a property of a
+/// body in a caller's context, judged by the verifier; the
+/// resolver only answers "what does this name denote"). A
+/// spec with neither shape denotes nothing here and calls to
+/// it stay unresolvable.
+#[derive(Debug, Clone, Default)]
+pub struct SpecIndex {
+    by_name: HashMap<String, FunctionSpec>,
+}
+
+impl SpecIndex {
+    pub fn from_specs(specs: &[FunctionSpec]) -> Self {
+        Self {
+            by_name: specs
+                .iter()
+                .map(|s| (s.name.clone(), s.clone()))
+                .collect(),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&FunctionSpec> {
+        self.by_name.get(name)
+    }
+
+    /// The body a call to `name` denotes: the callee's first
+    /// equation body, or its guard-table body when it has no
+    /// equation. The body is NOT call-resolved — it may itself
+    /// contain calls; resolving those is the consumer's step,
+    /// under the consumer's cycle/depth guard.
+    pub fn callee_body(&self, name: &str) -> Option<IRNode> {
+        let spec = self.by_name.get(name)?;
+        first_equation_body(spec).or_else(|| guard_table_body(spec))
+    }
+
+    /// IR-level inlining: replace every call to an indexed
+    /// spec in `body` by the callee's body with the (already
+    /// inlined) arguments substituted for the callee's
+    /// parameters, transitively. Calls to names the index does
+    /// not hold — builtins like `len` and the `List` literal,
+    /// template pseudo-calls — pass through untouched; judging
+    /// them is the verifier's business, not the resolver's.
+    ///
+    /// Returns None when a call to an indexed spec cannot be
+    /// resolved: unknown to the index's body builders, arity
+    /// mismatch, a cycle or the depth cap, a capture risk in
+    /// substitution, or a tree shape outside the seed builders'
+    /// output set (the only inputs this is applied to are
+    /// equation bodies and resolved callees, so any other shape
+    /// means the body was never the resolver's to expand).
+    pub fn inline_calls(&self, body: &IRNode) -> Option<IRNode> {
+        self.inline_rec(body, &[], 0)
+    }
+
+    fn inline_rec(
+        &self,
+        node: &IRNode,
+        visiting: &[String],
+        depth: usize,
+    ) -> Option<IRNode> {
+        match node {
+            IRNode::Literal(_) | IRNode::Var(_) => Some(node.clone()),
+            IRNode::BinOp(op, l, r) => Some(IRNode::BinOp(
+                *op,
+                Box::new(self.inline_rec(l, visiting, depth)?),
+                Box::new(self.inline_rec(r, visiting, depth)?),
+            )),
+            IRNode::UnaryOp(op, inner) => Some(IRNode::UnaryOp(
+                *op,
+                Box::new(self.inline_rec(inner, visiting, depth)?),
+            )),
+            IRNode::Match { scrutinee, cases } => {
+                let scrutinee = Box::new(self.inline_rec(scrutinee, visiting, depth)?);
+                let mut out = Vec::with_capacity(cases.len());
+                for (pat, body) in cases {
+                    out.push((pat.clone(), self.inline_rec(body, visiting, depth)?));
+                }
+                Some(IRNode::Match {
+                    scrutinee,
+                    cases: out,
+                })
+            }
+            IRNode::Call { function, args } => {
+                // Arguments are caller-side expressions: any
+                // calls inside them resolve in the caller's own
+                // resolution context, before the callee is
+                // entered — so `f(f(x))` is not a cycle.
+                let mut inlined_args = Vec::with_capacity(args.len());
+                for a in args {
+                    inlined_args.push(self.inline_rec(a, visiting, depth)?);
+                }
+                if !self.by_name.contains_key(function) {
+                    return Some(IRNode::Call {
+                        function: function.clone(),
+                        args: inlined_args,
+                    });
+                }
+                if depth >= MAX_INLINE_DEPTH
+                    || visiting.iter().any(|v| v == function)
+                {
+                    return None;
+                }
+                let callee = &self.by_name[function];
+                if callee.params.len() != inlined_args.len() {
+                    return None;
+                }
+                let callee_body = self.callee_body(function)?;
+                let substituted =
+                    substitute_params(&callee_body, &callee.params, &inlined_args)?;
+                let mut visiting = visiting.to_vec();
+                visiting.push(function.clone());
+                self.inline_rec(&substituted, &visiting, depth + 1)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Substitute argument trees for a callee's parameters in its
+/// body. The bodies the resolver produces contain no binders
+/// except match variable patterns, and substitution respects
+/// them: a pattern-bound name shadows the parameter inside its
+/// arm, and if any argument mentions a pattern-bound name
+/// freely the substitution would capture it — refused (None)
+/// rather than renamed, as no M2 callee binds anything. Any
+/// shape outside the builders' output set is likewise refused.
+fn substitute_params(
+    node: &IRNode,
+    params: &[Param],
+    args: &[IRNode],
+) -> Option<IRNode> {
+    // Capture screen: names bound by patterns anywhere in the
+    // callee body vs names occurring free in the arguments.
+    let mut bound: Vec<&str> = Vec::new();
+    collect_pattern_binders(node, &mut bound);
+    if !bound.is_empty() {
+        let mut free: Vec<String> = Vec::new();
+        for a in args {
+            collect_free_vars(a, &mut free)?;
+        }
+        if bound.iter().any(|b| free.iter().any(|f| f == b)) {
+            return None;
+        }
+    }
+    substitute_rec(node, params, args, &[])
+}
+
+fn collect_pattern_binders<'a>(node: &'a IRNode, out: &mut Vec<&'a str>) {
+    match node {
+        IRNode::Match { scrutinee, cases } => {
+            collect_pattern_binders(scrutinee, out);
+            for (pat, body) in cases {
+                if let IRPattern::Variable(name) = pat {
+                    out.push(name.as_str());
+                }
+                collect_pattern_binders(body, out);
+            }
+        }
+        IRNode::BinOp(_, l, r) => {
+            collect_pattern_binders(l, out);
+            collect_pattern_binders(r, out);
+        }
+        IRNode::UnaryOp(_, inner) => collect_pattern_binders(inner, out),
+        IRNode::Call { args, .. } => {
+            for a in args {
+                collect_pattern_binders(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_free_vars(node: &IRNode, out: &mut Vec<String>) -> Option<()> {
+    match node {
+        IRNode::Var(name) => {
+            out.push(name.clone());
+            Some(())
+        }
+        IRNode::Literal(_) => Some(()),
+        IRNode::BinOp(_, l, r) => {
+            collect_free_vars(l, out)?;
+            collect_free_vars(r, out)
+        }
+        IRNode::UnaryOp(_, inner) => collect_free_vars(inner, out),
+        IRNode::Call { args, .. } => {
+            for a in args {
+                collect_free_vars(a, out)?;
+            }
+            Some(())
+        }
+        IRNode::Match { scrutinee, cases } => {
+            collect_free_vars(scrutinee, out)?;
+            for (_, body) in cases {
+                collect_free_vars(body, out)?;
+            }
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn substitute_rec(
+    node: &IRNode,
+    params: &[Param],
+    args: &[IRNode],
+    shadowed: &[&str],
+) -> Option<IRNode> {
+    match node {
+        IRNode::Var(name) => {
+            if shadowed.contains(&name.as_str()) {
+                return Some(node.clone());
+            }
+            match params.iter().position(|p| &p.name == name) {
+                Some(i) => Some(args[i].clone()),
+                None => Some(node.clone()),
+            }
+        }
+        IRNode::Literal(_) => Some(node.clone()),
+        IRNode::BinOp(op, l, r) => Some(IRNode::BinOp(
+            *op,
+            Box::new(substitute_rec(l, params, args, shadowed)?),
+            Box::new(substitute_rec(r, params, args, shadowed)?),
+        )),
+        IRNode::UnaryOp(op, inner) => Some(IRNode::UnaryOp(
+            *op,
+            Box::new(substitute_rec(inner, params, args, shadowed)?),
+        )),
+        IRNode::Call { function, args: call_args } => {
+            let mut out = Vec::with_capacity(call_args.len());
+            for a in call_args {
+                out.push(substitute_rec(a, params, args, shadowed)?);
+            }
+            Some(IRNode::Call {
+                function: function.clone(),
+                args: out,
+            })
+        }
+        IRNode::Match { scrutinee, cases } => {
+            let scrutinee = Box::new(substitute_rec(scrutinee, params, args, shadowed)?);
+            let mut out = Vec::with_capacity(cases.len());
+            for (pat, body) in cases {
+                let body = match pat {
+                    IRPattern::Variable(name) => {
+                        let mut shadowed = shadowed.to_vec();
+                        shadowed.push(name.as_str());
+                        substitute_rec(body, params, args, &shadowed)?
+                    }
+                    _ => substitute_rec(body, params, args, shadowed)?,
+                };
+                out.push((pat.clone(), body));
+            }
+            Some(IRNode::Match {
+                scrutinee,
+                cases: out,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn is_int_family(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Int
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+    )
+}
+
+/// One guard-table row, from a postcondition of the form
+/// `<guard on the input> || output == <literal>` — the shape
+/// the spec dialect writes lookup tables in ("param<v ||
+/// param>v || output==lit" reads as "param == v implies
+/// output == lit": the constraint can only hold at param == v
+/// if the output pin does). Returns the pinned input value
+/// and the pinned output as an IR literal.
+///
+/// Recognition is by evaluation, not by pattern-matching one
+/// exact guard spelling: the Or's leaves must be exactly one
+/// output pin plus comparisons of the single parameter
+/// against Int constants, and the row pins a value only where
+/// EVERY guard leaf is false. The integers around the guard
+/// constants are probed: outside the outermost constants each
+/// comparison's truth is stable, and the two extra probe
+/// points on each side expose a false-region extending to
+/// infinity, so exactly one falsifying probe point ⟺ the
+/// guard pins exactly that single value. A row pinning a
+/// range, carrying two output pins, or mentioning anything
+/// else is not a row.
+fn guard_row(c: &Constraint, param: &str) -> Option<(i64, IRNode)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let mut leaves = Vec::new();
+    flatten_or(expr, &mut leaves);
+    if leaves.len() < 2 {
+        return None;
+    }
+    let mut pin: Option<IRNode> = None;
+    let mut guards: Vec<(BinOp, bool, i64)> = Vec::new();
+    for leaf in leaves {
+        if let Expr::BinOp(BinOp::Eq, l, r) = leaf {
+            let lit = if matches!(l.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(r.as_ref())
+            } else if matches!(r.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(l.as_ref())
+            } else {
+                None
+            };
+            if let Some(lit) = lit {
+                if pin.is_some() {
+                    return None; // two output pins in one row: ambiguous
+                }
+                let node = expr_to_ir(lit);
+                if !matches!(node, IRNode::Literal(_)) {
+                    return None; // the pin must be a literal value
+                }
+                pin = Some(node);
+                continue;
+            }
+            // An Eq leaf that does not pin the output may still
+            // be a guard on the parameter (param == v): fall
+            // through to guard parsing.
+        }
+        guards.push(guard_leaf(leaf, param)?);
+    }
+    let pin = pin?;
+    if guards.is_empty() {
+        return None;
+    }
+    let lo = guards.iter().map(|g| g.2).min()? - 2;
+    let hi = guards.iter().map(|g| g.2).max()? + 2;
+    let mut pinned: Option<i64> = None;
+    for x in lo..=hi {
+        if guards.iter().all(|g| !guard_leaf_holds(g, x)) {
+            if pinned.is_some() {
+                return None; // pins a range, not a single value
+            }
+            pinned = Some(x);
+        }
+    }
+    Some((pinned?, pin))
+}
+
+fn flatten_or<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::BinOp(BinOp::Or, l, r) => {
+            flatten_or(l, out);
+            flatten_or(r, out);
+        }
+        _ => out.push(expr),
+    }
+}
+
+/// A guard leaf normalized to (operator, constant_on_left,
+/// constant): a comparison between the parameter and an Int
+/// constant, in either operand order. Anything else — another
+/// variable, a compound side, a non-comparison operator — is
+/// not a guard leaf.
+fn guard_leaf(leaf: &Expr, param: &str) -> Option<(BinOp, bool, i64)> {
+    let Expr::BinOp(op, l, r) = leaf else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Neq
+    ) {
+        return None;
+    }
+    match (l.as_ref(), r.as_ref()) {
+        (Expr::Var(v), Expr::IntLit(n)) if v == param => Some((*op, false, *n)),
+        (Expr::IntLit(n), Expr::Var(v)) if v == param => Some((*op, true, *n)),
+        _ => None,
+    }
+}
+
+/// Does the normalized guard leaf hold at `param == x`?
+fn guard_leaf_holds(guard: &(BinOp, bool, i64), x: i64) -> bool {
+    let (op, constant_on_left, constant) = guard;
+    let (a, b) = if *constant_on_left {
+        (*constant, x)
+    } else {
+        (x, *constant)
+    };
+    match op {
+        BinOp::Lt => a < b,
+        BinOp::Le => a <= b,
+        BinOp::Gt => a > b,
+        BinOp::Ge => a >= b,
+        BinOp::Eq => a == b,
+        BinOp::Neq => a != b,
+        _ => unreachable!("guard_leaf admits only comparisons"),
+    }
 }
 
 pub fn expr_to_pattern(expr: &Expr) -> IRPattern {
@@ -1545,7 +3184,7 @@ pub fn expr_to_pattern(expr: &Expr) -> IRPattern {
     }
 }
 
-fn expr_to_ir(expr: &Expr) -> IRNode {
+pub(crate) fn expr_to_ir(expr: &Expr) -> IRNode {
     match expr {
         Expr::IntLit(n) => IRNode::Literal(IRLiteral::Int(*n)),
         Expr::FloatLit(f) => IRNode::Literal(IRLiteral::Float(*f)),
@@ -1596,19 +3235,44 @@ fn unaryop_to_ir(op: UnaryOp) -> IRUnaryOp {
 }
 
 fn evaluate_candidate(candidate: &CandidateImplementation, spec: &FunctionSpec) -> ScoreBreakdown {
-    // Test pass ratio
+    // Test pass ratio — REAL execution via the IR interpreter
+    // (synthesis::eval): the candidate body is run against every
+    // spec test whose input/expected values can be mapped to
+    // evaluator values, and the ratio is passed / evaluable.
+    // A candidate that cannot be evaluated on a test (holes,
+    // unbound variables, unknown calls, …) FAILS that test —
+    // it does not get the benefit of the doubt.
+    //
+    // FALLBACK: if a spec has tests but NONE of them can be
+    // mapped (e.g. multi-param specs, whose tuple test inputs
+    // the current spec syntax cannot bind), there is no truth
+    // signal to measure. Keep the previous structural behavior
+    // (tests assumed passed) rather than punishing every
+    // candidate for an encoding limitation. Specs with no tests
+    // at all keep the neutral 0.5.
     let test_score = if spec.tests.is_empty() {
         0.5 // No tests: neutral score
     } else {
-        let passed = spec.tests.iter().filter(|_test| {
-            // Execute test logic (simplified)
-            true
-        }).count();
-        passed as f64 / spec.tests.len() as f64
+        let run = super::eval::run_spec_tests(&candidate.body, spec);
+        if run.evaluable == 0 {
+            1.0 // FALLBACK (see above): no mappable tests — legacy structural score
+        } else {
+            run.passed as f64 / run.evaluable as f64
+        }
     };
 
     // Constraint score: structural similarity to constraint shape
     let constraint_score = 0.7; // Placeholder — real version checks Z3
+
+    // Hole penalty: a body with unfilled Holes has not actually run
+    // any test or satisfied any constraint — those parts of it are
+    // literally missing. Correctness credit therefore decays by
+    // half per hole (1 hole → ×0.5, 2 holes → ×0.25, …), so a holed
+    // candidate always ranks strictly below an otherwise-equal
+    // hole-free one. selector::select_best additionally hard-gates
+    // holed candidates whenever a hole-free candidate exists.
+    let holes = count_holes(&candidate.body);
+    let hole_factor = 0.5f64.powi(holes as i32);
 
     // Complexity: check if body matches Big-O bound
     let complexity_score = estimate_complexity(&candidate.body, spec);
@@ -1617,8 +3281,8 @@ fn evaluate_candidate(candidate: &CandidateImplementation, spec: &FunctionSpec) 
     let quality_score = estimate_quality(&candidate.body);
 
     ScoreBreakdown {
-        test_pass_ratio: test_score,
-        constraint_score,
+        test_pass_ratio: test_score * hole_factor,
+        constraint_score: constraint_score * hole_factor,
         complexity_score,
         quality_score,
         synthesis_time_us: 0,
@@ -1830,5 +3494,1368 @@ impl ComplexityBound {
             ComplexityDimension::AmortizedTime => "amortized time",
             ComplexityDimension::Communication => "communication",
         }
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_spec() -> FunctionSpec {
+        FunctionSpec {
+            name: "test".into(),
+            doc: None,
+            generics: vec![],
+            params: vec![],
+            return_type: TypeRef::Unit,
+            preconditions: vec![],
+            postconditions: vec![],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: HashMap::new(),
+        }
+    }
+
+    /// True if the tree contains a `Call` to the placeholder
+    /// function "_" anywhere (mirrors the `count_holes` traversal).
+    fn contains_placeholder_call(node: &IRNode) -> bool {
+        match node {
+            IRNode::Call { function, args } =>
+                function == "_" || args.iter().any(contains_placeholder_call),
+            IRNode::Block(stmts) => stmts.iter().any(contains_placeholder_call),
+            IRNode::Let { value, body, .. } =>
+                contains_placeholder_call(value) || contains_placeholder_call(body),
+            IRNode::If { condition, then_branch, else_branch } =>
+                contains_placeholder_call(condition)
+                    || contains_placeholder_call(then_branch)
+                    || contains_placeholder_call(else_branch),
+            IRNode::While { condition, body, .. } =>
+                contains_placeholder_call(condition) || contains_placeholder_call(body),
+            IRNode::For { start, end, body, .. } =>
+                contains_placeholder_call(start)
+                    || contains_placeholder_call(end)
+                    || contains_placeholder_call(body),
+            IRNode::Match { scrutinee, cases } =>
+                contains_placeholder_call(scrutinee)
+                    || cases.iter().any(|(_, b)| contains_placeholder_call(b)),
+            IRNode::Return(expr) => contains_placeholder_call(expr),
+            IRNode::BinOp(_, l, r) =>
+                contains_placeholder_call(l) || contains_placeholder_call(r),
+            IRNode::UnaryOp(_, inner) => contains_placeholder_call(inner),
+            IRNode::Lambda { body, .. } | IRNode::Closure { body, .. } =>
+                contains_placeholder_call(body),
+            IRNode::Collection { elements, .. } =>
+                elements.iter().any(contains_placeholder_call),
+            IRNode::Map { function, over } | IRNode::Filter { predicate: function, over } =>
+                contains_placeholder_call(function) || contains_placeholder_call(over),
+            IRNode::Fold { operation, initial, over } =>
+                contains_placeholder_call(operation)
+                    || contains_placeholder_call(initial)
+                    || contains_placeholder_call(over),
+            IRNode::Sort { comparator, collection } =>
+                contains_placeholder_call(comparator) || contains_placeholder_call(collection),
+            IRNode::Alloc { initial, .. } => contains_placeholder_call(initial),
+            IRNode::Assign { target, value } =>
+                contains_placeholder_call(target) || contains_placeholder_call(value),
+            IRNode::Typed { node, .. } => contains_placeholder_call(node),
+            _ => false, // Holes, Literals, Vars, etc.
+        }
+    }
+
+    fn make_candidate(body: IRNode, spec: &FunctionSpec) -> CandidateImplementation {
+        CandidateImplementation {
+            id: 0,
+            body,
+            spec_name: spec.name.clone(),
+            spec: spec.clone(),
+            score: 0.0,
+            scores: empty_scores(),
+            generation: 0,
+            provenance: Provenance::Template { template_name: "test".into() },
+            verified: false,
+            verification_status: None,
+        }
+    }
+
+    /// Measured truth must dominate the composite score. With
+    /// the old weights (0.4 tpr / 0.3 constraint / 0.2 complexity
+    /// / 0.1 quality) a candidate passing NO test could outscore
+    /// one passing ALL of them on the flat placeholder constraint
+    /// score (0.7 for every hole-free body) plus shape heuristics
+    /// — measured probe winners were exactly that: tpr 0.000.
+    /// Invariant: a test_pass_ratio gap of ≥ 0.25 always decides,
+    /// no matter what the other dimensions say.
+    #[test]
+    fn composite_score_lets_measured_truth_dominate() {
+        let breakdown = |tpr: f64, constraint: f64, complexity: f64, quality: f64| {
+            ScoreBreakdown {
+                test_pass_ratio: tpr,
+                constraint_score: constraint,
+                complexity_score: complexity,
+                quality_score: quality,
+                synthesis_time_us: 0,
+            }
+        };
+        // Passes every measured test, gets nothing else — must
+        // beat a candidate that passes none and maxes the rest.
+        let truthful = breakdown(1.0, 0.0, 0.0, 0.0);
+        let fancy = breakdown(0.0, 1.0, 1.0, 1.0);
+        assert!(
+            composite_score(&truthful) > composite_score(&fancy),
+            "truthful {} vs fancy {}",
+            composite_score(&truthful),
+            composite_score(&fancy)
+        );
+        // The 0.25-gap invariant against the worst case: the
+        // ahead candidate gets zero from every other dimension,
+        // the behind candidate gets the maximum.
+        let ahead = breakdown(0.25, 0.0, 0.0, 0.0);
+        let behind = breakdown(0.0, 1.0, 1.0, 1.0);
+        assert!(composite_score(&ahead) > composite_score(&behind));
+    }
+
+    fn test_induced_candidate(spec: &FunctionSpec) -> CandidateImplementation {
+        let mut c = make_candidate(
+            IRNode::Match {
+                scrutinee: Box::new(IRNode::Var("kind".into())),
+                cases: vec![(
+                    IRPattern::Wildcard,
+                    IRNode::Hole { id: 42, expected_type: None },
+                )],
+            },
+            spec,
+        );
+        c.provenance = Provenance::TestInduced { num_tests: 3 };
+        c
+    }
+
+    /// Seed protection, unit level: a protected seed missing
+    /// from the population is re-admitted; one whose body already
+    /// survived is not duplicated; no seeds is a no-op.
+    #[test]
+    fn readmit_protected_seeds_restores_dropped_seed() {
+        let spec = is_literal_kind_spec();
+        let seed = test_induced_candidate(&spec);
+        let other = make_candidate(IRNode::Literal(IRLiteral::Bool(true)), &spec);
+
+        let mut pop = vec![other.clone()];
+        readmit_protected_seeds(&mut pop, &[seed.clone()]);
+        assert_eq!(pop.len(), 2);
+        assert!(matches!(
+            pop[1].provenance,
+            Provenance::TestInduced { .. }
+        ));
+
+        // Already present (same body): no duplicate.
+        let mut pop = vec![seed.clone(), other];
+        readmit_protected_seeds(&mut pop, &[seed]);
+        assert_eq!(pop.len(), 2);
+
+        // Nothing protected: population untouched.
+        let mut pop = vec![make_candidate(IRNode::Literal(IRLiteral::Int(1)), &spec)];
+        readmit_protected_seeds(&mut pop, &[]);
+        assert_eq!(pop.len(), 1);
+    }
+
+    /// Seed protection, pipeline level: the final pool returned
+    /// by `synthesize` for is_literal_kind contains the
+    /// TestInduced seed, carrying its measured score — every test
+    /// passed (1.0) times the one-hole decay (×0.5) = 0.5. The
+    /// search phases may do what they like; the seed's presence
+    /// in the pool selection sees is guaranteed by re-admission
+    /// in `run`, not by luck.
+    #[test]
+    fn synthesized_pool_keeps_test_induced_seed() {
+        let spec = is_literal_kind_spec();
+        let pool = synthesize(&spec, 1).expect("opt-1 synthesis must succeed");
+        let seed = pool
+            .iter()
+            .find(|c| matches!(c.provenance, Provenance::TestInduced { .. }))
+            .expect("final pool must contain the TestInduced seed");
+        assert!(
+            (seed.scores.test_pass_ratio - 0.5).abs() < 1e-9,
+            "seed tpr was {}",
+            seed.scores.test_pass_ratio
+        );
+    }
+
+    /// Load one of the real M2 specs (the same helper shape as
+    /// the verifier tests). Constraint seeds are derived from
+    /// spec text, so their tests must run against spec text —
+    /// hand-built ASTs would test the test, not the derivation.
+    fn load_m2_spec(file: &str, name: &str) -> FunctionSpec {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/self_host/{}.morph", root, file);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        let checked = crate::spec::typeck::check(parsed).unwrap();
+        checked
+            .spec
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .clone()
+    }
+
+    fn constraint_seed(
+        engine: &SynthesisEngine,
+        spec: &FunctionSpec,
+        kind: &str,
+    ) -> CandidateImplementation {
+        engine
+            .seed_from_constraints(spec)
+            .into_iter()
+            .find(|c| matches!(&c.provenance, Provenance::ConstraintInduced { kind: k } if k == kind))
+            .unwrap_or_else(|| panic!("{} must have a {} constraint seed", spec.name, kind))
+    }
+
+    fn eval_int_body(body: &IRNode, var: &str, value: i64) -> crate::synthesis::eval::Value {
+        let mut env = crate::synthesis::eval::Env::new();
+        env.insert(var.into(), crate::synthesis::eval::Value::Int(value));
+        crate::synthesis::eval::eval(body, &env).expect("seed body must evaluate")
+    }
+
+    /// Constraint seeds (i): a range spec's equation constraint
+    /// IS its body — `output == (tag>=0&&tag<=8)` — so the seed
+    /// built from it must be Verified by the candidate-encoding
+    /// verifier (the pool previously contained NO Verified
+    /// candidate for this spec in any measured draw), must
+    /// survive to the final pool under seed protection, and
+    /// must win selection once the gates can see it.
+    #[test]
+    fn constraint_equation_seed_is_verified_and_wins() {
+        let spec = load_m2_spec("validator", "is_known_type_tag");
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the equation seed");
+        let seed = constraint_seed(&engine, &spec, "equation");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let pool = synthesize(&spec, 1).expect("opt-1 synthesis must succeed");
+        assert!(
+            pool.iter()
+                .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+            "final pool must contain the constraint seed"
+        );
+        let verified = crate::verify::verifier::verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the constraint's own expression"
+        );
+    }
+
+    /// Constraint seeds (ii): a lookup spec's guard rows
+    /// enumerate the whole table, including rows no in-spec test
+    /// exercises (2 → "Float", 3 → "Bool", 7 → "Option" for
+    /// type_tag_name). The guard-table seed must return the
+    /// pinned output on EVERY row — evaluated here through the
+    /// IR interpreter — and be Verified.
+    #[test]
+    fn constraint_guard_table_seed_covers_every_row() {
+        let spec = load_m2_spec("printer", "type_tag_name");
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let rows = [
+            (1, "Int"),
+            (2, "Float"),
+            (3, "Bool"),
+            (4, "String"),
+            (6, "List"),
+            (7, "Option"),
+        ];
+        for (tag, name) in rows {
+            let v = eval_int_body(&seed.body, "tag", tag);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(name.into()),
+                "tag {} must print as {}",
+                tag,
+                name
+            );
+        }
+        // Off-table the spec is silent; the wildcard arm carries
+        // the typed default for String (Phase 15: the mirrors
+        // abstain there and the recorded winner value was "").
+        let v = eval_int_body(&seed.body, "tag", 0);
+        assert_eq!(v, crate::synthesis::eval::Value::Str(String::new()));
+
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Constraint seeds (ii, Int table): node_arity's rows pin
+    /// six kinds; its seventh constraint (`output >= 0`) is not
+    /// a guard row and must be skipped as one — yet still be
+    /// PROVEN of the seed (every row value and the Int default
+    /// satisfy the floor), so the seed is Verified whole.
+    #[test]
+    fn constraint_guard_table_seed_for_node_arity() {
+        let spec = load_m2_spec("validator", "node_arity");
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the guard-table seed");
+        let seed = constraint_seed(&engine, &spec, "guard_table");
+
+        let rows = [(0, 0), (1, 0), (2, 2), (3, 1), (5, 2), (6, 1)];
+        for (kind, arity) in rows {
+            let v = eval_int_body(&seed.body, "kind", kind);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(arity),
+                "kind {} must have arity {}",
+                kind,
+                arity
+            );
+        }
+        // Unpinned kinds (Call=4, ListLiteral=8) get the typed
+        // Int default, which satisfies the spec's floor.
+        let v = eval_int_body(&seed.body, "kind", 4);
+        assert_eq!(v, crate::synthesis::eval::Value::Int(0));
+
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Constraint seeds (iii): the two test-less specs have
+    /// never had a truth signal of any kind — no tests, hence no
+    /// TestInduced seed, and no Verified pool candidate in any
+    /// measured draw. Their constraints are equations, so the
+    /// equation seed must exist, be Verified, and reach the
+    /// final pool under protection.
+    #[test]
+    fn constraint_equation_seeds_give_testless_specs_verified_candidates() {
+        for (file, name) in [("validator", "tags_compatible"), ("printer", "needs_parens")] {
+            let spec = load_m2_spec(file, name);
+            let engine = SynthesisEngine::new(SynthesisConfig::default());
+            let seed = constraint_seed(&engine, &spec, "equation");
+            let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+            assert_eq!(
+                result.status,
+                VerificationStatus::Verified,
+                "{}'s equation seed must verify",
+                name
+            );
+            let pool = synthesize(&spec, 1).expect("opt-1 synthesis must succeed");
+            assert!(
+                pool.iter()
+                    .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+                "{}'s final pool must contain the constraint seed",
+                name
+            );
+        }
+    }
+
+    /// Constraint seeds (iv): the composition specs' equations
+    /// call other specs — the body converts to IR but lies
+    /// outside the verifier's encodable subset, so NO seed is
+    /// admitted (an unverifiable seed would be exactly the
+    /// Inconclusive filler this phase exists to displace). A
+    /// spec whose only constraint fits neither pattern (a bare
+    /// ordering on output) likewise gets no seed.
+    #[test]
+    fn constraint_seeds_absent_where_constraints_fit_neither_pattern() {
+        for (file, name) in [("validator", "validate_kind_tag"), ("printer", "print_node_kind")] {
+            let spec = load_m2_spec(file, name);
+            let engine = SynthesisEngine::new(SynthesisConfig::default());
+            assert!(
+                engine.seed_from_constraints(&spec).is_empty(),
+                "{} must not get a constraint seed",
+                name
+            );
+        }
+
+        let mut spec = dummy_spec();
+        spec.name = "floor_only".into();
+        spec.params = vec![Param {
+            name: "x".into(),
+            ty: TypeRef::Int,
+            annotations: HashMap::new(),
+        }];
+        spec.return_type = TypeRef::Int;
+        spec.postconditions = vec![Constraint::Expr(Expr::BinOp(
+            BinOp::Ge,
+            Box::new(Expr::Var("output".into())),
+            Box::new(Expr::IntLit(0)),
+        ))];
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        assert!(engine.seed_from_constraints(&spec).is_empty());
+    }
+
+    /// Load every spec of one M2 module file — the module
+    /// context spec-to-spec calls resolve against.
+    fn load_m2_module(file: &str) -> Vec<FunctionSpec> {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/self_host/{}.morph", root, file);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        let checked = crate::spec::typeck::check(parsed).unwrap();
+        checked.spec.functions
+    }
+
+    fn module_spec(module: &[FunctionSpec], name: &str) -> FunctionSpec {
+        module.iter().find(|f| f.name == name).unwrap().clone()
+    }
+
+    fn contains_call_to(node: &IRNode, name: &str) -> bool {
+        match node {
+            IRNode::Call { function, args } => {
+                function == name || args.iter().any(|a| contains_call_to(a, name))
+            }
+            IRNode::BinOp(_, l, r) => {
+                contains_call_to(l, name) || contains_call_to(r, name)
+            }
+            IRNode::UnaryOp(_, inner) => contains_call_to(inner, name),
+            IRNode::Match { scrutinee, cases } => {
+                contains_call_to(scrutinee, name)
+                    || cases.iter().any(|(_, b)| contains_call_to(b, name))
+            }
+            _ => false,
+        }
+    }
+
+    /// Spec calls (i): with the module present, validate_kind_tag's
+    /// equation — `output == is_known_node_kind(kind)` — finally
+    /// yields a seed: the call is resolved against the callee's
+    /// own constraint body, so the seed IS the range check the
+    /// composed spec denotes. It must be Verified by the
+    /// module-aware verifier and win module-aware synthesis at
+    /// tpr 1.000 with its own body. (Without the module the same
+    /// spec gets no seed — see
+    /// constraint_seeds_absent_where_constraints_fit_neither_pattern,
+    /// which runs registry-less and is unchanged.)
+    #[test]
+    fn composition_equation_seed_is_verified_and_wins() {
+        let module = load_m2_module("validator");
+        let spec = module_spec(&module, "validate_kind_tag");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &spec, "equation");
+        assert_eq!(count_holes(&seed.body), 0);
+        assert!(
+            !contains_call_to(&seed.body, "is_known_node_kind"),
+            "the seed body must be the resolved callee body, not the call: {:?}",
+            seed.body
+        );
+        // The resolved body is the callee's range, executed here
+        // through the IR interpreter — including the untested
+        // boundary points 9 (in) and 10 (out).
+        for (kind, expected) in [(0, true), (4, true), (9, true), (10, false), (77, false)] {
+            let v = eval_int_body(&seed.body, "kind", kind);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Bool(expected),
+                "kind {}",
+                kind
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let pool = synthesize_with_module(&spec, 1, &module)
+            .expect("opt-1 synthesis must succeed");
+        assert!(
+            pool.iter()
+                .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+            "final pool must contain the constraint seed"
+        );
+        let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the resolved seed body"
+        );
+    }
+
+    /// Spec calls (ii): print_node_kind composes node_kind_name —
+    /// a guard-table spec with NO equation — so the resolver
+    /// falls back to the callee's guard-table body and the seed
+    /// is the name lookup itself. Verified by the module-aware
+    /// verifier, and wins module-aware synthesis at tpr 1.000.
+    #[test]
+    fn composition_seed_for_print_node_kind_is_verified_and_wins() {
+        let module = load_m2_module("printer");
+        let spec = module_spec(&module, "print_node_kind");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &spec, "equation");
+        assert_eq!(count_holes(&seed.body), 0);
+        assert!(
+            !contains_call_to(&seed.body, "node_kind_name"),
+            "the seed body must be the resolved callee body, not the call: {:?}",
+            seed.body
+        );
+        // The lookup itself, on rows no in-spec test exercises
+        // (0 → "Literal") as well as both tested rows.
+        for (kind, expected) in [(0, "Literal"), (2, "BinaryOp"), (7, "Lambda")] {
+            let v = eval_int_body(&seed.body, "kind", kind);
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(expected.into()),
+                "kind {}",
+                kind
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        let pool = synthesize_with_module(&spec, 1, &module)
+            .expect("opt-1 synthesis must succeed");
+        assert!(
+            pool.iter()
+                .any(|c| matches!(c.provenance, Provenance::ConstraintInduced { .. })),
+            "final pool must contain the constraint seed"
+        );
+        let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+        let winner =
+            crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+        assert!(winner.verified, "the spec-exact seed must win verified");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner tpr was {}",
+            winner.scores.test_pass_ratio
+        );
+        assert_eq!(
+            format!("{:?}", winner.body),
+            format!("{:?}", seed.body),
+            "the winning body must be the resolved seed body"
+        );
+    }
+
+    /// Spec calls (iii): a cyclic pair of specs (a calls b, b
+    /// calls a) must not hang or panic resolution — the cycle
+    /// simply yields no seed, exactly like an unresolvable call.
+    /// This test completing at all is the termination evidence.
+    #[test]
+    fn cyclic_specs_get_no_constraint_seed() {
+        let cyclic = |name: &str, callee: &str| {
+            let mut spec = dummy_spec();
+            spec.name = name.into();
+            spec.params = vec![Param {
+                name: "x".into(),
+                ty: TypeRef::Int,
+                annotations: HashMap::new(),
+            }];
+            spec.return_type = TypeRef::Bool;
+            spec.postconditions = vec![Constraint::Expr(Expr::BinOp(
+                BinOp::Eq,
+                Box::new(Expr::Var("output".into())),
+                Box::new(Expr::Call(callee.into(), vec![Expr::Var("x".into())])),
+            ))];
+            spec
+        };
+        let a = cyclic("cyc_a", "cyc_b");
+        let b = cyclic("cyc_b", "cyc_a");
+        let module = vec![a.clone(), b];
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        assert!(engine.seed_from_constraints(&a).is_empty());
+        assert!(engine.seed_from_constraints(&module[1]).is_empty());
+    }
+
+    /// replace_hole must actually substitute the hole wherever
+    /// find_hole_positions found it. The path walker behind it
+    /// used to implement only the Block step — every other
+    /// PathElem fell into a no-op arm — so a hole inside a match
+    /// arm (the TestInduced seed's wildcard), an If branch, or a
+    /// Let body was silently left in place: "expanded" MCTS
+    /// children were clones of their parent, still holed, never
+    /// terminal, never harvested, and rollouts could not fill
+    /// such holes either.
+    #[test]
+    fn replace_hole_fills_holes_beyond_block_paths() {
+        let filling = IRNode::Literal(IRLiteral::Bool(false));
+        let hole = || IRNode::Hole { id: 7, expected_type: None };
+
+        // Path [MatchCase(1)] — the seed's wildcard arm.
+        let mut body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::Literal(IRLiteral::Bool(true)),
+                ),
+                (IRPattern::Wildcard, hole()),
+            ],
+        };
+        let holes = find_hole_positions(&body);
+        assert_eq!(holes.len(), 1);
+        replace_hole(&mut body, &holes[0], &filling);
+        assert_eq!(count_holes(&body), 0, "match-arm hole left: {:?}", body);
+
+        // Path [IfElse].
+        let mut body = IRNode::If {
+            condition: Box::new(IRNode::Literal(IRLiteral::Bool(true))),
+            then_branch: Box::new(IRNode::Literal(IRLiteral::Bool(true))),
+            else_branch: Box::new(hole()),
+        };
+        let holes = find_hole_positions(&body);
+        assert_eq!(holes.len(), 1);
+        replace_hole(&mut body, &holes[0], &filling);
+        assert_eq!(count_holes(&body), 0, "if-else hole left: {:?}", body);
+
+        // Path [LetBody].
+        let mut body = IRNode::Let {
+            name: "x".into(),
+            value: Box::new(IRNode::Literal(IRLiteral::Int(1))),
+            body: Box::new(hole()),
+        };
+        let holes = find_hole_positions(&body);
+        assert_eq!(holes.len(), 1);
+        replace_hole(&mut body, &holes[0], &filling);
+        assert_eq!(count_holes(&body), 0, "let-body hole left: {:?}", body);
+
+        // Nested path [MatchCase(0), BinOpR]: only the addressed
+        // hole is replaced; a second hole elsewhere survives.
+        let mut body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Wildcard,
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                        Box::new(hole()),
+                    ),
+                ),
+                (IRPattern::Literal(IRLiteral::Int(0)), hole()),
+            ],
+        };
+        let holes = find_hole_positions(&body);
+        assert_eq!(holes.len(), 2);
+        replace_hole(&mut body, &holes[0], &IRNode::Literal(IRLiteral::Int(9)));
+        assert_eq!(count_holes(&body), 1, "exactly one hole must remain: {:?}", body);
+    }
+
+    /// Seed-root harvest, pipeline level: the final pool contains
+    /// a HOLE-FREE completion of the TestInduced seed — the seed's
+    /// own match shape (one literal arm per test, wildcard arm
+    /// last) with the wildcard hole filled — measuring the full
+    /// 1.0 test pass ratio with no hole decay. The spec's tests
+    /// only reach the literal arms, so ANY filling of the wildcard
+    /// completes a body that passes every test. Before the
+    /// seed-rooted MCTS pass existed, the single MCTS tree was
+    /// rooted at one random population member, so seed completions
+    /// reached the pool only when the seed itself happened to be
+    /// picked as that root — the holed original (tpr 0.5, see the
+    /// test above) was otherwise the seed's only presence.
+    #[test]
+    fn synthesized_pool_contains_hole_free_seed_completion() {
+        let spec = is_literal_kind_spec();
+        let pool = synthesize(&spec, 1).expect("opt-1 synthesis must succeed");
+        let completion = pool.iter().find(|c| {
+            if count_holes(&c.body) != 0
+                || (c.scores.test_pass_ratio - 1.0).abs() >= 1e-9
+            {
+                return false;
+            }
+            // The seed's shape: a match whose leading arms are the
+            // per-test literal arms and whose last arm is the
+            // (now filled) wildcard.
+            match &c.body {
+                IRNode::Match { cases, .. } => {
+                    cases.len() == spec.tests.len() + 1
+                        && cases[..spec.tests.len()]
+                            .iter()
+                            .all(|(p, _)| matches!(p, IRPattern::Literal(_)))
+                        && matches!(cases[spec.tests.len()].0, IRPattern::Wildcard)
+                }
+                _ => false,
+            }
+        });
+        assert!(
+            completion.is_some(),
+            "pool must contain a hole-free completion of the test-induced seed; \
+             pool (holes, tpr): {:?}",
+            pool.iter()
+                .map(|c| (count_holes(&c.body), c.scores.test_pass_ratio))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Hole penalty: correctness credit halves per unfilled hole,
+    /// so a holed candidate ranks strictly below an otherwise-equal
+    /// hole-free one. The dummy spec has no tests, so the neutral
+    /// test score is 0.5 and the placeholder constraint score 0.7.
+    #[test]
+    fn evaluate_candidate_penalizes_holes() {
+        let spec = dummy_spec();
+        let free = make_candidate(IRNode::Literal(IRLiteral::Int(1)), &spec);
+        let one_hole = make_candidate(
+            IRNode::Block(vec![
+                IRNode::Literal(IRLiteral::Int(1)),
+                IRNode::Hole { id: 1, expected_type: None },
+            ]),
+            &spec,
+        );
+        let two_holes = make_candidate(
+            IRNode::Block(vec![
+                IRNode::Hole { id: 1, expected_type: None },
+                IRNode::Hole { id: 2, expected_type: None },
+            ]),
+            &spec,
+        );
+
+        let free_scores = evaluate_candidate(&free, &spec);
+        assert!((free_scores.test_pass_ratio - 0.5).abs() < 1e-9);
+        assert!((free_scores.constraint_score - 0.7).abs() < 1e-9);
+
+        let one_scores = evaluate_candidate(&one_hole, &spec);
+        assert!((one_scores.test_pass_ratio - 0.25).abs() < 1e-9);
+        assert!((one_scores.constraint_score - 0.35).abs() < 1e-9);
+        assert!(one_scores.test_pass_ratio < free_scores.test_pass_ratio);
+        assert!(one_scores.constraint_score < free_scores.constraint_score);
+
+        let two_scores = evaluate_candidate(&two_holes, &spec);
+        assert!((two_scores.test_pass_ratio - 0.125).abs() < 1e-9);
+        assert!(two_scores.test_pass_ratio < one_scores.test_pass_ratio);
+    }
+
+    /// A spec with real, mappable tests — mirrors
+    /// examples/self_host/validator.morph `is_literal_kind`
+    /// (input kind: Int, output Bool, output == (kind == 0)).
+    fn is_literal_kind_spec() -> FunctionSpec {
+        let mut spec = dummy_spec();
+        spec.name = "is_literal_kind".into();
+        spec.params = vec![Param {
+            name: "kind".into(),
+            ty: TypeRef::Int,
+            annotations: HashMap::new(),
+        }];
+        spec.return_type = TypeRef::Bool;
+        let test = |input: i64, expected: bool| Test {
+            name: None,
+            input: Expr::IntLit(input),
+            expected_output: Expr::BoolLit(expected),
+            timeout_ms: None,
+            property: false,
+        };
+        spec.tests = vec![test(0, true), test(2, false), test(4, false)];
+        spec
+    }
+
+    /// Truth signal: a candidate that actually implements the
+    /// spec scores a measured 1.0 — and a wrong one scores
+    /// strictly less, by exactly the tests it fails. Before the
+    /// IR interpreter landed, both scored 1.0 (the filter in
+    /// evaluate_candidate unconditionally returned true).
+    #[test]
+    fn evaluate_candidate_measures_real_test_pass_ratio() {
+        let spec = is_literal_kind_spec();
+
+        // Correct: kind == 0.
+        let correct = make_candidate(
+            IRNode::BinOp(
+                IRBinOp::Eq,
+                Box::new(IRNode::Var("kind".into())),
+                Box::new(IRNode::Literal(IRLiteral::Int(0))),
+            ),
+            &spec,
+        );
+        let scores = evaluate_candidate(&correct, &spec);
+        assert!((scores.test_pass_ratio - 1.0).abs() < 1e-9);
+
+        // Wrong: always false — passes exactly 2 of 3 tests.
+        let wrong = make_candidate(IRNode::Literal(IRLiteral::Bool(false)), &spec);
+        let scores = evaluate_candidate(&wrong, &spec);
+        assert!((scores.test_pass_ratio - 2.0 / 3.0).abs() < 1e-9);
+
+        // The classic random-tree failure mode: an unbound
+        // Var("result") body. It never compiled — and now it
+        // also measures 0 instead of a free 1.0.
+        let unbound = make_candidate(IRNode::Var("result".into()), &spec);
+        let scores = evaluate_candidate(&unbound, &spec);
+        assert_eq!(scores.test_pass_ratio, 0.0);
+    }
+
+    /// The TestInduced shape — a match on the input with one
+    /// literal arm per test plus exactly one wildcard Hole —
+    /// passes every test its arms reach, then the hole decay
+    /// halves its credit: measured 1.0 × 0.5 decay = 0.5.
+    #[test]
+    fn evaluate_candidate_test_induced_shape_scores_measured_ratio_times_hole_decay() {
+        let spec = is_literal_kind_spec();
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(0)),
+                    IRNode::Literal(IRLiteral::Bool(true)),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Int(2)),
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Int(4)),
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Hole { id: 99, expected_type: None },
+                ),
+            ],
+        };
+        let candidate = make_candidate(body, &spec);
+        let scores = evaluate_candidate(&candidate, &spec);
+        assert!((scores.test_pass_ratio - 0.5).abs() < 1e-9);
+    }
+
+    /// Walk `node` tracking lexical scope the way the language
+    /// binds names (Let / For / Lambda / Closure / match-arm
+    /// variable patterns) and assert every `Var` refers to a name
+    /// actually in scope at that point.
+    fn assert_vars_in_scope(node: &IRNode, scope: &[String]) {
+        match node {
+            IRNode::Var(name) => assert!(
+                scope.iter().any(|s| s == name),
+                "free variable Var({:?}) emitted with scope {:?}",
+                name,
+                scope
+            ),
+            IRNode::Block(stmts) => stmts.iter().for_each(|s| assert_vars_in_scope(s, scope)),
+            IRNode::Let { name, value, body } => {
+                assert_vars_in_scope(value, scope);
+                let mut inner = scope.to_vec();
+                inner.push(name.clone());
+                assert_vars_in_scope(body, &inner);
+            }
+            IRNode::If { condition, then_branch, else_branch } => {
+                assert_vars_in_scope(condition, scope);
+                assert_vars_in_scope(then_branch, scope);
+                assert_vars_in_scope(else_branch, scope);
+            }
+            IRNode::While { condition, body, .. } => {
+                assert_vars_in_scope(condition, scope);
+                assert_vars_in_scope(body, scope);
+            }
+            IRNode::For { var, start, end, body } => {
+                assert_vars_in_scope(start, scope);
+                assert_vars_in_scope(end, scope);
+                let mut inner = scope.to_vec();
+                inner.push(var.clone());
+                assert_vars_in_scope(body, &inner);
+            }
+            IRNode::Match { scrutinee, cases } => {
+                assert_vars_in_scope(scrutinee, scope);
+                for (pattern, body) in cases {
+                    let mut inner = scope.to_vec();
+                    pattern_bindings(pattern, &mut inner);
+                    assert_vars_in_scope(body, &inner);
+                }
+            }
+            IRNode::Call { args, .. } => {
+                args.iter().for_each(|a| assert_vars_in_scope(a, scope))
+            }
+            IRNode::Return(e) => assert_vars_in_scope(e, scope),
+            IRNode::BinOp(_, l, r) => {
+                assert_vars_in_scope(l, scope);
+                assert_vars_in_scope(r, scope);
+            }
+            IRNode::UnaryOp(_, e) => assert_vars_in_scope(e, scope),
+            IRNode::Lambda { params, body, .. } | IRNode::Closure { params, body, .. } => {
+                let mut inner = scope.to_vec();
+                inner.extend(params.iter().map(|(n, _)| n.clone()));
+                assert_vars_in_scope(body, &inner);
+            }
+            IRNode::Collection { elements, .. } => {
+                elements.iter().for_each(|e| assert_vars_in_scope(e, scope))
+            }
+            IRNode::Map { function, over } | IRNode::Filter { predicate: function, over } => {
+                assert_vars_in_scope(function, scope);
+                assert_vars_in_scope(over, scope);
+            }
+            IRNode::Fold { operation, initial, over } => {
+                assert_vars_in_scope(operation, scope);
+                assert_vars_in_scope(initial, scope);
+                assert_vars_in_scope(over, scope);
+            }
+            IRNode::Sort { comparator, collection } => {
+                assert_vars_in_scope(comparator, scope);
+                assert_vars_in_scope(collection, scope);
+            }
+            IRNode::Alloc { initial, .. } => assert_vars_in_scope(initial, scope),
+            IRNode::Assign { target, value } => {
+                assert_vars_in_scope(target, scope);
+                assert_vars_in_scope(value, scope);
+            }
+            IRNode::Typed { node, .. } => assert_vars_in_scope(node, scope),
+            IRNode::Index(c, i) => {
+                assert_vars_in_scope(c, scope);
+                assert_vars_in_scope(i, scope);
+            }
+            IRNode::Loop { body } => assert_vars_in_scope(body, scope),
+            IRNode::Break { value } => {
+                if let Some(v) = value {
+                    assert_vars_in_scope(v, scope);
+                }
+            }
+            IRNode::StructDef { body, .. } => assert_vars_in_scope(body, scope),
+            IRNode::TryPropagate(e) => assert_vars_in_scope(e, scope),
+            IRNode::Hole { .. } | IRNode::Literal(_) => {}
+        }
+    }
+
+    /// Scope-aware generation: every `Var` leaf the random tree
+    /// generator emits must name a variable that is actually in
+    /// scope there — a spec parameter, or a name the generator
+    /// itself bound on the way down (its `For` variable). The old
+    /// generator hardcoded `Var("result")` as a leaf, which is
+    /// bound nowhere: such trees can never evaluate or compile.
+    /// Checked against a spec with a parameter and one without
+    /// (empty scope → no `Var` leaves at all).
+    #[test]
+    fn random_ir_tree_only_emits_in_scope_vars() {
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        for spec in [dummy_spec(), is_literal_kind_spec()] {
+            let scope: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
+            for depth in 0..=4 {
+                for _ in 0..200 {
+                    let tree = random_ir_tree(&spec, depth, &engine);
+                    assert_vars_in_scope(&tree, &scope);
+                }
+            }
+        }
+    }
+
+    /// `scope_at_path` starts from the spec parameters and adds
+    /// exactly the binders enclosing the position: a `Let` name
+    /// counts in its body but not its value; a `For` variable in
+    /// its body; a match-arm variable pattern in that arm only.
+    #[test]
+    fn scope_at_path_collects_enclosing_binders() {
+        let tree = IRNode::Let {
+            name: "y".into(),
+            value: Box::new(IRNode::Hole { id: 1, expected_type: None }),
+            body: Box::new(IRNode::For {
+                var: "i".into(),
+                start: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                end: Box::new(IRNode::Literal(IRLiteral::Int(3))),
+                body: Box::new(IRNode::Match {
+                    scrutinee: Box::new(IRNode::Var("kind".into())),
+                    cases: vec![
+                        (
+                            IRPattern::Variable("m".into()),
+                            IRNode::Hole { id: 2, expected_type: None },
+                        ),
+                        (
+                            IRPattern::Wildcard,
+                            IRNode::Hole { id: 3, expected_type: None },
+                        ),
+                    ],
+                }),
+            }),
+        };
+        let params = vec!["kind".to_string()];
+        let holes = find_hole_positions(&tree);
+        assert_eq!(holes.len(), 3);
+        // Hole 1 sits in the Let's *value*: "y" is not yet bound.
+        assert_eq!(scope_at_path(&tree, &holes[0].path, &params), vec!["kind"]);
+        // Hole 2 sits in the variable-pattern arm inside the loop.
+        assert_eq!(
+            scope_at_path(&tree, &holes[1].path, &params),
+            vec!["kind", "y", "i", "m"]
+        );
+        // Hole 3 sits in the wildcard arm: no pattern binding.
+        assert_eq!(
+            scope_at_path(&tree, &holes[2].path, &params),
+            vec!["kind", "y", "i"]
+        );
+    }
+
+    /// Rollout fillings obey the same rule as tree generation:
+    /// with a non-empty scope every emitted `Var` comes from it;
+    /// with an empty scope no `Var` is emitted at all (the old
+    /// code returned Var("result") / Var("output") here).
+    #[test]
+    fn random_filling_only_emits_in_scope_vars() {
+        let hole = HoleRef { path: Vec::new(), expected_type: None };
+        let scope = vec!["kind".to_string(), "y".to_string()];
+        for _ in 0..500 {
+            let filling = random_filling(&hole, &scope);
+            assert_vars_in_scope(&filling, &scope);
+        }
+        for _ in 0..500 {
+            let filling = random_filling(&hole, &[]);
+            assert_vars_in_scope(&filling, &[]);
+        }
+    }
+
+    /// MCTS expansion fillings are computed against the scope at
+    /// the hole: inside `let y = … in □` for a spec with parameter
+    /// `kind`, fillings may reference `kind` and `y` — and nothing
+    /// else (the old code hardcoded Var("x") and `a + b`).
+    #[test]
+    fn generate_hole_fillings_only_emit_in_scope_vars() {
+        let spec = is_literal_kind_spec();
+        let node = MCTSNode {
+            state: IRNode::Let {
+                name: "y".into(),
+                value: Box::new(IRNode::Literal(IRLiteral::Int(0))),
+                body: Box::new(IRNode::Hole { id: 7, expected_type: None }),
+            },
+            parent: None,
+            children: Vec::new(),
+            visits: 0,
+            total_reward: 0.0,
+            is_terminal: false,
+            hole_count: 1,
+        };
+        let holes = find_hole_positions(&node.state);
+        assert_eq!(holes.len(), 1);
+        let scope = vec!["kind".to_string(), "y".to_string()];
+        for _ in 0..100 {
+            for filling in generate_hole_fillings(&holes[0], &node, &spec) {
+                assert_vars_in_scope(&filling, &scope);
+            }
+        }
+    }
+
+    fn mcts_node_with(state: IRNode) -> MCTSNode {
+        let hole_count = count_holes(&state);
+        MCTSNode {
+            state,
+            parent: None,
+            children: Vec::new(),
+            visits: 0,
+            total_reward: 0.0,
+            is_terminal: false,
+            hole_count,
+        }
+    }
+
+    /// Every filling must evaluate (in an empty environment —
+    /// typed fillings are literals, so nothing may be unbound)
+    /// to a value of the hole's type.
+    fn assert_fillings_eval_to(fillings: &[IRNode], what: &str, ok: impl Fn(&crate::synthesis::eval::Value) -> bool) {
+        assert!(!fillings.is_empty(), "no fillings generated for {}", what);
+        for filling in fillings {
+            let value = crate::synthesis::eval::eval(filling, &HashMap::new()).unwrap_or_else(|e| {
+                panic!("filling {:?} for {} must evaluate: {:?}", filling, what, e)
+            });
+            assert!(
+                ok(&value),
+                "filling {:?} for {} evaluated to {:?} — wrong type",
+                filling, what, value
+            );
+        }
+    }
+
+    /// Type-directed expansion: a hole that carries an expected
+    /// type (the TestInduced seed's wildcard hole carries the
+    /// spec's return type) must only be filled with expressions
+    /// of that type. The legacy menu always led with Int(0) —
+    /// which is why winning seed completions put `_ => 0` in
+    /// String and Bool functions and never compiled (E0308).
+    #[test]
+    fn generate_hole_fillings_respect_bool_hole_type() {
+        let spec = is_literal_kind_spec(); // returns Bool
+        let node = mcts_node_with(IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("kind".into())),
+            cases: vec![(
+                IRPattern::Wildcard,
+                IRNode::Hole { id: 7, expected_type: Some(TypeRef::Bool) },
+            )],
+        });
+        let holes = find_hole_positions(&node.state);
+        assert_eq!(holes.len(), 1);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert_fillings_eval_to(&fillings, "Bool hole", |v| {
+            matches!(v, crate::synthesis::eval::Value::Bool(_))
+        });
+    }
+
+    #[test]
+    fn generate_hole_fillings_respect_string_hole_type() {
+        let mut spec = dummy_spec();
+        spec.name = "name_of".into();
+        spec.params = vec![Param {
+            name: "kind".into(),
+            ty: TypeRef::Int,
+            annotations: HashMap::new(),
+        }];
+        spec.return_type = TypeRef::String;
+        spec.tests = vec![Test {
+            name: None,
+            input: Expr::IntLit(0),
+            expected_output: Expr::StringLit("Literal".into()),
+            timeout_ms: None,
+            property: false,
+        }];
+        let node = mcts_node_with(IRNode::Hole {
+            id: 1,
+            expected_type: Some(TypeRef::String),
+        });
+        let holes = find_hole_positions(&node.state);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert_fillings_eval_to(&fillings, "String hole", |v| {
+            matches!(v, crate::synthesis::eval::Value::Str(_))
+        });
+        // Values the spec's tests expect are return-typed by
+        // construction, so they belong in the menu too.
+        assert!(
+            fillings.iter().any(|f| matches!(
+                f,
+                IRNode::Literal(IRLiteral::String(s)) if s == "Literal"
+            )),
+            "test output \"Literal\" missing from String fillings: {:?}",
+            fillings
+        );
+    }
+
+    #[test]
+    fn generate_hole_fillings_respect_int_hole_type() {
+        let mut spec = dummy_spec();
+        spec.name = "arity_of".into();
+        spec.return_type = TypeRef::Int;
+        spec.tests = vec![Test {
+            name: None,
+            input: Expr::IntLit(0),
+            expected_output: Expr::IntLit(2),
+            timeout_ms: None,
+            property: false,
+        }];
+        let node = mcts_node_with(IRNode::Hole {
+            id: 1,
+            expected_type: Some(TypeRef::Int),
+        });
+        let holes = find_hole_positions(&node.state);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert_fillings_eval_to(&fillings, "Int hole", |v| {
+            matches!(v, crate::synthesis::eval::Value::Int(_))
+        });
+        assert!(
+            fillings
+                .iter()
+                .any(|f| matches!(f, IRNode::Literal(IRLiteral::Int(2)))),
+            "test output 2 missing from Int fillings: {:?}",
+            fillings
+        );
+    }
+
+    #[test]
+    fn generate_hole_fillings_respect_list_hole_type() {
+        let mut spec = dummy_spec();
+        spec.return_type = TypeRef::List(Box::new(TypeRef::Int));
+        let node = mcts_node_with(IRNode::Hole {
+            id: 1,
+            expected_type: Some(TypeRef::List(Box::new(TypeRef::Int))),
+        });
+        let holes = find_hole_positions(&node.state);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert_fillings_eval_to(&fillings, "List hole", |v| {
+            matches!(v, crate::synthesis::eval::Value::List(_))
+        });
+    }
+
+    /// Regression guard: a hole with NO expected type keeps the
+    /// legacy type-blind menu exactly — typed fillings are an
+    /// addition for typed holes, not a behavior change for the
+    /// untyped majority (random trees, templates).
+    #[test]
+    fn generate_hole_fillings_untyped_hole_keeps_legacy_menu() {
+        let spec = is_literal_kind_spec();
+        let node = mcts_node_with(IRNode::Hole { id: 3, expected_type: None });
+        let holes = find_hole_positions(&node.state);
+        let fillings = generate_hole_fillings(&holes[0], &node, &spec);
+        assert!(
+            fillings
+                .iter()
+                .any(|f| matches!(f, IRNode::Literal(IRLiteral::Int(0)))),
+            "legacy menu lost its Int(0) filling: {:?}",
+            fillings
+        );
+        assert!(
+            fillings
+                .iter()
+                .any(|f| matches!(f, IRNode::Literal(IRLiteral::Bool(true)))),
+            "legacy menu lost its Bool(true) filling: {:?}",
+            fillings
+        );
+    }
+
+    /// Rollout fillings obey the same type discipline as the
+    /// expansion menu: a draw for a Bool-typed hole is always a
+    /// Bool literal, never Int(0) / a Return wrapper / a fresh
+    /// Hole (the legacy arms).
+    #[test]
+    fn random_filling_respects_hole_type() {
+        let tree = IRNode::Hole {
+            id: 5,
+            expected_type: Some(TypeRef::Bool),
+        };
+        let holes = find_hole_positions(&tree);
+        assert_eq!(holes.len(), 1);
+        let scope = vec!["kind".to_string()];
+        for _ in 0..500 {
+            let filling = random_filling(&holes[0], &scope);
+            let value = crate::synthesis::eval::eval(&filling, &HashMap::new()).unwrap_or_else(|e| {
+                panic!("rollout filling {:?} must evaluate: {:?}", filling, e)
+            });
+            assert!(
+                matches!(value, crate::synthesis::eval::Value::Bool(_)),
+                "rollout filling {:?} evaluated to {:?} — wrong type for a Bool hole",
+                filling, value
+            );
+        }
+    }
+
+    /// Regression: `random_ir_tree` used to emit
+    /// `Call { function: "_", args: [] }` as a leaf — a call to a
+    /// nonexistent function that codegen happily emitted. An
+    /// unfilled leaf must be an honest `Hole` instead.
+    #[test]
+    fn random_ir_tree_never_emits_placeholder_call() {
+        let spec = dummy_spec();
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        for depth in 0..=4 {
+            for _ in 0..200 {
+                let tree = random_ir_tree(&spec, depth, &engine);
+                assert!(
+                    !contains_placeholder_call(&tree),
+                    "random_ir_tree(depth={}) emitted a placeholder Call to \"_\"",
+                    depth
+                );
+            }
+        }
+    }
+
+    // ── Generation-side type discipline (Phase 12) ─────────
+    //
+    // The Phase 11 return-type gate can only crown what the
+    // pool contains: in roughly half of draws a test-less
+    // spec's hole-free pool was uniformly mistyped, because
+    // random seed bodies were generated type-blind — `(actual
+    // + expected)` or `return actual;` as a Bool body, a bare
+    // `for` loop as a Bool body. The seeds are the pool's
+    // foundation (MCTS completions inherit their root shape),
+    // so generation itself must be type-aware: a body drawn
+    // for a typed spec must never be PROVABLY mistyped under
+    // selector::return_type_verdict.
+
+    fn gen_spec(
+        name: &str,
+        params: Vec<(&str, TypeRef)>,
+        return_type: TypeRef,
+    ) -> FunctionSpec {
+        let mut spec = dummy_spec();
+        spec.name = name.into();
+        spec.params = params
+            .into_iter()
+            .map(|(n, ty)| Param {
+                name: n.into(),
+                ty,
+                annotations: HashMap::new(),
+            })
+            .collect();
+        spec.return_type = return_type;
+        spec
+    }
+
+    /// Mirrors the M2 self-host specs' signatures (all-Int
+    /// params; Bool/Int/String returns), including both
+    /// test-less multi-param specs (tags_compatible,
+    /// needs_parens).
+    fn m2_signature_specs() -> Vec<FunctionSpec> {
+        vec![
+            gen_spec("is_known_type_tag", vec![("tag", TypeRef::Int)], TypeRef::Bool),
+            gen_spec("node_arity", vec![("kind", TypeRef::Int)], TypeRef::Int),
+            gen_spec("type_tag_name", vec![("tag", TypeRef::Int)], TypeRef::String),
+            gen_spec(
+                "tags_compatible",
+                vec![("expected", TypeRef::Int), ("actual", TypeRef::Int)],
+                TypeRef::Bool,
+            ),
+            gen_spec(
+                "needs_parens",
+                vec![("op", TypeRef::Int), ("parent_op", TypeRef::Int)],
+                TypeRef::Bool,
+            ),
+        ]
+    }
+
+    /// Property: random seed bodies (the production seeding
+    /// path, `seed_random`) are never provably mistyped for
+    /// their spec — and generation has not degenerated to
+    /// only-unprovable shapes: some draws are provably right.
+    #[test]
+    fn random_seed_bodies_are_never_provably_mistyped() {
+        use crate::synthesis::selector::{return_type_verdict, TypeVerdict};
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        for spec in m2_signature_specs() {
+            let (mut mismatched, mut matches_ct, mut unknown) = (0usize, 0usize, 0usize);
+            const N: usize = 200;
+            for _ in 0..N {
+                let candidate = engine.seed_random(&spec);
+                match return_type_verdict(&candidate.body, &spec) {
+                    TypeVerdict::Mismatched => mismatched += 1,
+                    TypeVerdict::Matches => matches_ct += 1,
+                    TypeVerdict::Unknown => unknown += 1,
+                }
+            }
+            assert_eq!(
+                mismatched, 0,
+                "{}: {}/{} random seed bodies provably mistyped ({} Matches, {} Unknown)",
+                spec.name, mismatched, N, matches_ct, unknown
+            );
+            assert!(
+                matches_ct > 0,
+                "{}: no provably-matching seed body in {} draws — generation degenerated to unprovable shapes",
+                spec.name, N
+            );
+        }
+    }
+
+    /// Regression: the legacy untyped generator keeps its
+    /// historical behavior — it is type-blind, so over many
+    /// draws it still produces the shapes the typed path
+    /// forbids as bodies for a non-Unit spec (statement-only
+    /// roots, provably mistyped bodies). Callers without a
+    /// type context are untouched by the typed path.
+    #[test]
+    fn random_ir_tree_legacy_path_stays_type_blind() {
+        use crate::synthesis::selector::{return_type_verdict, TypeVerdict};
+        let spec = gen_spec("legacy_bool", vec![("tag", TypeRef::Int)], TypeRef::Bool);
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let mut legacy_shapes = 0usize;
+        for _ in 0..200 {
+            let tree = random_ir_tree(&spec, 3, &engine);
+            if matches!(tree, IRNode::For { .. } | IRNode::While { .. })
+                || return_type_verdict(&tree, &spec) == TypeVerdict::Mismatched
+            {
+                legacy_shapes += 1;
+            }
+        }
+        assert!(
+            legacy_shapes > 0,
+            "legacy generator produced no type-blind shapes in 200 draws — the untyped path changed"
+        );
     }
 }

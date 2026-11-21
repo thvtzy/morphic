@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/LLM-Ollama-purple?style=for-the-badge" alt="LLM: Ollama">
   <br>
   <a href="https://github.com/thvtzy/morphic/stargazers"><img src="https://img.shields.io/github/stars/thvtzy/morphic?style=for-the-badge&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-19%20passed-green?style=for-the-badge" alt="Tests: 19"></a>
+  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-194%20passed-green?style=for-the-badge" alt="Tests: 194"></a>
 </p>
 
 <p align="center">
@@ -177,7 +177,7 @@ Morphic combines three synthesis paradigms:
 None alone is sufficient. Together, they cover each other's weaknesses.
 
 ### 3. Formal Guarantees
-Every implementation that compiles is **proven correct** by Z3, not just "tested." If a postcondition fails, Z3 gives you a **counterexample** — the exact inputs that break it.
+Every winning implementation is **judged by Z3 against the candidate itself** — proven, refuted with a **counterexample** (the exact inputs that break it), or honestly reported inconclusive — not just "tested."
 
 ```
 $ morphic check sort.morph
@@ -207,7 +207,8 @@ morphic/
 ├── ARCHITECTURE.md               # Compiler pipeline
 ├── examples/
 │   ├── sort.morph                # Self-synthesizing sort
-│   └── binary_search.morph       # Self-synthesizing binary search
+│   ├── binary_search.morph       # Self-synthesizing binary search
+│   └── self_host/                # validator.morph + printer.morph (v0.5 self-hosting specs)
 ├── src/
 │   ├── main.rs                   # CLI entry point
 │   ├── spec/
@@ -223,6 +224,7 @@ morphic/
 │   ├── synthesis/
 │   │   ├── mod.rs                # Synthesis module
 │   │   ├── engine.rs             # MCTS + Genetic + LLM engine
+│   │   ├── eval.rs               # IR interpreter — executes spec tests for real scoring
 │   │   ├── templates.rs          # 9 algorithmic patterns
 │   │   ├── selector.rs           # Pareto-optimal candidate selection
 │   │   └── interactive.rs        # Interactive synthesis UI
@@ -230,10 +232,13 @@ morphic/
 │   │   ├── mod.rs                # Verification module
 │   │   ├── verifier.rs           # Z3-based formal verification
 │   │   └── smt.rs                # Z3 FFI layer (v0.20)
-│   └── codegen/
-│       └── mod.rs                # Multi-target code generation
+│   ├── codegen/
+│   │   └── mod.rs                # Multi-target code generation
+│   ├── m2_synthesis_probe.rs     # M2 synthesis measurement harness
+│   └── m2_cross_validation.rs    # Behavioral cross-validation vs tests/m2_proof.rs mirrors
 └── tests/
-    └── (integration tests)
+    ├── (integration tests)
+    └── m2_proof.rs               # Hand-written mirrors of the self-hosting specs
 ```
 
 ---
@@ -245,8 +250,16 @@ morphic/
 | **[GUIDE.md](GUIDE.md)** | Beginner tutorial — from zero to first synthesized function |
 | **[LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md)** | Complete .morph language specification |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Full compiler pipeline + design decisions |
-| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 pre-flight plan — risks, safeties, milestones |
+| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 self-hosting roadmap — milestones M0–M5; M2 gate closed 2026-11-20 |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to contribute + good first issues |
+
+---
+
+## 📍 Current Status — 2026-11-20
+
+v0.5 self-hosting is underway. Milestones M0 (pre-flight) and M1 (tokenizer) are done, and the **M2 gate closed on 2026-11-20**: the pretty-printer and validator specs in `examples/self_host/` now synthesize through the same validation pipeline as M1 — real test execution inside candidate selection, Z3 verdicts that judge the candidate itself (including spec-to-spec calls), and behavioral cross-validation against the hand-written mirrors in `tests/m2_proof.rs`.
+
+Final M2 evidence: **194 tests passing**; winning candidates Z3-verified **42/42** across repeated synthesis runs with **0 refuted winners**; cross-validation agreement **64/64 golden cases + 539/539 pinned sweep inputs**. Next milestone: M3 (codegen in Morphic). Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
 
 ---
 
@@ -258,7 +271,7 @@ morphic/
 | **0.2** | Z3 FFI: real formal verification (bundled binary) | ✅ Done |
 | **0.3** | LLM module: Ollama client + prompt + parser (local + remote) | ✅ Done |
 | **0.4** | Template library: 9 algorithmic patterns + spec shape detection | ✅ Done |
-| **0.5** | Self-hosting: Morphic compiler written in Morphic | 🔨 Next |
+| **0.5** | Self-hosting: Morphic compiler written in Morphic | 🔨 In progress — M0 ✅ · M1 ✅ · M2 gate closed · M3 next |
 | **0.6** | WASM playground: Morphic in the browser | 📅 Planned |
 | **1.0** | Production-ready — verified standard library | 🎯 Target |
 
