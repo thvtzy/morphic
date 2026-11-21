@@ -3,8 +3,95 @@
 // │  Proof that Morphic IR can express compiler components      │
 // │  WITHOUT self/&mut/OOP — pure functional struct passing     │
 // └────────────────────────────────────────────────────────────┘
+//
+// ── S4 re-authoring record (2026-11-21, Phase 47) ───────────
+//  This file was re-authored into the dialect the current
+//  parser + typechecker accept; it previously failed
+//  `morphic check`. The pre-re-authoring text is preserved
+//  in git history. Semantics are preserved spec-for-spec —
+//  every change below is a FORM change, and nothing was
+//  silently weakened:
+//
+//   1. Module wrapper added: the items now live inside
+//      `FunctionalTokenizer { ... }`. Without it the parser
+//      consumed `type` as the module name and died at the
+//      first type definition (line 9).
+//   2. Alias type defs gained their trailing ';'
+//      (`type TokenKind = Int;`). Record defs take none —
+//      that is parse_type_def's grammar, not a style choice.
+//   3. if…then…else constraints rewritten as guard rows,
+//      the established module dialect (validator.morph's
+//      note): `negated-guard||consequent` reads as
+//      "guard implies consequent"; the negation of an
+//      equality guard is written with '!=', which the
+//      current parser accepts in this position (measured).
+//   4. skip_whitespace: the original's two `invariant:`
+//      lines are carried as `constraint:` lines with
+//      identical expressions. Spec invariants are checked
+//      with only the inputs in scope (measured type error:
+//      "invariant: Undefined variable: 'output'"), so the
+//      original form is outside the accepted dialect; as
+//      postconditions the two lines state exactly what the
+//      original asserted about the output state.
+//   5. is_ident_start / is_ident_continue: the output
+//      equation's disjunction is now parenthesized as a
+//      whole. In the original text the parentheses covered
+//      only the first disjunct, and under the parser's
+//      precedence (|| loosest, == above it) the literal
+//      reading was (output==range)||rest, not the intended
+//      equation. The intended equation is what the mirrors
+//      implement and what the hand-written tokenizer does.
+//   6. Operators inside constraints are written tight,
+//      per the established module dialect.
+//
+//  DROPPED, per spec, with reasons (also noted at each spec):
+//   - tokenize_one, tokenize_all: BOTH original constraints
+//     call methods on Result values (output.is_err(),
+//     output.unwrap(), output.is_ok()). The spec language
+//     has no method-call expression (there is no MethodCall
+//     AST variant) — surfacing one is a language-owner
+//     decision, still open. The two specs therefore carry
+//     their signatures (and tokenize_all its optimize
+//     bound) only; their behavior is pinned by the mirror
+//     golden in tests/tokenizer_proof.rs.
+//   - The in-spec tests of the five TokenizerState-input
+//     specs (peek, next_char, skip_whitespace, tokenize_one,
+//     tokenize_all — 9 tests) are written with record
+//     literals, which the test syntax cannot express (no
+//     record-literal expression exists). They are
+//     transcribed verbatim into the mirror golden in
+//     tests/tokenizer_proof.rs — the M2 precedent for specs
+//     whose test syntax cannot bind their inputs. The three
+//     Char classifiers' 9 tests use char literals (F4,
+//     Phase 45) and are carried in-spec below, unchanged.
+//
+//  One cross-artifact divergence, recorded here and pinned
+//  by a dedicated test in tests/tokenizer_proof.rs: the
+//  spec's tokenize tests stamp each token with the line/col
+//  where the token STARTS; the M0 hand-written tokenizer
+//  stamps the position AFTER the token (its push_token
+//  reads the already-advanced state). The mirrors follow
+//  the spec. Everything else — lexemes, kinds, positions,
+//  error cases — agrees with the hand-written tokenizer.
+
+FunctionalTokenizer {
 
 // ── Types ──────────────────────────────────────────────────
+
+// Token kinds, coded as Int (ADT simulated). The codes are
+// the discriminants of the TokenKind enum in
+// tests/tokenizer_proof.rs:
+// 0=Ident, 1=IntLit, 2=StringLit, 3=LParen, 4=RParen,
+// 5=LBrace, 6=RBrace, 7=Colon, 8=Semicolon, 9=Comma,
+// 10=Lt, 11=Gt, 12=Eq
+type TokenKind = Int;
+
+type Token = {
+    kind: TokenKind,
+    lexeme: String,
+    line: Int,
+    col: Int
+}
 
 type TokenizerState = {
     source: String,
@@ -14,16 +101,7 @@ type TokenizerState = {
     tokens: List<Token>
 }
 
-type Token = {
-    kind: TokenKind,
-    lexeme: String,
-    line: Int,
-    col: Int
-}
-
-type TokenKind = Int  // ADT simulated: 0=Ident, 1=IntLit, 2=StringLit, 3=LParen, etc.
-
-type StepResult = Result<TokenizerState, String>
+type StepResult = Result<TokenizerState, String>;
 
 // ── State Accessors (pure functions) ──────────────────────
 
@@ -31,26 +109,28 @@ spec peek {
     input: state: TokenizerState
     output: Option<Char>
 
-    constraint: if state.pos >= len(state.source) then output == None()
-    constraint: if state.pos < len(state.source) then output == Some(state.source[state.pos])
-
-    test "non-empty" { input: { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }; expect: Some('h') }
-    test "at-end" { input: { source: "", pos: 0, line: 1, col: 1, tokens: [] }; expect: None() }
+    // Original form: two if-then constraints (guard rows
+    // per re-authoring note 3). Tests moved to the mirror
+    // golden (record literals — see header).
+    constraint: state.pos<len(state.source)||output==None()
+    constraint: state.pos>=len(state.source)||output==Some(state.source[state.pos])
 }
 
 spec next_char {
     input: state: TokenizerState
     output: TokenizerState
 
-    constraint: output.pos == state.pos + 1
-    constraint: if peek(state) == Some('\n')
-        then output.line == state.line + 1 && output.col == 1
-        else output.col == state.col + 1
-
-    test "normal" {
-        input: { source: "ab", pos: 0, line: 1, col: 1, tokens: [] };
-        expect: { source: "ab", pos: 1, line: 1, col: 2, tokens: [] }
-    }
+    // Original form: one unconditional constraint plus an
+    // if-then-else on peek(state)==Some('\n'); the then
+    // branch's conjunction is split into its two rows.
+    // Fields no row pins (line in the else case, source,
+    // tokens) are carried over unchanged — the mirror in
+    // tests/tokenizer_proof.rs states the full update.
+    // Tests moved to the mirror golden (record literals).
+    constraint: output.pos==state.pos+1
+    constraint: peek(state)!=Some('\n')||output.line==state.line+1
+    constraint: peek(state)!=Some('\n')||output.col==1
+    constraint: peek(state)==Some('\n')||output.col==state.col+1
 }
 
 // ── Tokenizer Core ────────────────────────────────────────
@@ -59,90 +139,73 @@ spec is_whitespace {
     input: c: Char
     output: Bool
 
-    constraint: output == (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+    constraint: output==(c==' '||c=='\t'||c=='\n'||c=='\r')
 
-    test "space" { input: ' '; expect: true }
-    test "letter" { input: 'a'; expect: false }
-    test "newline" { input: '\n'; expect: true }
+    test "space" { input: ' ' expect: true }
+    test "letter" { input: 'a' expect: false }
+    test "newline" { input: '\n' expect: true }
 }
 
 spec is_ident_start {
     input: c: Char
     output: Bool
 
-    constraint: output == (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+    // Disjunction parenthesized as a whole (note 5).
+    constraint: output==((c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_')
 
-    test "lower" { input: 'a'; expect: true }
-    test "digit" { input: '5'; expect: false }
-    test "underscore" { input: '_'; expect: true }
+    test "lower" { input: 'a' expect: true }
+    test "digit" { input: '5' expect: false }
+    test "underscore" { input: '_' expect: true }
 }
 
 spec is_ident_continue {
     input: c: Char
     output: Bool
 
-    constraint: output == is_ident_start(c) || (c >= '0' && c <= '9')
+    // Disjunction parenthesized as a whole (note 5).
+    constraint: output==(is_ident_start(c)||(c>='0'&&c<='9'))
 
-    test "letter" { input: 'x'; expect: true }
-    test "digit-ok" { input: '7'; expect: true }
-    test "special" { input: '{'; expect: false }
+    test "letter" { input: 'x' expect: true }
+    test "digit-ok" { input: '7' expect: true }
+    test "special" { input: '{' expect: false }
 }
 
 spec skip_whitespace {
     input: state: TokenizerState
     output: TokenizerState
 
-    invariant: output.pos >= state.pos
-    invariant: len(output.source) == len(state.source)
-
-    test "no-whitespace" {
-        input: { source: "hi", pos: 0, line: 1, col: 1, tokens: [] };
-        expect: { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
-    }
-
-    test "skip-spaces" {
-        input: { source: "  hi", pos: 0, line: 1, col: 1, tokens: [] };
-        expect: { source: "  hi", pos: 2, line: 1, col: 3, tokens: [] }
-    }
+    // The original's two invariant lines, carried as
+    // constraints with identical expressions (note 4).
+    // They are all the spec states: the full behavior
+    // (advance to the first non-whitespace char, tracking
+    // line/col through next_char) is the mirror's.
+    // Tests moved to the mirror golden (record literals).
+    constraint: output.pos>=state.pos
+    constraint: len(output.source)==len(state.source)
 }
 
 spec tokenize_one {
     input: state: TokenizerState
     output: StepResult
 
-    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
-    constraint: output.is_ok() || state.pos >= len(state.source)
-
-    test "keyword-spec" {
-        input: { source: "spec", pos: 0, line: 1, col: 1, tokens: [] };
-        expect: Ok({ source: "spec", pos: 4, line: 1, col: 5, tokens: [
-            { kind: 0, lexeme: "spec", line: 1, col: 1 }
-        ] })
-    }
-
-    test "end-of-input" {
-        input: { source: "", pos: 0, line: 1, col: 1, tokens: [] };
-        expect: Ok({ source: "", pos: 0, line: 1, col: 1, tokens: [] })
-    }
+    // Both original constraints dropped: they call methods
+    // on the Result output (is_err / unwrap / is_ok), which
+    // the spec language cannot express (see header).
+    // Behavior is pinned by the mirror golden in
+    // tests/tokenizer_proof.rs. Tests likewise moved there
+    // (record literals).
 }
 
 spec tokenize_all {
     input: state: TokenizerState
     output: Result<List<Token>, String>
 
-    constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
+    // The original constraint dropped: it calls methods on
+    // the Result output (is_err / unwrap), not expressible
+    // (see header). Behavior is pinned by the mirror golden
+    // in tests/tokenizer_proof.rs. Tests likewise moved
+    // there (record literals).
     optimize: time < O(n)
+}
 
-    test "simple-spec" {
-        input: { source: "spec sort", pos: 0, line: 1, col: 1, tokens: [] };
-        expect: Ok([
-            { kind: 0, lexeme: "spec", line: 1, col: 1 },
-            { kind: 0, lexeme: "sort", line: 1, col: 6 }
-        ])
-    }
-
-    test "empty" {
-        input: { source: "", pos: 0, line: 1, col: 1, tokens: [] };
-        expect: Ok([])
-    }
 }
