@@ -356,13 +356,19 @@ struct WinnerEntry {
     body_key: String,
 }
 
-struct WinnerSet {
+pub(super) struct WinnerSet {
     /// Specs in module order.
     order: Vec<String>,
     entries: HashMap<String, WinnerEntry>,
 }
 
 impl WinnerSet {
+    /// Number of specs in the set (module order length).
+    /// Exposed for the M4 harness's extraction sanity check.
+    pub(super) fn spec_count(&self) -> usize {
+        self.order.len()
+    }
+
     fn get(&self, name: &str) -> Result<&WinnerEntry, String> {
         self.entries
             .get(name)
@@ -372,7 +378,7 @@ impl WinnerSet {
 
 /// Run the module-aware pipeline once over every spec in
 /// `functions` and extract each spec's winner.
-fn extract_winners(functions: &[FunctionSpec]) -> WinnerSet {
+pub(super) fn extract_winners(functions: &[FunctionSpec]) -> WinnerSet {
     let mut order = Vec::new();
     let mut raw: HashMap<String, CandidateImplementation> = HashMap::new();
     for func in functions {
@@ -890,9 +896,9 @@ impl WinnerSet {
 // raw contents (A) or the mirror-pinned escaped contents
 // (B) — see the module header.
 
-struct Composed<'a> {
-    w: &'a WinnerSet,
-    escape_literals: bool,
+pub(super) struct Composed<'a> {
+    pub(super) w: &'a WinnerSet,
+    pub(super) escape_literals: bool,
 }
 
 impl<'a> Composed<'a> {
@@ -1683,7 +1689,7 @@ impl<'a> Composed<'a> {
 
     // ── The driver (generate_rust_from_spec_assembled) ──
 
-    fn driver_file(&self, candidate: &CandidateImplementation) -> Result<String, String> {
+    pub(super) fn driver_file(&self, candidate: &CandidateImplementation) -> Result<String, String> {
         let spec = &candidate.spec;
 
         // Module header: presence is the doc's Some-ness.
@@ -1899,22 +1905,22 @@ fn render(composed: &Composed, case: &Case) -> Result<String, String> {
 }
 
 // Tree-building shorthands for the transcriptions below.
-fn li(n: i64) -> IRNode {
+pub(super) fn li(n: i64) -> IRNode {
     IRNode::Literal(IRLiteral::Int(n))
 }
-fn ls(s: &str) -> IRNode {
+pub(super) fn ls(s: &str) -> IRNode {
     IRNode::Literal(IRLiteral::String(s.to_string()))
 }
-fn lb(b: bool) -> IRNode {
+pub(super) fn lb(b: bool) -> IRNode {
     IRNode::Literal(IRLiteral::Bool(b))
 }
-fn vr(n: &str) -> IRNode {
+pub(super) fn vr(n: &str) -> IRNode {
     IRNode::Var(n.to_string())
 }
-fn bin(op: IRBinOp, l: IRNode, r: IRNode) -> IRNode {
+pub(super) fn bin(op: IRBinOp, l: IRNode, r: IRNode) -> IRNode {
     IRNode::BinOp(op, Box::new(l), Box::new(r))
 }
-fn call(f: &str, args: Vec<IRNode>) -> IRNode {
+pub(super) fn call(f: &str, args: Vec<IRNode>) -> IRNode {
     IRNode::Call {
         function: f.to_string(),
         args,
@@ -2875,7 +2881,7 @@ fn proof_corpus() -> Vec<Case> {
 /// Build a candidate from raw parts (the DriverSpec cases
 /// of corpus (iii), transcribed from tests/m3_proof.rs's
 /// slice-6 golden tests into a real spec + body).
-fn make_candidate(
+pub(super) fn make_candidate(
     name: &str,
     doc: Option<&str>,
     generics: Vec<&str>,
@@ -3568,7 +3574,7 @@ fn m3_gate() {
 // resolution + execution, the capture refusal, and exactly
 // what the A/B literal modes change.
 
-fn hand_entry(
+pub(super) fn hand_entry(
     name: &str,
     params: Vec<(&str, TypeRef)>,
     ret: TypeRef,
@@ -3577,7 +3583,7 @@ fn hand_entry(
     make_candidate(name, None, vec![], params, ret, vec![], body, vec![])
 }
 
-fn hand_set(cands: Vec<CandidateImplementation>) -> WinnerSet {
+pub(super) fn hand_set(cands: Vec<CandidateImplementation>) -> WinnerSet {
     let raw: HashMap<String, CandidateImplementation> = cands
         .iter()
         .map(|c| (c.spec_name.clone(), c.clone()))

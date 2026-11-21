@@ -1434,6 +1434,17 @@ impl std::error::Error for CodegenError {}
 #[cfg(test)]
 mod m3_gate;
 
+/// M4-S1 composed-compiler harness (Phase 44): generalizes
+/// the M3 gate's composition into a reusable build-path
+/// instrument — one winner extraction per spec through the
+/// real pipeline, that single winner rendered by the
+/// original `generate` AND by the composed codegen
+/// (m3_gate's mirror-completed composition), byte-compared
+/// as whole files. Test-only; it lives inside codegen next
+/// to the M3 gate whose machinery it reuses.
+#[cfg(test)]
+mod m4_harness;
+
 #[cfg(test)]
 mod tests {
     use super::*;
