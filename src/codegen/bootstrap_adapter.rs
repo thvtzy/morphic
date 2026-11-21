@@ -476,25 +476,76 @@ impl Adapter {
                     self.sexpr_text(body)?,
                 )
             }
+            // Field projection (Phase 78): the template
+            // winner renders the dot; the field name passes
+            // through the same rust_ident glue the Var arm
+            // uses, exactly as the original's Field arm.
+            SpecExpr::Field(base, field) => {
+                syn::rust_expr_field_text::rust_expr_field_text(
+                    self.sexpr_text(base)?,
+                    rust_ident(field),
+                )
+            }
+            // Method calls (Phase 78, decision D1a): the
+            // dispatch winner classifies the EFFECTIVE name
+            // — the walker folds the argument count into
+            // the key (a call carrying arguments passes the
+            // empty name, itself off-table), exactly the
+            // fold the spec's doc records and the original's
+            // args.is_empty() guard makes. The closed table
+            // renders through the method template winner on
+            // the rendered receiver; everything else takes
+            // the fixed-text table's kind-13 row.
+            SpecExpr::MethodCall {
+                receiver,
+                name,
+                args,
+            } => {
+                let key = if args.is_empty() { name.clone() } else { String::new() };
+                match syn::rust_expr_method_form::rust_expr_method_form(key) {
+                    0 => syn::rust_expr_method_text::rust_expr_method_text(
+                        self.sexpr_text(receiver)?,
+                        name.clone(),
+                    ),
+                    _ => syn::rust_expr_fixed_text::rust_expr_fixed_text(13),
+                }
+            }
+            // Record literals (Phase 78, decision D3a):
+            // fields in written order; a bare string-literal
+            // field value takes the owned form through its
+            // winner (the defect-4d rule, as the original's
+            // arm applies it); the frame is the record
+            // template winner's, the type name through the
+            // rust_ident glue as in the original.
+            SpecExpr::RecordLit { type_name, fields } => {
+                let rendered: Result<Vec<String>, String> = fields
+                    .iter()
+                    .map(|(n, v)| {
+                        let value_text = match v {
+                            SpecExpr::StringLit(s) => {
+                                syn::rust_string_literal_owned_text::rust_string_literal_owned_text(
+                                    self.literal_contents(s),
+                                )
+                            }
+                            _ => self.sexpr_text(v)?,
+                        };
+                        Ok(format!("{}: {}", rust_ident(n), value_text))
+                    })
+                    .collect();
+                syn::rust_expr_record_text::rust_expr_record_text(
+                    rust_ident(type_name),
+                    rendered?.join(", "),
+                )
+            }
             // Every kind without an arm: the fixed text the
             // rust_expr_fixed_text table pins ("??").
             other => {
                 let kind = match other {
                     SpecExpr::FloatLit(_) => 2,
-                    SpecExpr::Field(..) => 5,
                     SpecExpr::Index(..) => 6,
                     SpecExpr::UnaryOp(..) => 9,
                     SpecExpr::Length(_) => 11,
                     SpecExpr::Comprehension { .. } => 12,
-                    // M1 features (Phase 73): kinds appended
-                    // at the end of the SpecExpr table (audit
-                    // section 4). The Codegen specs gain the
-                    // 13/14 rows in Phase 78; until then these
-                    // route through the fixed-text table's
-                    // standing default, exactly as the native
-                    // expr_to_rust's wildcard renders them.
-                    SpecExpr::MethodCall { .. } => 13,
-                    SpecExpr::RecordLit { .. } => 14,
                     _ => unreachable!(),
                 };
                 syn::rust_expr_fixed_text::rust_expr_fixed_text(kind)
@@ -774,17 +825,47 @@ impl Adapter {
             IRNode::Alloc { .. } => {
                 syn::rust_unsupported_text::rust_unsupported_text("Alloc".to_string())
             }
-            // M1 features (Phase 73): the composed emitter
-            // renders the new kinds with the unsupported text,
-            // exactly the Alloc treatment — their rendering
-            // specs (kind rows 28/29) land in Phase 78. No
-            // node of either kind could be produced before
-            // this phase, so no existing output changes.
-            IRNode::FieldAccess { .. } => {
-                syn::rust_unsupported_text::rust_unsupported_text("FieldAccess".to_string())
+            // M1 features (Phase 78, decisions D2a/D3a):
+            // field projection renders through its template
+            // winner — the base through the condition
+            // position, a record-literal base parenthesized
+            // first, exactly the original's discipline; the
+            // field name through the rust_ident glue.
+            IRNode::FieldAccess { base, field } => {
+                let base_text = match base.as_ref() {
+                    IRNode::RecordLit { .. } => {
+                        format!("({})", self.expr_text(base)?)
+                    }
+                    _ => self.condition_text(base)?,
+                };
+                syn::rust_field_access_text::rust_field_access_text(
+                    base_text,
+                    rust_ident(field),
+                )
             }
-            IRNode::RecordLit { .. } => {
-                syn::rust_unsupported_text::rust_unsupported_text("RecordLit".to_string())
+            // Record construction: fields in written order,
+            // a bare string-literal field value owned
+            // through its winner (the defect-4d rule), the
+            // frame the record template winner's.
+            IRNode::RecordLit { type_name, fields } => {
+                let rendered: Result<Vec<String>, String> = fields
+                    .iter()
+                    .map(|(n, v)| {
+                        let value_text = match v {
+                            IRNode::Literal(IRLiteral::String(s)) => {
+                                syn::rust_string_literal_owned_text::rust_string_literal_owned_text(
+                                    self.literal_contents(s),
+                                )
+                            }
+                            _ => self.expr_text(v)?,
+                        };
+                        Ok(format!("{}: {}", rust_ident(n), value_text))
+                    })
+                    .collect();
+                syn::rust_record_lit_text::rust_record_lit_text(
+                    rust_ident(type_name),
+                    rendered?.join(", "),
+                )
             }
             IRNode::Typed { node, ty } => self.expr_typed_text(node, Some(ty))?,
         })

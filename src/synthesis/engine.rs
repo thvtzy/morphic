@@ -8410,6 +8410,31 @@ spec exclaim {
     /// byte-identical below, unchanged (rust_generics_text's
     /// own body did not change — only its doc and its
     /// driver's join elements did).
+    ///
+    /// Phase 78 extension (2026-11-22): the M1-features
+    /// kind-row amendments. Two bodies are REPLACED in
+    /// place — rust_expr_form (Field leaves the fallback
+    /// family for family 8; MethodCall and RecordLit join
+    /// as families 9 and 10) and rust_expr_fixed_text (the
+    /// Field row is gone, the MethodCall fallback row is
+    /// in) — the Phase 55 replacement precedent for amended
+    /// specs. Six bodies are APPENDED: the phase's five new
+    /// equation templates (rust_expr_field_text,
+    /// rust_expr_method_text, rust_expr_record_text,
+    /// rust_field_access_text, rust_record_lit_text) and
+    /// rust_tail_form, whose guard-table body this phase
+    /// amended (the FieldAccess/RecordLit value rows) and
+    /// which joins by the Phase 37 precedent for bodies a
+    /// phase corrects: 52 Codegen bodies, 69 total. The
+    /// other 61 bodies are asserted byte-identical below,
+    /// unchanged. (rust_expr_method_form, the phase's sixth
+    /// new spec, has no seed body — String-equality guards
+    /// are the recorded unadmitted family, like
+    /// rust_expr_call_form, rust_target_route and
+    /// rust_ident_empty, which are likewise absent.
+    /// rust_stmt_form's constraints did not move — its
+    /// amendment is doc and tests only — so it has no
+    /// fixture consequence.)
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -8422,7 +8447,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 63, "46 Codegen + 14 M2 + 3 tokenizer golden bodies");
+        assert_eq!(expected.len(), 69, "52 Codegen + 14 M2 + 3 tokenizer golden bodies");
         let mut modules: Vec<(String, Vec<FunctionSpec>)> = ["validator", "printer", "codegen"]
             .iter()
             .map(|f| (f.to_string(), load_m2_module(f)))
@@ -12288,6 +12313,9 @@ spec exclaim {
     /// tails determine is 0, the catch-all's cells all pin
     /// the wildcard's own value and materialize no arm, and
     /// the single-value rows arm in row order as always.
+    /// (Phase 78: rust_tail_form's expected body carries the
+    /// amendment's two new arms — kinds 28/29 pin 1 by their
+    /// own rows, appended in row order after kind 27's.)
     #[test]
     #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_catch_all_at_default_unchanged() {
@@ -12314,6 +12342,7 @@ spec exclaim {
         let mut cases: Vec<(IRPattern, IRNode)> = [
             (1, 2), (22, 3), (7, 1), (9, 1), (10, 1), (11, 1), (12, 1), (13, 1),
             (14, 1), (15, 1), (16, 1), (17, 1), (18, 1), (19, 1), (23, 1), (27, 1),
+            (28, 1), (29, 1),
         ]
         .into_iter()
         .map(|(k, v)| {

@@ -1690,6 +1690,18 @@ fn expr_to_rust(expr: &Expr) -> String {
                 .collect();
             format!("|{}| {}", names.join(", "), expr_to_rust(body))
         }
+        // Field projection (Phase 78 — the lockstep arm
+        // the Phase 77 record deferred to the Codegen spec
+        // amendments, which move both sides together):
+        // Rust's own `.field` on the rendered receiver,
+        // exactly the rust_expr_field_text template. This
+        // walker carries no condition-position discipline
+        // (that is the IR walker's), so the receiver
+        // renders as it renders in every other position
+        // here.
+        Expr::Field(base, field) => {
+            format!("{}.{}", expr_to_rust(base), rust_ident(field))
+        }
         // Method calls (Phase 77, decision D1a — scoped
         // unfreeze, new arm only): the four closed-table
         // builtins render as the identical Rust method
@@ -3794,16 +3806,17 @@ mod tests {
             args: vec![Expr::IntLit(1)],
         };
         assert_eq!(expr_to_rust(&with_arg), "??");
-        // The Field boundary, pinned as standing:
-        // Expr::Field keeps its pre-existing catch-all
-        // rendering (the M3 corpus pins "field-fallback"
-        // byte-for-byte; the composed side gains the kind
-        // rows in Phase 78), so a method call on a field
-        // receiver inherits it. `state.tokens.len()` is
-        // Phase 78 territory — recorded, not smoothed.
+        // The Field boundary as Phase 77 left it —
+        // Expr::Field kept its pre-existing catch-all
+        // rendering ("??", and "??.len()" through a method
+        // receiver) — was Phase 78 territory, and Phase 78
+        // has now landed: the Field arm above renders the
+        // projection for real, in lockstep with the
+        // Codegen specs' kind-5 row (rust_expr_field_text),
+        // so the chained shape renders whole.
         let field_recv = Expr::Field(Box::new(var("state")), "tokens".into());
-        assert_eq!(expr_to_rust(&field_recv), "??");
-        assert_eq!(expr_to_rust(&mc(field_recv, "len")), "??.len()");
+        assert_eq!(expr_to_rust(&field_recv), "state.tokens");
+        assert_eq!(expr_to_rust(&mc(field_recv, "len")), "state.tokens.len()");
     }
 
     #[test]
