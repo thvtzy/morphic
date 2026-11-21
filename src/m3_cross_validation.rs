@@ -195,7 +195,14 @@
 //  run, and it is NOT a behavioral disagreement; the probe's
 //  standalone winner-body compile check records the same
 //  facts independently. Phase 29's re-measurement recorded
-//  zero COMPILE_EDGE rows.
+//  zero COMPILE_EDGE rows. Phase 36's slice-5 measurement
+//  recorded a FOURTH family — E0382, a String variable in
+//  Concat left-operand position being moved by the rendered
+//  `+` (see compile_edge_kind) — on four statement-template
+//  seed winners, deterministic across runs; it is booked
+//  the same way, and unlike the Phase 29 families it is
+//  NOT fixed: the emitter stays frozen, and whether to
+//  open a second unfreeze is the owner's decision.
 //
 //  The harness asserts nothing about agreement — winners are
 //  draw-dependent and disagreement is a measurement, not a
@@ -3457,7 +3464,7 @@ mod xval3 {
         let _ = writeln!(md, "# M3 cross-validation (slices 1–5): synthesized winners vs tests/m3_proof.rs mirrors");
         let _ = writeln!(md);
         let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the complete finite domain (Int codes -2..=30 for the 37 Int-code specs; rust_keyword: 51 positives + 24 near-miss negatives; rust_literal_bool and rust_test_name_form: the full Bool domain; rust_pattern_ctor_name: 7 names × has_subs; slice 3: rust_string_ownership over the full -2..=30 × -2..=30 cross product, the `++` equation templates over string batteries, rust_ident_suffix over its sanitized-string contract domain plus out-of-contract names reported separately; slice 4: the (kind, lit) code specs over the full 33 × 11 grid, rust_match_scrutinee_form over the full Bool × Bool domain, the walker templates over batteries of pre-rendered child texts incl. composed two-level inputs; slice 5: the six statement classifications over the same band, rust_stmt_seq_form over positions -2..=3 × the full Bool domain, the statement/tail templates over batteries of pad strings and pre-rendered statement parts). See src/m3_cross_validation.rs for sweep definitions and mirror semantics: a case is pinned exactly where the spec's constraints decide it.");
-        let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL) — except a rustc failure at the emitter's rendering layer (the family measured in Phases 25/27/28 and fixed in Phase 29: E0369 Concat-operand ownership; E0308 string-boundary rendering; parse-level unescaped-literal failures), which is recorded as COMPILE_EDGE: not executed, not a behavioral disagreement. Spec-silent (unpinned) cases are reported separately and never counted as disagreements; out-of-contract cases (rust_ident_suffix) are reported separately and counted in no bucket.");
+        let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL) — except a rustc failure at the emitter's rendering layer (the family measured in Phases 25/27/28 and fixed in Phase 29: E0369 Concat-operand ownership; E0308 string-boundary rendering; parse-level unescaped-literal failures; plus the fourth family measured in Phase 36: E0382, a String variable moved by Concat's rendered `+` when a template repeats it in one chain), which is recorded as COMPILE_EDGE: not executed, not a behavioral disagreement. Spec-silent (unpinned) cases are reported separately and never counted as disagreements; out-of-contract cases (rust_ident_suffix) are reported separately and counted in no bucket.");
         let _ = writeln!(md);
         let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 verified | Winner prov | Golden agree | Sweep pinned agree | Unpinned cases | Exec |");
         let _ = writeln!(md, "|---|---|---|---|---|---|---|---|---|");
@@ -3664,12 +3671,31 @@ mod xval3 {
     ///    (contents unescaped), so a literal containing `"`
     ///    breaks the file's syntax before any type check
     ///    (`"""`, `", "Precondition violated");"`).
+    /// Phase 29 fixed those three families under the
+    /// user's unfreeze. Phase 36 measured a fourth, on
+    /// slice-5 seed winners:
+    ///  - E0382: Concat's rendered `+` MOVES its left
+    ///    operand when that operand is a String value.
+    ///    Phase 29's treatment covers a string LITERAL in
+    ///    left position (.to_string()) and borrows right
+    ///    operands, but a String VARIABLE in left position
+    ///    still moves — so a template whose pin uses one
+    ///    String parameter two or more times in a single
+    ///    `++` chain (the statement templates' pad /
+    ///    pad_inner) renders code that borrows the variable
+    ///    after the first `+` moved it: "borrow of moved
+    ///    value". The IR has no moves — a body may use a
+    ///    variable any number of times and the interpreter
+    ///    measures it so — so an E0382 is only ever a
+    ///    rendering failure, never an IR-behavior failure.
     /// Anything else (a winner that runs but panics, wrong
     /// output count, a non-rendering type error) is NOT an
     /// edge and stays a disagreement.
     fn compile_edge_kind(err: &str) -> Option<&'static str> {
         if err.contains("E0369") {
             Some("E0369 concat-ownership")
+        } else if err.contains("E0382") {
+            Some("E0382 concat-operand move")
         } else if err.contains("E0308") {
             Some("E0308 string-boundary rendering")
         } else if err.contains("mismatched closing delimiter")
@@ -4565,11 +4591,15 @@ mod xval3 {
 
     #[test]
     fn xval3_compile_edge_classification() {
-        // The three measured rendering edges classify; a
+        // The four measured rendering edges classify; a
         // behavioral failure does not.
         assert_eq!(
             compile_edge_kind("rustc failed: error[E0369]: cannot add `String` to `&str`"),
             Some("E0369 concat-ownership")
+        );
+        assert_eq!(
+            compile_edge_kind("rustc failed: error[E0382]: borrow of moved value: `pad`"),
+            Some("E0382 concat-operand move")
         );
         assert_eq!(
             compile_edge_kind("rustc failed: error[E0308]: mismatched types"),
