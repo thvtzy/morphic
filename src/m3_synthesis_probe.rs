@@ -30,18 +30,31 @@
 //  Concat operands (the Phase 25 edge), so literal-first
 //  assemblies failed E0369 while variable-first ones
 //  compiled; Phase 29 fixed that rendering family under the
-//  user's unfreeze, and the probe now records 44/44 compiles
-//  per run — it reports the rustc verdict, never a judgment.
+//  user's unfreeze, and its re-measurement recorded 44/44
+//  compiles per run over slices 1–3 — the probe now runs all
+//  79 specs and reports the rustc verdict per winner, never
+//  a judgment.
 //
-//  For the four slice-3 specs Phase 26 predicted seedless
-//  (rust_ident_suffix, rust_ident_empty, rust_string_ownership,
-//  rust_generics_text) the probe additionally dumps one CAND3
-//  line per verified-pool candidate: provenance, verdict,
-//  status, measured tpr, the spec names the body CALLS (the
-//  composition question for rust_ident_suffix: does any pool
-//  candidate call rust_keyword?), its root shape, and whether
-//  it contains a Concat or a Match — the characterization
-//  evidence for seedless winners.
+//  For the specs the phase records predict seedless the probe
+//  additionally dumps one CAND3 line per verified-pool
+//  candidate: provenance, verdict, status, measured tpr, the
+//  spec names the body CALLS, its root shape, and whether it
+//  contains a Concat or a Match — the characterization
+//  evidence for seedless winners. The original watch list
+//  (Phase 26's four slice-3 predictions: rust_ident_suffix,
+//  rust_ident_empty, rust_string_ownership,
+//  rust_generics_text) is joined in Phase 31 by the eight
+//  slice-4 open shapes: the Int-keyed expression pins
+//  (rust_unary_text, rust_concat_right_text,
+//  rust_match_scrutinee_text), the two-parameter Int guard
+//  tables with literal pins (rust_concat_left_owned,
+//  rust_concat_right_form), the by-design partial
+//  rust_match_scrutinee_bare (G2), the Bool x Bool region
+//  rows of rust_match_scrutinee_form, and
+//  rust_concat_left_text — the Bool-guarded shape the
+//  composition-guard territory rule is predicted to refuse
+//  (bare-variable pins under a plain Bool-parameter guard,
+//  at an arity neither earlier family admits).
 //
 //  The probe never asserts on synthesis *quality* — the engine
 //  is randomized — only on pipeline invariants: parse/typecheck
@@ -115,13 +128,23 @@ mod probe3 {
         }
     }
 
-    /// The slice-3 specs Phase 26 predicted seedless; their
-    /// pools are dumped candidate by candidate (CAND3 lines).
-    const SEEDLESS_WATCH: [&str; 4] = [
+    /// The specs whose pools are dumped candidate by
+    /// candidate (CAND3 lines): Phase 26's four slice-3
+    /// predictions plus Phase 31's eight slice-4 open
+    /// shapes (see the module header).
+    const SEEDLESS_WATCH: [&str; 12] = [
         "rust_ident_suffix",
         "rust_ident_empty",
         "rust_string_ownership",
         "rust_generics_text",
+        "rust_unary_text",
+        "rust_concat_right_text",
+        "rust_concat_right_form",
+        "rust_match_scrutinee_text",
+        "rust_match_scrutinee_form",
+        "rust_match_scrutinee_bare",
+        "rust_concat_left_owned",
+        "rust_concat_left_text",
     ];
 
     /// Body facts for the CAND3 pool dump: the spec names this
@@ -361,11 +384,11 @@ mod probe3 {
                     }
                 }
 
-                // Seedless-watch pool dump (Phase 27): for the
-                // four slice-3 specs predicted to have no
-                // constraint seed, characterize EVERY candidate
-                // in the verified pool — provenance, verdict,
-                // measured tpr, called spec names, root shape.
+                // Seedless-watch pool dump (Phase 27, extended
+                // in Phase 31): for the watched specs,
+                // characterize EVERY candidate in the verified
+                // pool — provenance, verdict, measured tpr,
+                // called spec names, root shape.
                 if SEEDLESS_WATCH.contains(&name.as_str()) {
                     for c in &verified {
                         let (calls, root, concat, has_match) = body_facts(&c.body);
