@@ -3290,7 +3290,40 @@ mod xval3 {
         // PINNED_TOTALS) likewise still covers slices 1–3;
         // extending the sweeps to slice 4 belongs to the
         // measurement phase.
-        const RECOGNIZED: [&str; 30] = [
+        //
+        // Phase 31 flip: the measurement is in (probe +
+        // cross-validation, 3 runs each; see the ROAD's
+        // Phase 31 record). The recognized set grows by the
+        // 27 slice-4 specs whose seed the probe records in
+        // every run: the 21 equation templates (incl.
+        // rust_binop_infix_text, whose equation composes a
+        // call inside the `++` chain), the 4 single-Int
+        // guard tables with literal pins
+        // (rust_expr_binop_form, rust_collection_prefix,
+        // rust_collection_suffix, rust_hole_text), and the 2
+        // composition-guard shapes (rust_condition_text's
+        // call guard, rust_break_text's Bool guard with a
+        // compound pin). The eight remaining slice-4 shapes
+        // are asserted UNRECOGNIZED below, each on its
+        // measured predicate: the Int-keyed expression pins
+        // (rust_unary_text, rust_concat_right_text,
+        // rust_match_scrutinee_text — guard_table_body
+        // admits one parameter and literal pins only via
+        // guard_row; composition_guard_body's leaves are
+        // Bool-domain only via guard_leaf_on_expr), the
+        // two-parameter Int guard tables with literal pins
+        // (rust_concat_left_owned, rust_concat_right_form,
+        // rust_match_scrutinee_bare — guard_table_body's
+        // arity is one; scrutinee_bare is additionally
+        // partial by design, G2), the Bool x Bool region
+        // rows (rust_match_scrutinee_form — its rows guard
+        // on TWO different Bool expressions, where
+        // composition_guard_row requires one shared guard),
+        // and rust_concat_left_text (a plain Bool-parameter
+        // guard with bare-variable pins at arity three:
+        // composition_guard_body's territory rule refuses
+        // it, and neither earlier family admits its arity).
+        const RECOGNIZED: [&str; 57] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -3303,6 +3336,17 @@ mod xval3 {
             "rust_constraint_fixed_text", "rust_order_form",
             "rust_order_separator", "rust_condition_wrap",
             "rust_ident_suffix", "rust_generics_text",
+            // ── slice 4 (Phase 31) ──
+            "rust_expr_binop_form", "rust_binop_infix_text",
+            "rust_binop_append_text", "rust_binop_merge_text",
+            "rust_binop_concat_text", "rust_collection_prefix",
+            "rust_collection_suffix", "rust_map_text", "rust_filter_text",
+            "rust_fold_text", "rust_sort_text", "rust_call_text",
+            "rust_condition_text", "rust_if_text", "rust_lambda_text",
+            "rust_match_arm_text", "rust_match_text", "rust_block_text",
+            "rust_loop_text", "rust_struct_def_text", "rust_index_text",
+            "rust_try_text", "rust_assign_text", "rust_return_text",
+            "rust_break_text", "rust_hole_text", "rust_unsupported_text",
         ];
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 79, "module spec count");
@@ -3320,7 +3364,19 @@ mod xval3 {
                 func.name
             );
         }
-        for name in ["rust_string_ownership", "rust_ident_empty"] {
+        for name in [
+            "rust_string_ownership",
+            "rust_ident_empty",
+            // ── slice 4 (Phase 31): measured unrecognized ──
+            "rust_unary_text",
+            "rust_concat_right_text",
+            "rust_concat_right_form",
+            "rust_match_scrutinee_text",
+            "rust_match_scrutinee_form",
+            "rust_match_scrutinee_bare",
+            "rust_concat_left_owned",
+            "rust_concat_left_text",
+        ] {
             assert!(
                 index.callee_body(name).is_none(),
                 "{}: recorded non-goal must stay unrecognized",
