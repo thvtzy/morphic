@@ -824,13 +824,19 @@ fn m4_s1_examples_dual_render() {
 // passes `morphic check` (parse + typeck — exactly
 // `load_functions` below). The inventory is DERIVED by
 // scanning examples/ at run time, never hardcoded; the
-// Phase 43 audit's enumeration (8 files, 138 specs, 130
-// passing) is asserted as counts, so an inventory change
-// fails this test loudly instead of silently re-scoping
-// the gate. The one excluded file is
-// examples/functional_tokenizer.morph (8 specs), which
-// fails check — its exclusion is recorded here and in the
-// gate note, and is S4's business, not a silent omission.
+// enumeration is asserted as counts, so an inventory
+// change fails this test loudly instead of silently
+// re-scoping the gate. As closed in Phase 46 the corpus
+// was 130 specs in 7 files, with
+// examples/functional_tokenizer.morph (8 specs) the one
+// recorded exclusion — it failed check, and repairing it
+// was S4's business. Phase 47 (S4 part 1) re-authored that
+// file into the accepted dialect; it passes check now, so
+// the corpus is the full inventory — 138 specs in 8
+// files — and the exclusion set is empty. The tokenizer's
+// inclusion is sound on the harness's own terms: the dual
+// render judges rendering identity of whatever winner the
+// pipeline crowns for each spec, per extracted winner.
 // The Codegen module's own 112 specs ARE corpus members:
 // the gate demands 100+ byte-identical specs and the
 // non-Codegen corpus is only 18, so the arithmetic forces
@@ -854,11 +860,14 @@ fn m4_s1_examples_dual_render() {
 // (report at target/m4-harness/gate-report.md, rewritten
 // after each file so a partial run stays informative)
 
-/// The Phase 43 audit's inventory of check-passing files,
-/// as (path, spec count) — asserted against the derived
+/// The audited inventory of check-passing files, as
+/// (path, spec count) — asserted against the derived
 /// enumeration so the gate's corpus cannot drift silently.
-const EXPECTED_CORPUS: [(&str, usize); 7] = [
+/// (Phase 47: functional_tokenizer.morph joined the corpus
+/// when its re-authoring made it pass check.)
+const EXPECTED_CORPUS: [(&str, usize); 8] = [
     ("examples/binary_search.morph", 1),
+    ("examples/functional_tokenizer.morph", 8),
     ("examples/self_host/codegen.morph", 112),
     ("examples/self_host/count_matching.morph", 1),
     ("examples/self_host/is_sorted.morph", 1),
@@ -868,8 +877,9 @@ const EXPECTED_CORPUS: [(&str, usize); 7] = [
 ];
 
 /// Files the scan must find but `morphic check` must
-/// reject (the recorded exclusion).
-const EXPECTED_EXCLUDED: [&str; 1] = ["examples/functional_tokenizer.morph"];
+/// reject (the recorded exclusion). Empty since Phase 47:
+/// every file in the inventory passes check.
+const EXPECTED_EXCLUDED: [&str; 0] = [];
 
 /// Recursively collect the repo's .morph files under
 /// examples/, as crate-relative paths in sorted order.
@@ -913,7 +923,7 @@ struct CorpusFile {
 /// that pass check (parse + typeck, `load_functions`),
 /// record the rest as excluded. Asserts the derived
 /// corpus IS the audited one — paths, per-file spec
-/// counts, the exclusion, and the 130-spec total.
+/// counts, the exclusion, and the 138-spec total.
 fn enumerate_corpus() -> (Vec<CorpusFile>, Vec<String>) {
     let scanned = scan_morph_files();
     assert_eq!(
@@ -958,7 +968,7 @@ fn enumerate_corpus() -> (Vec<CorpusFile>, Vec<String>) {
         );
         total += count;
     }
-    assert_eq!(total, 130, "the gate corpus must hold 130 specs");
+    assert_eq!(total, 138, "the gate corpus must hold 138 specs");
     (files, excluded)
 }
 
@@ -974,7 +984,7 @@ struct FileTally {
 }
 
 #[test]
-#[ignore = "M4 gate: corpus-scale dual render (130 specs, minutes); run explicitly with --ignored --nocapture m4_gate"]
+#[ignore = "M4 gate: corpus-scale dual render (138 specs, minutes); run explicitly with --ignored --nocapture m4_gate"]
 fn m4_gate_corpus_dual_render() {
     let started = std::time::Instant::now();
     let root = env!("CARGO_MANIFEST_DIR");
@@ -998,7 +1008,7 @@ fn m4_gate_corpus_dual_render() {
     let mut compiler = ComposedCompiler::new(&winners);
 
     let mut report = String::new();
-    report.push_str("# M4 gate report (Phase 46)\n\n");
+    report.push_str("# M4 gate report (Phase 46; corpus enlarged to the full 138-spec inventory in Phase 47)\n\n");
     report.push_str(
         "Composition judged: original pipeline (parse → typeck → synthesize → verify → \
          select) with the M3 mirror-completed composed codegen (mode B) in \
@@ -1009,7 +1019,11 @@ fn m4_gate_corpus_dual_render() {
         "Corpus: {} specs in {} check-passing files; excluded (fails `morphic check`): {}.\n\n",
         corpus_specs,
         corpus.len(),
-        excluded.join(", "),
+        if excluded.is_empty() {
+            "none".to_string()
+        } else {
+            excluded.join(", ")
+        },
     ));
 
     let mut grand = FileTally::default();
@@ -1112,12 +1126,12 @@ fn m4_gate_corpus_dual_render() {
     // gate record's business (ROAD), not an assertion here:
     // a divergent record is evidence, not a harness failure.
     assert_eq!(
-        grand.attempted, 130,
+        grand.attempted, 138,
         "every corpus spec must produce a record"
     );
     assert_eq!(
         compiler.pipeline_runs(),
-        130,
+        138,
         "the pipeline must run exactly once per corpus spec"
     );
     assert!(
