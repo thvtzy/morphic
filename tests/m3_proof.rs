@@ -1,6 +1,7 @@
 // ┌────────────────────────────────────────────────────────────┐
-// │  M3: Codegen — Proof Tests (slices 1–3: leaf mappings +   │
-// │  small template families + name/text assembly)             │
+// │  M3: Codegen — Proof Tests (slices 1–5: leaf mappings,   │
+// │  template families, name/text assembly, the expression  │
+// │  walker, the statement walker)                          │
 // │                                                            │
 // │  Two layers, mirroring tests/m2_proof.rs:                  │
 // │                                                            │
@@ -1328,6 +1329,306 @@ fn rust_unsupported_text(shape: &str) -> String {
     )
 }
 
+// ── Slice 5 mirrors: the statement walker ──
+// ── (ir_to_rust + ir_to_rust_tail, src/codegen/mod.rs:310-541) ──
+
+/// Mirror of the dispatch of `ir_to_rust`
+/// (src/codegen/mod.rs:310-498): arm codes in the
+/// original's source order — 0 Hole, 1 Block, 2 Let,
+/// 3 If, 4 While, 5 For, 6 Match, 7 Call, 8 Return,
+/// 9 Alloc, 10 Assign, 11 Collection, 12 Map, 13 Filter,
+/// 14 Fold, 15 Sort, 16 Typed, 17 the expression fallback.
+/// Total over the 28 kinds (the fallback arm catches the
+/// rest, exactly the original's `_`); None off-domain.
+fn rust_stmt_form(kind: i64) -> Option<i64> {
+    match kind {
+        0 => Some(0),   // Hole
+        1 => Some(1),   // Block
+        2 => Some(2),   // Let
+        3 => Some(3),   // If
+        4 => Some(4),   // While
+        5 => Some(5),   // For
+        6 => Some(6),   // Match
+        7 => Some(7),   // Call
+        8 => Some(8),   // Return
+        15 => Some(11), // Collection
+        16 => Some(12), // Map
+        17 => Some(13), // Filter
+        18 => Some(14), // Fold
+        19 => Some(15), // Sort
+        20 => Some(9),  // Alloc
+        21 => Some(10), // Assign
+        22 => Some(16), // Typed
+        0..=27 => Some(17), // Literal, Var, BinOp, UnaryOp, Lambda,
+                        // Closure, Index, Loop, Break, StructDef,
+                        // TryPropagate — the fallback
+        _ => None,
+    }
+}
+
+/// Mirror of the dispatch of `ir_to_rust_tail`
+/// (src/codegen/mod.rs:507-541): 0 = statement
+/// fallthrough, 1 = bare expression, 2 = Block split,
+/// 3 = Typed re-entry. Total over the 28 kinds; None
+/// off-domain.
+fn rust_tail_form(kind: i64) -> Option<i64> {
+    match kind {
+        1 => Some(2),  // Block
+        22 => Some(3), // Typed
+        7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 23 | 27 => {
+            Some(1) // Call, Literal, Var, BinOp, UnaryOp, Lambda,
+            // Closure, Collection, Map, Filter, Fold, Sort,
+            // Index, TryPropagate
+        }
+        0..=27 => Some(0), // Hole, Let, If, While, For, Match,
+                           // Return, Alloc, Assign, Loop, Break,
+                           // StructDef
+        _ => None,
+    }
+}
+
+/// Mirror of the statement-position collection prefix
+/// (the Collection arm of `ir_to_rust`,
+/// src/codegen/mod.rs:418-451): Set and Map collapse to
+/// the List form.
+fn rust_stmt_collection_prefix(kind: i64) -> Option<&'static str> {
+    match kind {
+        0 => Some("vec!["), // List
+        1 => Some("vec!["), // Set — collapsed
+        2 => Some("vec!["), // Map — collapsed
+        3 => Some("["),     // Array
+        4 => Some("("),     // Tuple
+        _ => None,
+    }
+}
+
+/// Mirror of the statement-position collection suffix
+/// (src/codegen/mod.rs:418-451): the collapse is
+/// complete — Set/Map lose the `])` of expression
+/// position too.
+fn rust_stmt_collection_suffix(kind: i64) -> Option<&'static str> {
+    match kind {
+        0 => Some("]"), // List
+        1 => Some("]"), // Set — collapsed
+        2 => Some("]"), // Map — collapsed
+        3 => Some("]"), // Array
+        4 => Some(")"), // Tuple
+        _ => None,
+    }
+}
+
+/// Mirror of the expectation provenance of the two
+/// statement walkers: 0 = Some(fn_ret), 1 = Some(the
+/// node's own declared type), 2 = inherited unchanged.
+/// Sites: 0 Let body, 1 If then, 2 If else, 3 Match arm
+/// body, 4 Return expression, 5 Alloc initial, 6 tail
+/// Typed re-entry, 7 tail Block last statement.
+fn rust_expectation_source(site: i64) -> Option<i64> {
+    match site {
+        0..=4 => Some(0),
+        5..=6 => Some(1),
+        7 => Some(2),
+        _ => None,
+    }
+}
+
+/// Mirror of the relative indent of each placement
+/// site in the statement walkers (src/codegen/mod.rs:
+/// 310-541). Sites: 0 Block statement, 1 Let tail body,
+/// 2 If branch, 3 While body, 4 For body, 5 Match arm
+/// header line, 6 Match arm body, 7 tail Block non-last,
+/// 8 tail Block last.
+fn rust_stmt_child_indent(site: i64) -> Option<i64> {
+    match site {
+        0 | 1 | 7 | 8 => Some(0),
+        2..=5 => Some(1),
+        6 => Some(2),
+        _ => None,
+    }
+}
+
+/// Mirror of the per-statement renderer choice for a
+/// Block (ir_to_rust's Block arm; ir_to_rust_tail's
+/// Block arm): 0 = statement renderer, 1 = tail
+/// renderer. Only the tail position's last statement
+/// takes the tail renderer.
+fn rust_stmt_seq_form(position: i64, last: bool) -> Option<i64> {
+    match (position, last) {
+        (1, true) => Some(1),
+        (0, _) | (1, false) => Some(0),
+        _ => None,
+    }
+}
+
+/// Mirror of the Hole arm of `ir_to_rust`
+/// (src/codegen/mod.rs:316-319): the TODO comment line
+/// and the panic line, both at pad.
+fn rust_stmt_hole_text(pad: &str) -> String {
+    format!(
+        "{}// TODO: synthesis incomplete\n{}panic!(\"Hole not filled\");\n",
+        pad, pad
+    )
+}
+
+/// Mirror of the Let arm of `ir_to_rust`
+/// (src/codegen/mod.rs:328-337).
+fn rust_stmt_let_text(pad: &str, name: &str, value: &str, body: &str) -> String {
+    format!("{}let {} = {};\n{}", pad, name, value, body)
+}
+
+/// Mirror of the If arm of `ir_to_rust`
+/// (src/codegen/mod.rs:339-349): the closing braces
+/// carry NO pad — the original's format string
+/// interpolates none.
+fn rust_stmt_if_text(pad: &str, cond: &str, then_text: &str, else_text: &str) -> String {
+    format!(
+        "{}if {} {{\n{}}} else {{\n{}}}\n",
+        pad, cond, then_text, else_text
+    )
+}
+
+/// Mirror of the While arm of `ir_to_rust`
+/// (src/codegen/mod.rs:352-362): the invariant comment
+/// line precedes the loop when present.
+fn rust_stmt_while_text(
+    has_inv: bool,
+    inv: &str,
+    pad: &str,
+    cond: &str,
+    body: &str,
+) -> String {
+    let inv_comment = if has_inv {
+        format!("{}// invariant: {}\n", pad, inv)
+    } else {
+        String::new()
+    };
+    format!(
+        "{}{}while {} {{\n{}{}}}\n",
+        inv_comment, pad, cond, body, pad
+    )
+}
+
+/// Mirror of the For arm of `ir_to_rust`
+/// (src/codegen/mod.rs:364-373).
+fn rust_stmt_for_text(pad: &str, var: &str, start: &str, end: &str, body: &str) -> String {
+    format!(
+        "{}for {} in {}..{} {{\n{}{}}}\n",
+        pad, var, start, end, body, pad
+    )
+}
+
+/// Mirror of the Match arm's head line in `ir_to_rust`
+/// (src/codegen/mod.rs:376).
+fn rust_stmt_match_head_text(pad: &str, scrutinee: &str) -> String {
+    format!("{}match {} {{\n", pad, scrutinee)
+}
+
+/// Mirror of one case line-group of the Match arm of
+/// `ir_to_rust` (src/codegen/mod.rs:378-384).
+fn rust_stmt_match_arm_text(pad_inner: &str, pat: &str, body: &str) -> String {
+    format!("{}{} => {{\n{}{}}},\n", pad_inner, pat, body, pad_inner)
+}
+
+/// Mirror of the Match arm's closing line in
+/// `ir_to_rust` (src/codegen/mod.rs:386).
+fn rust_stmt_match_close_text(pad: &str) -> String {
+    format!("{}}}\n", pad)
+}
+
+/// Mirror of the Call arm of `ir_to_rust`
+/// (src/codegen/mod.rs:389-398): the call terminated.
+fn rust_stmt_call_text(pad: &str, func: &str, args: &str) -> String {
+    format!("{}{}({});\n", pad, func, args)
+}
+
+/// Mirror of the Return arm of `ir_to_rust`
+/// (src/codegen/mod.rs:400-402): the operand arrives
+/// typed-rendered (the assembly supplies it).
+fn rust_stmt_return_text(pad: &str, rendered: &str) -> String {
+    format!("{}return {};\n", pad, rendered)
+}
+
+/// Mirror of the Alloc arm of `ir_to_rust`
+/// (src/codegen/mod.rs:404-409).
+fn rust_stmt_alloc_text(pad: &str, name: &str, ty: &str, initial: &str) -> String {
+    format!("{}let mut {}: {} = {};\n", pad, name, ty, initial)
+}
+
+/// Mirror of the Assign arm of `ir_to_rust`
+/// (src/codegen/mod.rs:411-416).
+fn rust_stmt_assign_text(pad: &str, target: &str, value: &str) -> String {
+    format!("{}{} = {};\n", pad, target, value)
+}
+
+/// Mirror of the Collection arm of `ir_to_rust`
+/// (src/codegen/mod.rs:418-451), composed through the
+/// statement affix mirrors exactly as the spec composes
+/// them by call.
+fn rust_stmt_collection_text(kind: i64, pad: &str, elems: &str) -> Option<String> {
+    Some(format!(
+        "{}{}{}{};\n",
+        pad,
+        rust_stmt_collection_prefix(kind)?,
+        elems,
+        rust_stmt_collection_suffix(kind)?
+    ))
+}
+
+/// Mirror of the Map arm of `ir_to_rust`
+/// (src/codegen/mod.rs:453-460).
+fn rust_stmt_map_text(pad: &str, over: &str, func: &str) -> String {
+    format!("{}({}).iter().map({}).collect();\n", pad, over, func)
+}
+
+/// Mirror of the Filter arm of `ir_to_rust`
+/// (src/codegen/mod.rs:462-469).
+fn rust_stmt_filter_text(pad: &str, over: &str, pred: &str) -> String {
+    format!("{}({}).iter().filter({}).collect();\n", pad, over, pred)
+}
+
+/// Mirror of the Fold arm of `ir_to_rust`
+/// (src/codegen/mod.rs:471-479): text order is
+/// (initial, operation), as in the original.
+fn rust_stmt_fold_text(pad: &str, over: &str, initial: &str, operation: &str) -> String {
+    format!(
+        "{}({}).iter().fold({}, {});\n",
+        pad, over, initial, operation
+    )
+}
+
+/// Mirror of the Sort arm of `ir_to_rust`
+/// (src/codegen/mod.rs:481-491): only the first line
+/// carries the pad — the original's format string has
+/// no pad for the sort_by / sorted lines.
+fn rust_stmt_sort_text(pad: &str, coll: &str, cmp: &str) -> String {
+    format!(
+        "{}let mut sorted = {};\nsorted.sort_by({});\nsorted;\n",
+        pad, coll, cmp
+    )
+}
+
+/// Mirror of the fallback arm of `ir_to_rust`
+/// (src/codegen/mod.rs:496): the expression rendering
+/// terminated.
+fn rust_stmt_expr_text(pad: &str, rendered: &str) -> String {
+    format!("{}{};\n", pad, rendered)
+}
+
+/// Mirror of the bare-expression arm of
+/// `ir_to_rust_tail` (src/codegen/mod.rs:529-538):
+/// pad + the typed rendering + a newline, NO `;`.
+fn rust_tail_expr_text(pad: &str, rendered: &str) -> String {
+    format!("{}{}\n", pad, rendered)
+}
+
+/// Mirror of the Block arm assembly of
+/// `ir_to_rust_tail` (src/codegen/mod.rs:514-524):
+/// the non-last statements' renderings concatenated
+/// with the last statement's tail rendering.
+fn rust_tail_block_text(rest: &str, last: &str) -> String {
+    format!("{}{}", rest, last)
+}
+
 /// The emitter's char escaping, hand-mirrored (Phase 29):
 /// like escape_rust_str_mirror, plus `'` escaped, and `"`
 /// NOT escaped (a double quote is a fine char literal).
@@ -1591,6 +1892,300 @@ fn ir_expr_assembled(e: &Expr) -> String {
         },
         Expr::Hole => rust_hole_text(0).unwrap(),
         Expr::Alloc => rust_unsupported_text("Alloc"),
+    }
+}
+
+// ── Slice 5 assembly mirrors: the statement walkers, ──
+// ── composed from the pinned pieces exactly as the ──
+// ── originals compose them ──
+
+/// Tree form of IRNode for the assembled statement
+/// walkers. Expression children reuse the `Expr` tree;
+/// names arrive raw (the mirrors apply
+/// rust_ident_verbatim, as the expression assembly
+/// does). `Expr(e)` stands for every kind the statement
+/// walker routes to its fallback arm (rust_stmt_form
+/// family 17) — and, in tail position, for the
+/// expression kinds whose dispatch rust_tail_form
+/// decides from the kind code. `Typed` carries the
+/// annotation's TypeCode: the statement walker drops
+/// it, the tail walker re-enters with it as the
+/// expectation. Alloc's declared type is a `Ty` tree
+/// (ty_to_rust is slices 1-2); its TypeCode for the
+/// expectation is `ty_code`.
+#[allow(dead_code)]
+enum Stmt {
+    Hole,
+    Block(Vec<Stmt>),
+    Let(&'static str, Expr, Box<Stmt>),
+    If(Expr, Box<Stmt>, Box<Stmt>),
+    While(Expr, Box<Stmt>, Option<&'static str>),
+    For(&'static str, Expr, Expr, Box<Stmt>),
+    Match(Expr, Vec<(Pat, Stmt)>),
+    Call(&'static str, Vec<Expr>),
+    Return(Expr),
+    Alloc(&'static str, Ty, Expr),
+    Assign(Expr, Expr),
+    Collection(i64, Vec<Expr>),
+    Map(Expr, Expr),
+    Filter(Expr, Expr),
+    Fold(Expr, Expr, Expr),
+    Sort(Expr, Expr),
+    Typed(Box<Stmt>, i64),
+    Expr(Expr),
+}
+
+/// IRNodeKindCode of a Stmt (declaration order,
+/// slices 1-2).
+fn stmt_kind(s: &Stmt) -> i64 {
+    match s {
+        Stmt::Hole => 0,
+        Stmt::Block(_) => 1,
+        Stmt::Let(..) => 2,
+        Stmt::If(..) => 3,
+        Stmt::While(..) => 4,
+        Stmt::For(..) => 5,
+        Stmt::Match(..) => 6,
+        Stmt::Call(..) => 7,
+        Stmt::Return(_) => 8,
+        Stmt::Collection(..) => 15,
+        Stmt::Map(..) => 16,
+        Stmt::Filter(..) => 17,
+        Stmt::Fold(..) => 18,
+        Stmt::Sort(..) => 19,
+        Stmt::Alloc(..) => 20,
+        Stmt::Assign(..) => 21,
+        Stmt::Typed(..) => 22,
+        Stmt::Expr(e) => expr_kind(e),
+    }
+}
+
+/// The TypeCode of a `Ty` tree, for Alloc's
+/// expectation: the tag the type was built from.
+fn ty_code(ty: &Ty) -> i64 {
+    match ty {
+        Ty::Leaf(tag) => *tag,
+        Ty::Name(_) => 15,
+        Ty::Wrap1(tag, ..) => *tag,
+        Ty::Wrap2(tag, ..) => *tag,
+        Ty::Tuple(_) => 21,
+        Ty::Array(..) => 22,
+        Ty::Func(..) => 23,
+    }
+}
+
+/// The statement walker's pad: four spaces per level.
+/// The repetition is the mirror-only half of the
+/// slice's indentation answer (the specs pin the
+/// arithmetic, rust_stmt_child_indent).
+fn stmt_pad(indent: usize) -> String {
+    "    ".repeat(indent)
+}
+
+/// Assembly of `expr_in_condition_position` over the
+/// Expr tree (the base both the If/While conditions
+/// and the Match scrutinee build on).
+fn condition_mirror(e: &Expr) -> String {
+    rust_condition_text(expr_kind(e), &ir_expr_assembled(e))
+}
+
+/// Assembly of `ir_to_rust_expr_typed` over the Expr
+/// tree: the only expectation-driven rewrite is the
+/// String-literal ownership one (rust_string_ownership
+/// decides, the owned template renders); every other
+/// node delegates to the untyped assembly. The Expr
+/// tree has no Typed variant — the original's re-entry
+/// through a Typed node with its own type is covered
+/// at code level by the rust_typed_form /
+/// rust_string_ownership golden.
+fn ir_expr_typed_mirror(e: &Expr, expected: i64) -> String {
+    match e {
+        Expr::Lit(Lit::Str(s)) if rust_string_ownership(3, expected) => {
+            rust_string_literal_owned_text(s)
+        }
+        _ => ir_expr_assembled(e),
+    }
+}
+
+/// Assembly of `match_scrutinee_to_rust` for statement
+/// Match cases (the expression assembly's
+/// match_scrutinee_mirror over (Pat, Stmt) cases).
+fn stmt_match_scrutinee_mirror(scrutinee: &Expr, cases: &[(Pat, Stmt)]) -> String {
+    let base = condition_mirror(scrutinee);
+    let has_string = cases
+        .iter()
+        .any(|(p, _)| pattern_has_string_literal_mirror(p));
+    let form = rust_match_scrutinee_form(has_string, is_bare_string_literal_mirror(scrutinee));
+    rust_match_scrutinee_text(form, &base).unwrap()
+}
+
+/// Faithful assembly of `ir_to_rust`
+/// (src/codegen/mod.rs:310-498) from the slice 1-5
+/// mirrors: every arm dispatches through its per-arm
+/// mirror, children recurse exactly as the walker
+/// recurses, and `fn_ret` (a TypeCode) is threaded as
+/// the expectation source the original threads.
+/// Value positions route through `ir_tail_assembled`,
+/// exactly as the original routes them through
+/// ir_to_rust_tail.
+fn ir_stmt_assembled(s: &Stmt, indent: usize, fn_ret: i64) -> String {
+    let pad = stmt_pad(indent);
+    match s {
+        Stmt::Hole => rust_stmt_hole_text(&pad),
+        Stmt::Block(stmts) => stmts
+            .iter()
+            .map(|st| ir_stmt_assembled(st, indent, fn_ret))
+            .collect(),
+        Stmt::Let(name, value, body) => rust_stmt_let_text(
+            &pad,
+            &rust_ident_verbatim(name),
+            &ir_expr_assembled(value),
+            &ir_tail_assembled(body, indent, fn_ret, fn_ret),
+        ),
+        Stmt::If(c, t, e) => rust_stmt_if_text(
+            &pad,
+            &condition_mirror(c),
+            &ir_tail_assembled(t, indent + 1, fn_ret, fn_ret),
+            &ir_tail_assembled(e, indent + 1, fn_ret, fn_ret),
+        ),
+        Stmt::While(c, body, inv) => rust_stmt_while_text(
+            inv.is_some(),
+            inv.unwrap_or(""),
+            &pad,
+            &condition_mirror(c),
+            &ir_stmt_assembled(body, indent + 1, fn_ret),
+        ),
+        Stmt::For(var, start, end, body) => rust_stmt_for_text(
+            &pad,
+            &rust_ident_verbatim(var),
+            &ir_expr_assembled(start),
+            &ir_expr_assembled(end),
+            &ir_stmt_assembled(body, indent + 1, fn_ret),
+        ),
+        Stmt::Match(scrutinee, cases) => {
+            let mut out =
+                rust_stmt_match_head_text(&pad, &stmt_match_scrutinee_mirror(scrutinee, cases));
+            let pad_inner = stmt_pad(indent + 1);
+            for (pat, body) in cases {
+                out.push_str(&rust_stmt_match_arm_text(
+                    &pad_inner,
+                    &ir_pattern_assembled(pat),
+                    &ir_tail_assembled(body, indent + 2, fn_ret, fn_ret),
+                ));
+            }
+            out.push_str(&rust_stmt_match_close_text(&pad));
+            out
+        }
+        Stmt::Call(name, args) => {
+            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
+            rust_stmt_call_text(&pad, &rust_ident_verbatim(name), &rendered.join(", "))
+        }
+        Stmt::Return(e) => rust_stmt_return_text(&pad, &ir_expr_typed_mirror(e, fn_ret)),
+        Stmt::Alloc(name, ty, initial) => rust_stmt_alloc_text(
+            &pad,
+            &rust_ident_verbatim(name),
+            &ty_to_rust_assembled(ty),
+            &ir_expr_typed_mirror(initial, ty_code(ty)),
+        ),
+        Stmt::Assign(t, v) => {
+            rust_stmt_assign_text(&pad, &ir_expr_assembled(t), &ir_expr_assembled(v))
+        }
+        Stmt::Collection(kind, elems) => {
+            let rendered: Vec<String> = elems.iter().map(ir_expr_assembled).collect();
+            rust_stmt_collection_text(*kind, &pad, &rendered.join(", ")).unwrap()
+        }
+        Stmt::Map(f, over) => {
+            rust_stmt_map_text(&pad, &ir_expr_assembled(over), &ir_expr_assembled(f))
+        }
+        Stmt::Filter(p, over) => {
+            rust_stmt_filter_text(&pad, &ir_expr_assembled(over), &ir_expr_assembled(p))
+        }
+        Stmt::Fold(op, init, over) => rust_stmt_fold_text(
+            &pad,
+            &ir_expr_assembled(over),
+            &ir_expr_assembled(init),
+            &ir_expr_assembled(op),
+        ),
+        Stmt::Sort(cmp, coll) => {
+            rust_stmt_sort_text(&pad, &ir_expr_assembled(coll), &ir_expr_assembled(cmp))
+        }
+        Stmt::Typed(inner, _) => ir_stmt_assembled(inner, indent, fn_ret),
+        Stmt::Expr(e) => rust_stmt_expr_text(&pad, &ir_expr_assembled(e)),
+    }
+}
+
+/// The typed rendering of a tail-position expression
+/// node, for `ir_tail_assembled`'s bare-expression
+/// arm: the typed walker delegates every composite to
+/// the untyped emitter, so the slice-4 expression
+/// templates render them (with `ir_expr_typed_mirror`
+/// for the nodes the Stmt tree carries as `Expr`).
+fn tail_expr_typed_text(s: &Stmt, expected: i64) -> String {
+    match s {
+        Stmt::Expr(e) => ir_expr_typed_mirror(e, expected),
+        Stmt::Call(name, args) => {
+            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
+            rust_call_text(&rust_ident_verbatim(name), &rendered.join(", "))
+        }
+        Stmt::Collection(kind, elems) => {
+            let rendered: Vec<String> = elems.iter().map(ir_expr_assembled).collect();
+            format!(
+                "{}{}{}",
+                rust_collection_prefix(*kind).unwrap(),
+                rendered.join(", "),
+                rust_collection_suffix(*kind).unwrap()
+            )
+        }
+        Stmt::Map(f, over) => rust_map_text(&ir_expr_assembled(over), &ir_expr_assembled(f)),
+        Stmt::Filter(p, over) => {
+            rust_filter_text(&ir_expr_assembled(over), &ir_expr_assembled(p))
+        }
+        Stmt::Fold(op, init, over) => rust_fold_text(
+            &ir_expr_assembled(over),
+            &ir_expr_assembled(init),
+            &ir_expr_assembled(op),
+        ),
+        Stmt::Sort(cmp, coll) => {
+            rust_sort_text(&ir_expr_assembled(coll), &ir_expr_assembled(cmp))
+        }
+        _ => unreachable!("tail_expr_typed_text on a statement-shaped kind"),
+    }
+}
+
+/// Faithful assembly of `ir_to_rust_tail`
+/// (src/codegen/mod.rs:507-541): the dispatch goes
+/// through the rust_tail_form mirror, as the original
+/// dispatches on the node kind. `expected` is a
+/// TypeCode (26 stands for None, the ExpectedTypeCode
+/// convention of slice 3).
+fn ir_tail_assembled(s: &Stmt, indent: usize, fn_ret: i64, expected: i64) -> String {
+    match rust_tail_form(stmt_kind(s)).unwrap() {
+        2 => {
+            let Stmt::Block(stmts) = s else {
+                unreachable!("tail form 2 is Block only")
+            };
+            match stmts.split_last() {
+                None => String::new(),
+                Some((last, rest)) => {
+                    let rest_text: String = rest
+                        .iter()
+                        .map(|st| ir_stmt_assembled(st, indent, fn_ret))
+                        .collect();
+                    rust_tail_block_text(
+                        &rest_text,
+                        &ir_tail_assembled(last, indent, fn_ret, expected),
+                    )
+                }
+            }
+        }
+        3 => {
+            let Stmt::Typed(inner, code) = s else {
+                unreachable!("tail form 3 is Typed only")
+            };
+            ir_tail_assembled(inner, indent, fn_ret, *code)
+        }
+        1 => rust_tail_expr_text(&stmt_pad(indent), &tail_expr_typed_text(s, expected)),
+        _ => ir_stmt_assembled(s, indent, fn_ret),
     }
 }
 
@@ -3150,6 +3745,417 @@ mod golden_tests {
         assert_eq!(ir_expr_assembled(&Expr::Lit(Lit::Char('\''))), "'\\''");
         assert_eq!(ir_expr_assembled(&Expr::Lit(Lit::Char('"'))), "'\"'");
     }
+
+    // ── Slice 5 golden: the statement walker ──
+
+    #[test]
+    fn stmt_form_total() {
+        // The full dispatch of ir_to_rust over the 28 kinds.
+        let expected: [(i64, i64); 28] = [
+            (0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7),
+            (8, 8), (9, 17), (10, 17), (11, 17), (12, 17), (13, 17),
+            (14, 17), (15, 11), (16, 12), (17, 13), (18, 14), (19, 15),
+            (20, 9), (21, 10), (22, 16), (23, 17), (24, 17), (25, 17),
+            (26, 17), (27, 17),
+        ];
+        for (kind, arm) in expected {
+            assert_eq!(rust_stmt_form(kind), Some(arm), "kind {}", kind);
+        }
+        assert_eq!(rust_stmt_form(-1), None);
+        assert_eq!(rust_stmt_form(28), None);
+    }
+
+    #[test]
+    fn tail_form_total() {
+        // The full dispatch of ir_to_rust_tail over the 28
+        // kinds: 0 statement fallthrough, 1 bare expression,
+        // 2 Block split, 3 Typed re-entry.
+        let expected: [(i64, i64); 28] = [
+            (0, 0), (1, 2), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 1),
+            (8, 0), (9, 1), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1),
+            (15, 1), (16, 1), (17, 1), (18, 1), (19, 1), (20, 0), (21, 0),
+            (22, 3), (23, 1), (24, 0), (25, 0), (26, 0), (27, 1),
+        ];
+        for (kind, form) in expected {
+            assert_eq!(rust_tail_form(kind), Some(form), "kind {}", kind);
+        }
+        assert_eq!(rust_tail_form(-1), None);
+        assert_eq!(rust_tail_form(28), None);
+    }
+
+    #[test]
+    fn stmt_collection_affixes_total() {
+        // Statement position: Set/Map collapse to the List
+        // form, prefix AND suffix.
+        let prefixes: [&str; 5] = ["vec![", "vec![", "vec![", "[", "("];
+        let suffixes: [&str; 5] = ["]", "]", "]", "]", ")"];
+        for kind in 0..=4i64 {
+            assert_eq!(
+                rust_stmt_collection_prefix(kind),
+                Some(prefixes[kind as usize]),
+                "prefix kind {}",
+                kind
+            );
+            assert_eq!(
+                rust_stmt_collection_suffix(kind),
+                Some(suffixes[kind as usize]),
+                "suffix kind {}",
+                kind
+            );
+        }
+        assert_eq!(rust_stmt_collection_prefix(5), None);
+        assert_eq!(rust_stmt_collection_suffix(-1), None);
+        // The assembled statement text, per kind.
+        assert_eq!(
+            rust_stmt_collection_text(0, "", "a, b").unwrap(),
+            "vec![a, b];\n"
+        );
+        assert_eq!(
+            rust_stmt_collection_text(1, "", "a, b").unwrap(),
+            "vec![a, b];\n"
+        );
+        assert_eq!(
+            rust_stmt_collection_text(2, "    ", "a, b").unwrap(),
+            "    vec![a, b];\n"
+        );
+        assert_eq!(
+            rust_stmt_collection_text(3, "", "a, b").unwrap(),
+            "[a, b];\n"
+        );
+        assert_eq!(
+            rust_stmt_collection_text(4, "", "a, b").unwrap(),
+            "(a, b);\n"
+        );
+        assert_eq!(rust_stmt_collection_text(5, "", "a"), None);
+    }
+
+    #[test]
+    fn expectation_source_total() {
+        let expected: [i64; 8] = [0, 0, 0, 0, 0, 1, 1, 2];
+        for site in 0..=7i64 {
+            assert_eq!(
+                rust_expectation_source(site),
+                Some(expected[site as usize]),
+                "site {}",
+                site
+            );
+        }
+        assert_eq!(rust_expectation_source(8), None);
+        assert_eq!(rust_expectation_source(-1), None);
+    }
+
+    #[test]
+    fn stmt_child_indent_total() {
+        let expected: [i64; 9] = [0, 0, 1, 1, 1, 1, 2, 0, 0];
+        for site in 0..=8i64 {
+            assert_eq!(
+                rust_stmt_child_indent(site),
+                Some(expected[site as usize]),
+                "site {}",
+                site
+            );
+        }
+        assert_eq!(rust_stmt_child_indent(9), None);
+    }
+
+    #[test]
+    fn stmt_seq_form_table() {
+        assert_eq!(rust_stmt_seq_form(0, false), Some(0));
+        assert_eq!(rust_stmt_seq_form(0, true), Some(0));
+        assert_eq!(rust_stmt_seq_form(1, false), Some(0));
+        assert_eq!(rust_stmt_seq_form(1, true), Some(1));
+        assert_eq!(rust_stmt_seq_form(2, true), None);
+        assert_eq!(rust_stmt_seq_form(-1, false), None);
+    }
+
+    #[test]
+    fn stmt_templates() {
+        // Hole: two lines, both padded.
+        assert_eq!(
+            rust_stmt_hole_text(""),
+            "// TODO: synthesis incomplete\npanic!(\"Hole not filled\");\n"
+        );
+        assert_eq!(
+            rust_stmt_hole_text("    "),
+            "    // TODO: synthesis incomplete\n    panic!(\"Hole not filled\");\n"
+        );
+        // Let: header line, then the tail body immediately.
+        assert_eq!(
+            rust_stmt_let_text("    ", "x", "1", "    x\n"),
+            "    let x = 1;\n    x\n"
+        );
+        // If: the closing braces carry NO pad (pinned quirk).
+        assert_eq!(
+            rust_stmt_if_text("    ", "c", "        5\n", "        6\n"),
+            "    if c {\n        5\n} else {\n        6\n}\n"
+        );
+        // While, with and without the invariant comment.
+        assert_eq!(
+            rust_stmt_while_text(false, "", "    ", "c", "        body;\n"),
+            "    while c {\n        body;\n    }\n"
+        );
+        assert_eq!(
+            rust_stmt_while_text(true, "x > 0", "    ", "c", "        body;\n"),
+            "    // invariant: x > 0\n    while c {\n        body;\n    }\n"
+        );
+        // For.
+        assert_eq!(
+            rust_stmt_for_text("    ", "i", "0", "10", "        body;\n"),
+            "    for i in 0..10 {\n        body;\n    }\n"
+        );
+        // Match pieces: head, one arm group, close.
+        assert_eq!(rust_stmt_match_head_text("    ", "v"), "    match v {\n");
+        assert_eq!(
+            rust_stmt_match_arm_text("        ", "Some(x)", "            x\n"),
+            "        Some(x) => {\n            x\n        },\n"
+        );
+        assert_eq!(rust_stmt_match_close_text("    "), "    }\n");
+        // Call / Return / Alloc / Assign statements.
+        assert_eq!(rust_stmt_call_text("    ", "f", "a, b"), "    f(a, b);\n");
+        assert_eq!(
+            rust_stmt_return_text("    ", "\"s\".to_string()"),
+            "    return \"s\".to_string();\n"
+        );
+        assert_eq!(
+            rust_stmt_alloc_text("    ", "buf", "String", "\"s\".to_string()"),
+            "    let mut buf: String = \"s\".to_string();\n"
+        );
+        assert_eq!(
+            rust_stmt_assign_text("    ", "x", "(x + 1)"),
+            "    x = (x + 1);\n"
+        );
+        // Iterator statements: the expression templates,
+        // terminated.
+        assert_eq!(
+            rust_stmt_map_text("    ", "xs", "f"),
+            "    (xs).iter().map(f).collect();\n"
+        );
+        assert_eq!(
+            rust_stmt_filter_text("    ", "xs", "p"),
+            "    (xs).iter().filter(p).collect();\n"
+        );
+        assert_eq!(
+            rust_stmt_fold_text("    ", "xs", "0", "add"),
+            "    (xs).iter().fold(0, add);\n"
+        );
+        // Sort: only the first line is padded (pinned quirk).
+        assert_eq!(
+            rust_stmt_sort_text("    ", "xs", "cmp"),
+            "    let mut sorted = xs;\nsorted.sort_by(cmp);\nsorted;\n"
+        );
+        // Fallback: the expression rendering, terminated —
+        // even a block form takes the ';'.
+        assert_eq!(
+            rust_stmt_expr_text("    ", "loop {\n}"),
+            "    loop {\n};\n"
+        );
+        // Tail pieces: bare expression (no ';'), block
+        // assembly (plain concatenation).
+        assert_eq!(rust_tail_expr_text("    ", "x"), "    x\n");
+        assert_eq!(rust_tail_block_text("a;\n", "b\n"), "a;\nb\n");
+    }
+
+    #[test]
+    fn stmt_walker_sequences() {
+        // A multi-statement Block at indent 1 in a
+        // String-returning function: the Alloc's initial
+        // and the Return's operand both take the owned
+        // form through the typed positions.
+        let body = Stmt::Block(vec![
+            Stmt::Alloc("buf", Ty::Leaf(3), Expr::Lit(Lit::Str("hi"))),
+            Stmt::Call("log", vec![Expr::Var("buf")]),
+            Stmt::Return(Expr::Lit(Lit::Str("done"))),
+        ]);
+        assert_eq!(
+            ir_stmt_assembled(&body, 1, 3),
+            "    let mut buf: String = \"hi\".to_string();\n    log(buf);\n    return \"done\".to_string();\n"
+        );
+        // A Hole statement inside a Block.
+        let body = Stmt::Block(vec![Stmt::Hole]);
+        assert_eq!(
+            ir_stmt_assembled(&body, 1, 0),
+            "    // TODO: synthesis incomplete\n    panic!(\"Hole not filled\");\n"
+        );
+        // Statement position renders the LAST statement
+        // as a statement too (seq position 0): the Call
+        // keeps its ';'.
+        let body = Stmt::Block(vec![
+            Stmt::Call("f", vec![Expr::Lit(Lit::Int(1))]),
+            Stmt::Call("g", vec![]),
+        ]);
+        assert_eq!(ir_stmt_assembled(&body, 0, 0), "f(1);\ng();\n");
+    }
+
+    #[test]
+    fn stmt_walker_nesting() {
+        // Depth >= 2: an If inside a Block at indent 1 —
+        // branches render at indent 2, the If's closing
+        // braces land at column 0 (the pinned quirk).
+        let body = Stmt::Block(vec![Stmt::If(
+            Expr::Var("c"),
+            Box::new(Stmt::Block(vec![Stmt::Assign(
+                Expr::Var("x"),
+                Expr::Lit(Lit::Int(1)),
+            )])),
+            Box::new(Stmt::Block(vec![Stmt::Call("f", vec![])])),
+        )]);
+        assert_eq!(
+            ir_stmt_assembled(&body, 1, 0),
+            "    if c {\n        x = 1;\n} else {\n        f()\n}\n"
+        );
+        // A statement Match at indent 1: arm bodies tail
+        // at indent 3, arm closings at indent 2, the
+        // match closing at indent 1; a string pattern
+        // puts the scrutinee through .as_str().
+        let m = Stmt::Match(
+            Expr::Var("v"),
+            vec![
+                (
+                    Pat::Literal(Lit::Str("a")),
+                    Stmt::Expr(Expr::Lit(Lit::Int(1))),
+                ),
+                (Pat::Wildcard, Stmt::Call("g", vec![])),
+            ],
+        );
+        assert_eq!(
+            ir_stmt_assembled(&m, 1, 0),
+            "    match v.as_str() {\n        \"a\" => {\n            1\n        },\n        _ => {\n            g()\n        },\n    }\n"
+        );
+        // A While with an invariant inside a Block: the
+        // comment line at the While's indent, the body
+        // one level deeper, the closing at the While's
+        // indent (padded — unlike the If).
+        let body = Stmt::Block(vec![Stmt::While(
+            Expr::Var("c"),
+            Box::new(Stmt::Block(vec![Stmt::Assign(
+                Expr::Var("x"),
+                Expr::BinOp(0, Box::new(Expr::Var("x")), Box::new(Expr::Lit(Lit::Int(1)))),
+            )])),
+            Some("x > 0"),
+        )]);
+        assert_eq!(
+            ir_stmt_assembled(&body, 1, 0),
+            "    // invariant: x > 0\n    while c {\n        x = (x + 1);\n    }\n"
+        );
+    }
+
+    #[test]
+    fn stmt_walker_tail_vs_statement() {
+        // The same node, both positions (indent 1,
+        // expectation None = code 26 in tail position).
+        let list = Stmt::Collection(0, vec![Expr::Lit(Lit::Int(1)), Expr::Lit(Lit::Int(2))]);
+        assert_eq!(ir_stmt_assembled(&list, 1, 0), "    vec![1, 2];\n");
+        assert_eq!(ir_tail_assembled(&list, 1, 0, 26), "    vec![1, 2]\n");
+        // A Set: collapsed as a statement, fully
+        // qualified as a tail value.
+        let set = Stmt::Collection(1, vec![Expr::Lit(Lit::Int(1))]);
+        assert_eq!(ir_stmt_assembled(&set, 1, 0), "    vec![1];\n");
+        assert_eq!(
+            ir_tail_assembled(&set, 1, 0, 26),
+            "    std::collections::HashSet::from([1])\n"
+        );
+        // A Call: terminated as a statement, bare as a
+        // tail.
+        let call = Stmt::Call("f", vec![Expr::Lit(Lit::Int(1))]);
+        assert_eq!(ir_stmt_assembled(&call, 1, 0), "    f(1);\n");
+        assert_eq!(ir_tail_assembled(&call, 1, 0, 26), "    f(1)\n");
+        // A Map likewise.
+        let map = Stmt::Map(Expr::Var("f"), Expr::Var("xs"));
+        assert_eq!(
+            ir_stmt_assembled(&map, 1, 0),
+            "    (xs).iter().map(f).collect();\n"
+        );
+        assert_eq!(
+            ir_tail_assembled(&map, 1, 0, 26),
+            "    (xs).iter().map(f).collect()\n"
+        );
+        // A Sort: the three-line discarded-value form as
+        // a statement, the value-keeping block expression
+        // as a tail.
+        let sort = Stmt::Sort(Expr::Var("cmp"), Expr::Var("xs"));
+        assert_eq!(
+            ir_stmt_assembled(&sort, 1, 0),
+            "    let mut sorted = xs;\nsorted.sort_by(cmp);\nsorted;\n"
+        );
+        assert_eq!(
+            ir_tail_assembled(&sort, 1, 0, 26),
+            "    { let mut sorted = xs; sorted.sort_by(cmp); sorted }\n"
+        );
+        // A Block in tail position: non-last statements
+        // as statements, the last as a bare tail; an
+        // empty Block renders nothing.
+        let block = Stmt::Block(vec![
+            Stmt::Call("f", vec![Expr::Lit(Lit::Int(1))]),
+            Stmt::Expr(Expr::Lit(Lit::Int(5))),
+        ]);
+        assert_eq!(ir_tail_assembled(&block, 1, 0, 26), "    f(1);\n    5\n");
+        assert_eq!(
+            ir_tail_assembled(&Stmt::Block(vec![]), 1, 0, 26),
+            ""
+        );
+    }
+
+    #[test]
+    fn stmt_walker_return_ownership() {
+        // The Return arm's typed call: a String literal
+        // is owned exactly in a String-returning
+        // function (fn_ret = TypeCode 3).
+        let ret = Stmt::Return(Expr::Lit(Lit::Str("s")));
+        assert_eq!(
+            ir_stmt_assembled(&ret, 0, 3),
+            "return \"s\".to_string();\n"
+        );
+        assert_eq!(ir_stmt_assembled(&ret, 0, 0), "return \"s\";\n");
+        // A Let's body is a tail with expectation
+        // Some(fn_ret): a bare-literal body is owned in
+        // a String function, bare otherwise. (The Let's
+        // VALUE position is untyped — the literal 1 is
+        // beside the point; a String value would stay
+        // bare there too.)
+        let let_stmt = Stmt::Let(
+            "x",
+            Expr::Lit(Lit::Int(1)),
+            Box::new(Stmt::Expr(Expr::Lit(Lit::Str("s")))),
+        );
+        assert_eq!(
+            ir_stmt_assembled(&let_stmt, 0, 3),
+            "let x = 1;\n\"s\".to_string()\n"
+        );
+        assert_eq!(ir_stmt_assembled(&let_stmt, 0, 0), "let x = 1;\n\"s\"\n");
+        // If branches are tails on the same expectation.
+        let if_stmt = Stmt::If(
+            Expr::Var("c"),
+            Box::new(Stmt::Expr(Expr::Lit(Lit::Str("a")))),
+            Box::new(Stmt::Expr(Expr::Lit(Lit::Str("b")))),
+        );
+        assert_eq!(
+            ir_stmt_assembled(&if_stmt, 0, 3),
+            "if c {\n    \"a\".to_string()\n} else {\n    \"b\".to_string()\n}\n"
+        );
+        // An Alloc's initial is typed by the Alloc's OWN
+        // declared type, not fn_ret.
+        let alloc_str = Stmt::Alloc("s", Ty::Leaf(3), Expr::Lit(Lit::Str("v")));
+        assert_eq!(
+            ir_stmt_assembled(&alloc_str, 0, 0),
+            "let mut s: String = \"v\".to_string();\n"
+        );
+        let alloc_int = Stmt::Alloc("n", Ty::Leaf(0), Expr::Lit(Lit::Str("v")));
+        assert_eq!(
+            ir_stmt_assembled(&alloc_int, 0, 3),
+            "let mut n: i64 = \"v\";\n"
+        );
+        // A tail Typed node re-enters with its own
+        // annotation as the expectation (tail form 3);
+        // in statement position the same node is
+        // transparent and the literal falls to the
+        // untyped fallback.
+        let typed = Stmt::Typed(
+            Box::new(Stmt::Expr(Expr::Lit(Lit::Str("s")))),
+            3,
+        );
+        assert_eq!(ir_tail_assembled(&typed, 0, 0, 26), "\"s\".to_string()\n");
+        assert_eq!(ir_stmt_assembled(&typed, 0, 0), "\"s\";\n");
+    }
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -3212,11 +4218,11 @@ spec bad {
         // Supplementary shape check (the pipeline test above is the
         // real validation): the file declares the 8 slice-1 specs
         // plus the 20 slice-2 specs plus the 16 slice-3 specs plus
-        // the 35 slice-4 specs.
+        // the 35 slice-4 specs plus the 27 slice-5 specs.
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 79, "codegen.morph should declare 79 specs");
-        assert!(src.matches("test \"").count() >= 118, "codegen.morph should carry in-spec tests");
+        assert_eq!(spec_decls, 106, "codegen.morph should declare 106 specs");
+        assert!(src.matches("test \"").count() >= 157, "codegen.morph should carry in-spec tests");
     }
 }
