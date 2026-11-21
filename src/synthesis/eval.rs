@@ -628,7 +628,7 @@ fn eval_unaryop(op: IRUnaryOp, v: Value) -> Result<Value, EvalError> {
 /// HERE, directly on mapped values, because `expr_to_ir`
 /// lowers it to a Hole (the IR kind table has no method-call
 /// kind — pinned by
-/// `expr_to_ir_method_call_lowers_to_hole_pending_74_76`).
+/// `expr_to_ir_method_call_lowers_to_hole_no_ir_kind`).
 /// The receiver and arguments map recursively through this
 /// same function, so a method call on a closed receiver
 /// (`Ok(5).is_ok()`, `Ok([1, 2]).unwrap().len()`) maps,

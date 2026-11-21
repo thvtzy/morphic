@@ -65,6 +65,15 @@ impl Verifier {
         }
     }
 
+    /// A verifier that knows the whole module the spec
+    /// belongs to — specs AND type declarations — so
+    /// record-typed parameters bind symbolically
+    /// (Phase 76, `Sym::Record`) in addition to spec-to-spec
+    /// inlining.
+    pub fn with_module(module: &Spec) -> Self {
+        Self::with_index(SpecIndex::from_module(module))
+    }
+
     pub fn verify_all(
         &self,
         candidates: Vec<CandidateImplementation>,
@@ -114,7 +123,7 @@ impl Verifier {
         // this implementation. `None` = the body is outside the
         // encodable subset; every constraint is then Unknown and
         // the candidate can only be Inconclusive, never Verified.
-        let param_env = param_env(spec);
+        let param_env = param_env(spec, &self.index);
         let output = sym_eval(
             &candidate.body,
             &mut param_env.clone(),
@@ -243,6 +252,21 @@ impl Verifier {
         };
 
         let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+        // D5a side conditions: every Char parameter (and
+        // every Char nested in a record/Option/Result
+        // parameter) ranges over the Unicode scalar values
+        // — without these, a "Char" constant could be a
+        // surrogate or beyond U+10FFFF and scalar-order
+        // proofs would be proving a different type.
+        for p in &spec.params {
+            if let Some(sym) = param_env.get(&p.name) {
+                let mut conditions = Vec::new();
+                collect_char_conditions(sym, &mut conditions);
+                for cond in &conditions {
+                    z3.assert(cond);
+                }
+            }
+        }
         let negated = formula.not();
         z3.assert(&negated);
 
@@ -287,9 +311,10 @@ enum Tri {
 //
 //   Literal, Var, BinOp, UnaryOp (Neg/Not/Abs/Len), If, Match
 //   (literal/variable/wildcard patterns), Let, Block, Return,
-//   Call ("len", the "List" literal, and — when the verifier
-//   carries the module — calls to other specs, inlined),
-//   Collection, Index, Typed.
+//   Call ("len", the "List" literal, the Ok/Err/Some/None
+//   constructors, and — when the verifier carries the module —
+//   calls to other specs, inlined), Collection, Index, Typed,
+//   FieldAccess, RecordLit (Phase 76).
 //
 // Anything else — holes, loops, mutation, lambdas and other
 // function values, higher-order combinators, calls that do
@@ -299,10 +324,50 @@ enum Tri {
 //
 // Representable sorts are Int, Bool and String, plus literal
 // lists of representable values (needed for len/Index over
-// collection literals). Floats and Chars have no honest Z3
-// sort here (IEEE floats are not Z3 reals), so they are
-// `Opaque`: bindable and discardable, but any use that needs
-// a concrete sort makes the body unencodable.
+// collection literals), records (per-field values), the
+// Result/Option tag+payload forms, and Char (Phase 76, D5a:
+// a Char is its Unicode scalar value on the Int sort; a Char
+// PARAM binds with the scalar range side-condition asserted
+// at check time — see `char_range_condition`). Floats have
+// no honest Z3 sort here (IEEE floats are not Z3 reals), so
+// they are `Opaque`: bindable and discardable, but any use
+// that needs a concrete sort makes the body unencodable.
+
+/// A sum-type constructor tag. Literal tags arise from
+/// constructor calls (`Ok(...)` is `Tag::True`); a symbolic
+/// tag arises from a parameter binding or an `ite` merge.
+/// The distinction is load-bearing for equality: comparing
+/// against a literal `None`/`Err` needs no payload term at
+/// all (see `sym_option_eq` / `sym_result_eq`).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg(feature = "z3-support")]
+enum Tag {
+    True,
+    False,
+    Free(z3::ast::Bool),
+}
+
+#[cfg(feature = "z3-support")]
+impl Tag {
+    fn term(&self) -> z3::ast::Bool {
+        match self {
+            Tag::True => z3::ast::Bool::from_bool(true),
+            Tag::False => z3::ast::Bool::from_bool(false),
+            Tag::Free(b) => b.clone(),
+        }
+    }
+
+    /// The tag of `if cond { a } else { b }` over two tagged
+    /// values: a shared literal survives; anything else is
+    /// the free ite term.
+    fn merge(cond: &z3::ast::Bool, a: &Tag, b: &Tag) -> Tag {
+        if a == b {
+            a.clone()
+        } else {
+            Tag::Free(cond.ite(&a.term(), &b.term()))
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 #[cfg(feature = "z3-support")]
@@ -311,6 +376,65 @@ enum Sym {
     Bool(z3::ast::Bool),
     Str(z3::ast::String),
     List(Vec<Sym>),
+    /// A list whose elements are unmodelled but whose
+    /// LENGTH is this Int term — the binding of a List-typed
+    /// parameter or record field (Phase 76). `len` reads the
+    /// term; element access and list equality are
+    /// unencodable (a length is not the list).
+    ListLen(z3::ast::Int),
+    /// A Char as its Unicode scalar value (Phase 76, D5a).
+    /// Deliberately NOT `Sym::Int`: sort-strictness — a
+    /// Char never compares or computes as an Int. A Char
+    /// term built from a literal is a Z3 numeral; a Char
+    /// parameter is a free constant carrying the range
+    /// side-condition.
+    Char(z3::ast::Int),
+    /// The character at a string index, as a length-≤1
+    /// string term (`s.at(i)`) — the String-index→Char
+    /// bridge (Phase 76). The safe z3 API exposes `str.at`
+    /// but no `str.to_code`, and the raw context handle the
+    /// FFI would need is not public, so the indexed char
+    /// cannot be joined to the scalar sort in general. What
+    /// this form supports, soundly: equality/order against
+    /// another indexed char (identical or not — Z3 string
+    /// order on length-≤1 strings IS scalar order, with the
+    /// out-of-bounds empty string sorting below every real
+    /// char) and against a CONSTANT Char (converted to its
+    /// one-char string). Against a SYMBOLIC Char parameter
+    /// it is unencodable — that is the bridge's named
+    /// boundary. Out-of-bounds is totalized as the empty
+    /// string: unequal to every real char, below every real
+    /// char — the same documented totalization class as
+    /// Z3's Div/Mod (the interpreter fails there instead).
+    /// A CONSTANT index into a LITERAL string stays exact
+    /// (the real scalar, or unencodable out of bounds).
+    CharStr(z3::ast::String),
+    /// A record value (Phase 76, D2a): the resolved
+    /// declaration name plus per-field values. A record
+    /// parameter binds as a record of per-field fresh values
+    /// (`fresh_sym` over the declared field types).
+    Record {
+        type_name: String,
+        fields: Vec<(String, Sym)>,
+    },
+    /// An Option value (Phase 76): constructor tag plus the
+    /// Some payload. Invariant: the payload is absent ONLY
+    /// when the tag is the literal `Tag::False` (a `None`
+    /// construction, possibly merged with itself) — a tag
+    /// that can be true always carries a payload.
+    Option {
+        some: Tag,
+        payload: Option<Box<Sym>>,
+    },
+    /// A Result value (Phase 76): constructor tag plus the
+    /// per-constructor payloads. Invariants mirror Option:
+    /// the Ok payload is absent only under a literal Err
+    /// tag, the Err payload only under a literal Ok tag.
+    Result {
+        ok: Tag,
+        ok_payload: Option<Box<Sym>>,
+        err_payload: Option<Box<Sym>>,
+    },
     Opaque,
 }
 
@@ -404,30 +528,165 @@ impl SymFlow {
     }
 }
 
-/// The initial symbolic environment: one free constant per
-/// spec parameter, of the parameter's sort. Parameters whose
-/// type has no representable sort are Opaque.
+/// The initial symbolic environment: one free symbolic
+/// value per spec parameter, built from the parameter's
+/// TYPE by `fresh_sym`. Parameters whose type has no
+/// representable sort are Opaque.
 #[cfg(feature = "z3-support")]
-fn param_env(spec: &FunctionSpec) -> SymEnv {
+fn param_env(spec: &FunctionSpec, index: &SpecIndex) -> SymEnv {
     let mut env = SymEnv::new();
     for p in &spec.params {
-        let sym = match &p.ty {
-            TypeRef::Int
-            | TypeRef::I8
-            | TypeRef::I16
-            | TypeRef::I32
-            | TypeRef::I64
-            | TypeRef::U8
-            | TypeRef::U16
-            | TypeRef::U32
-            | TypeRef::U64 => Sym::Int(z3::ast::Int::new_const(p.name.as_str())),
-            TypeRef::Bool => Sym::Bool(z3::ast::Bool::new_const(p.name.as_str())),
-            TypeRef::String => Sym::Str(z3::ast::String::new_const(p.name.as_str())),
-            _ => Sym::Opaque,
-        };
+        let sym = fresh_sym(&p.ty, &p.name, index, 0);
         env.insert(p.name.clone(), sym);
     }
     env
+}
+
+/// Recursion bound for `fresh_sym`: a self-referential
+/// record (`Node { next: Option<Node> }`) would otherwise
+/// expand forever. Past the bound the value binds Opaque —
+/// honest, and far deeper than any module in the tree.
+#[cfg(feature = "z3-support")]
+const MAX_FRESH_DEPTH: usize = 8;
+
+/// A fresh symbolic value of a type: the parameter-binding
+/// half of the Phase 76 representations. `path` names the
+/// Z3 constants after the value's position (`state`,
+/// `state.pos`, `output.is_ok`, …) so counterexamples read
+/// in the spec's own vocabulary. Record fields recurse over
+/// the DECLARED field types (the index must carry the
+/// module's declarations — `SpecIndex::from_module`; with a
+/// declarations-less index a record type binds Opaque,
+/// exactly the pre-Phase-76 behavior). A List binds its
+/// length only (`Sym::ListLen`): elements are unmodelled.
+#[cfg(feature = "z3-support")]
+fn fresh_sym(ty: &TypeRef, path: &str, index: &SpecIndex, depth: usize) -> Sym {
+    if depth > MAX_FRESH_DEPTH {
+        return Sym::Opaque;
+    }
+    match ty {
+        TypeRef::Int
+        | TypeRef::I8
+        | TypeRef::I16
+        | TypeRef::I32
+        | TypeRef::I64
+        | TypeRef::U8
+        | TypeRef::U16
+        | TypeRef::U32
+        | TypeRef::U64 => Sym::Int(z3::ast::Int::new_const(path)),
+        TypeRef::Bool => Sym::Bool(z3::ast::Bool::new_const(path)),
+        TypeRef::String => Sym::Str(z3::ast::String::new_const(path)),
+        TypeRef::Char => Sym::Char(z3::ast::Int::new_const(path)),
+        TypeRef::List(_) => {
+            Sym::ListLen(z3::ast::Int::new_const(format!("{path}.len").as_str()))
+        }
+        TypeRef::Option(inner) => Sym::Option {
+            some: Tag::Free(z3::ast::Bool::new_const(
+                format!("{path}.is_some").as_str(),
+            )),
+            payload: Some(Box::new(fresh_sym(
+                inner,
+                &format!("{path}.some"),
+                index,
+                depth + 1,
+            ))),
+        },
+        TypeRef::Result(ok_ty, err_ty) => Sym::Result {
+            ok: Tag::Free(z3::ast::Bool::new_const(
+                format!("{path}.is_ok").as_str(),
+            )),
+            ok_payload: Some(Box::new(fresh_sym(
+                ok_ty,
+                &format!("{path}.ok"),
+                index,
+                depth + 1,
+            ))),
+            err_payload: Some(Box::new(fresh_sym(
+                err_ty,
+                &format!("{path}.err"),
+                index,
+                depth + 1,
+            ))),
+        },
+        TypeRef::Named(name) => match index.record_fields(name) {
+            Some((resolved, fields)) => Sym::Record {
+                type_name: resolved,
+                fields: fields
+                    .iter()
+                    .map(|(fname, fty)| {
+                        (
+                            fname.clone(),
+                            fresh_sym(
+                                fty,
+                                &format!("{path}.{fname}"),
+                                index,
+                                depth + 1,
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
+            None => Sym::Opaque,
+        },
+        // Float, Unit, tuples, sets/maps, function types,
+        // generics, references, streams: no representable
+        // sort in this encoder.
+        _ => Sym::Opaque,
+    }
+}
+
+/// The D5a range side-condition for one Char term: a
+/// Unicode scalar value — 0 ≤ c ≤ 0x10FFFF, excluding the
+/// surrogate gap U+D800..=U+DFFF.
+#[cfg(feature = "z3-support")]
+fn char_range_condition(c: &z3::ast::Int) -> z3::ast::Bool {
+    let zero = z3::ast::Int::from_i64(0);
+    let max = z3::ast::Int::from_i64(0x10FFFF);
+    let gap_lo = z3::ast::Int::from_i64(0xD800);
+    let gap_hi = z3::ast::Int::from_i64(0xDFFF);
+    let in_range = z3::ast::Bool::and(&[&c.ge(&zero), &c.le(&max)]);
+    let in_gap = z3::ast::Bool::and(&[&c.ge(&gap_lo), &c.le(&gap_hi)]);
+    z3::ast::Bool::and(&[&in_range, &in_gap.not()])
+}
+
+/// Collect the range side-conditions owed by every Char
+/// term inside a bound parameter value (Char fields of
+/// record parameters and Char payloads of Option/Result
+/// parameters included — they are Char parameters in every
+/// sense that matters to scalar reasoning).
+#[cfg(feature = "z3-support")]
+fn collect_char_conditions(sym: &Sym, out: &mut Vec<z3::ast::Bool>) {
+    match sym {
+        Sym::Char(c) => out.push(char_range_condition(c)),
+        Sym::List(items) => {
+            for item in items {
+                collect_char_conditions(item, out);
+            }
+        }
+        Sym::Record { fields, .. } => {
+            for (_, v) in fields {
+                collect_char_conditions(v, out);
+            }
+        }
+        Sym::Option { payload, .. } => {
+            if let Some(p) = payload {
+                collect_char_conditions(p, out);
+            }
+        }
+        Sym::Result {
+            ok_payload,
+            err_payload,
+            ..
+        } => {
+            if let Some(p) = ok_payload {
+                collect_char_conditions(p, out);
+            }
+            if let Some(p) = err_payload {
+                collect_char_conditions(p, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(feature = "z3-support")]
@@ -519,6 +778,47 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<SymFl
             Some(SymFlow::Normal(sym_index(coll, idx)?))
         }
 
+        IRNode::FieldAccess { base, field } => {
+            // Projection by name (Phase 76, D2a): the base
+            // must be a record value and the field must be
+            // one of its fields — an unknown field or a
+            // non-record base is unencodable, never a guess.
+            match sym_eval(base, env, ctx)? {
+                Sym::Record { fields, .. } => fields
+                    .into_iter()
+                    .find(|(name, _)| name == field)
+                    .map(|(_, v)| SymFlow::Normal(v)),
+                _ => None,
+            }
+        }
+
+        IRNode::RecordLit { type_name, fields } => {
+            // Construction (Phase 76, D3a's IR half): fields
+            // evaluate in written order; a `Return` inside a
+            // field value unwinds the whole evaluation,
+            // exactly as inside a Collection. The stored type
+            // name is the RESOLVED declaration name when the
+            // index carries the module's declarations, so a
+            // constructed record compares equal to a
+            // parameter-bound one even when the literal was
+            // written through an alias.
+            let mut values = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                match sym_eval_flow(value, env, ctx)? {
+                    SymFlow::Returned(v) => return Some(SymFlow::Returned(v)),
+                    SymFlow::Normal(v) => values.push((name.clone(), v)),
+                }
+            }
+            let type_name = match ctx.index.record_fields(type_name) {
+                Some((resolved, _)) => resolved,
+                None => type_name.clone(),
+            };
+            Some(SymFlow::Normal(Sym::Record {
+                type_name,
+                fields: values,
+            }))
+        }
+
         IRNode::Typed { node, .. } => sym_eval_flow(node, env, ctx),
 
         // Everything below is outside the encodable subset,
@@ -539,13 +839,6 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<SymFl
         | IRNode::Fold { .. }
         | IRNode::Sort { .. }
         | IRNode::StructDef { .. }
-        // M1 features (Phase 73): the nodes exist, but the
-        // encoder has no record VALUE yet — Sym::Record and
-        // the FieldAccess projection land in Phase 76. Until
-        // then a body using them is unencodable, exactly like
-        // the rest of this list.
-        | IRNode::FieldAccess { .. }
-        | IRNode::RecordLit { .. }
         | IRNode::TryPropagate(_) => None,
     }
 }
@@ -558,9 +851,11 @@ fn sym_literal(lit: &IRLiteral) -> Option<Sym> {
         IRLiteral::String(s) => {
             Some(Sym::Str(z3::ast::String::from_str(s).ok()?))
         }
-        // Float, Char, Unit: no honest Z3 sort in this encoder.
-        IRLiteral::Float(_) | IRLiteral::Char(_) | IRLiteral::Unit => {
-            Some(Sym::Opaque)
+        // Float, Unit: no honest Z3 sort in this encoder.
+        // Char (Phase 76, D5a): its Unicode scalar value.
+        IRLiteral::Float(_) | IRLiteral::Unit => Some(Sym::Opaque),
+        IRLiteral::Char(c) => {
+            Some(Sym::Char(z3::ast::Int::from_i64(*c as u32 as i64)))
         }
     }
 }
@@ -658,10 +953,25 @@ fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
                 Err(_) => PatternCond::Undecidable,
             }
         }
+        // A Char scrutinee against a Char literal pattern:
+        // scalar equality (Phase 76). An indexed char
+        // (CharStr) compares as its one-char string.
+        (Sym::Char(a), IRLiteral::Char(c)) => {
+            PatternCond::Eq(a.eq(&z3::ast::Int::from_i64(*c as u32 as i64)))
+        }
+        (Sym::CharStr(a), IRLiteral::Char(c)) => {
+            match z3::ast::String::from_str(&c.to_string()) {
+                Ok(lit) => PatternCond::Eq(a.eq(&lit)),
+                Err(_) => PatternCond::Undecidable,
+            }
+        }
         // A list scrutinee has no literal patterns; an Opaque
         // scrutinee cannot be compared at all.
         (Sym::List(_), _) | (Sym::Opaque, _) => PatternCond::Undecidable,
-        // Remaining pairs are provably disjoint sorts.
+        // Remaining pairs are provably disjoint sorts —
+        // records, tagged values and list-lengths never equal
+        // a literal pattern, and a Char never equals an Int,
+        // Float, Bool or String literal.
         _ => PatternCond::Never,
     }
 }
@@ -680,6 +990,28 @@ fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv, ctx: &EvalCtx) ->
         }
         // The one pure builtin the specs and templates rely on.
         "len" if args.len() == 1 => sym_len(sym_eval(&args[0], env, ctx)?),
+        // The Result/Option constructors (Phase 76): they
+        // build the tag+payload forms. Exact arity, as in
+        // the interpreter's eval_call — a wrong-arity
+        // constructor call is unencodable, not inlined.
+        "Ok" if args.len() == 1 => Some(Sym::Result {
+            ok: Tag::True,
+            ok_payload: Some(Box::new(sym_eval(&args[0], env, ctx)?)),
+            err_payload: None,
+        }),
+        "Err" if args.len() == 1 => Some(Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(sym_eval(&args[0], env, ctx)?)),
+        }),
+        "Some" if args.len() == 1 => Some(Sym::Option {
+            some: Tag::True,
+            payload: Some(Box::new(sym_eval(&args[0], env, ctx)?)),
+        }),
+        "None" if args.is_empty() => Some(Sym::Option {
+            some: Tag::False,
+            payload: None,
+        }),
         // A call to another spec resolves by inlining the
         // callee's body (see sym_invoke); template-internal
         // pseudo-calls and unknown names resolve to nothing
@@ -699,7 +1031,28 @@ fn sym_len(v: Sym) -> Option<Sym> {
     match v {
         Sym::List(items) => Some(Sym::Int(z3::ast::Int::from_i64(items.len() as i64))),
         Sym::Str(s) => Some(Sym::Int(s.length())),
+        Sym::ListLen(n) => Some(Sym::Int(n)),
         _ => None,
+    }
+}
+
+/// Whether a Str term IS a string literal, and its value.
+/// `as_string()` alone does not answer this: measured on
+/// z3 0.20, it returns `Some("")` for a free constant and
+/// for a concatenation — only a genuine literal returns
+/// its own value. Z3 hash-conses literals, so a literal
+/// compares equal (AST identity) to a fresh build of its
+/// value, and nothing else does; that equality is the
+/// exact test. This is the fact the pure mirror tracks as
+/// `StrVal::Known`.
+#[cfg(feature = "z3-support")]
+fn str_literal(s: &z3::ast::String) -> Option<String> {
+    let value = s.as_string()?;
+    let rebuilt = z3::ast::String::from_str(&value).ok()?;
+    if *s == rebuilt {
+        Some(value)
+    } else {
+        None
     }
 }
 
@@ -718,20 +1071,46 @@ fn sym_index(coll: Sym, idx: Sym) -> Option<Sym> {
             items.into_iter().nth(n as usize)
         }
         (Sym::Str(s), Sym::Int(i)) => {
-            // A character of a literal string at a constant
-            // in-range index: a Char value (Opaque sort).
-            let n = i.as_i64()?;
-            if n < 0 {
-                return None;
+            // The String-index→Char bridge (Phase 76).
+            // CONSTANT index into a LITERAL string: exact —
+            // the character's scalar value, and an
+            // out-of-bounds index is unencodable, mirroring
+            // the interpreter's evaluation failure (no
+            // totalization where the value is known).
+            if let (Some(lit), Some(n)) = (str_literal(&s), i.as_i64()) {
+                if n < 0 {
+                    return None;
+                }
+                return lit
+                    .chars()
+                    .nth(n as usize)
+                    .map(|c| Sym::Char(z3::ast::Int::from_i64(c as u32 as i64)));
             }
-            let lit = s.as_string()?;
-            if lit.chars().nth(n as usize).is_some() {
-                Some(Sym::Opaque)
-            } else {
-                None
-            }
+            // The general case: `str.at` — the character as
+            // a length-≤1 string (Sym::CharStr; see its doc
+            // for the sound fragment and the named boundary).
+            Some(Sym::CharStr(s.at(i)))
         }
         _ => None,
+    }
+}
+
+/// Merge an Option/Result payload slot across an `ite`:
+/// a slot present on either side is observed only under
+/// the tag that side carries, so a one-sided payload is
+/// the merged payload; two present payloads merge by
+/// `sym_ite` (and can fail, failing the whole merge).
+#[cfg(feature = "z3-support")]
+fn sym_ite_payload(
+    cond: &z3::ast::Bool,
+    a: Option<Box<Sym>>,
+    b: Option<Box<Sym>>,
+) -> Option<Option<Box<Sym>>> {
+    match (a, b) {
+        (None, None) => Some(None),
+        (Some(x), None) => Some(Some(x)),
+        (None, Some(y)) => Some(Some(y)),
+        (Some(x), Some(y)) => sym_ite(cond, *x, *y).map(|v| Some(Box::new(v))),
     }
 }
 
@@ -741,7 +1120,67 @@ fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
         (Sym::Int(x), Sym::Int(y)) => Some(Sym::Int(cond.ite(&x, &y))),
         (Sym::Bool(x), Sym::Bool(y)) => Some(Sym::Bool(cond.ite(&x, &y))),
         (Sym::Str(x), Sym::Str(y)) => Some(Sym::Str(cond.ite(&x, &y))),
+        (Sym::Char(x), Sym::Char(y)) => Some(Sym::Char(cond.ite(&x, &y))),
+        (Sym::CharStr(x), Sym::CharStr(y)) => Some(Sym::CharStr(cond.ite(&x, &y))),
+        (Sym::ListLen(x), Sym::ListLen(y)) => Some(Sym::ListLen(cond.ite(&x, &y))),
         (Sym::Opaque, Sym::Opaque) => Some(Sym::Opaque),
+        (
+            Sym::Record {
+                type_name: ta,
+                fields: fa,
+            },
+            Sym::Record {
+                type_name: tb,
+                fields: fb,
+            },
+        ) => {
+            // Same declaration, same field set: merge
+            // fieldwise (in the left record's field order).
+            if ta != tb || fa.len() != fb.len() {
+                return None;
+            }
+            let mut merged = Vec::with_capacity(fa.len());
+            for (name, va) in fa {
+                let vb = fb
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| v.clone())?;
+                merged.push((name, sym_ite(cond, va, vb)?));
+            }
+            Some(Sym::Record {
+                type_name: ta,
+                fields: merged,
+            })
+        }
+        (
+            Sym::Option {
+                some: ta,
+                payload: pa,
+            },
+            Sym::Option {
+                some: tb,
+                payload: pb,
+            },
+        ) => Some(Sym::Option {
+            some: Tag::merge(cond, &ta, &tb),
+            payload: sym_ite_payload(cond, pa, pb)?,
+        }),
+        (
+            Sym::Result {
+                ok: ta,
+                ok_payload: oa,
+                err_payload: ea,
+            },
+            Sym::Result {
+                ok: tb,
+                ok_payload: ob,
+                err_payload: eb,
+            },
+        ) => Some(Sym::Result {
+            ok: Tag::merge(cond, &ta, &tb),
+            ok_payload: sym_ite_payload(cond, oa, ob)?,
+            err_payload: sym_ite_payload(cond, ea, eb)?,
+        }),
         _ => None,
     }
 }
@@ -819,7 +1258,275 @@ fn sym_binop(kind: BinKind, l: Sym, r: Sym) -> Option<Sym> {
             a.push(item);
             Some(Sym::List(a))
         }
+        // Char comparisons (Phase 76, D5a): scalar order on
+        // the Int sort. Arithmetic on Chars does not exist
+        // in the interpreter and stays unencodable.
+        (Eq, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.eq(&b))),
+        (Neq, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.eq(&b).not())),
+        (Lt, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.lt(&b))),
+        (Le, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.le(&b))),
+        (Gt, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.gt(&b))),
+        (Ge, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.ge(&b))),
+        // Indexed chars (the bridge's CharStr form): string
+        // equality/order over length-≤1 strings IS scalar
+        // equality/order (see Sym::CharStr). Against a
+        // CONSTANT Char the scalar converts to its one-char
+        // string; against a symbolic Char there is no
+        // conversion in the safe API — unencodable, the
+        // bridge's named boundary.
+        (Eq, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.eq(&b))),
+        (Neq, Sym::CharStr(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(a.eq(&b).not()))
+        }
+        (Lt, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.str_lt(&b))),
+        (Le, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.str_le(&b))),
+        (Gt, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.str_gt(&b))),
+        (Ge, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.str_ge(&b))),
+        (Eq, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.eq(&char_const_string(&b)?)))
+        }
+        (Neq, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.eq(&char_const_string(&b)?).not()))
+        }
+        (Lt, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.str_lt(&char_const_string(&b)?)))
+        }
+        (Le, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.str_le(&char_const_string(&b)?)))
+        }
+        (Gt, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.str_gt(&char_const_string(&b)?)))
+        }
+        (Ge, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.str_ge(&char_const_string(&b)?)))
+        }
+        (Eq, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.eq(&b)))
+        }
+        (Neq, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.eq(&b).not()))
+        }
+        (Lt, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.str_lt(&b)))
+        }
+        (Le, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.str_le(&b)))
+        }
+        (Gt, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.str_gt(&b)))
+        }
+        (Ge, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.str_ge(&b)))
+        }
+        // Record equality (Phase 76): fieldwise, by name —
+        // the interpreter's structural equality over
+        // Value::Record, with the type name part of it.
+        (
+            Eq,
+            Sym::Record {
+                type_name: an,
+                fields: af,
+            },
+            Sym::Record {
+                type_name: bn,
+                fields: bf,
+            },
+        ) => sym_record_eq(&an, &af, &bn, &bf).map(Sym::Bool),
+        (
+            Neq,
+            Sym::Record {
+                type_name: an,
+                fields: af,
+            },
+            Sym::Record {
+                type_name: bn,
+                fields: bf,
+            },
+        ) => sym_record_eq(&an, &af, &bn, &bf).map(|b| Sym::Bool(b.not())),
+        // Option / Result equality (Phase 76): tag logic
+        // plus the observed payload — see the helpers.
+        (
+            Eq,
+            Sym::Option {
+                some: at,
+                payload: ap,
+            },
+            Sym::Option {
+                some: bt,
+                payload: bp,
+            },
+        ) => sym_option_eq(&at, &ap, &bt, &bp).map(Sym::Bool),
+        (
+            Neq,
+            Sym::Option {
+                some: at,
+                payload: ap,
+            },
+            Sym::Option {
+                some: bt,
+                payload: bp,
+            },
+        ) => sym_option_eq(&at, &ap, &bt, &bp).map(|b| Sym::Bool(b.not())),
+        (
+            Eq,
+            Sym::Result {
+                ok: at,
+                ok_payload: ao,
+                err_payload: ae,
+            },
+            Sym::Result {
+                ok: bt,
+                ok_payload: bo,
+                err_payload: be,
+            },
+        ) => sym_result_eq(&at, &ao, &ae, &bt, &bo, &be).map(Sym::Bool),
+        (
+            Neq,
+            Sym::Result {
+                ok: at,
+                ok_payload: ao,
+                err_payload: ae,
+            },
+            Sym::Result {
+                ok: bt,
+                ok_payload: bo,
+                err_payload: be,
+            },
+        ) => sym_result_eq(&at, &ao, &ae, &bt, &bo, &be)
+            .map(|b| Sym::Bool(b.not())),
         _ => None,
+    }
+}
+
+/// The one-char string of a CONSTANT Char term, for the
+/// bridge's cross-representation comparisons. A symbolic
+/// Char term has no readable numeral (`as_i64` fails) and
+/// no string form in the safe API — None, which the caller
+/// turns into "unencodable" (the named boundary).
+#[cfg(feature = "z3-support")]
+fn char_const_string(c: &z3::ast::Int) -> Option<z3::ast::String> {
+    let n = c.as_i64()?;
+    let ch = char::from_u32(u32::try_from(n).ok()?)?;
+    z3::ast::String::from_str(&ch.to_string()).ok()
+}
+
+/// Equality of two symbolic values as a Bool term — the
+/// `Eq` row of `sym_binop`, unwrapped.
+#[cfg(feature = "z3-support")]
+fn sym_eq(l: Sym, r: Sym) -> Option<z3::ast::Bool> {
+    match sym_binop(BinKind::Eq, l, r)? {
+        Sym::Bool(b) => Some(b),
+        _ => None,
+    }
+}
+
+/// Record equality: records of different declared types
+/// are provably unequal (the interpreter's structural
+/// equality includes the type name — `Some(false)`, not
+/// unencodable); records of one type are equal iff every
+/// field is equal, compared BY NAME (written field order
+/// is not part of a value's identity here — the declared
+/// field set is). A field whose equality cannot encode
+/// makes the whole equality unencodable.
+#[cfg(feature = "z3-support")]
+fn sym_record_eq(
+    a_name: &str,
+    a_fields: &[(String, Sym)],
+    b_name: &str,
+    b_fields: &[(String, Sym)],
+) -> Option<z3::ast::Bool> {
+    if a_name != b_name {
+        return Some(z3::ast::Bool::from_bool(false));
+    }
+    if a_fields.len() != b_fields.len() {
+        return None; // one declared type, two field sets: malformed
+    }
+    let mut acc = z3::ast::Bool::from_bool(true);
+    for (name, va) in a_fields {
+        let vb = b_fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)?;
+        acc = z3::ast::Bool::and(&[&acc, &sym_eq(va.clone(), vb.clone())?]);
+    }
+    Some(acc)
+}
+
+/// Option equality. When either side is a literal `None`
+/// (tag `Tag::False`), equality is exactly tag equality —
+/// no payload term is needed, which is what lets
+/// `output == None()` judge a body whose payload sort has
+/// no equality. Otherwise both sides can be `Some`, both
+/// payloads are present (the Sym::Option invariant), and
+/// equality is tag equality plus payload equality under
+/// the tag.
+#[cfg(feature = "z3-support")]
+fn sym_option_eq(
+    a_some: &Tag,
+    a_pay: &Option<Box<Sym>>,
+    b_some: &Tag,
+    b_pay: &Option<Box<Sym>>,
+) -> Option<z3::ast::Bool> {
+    if *a_some == Tag::False || *b_some == Tag::False {
+        return Some(a_some.term().eq(&b_some.term()));
+    }
+    let pa = a_pay.as_ref()?;
+    let pb = b_pay.as_ref()?;
+    let pe = sym_eq((**pa).clone(), (**pb).clone())?;
+    let tags = a_some.term().eq(&b_some.term());
+    let under_tag = z3::ast::Bool::or(&[&a_some.term().not(), &pe]);
+    Some(z3::ast::Bool::and(&[&tags, &under_tag]))
+}
+
+/// Result equality, by tag case analysis: literal tags
+/// decide which payload slot (if any) is observed; two
+/// free tags need both slots' equalities. A payload slot
+/// that is absent where the case analysis observes it
+/// makes the equality unencodable (it cannot arise under
+/// the Sym::Result invariants from well-formed values).
+#[cfg(feature = "z3-support")]
+fn sym_result_eq(
+    a_ok: &Tag,
+    a_okp: &Option<Box<Sym>>,
+    a_errp: &Option<Box<Sym>>,
+    b_ok: &Tag,
+    b_okp: &Option<Box<Sym>>,
+    b_errp: &Option<Box<Sym>>,
+) -> Option<z3::ast::Bool> {
+    use z3::ast::Bool;
+    let slot = |x: &Option<Box<Sym>>, y: &Option<Box<Sym>>| -> Option<z3::ast::Bool> {
+        sym_eq((**x.as_ref()?).clone(), (**y.as_ref()?).clone())
+    };
+    match (a_ok, b_ok) {
+        (Tag::False, Tag::False) => slot(a_errp, b_errp),
+        (Tag::True, Tag::True) => slot(a_okp, b_okp),
+        (Tag::True, Tag::False) | (Tag::False, Tag::True) => {
+            Some(Bool::from_bool(false))
+        }
+        (Tag::True, Tag::Free(_)) => {
+            let e = slot(a_okp, b_okp)?;
+            Some(Bool::and(&[&b_ok.term(), &e]))
+        }
+        (Tag::Free(_), Tag::True) => {
+            let e = slot(a_okp, b_okp)?;
+            Some(Bool::and(&[&a_ok.term(), &e]))
+        }
+        (Tag::False, Tag::Free(_)) => {
+            let e = slot(a_errp, b_errp)?;
+            Some(Bool::and(&[&b_ok.term().not(), &e]))
+        }
+        (Tag::Free(_), Tag::False) => {
+            let e = slot(a_errp, b_errp)?;
+            Some(Bool::and(&[&a_ok.term().not(), &e]))
+        }
+        (Tag::Free(_), Tag::Free(_)) => {
+            let oe = slot(a_okp, b_okp)?;
+            let ee = slot(a_errp, b_errp)?;
+            let ta = a_ok.term();
+            let tb = b_ok.term();
+            let observed = Bool::or(&[
+                &Bool::and(&[&ta, &oe]),
+                &Bool::and(&[&ta.not(), &ee]),
+            ]);
+            Some(Bool::and(&[&ta.eq(&tb), &observed]))
+        }
     }
 }
 
@@ -963,10 +1670,10 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
         Expr::FloatLit(_) => Some(Sym::Opaque),
         Expr::BoolLit(b) => Some(Sym::Bool(z3::ast::Bool::from_bool(*b))),
         Expr::StringLit(s) => Some(Sym::Str(z3::ast::String::from_str(s).ok()?)),
-        // Char, like Float: no honest Z3 sort in this
-        // encoder — Opaque (bindable, not usable in an
-        // operation that needs a concrete sort).
-        Expr::CharLit(_) => Some(Sym::Opaque),
+        // Char (Phase 76, D5a): its Unicode scalar value on
+        // the Int sort — a literal is a genuine scalar, so
+        // no side condition is owed for it.
+        Expr::CharLit(c) => Some(Sym::Char(z3::ast::Int::from_i64(*c as u32 as i64))),
         Expr::BinOp(op, l, r) => {
             let kind = match op {
                 BinOp::Add => BinKind::Add,
@@ -1000,6 +1707,28 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 }
                 Some(Sym::List(values))
             }
+            // The Result/Option constructors (Phase 76),
+            // building the tag+payload forms — the same
+            // shapes sym_call builds on the body side, so a
+            // constraint's `Ok(...)` and a body's meet.
+            "Ok" if args.len() == 1 => Some(Sym::Result {
+                ok: Tag::True,
+                ok_payload: Some(Box::new(encode_expr(&args[0], env, ctx)?)),
+                err_payload: None,
+            }),
+            "Err" if args.len() == 1 => Some(Sym::Result {
+                ok: Tag::False,
+                ok_payload: None,
+                err_payload: Some(Box::new(encode_expr(&args[0], env, ctx)?)),
+            }),
+            "Some" if args.len() == 1 => Some(Sym::Option {
+                some: Tag::True,
+                payload: Some(Box::new(encode_expr(&args[0], env, ctx)?)),
+            }),
+            "None" if args.is_empty() => Some(Sym::Option {
+                some: Tag::False,
+                payload: None,
+            }),
             // A call to another spec resolves by inlining the
             // callee's body (see sym_invoke) — this arm is what
             // makes composition postconditions judgable at all;
@@ -1015,16 +1744,71 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
         Expr::Index(coll, idx) => {
             sym_index(encode_expr(coll, env, ctx)?, encode_expr(idx, env, ctx)?)
         }
-        // Field joins this list until Phase 76 (Sym::Record
-        // projection); the M1 forms (Phase 73) join it until
-        // their Phase 76 encodings land — MethodCall needs
-        // the Result/Option tag+payload form, RecordLit the
-        // record construction. Unencodable, never guessed.
-        Expr::Field(..)
-        | Expr::Lambda(..)
-        | Expr::Comprehension { .. }
-        | Expr::MethodCall { .. }
-        | Expr::RecordLit { .. } => None,
+        // Field projection (Phase 76, D2a): the base must
+        // encode to a record and the field must be among
+        // its fields — an unknown field or a non-record
+        // base is unencodable, never a guess.
+        Expr::Field(base, field) => match encode_expr(base, env, ctx)? {
+            Sym::Record { fields, .. } => fields
+                .into_iter()
+                .find(|(name, _)| name == field)
+                .map(|(_, v)| v),
+            _ => None,
+        },
+        // Record construction (Phase 76, D3a): the fields
+        // encode in written order; the stored type name is
+        // the resolved declaration name when the index
+        // carries declarations (see sym_eval's RecordLit).
+        Expr::RecordLit { type_name, fields } => {
+            let mut values = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                values.push((name.clone(), encode_expr(value, env, ctx)?));
+            }
+            let type_name = match ctx.index.record_fields(type_name) {
+                Some((resolved, _)) => resolved,
+                None => type_name.clone(),
+            };
+            Some(Sym::Record {
+                type_name,
+                fields: values,
+            })
+        }
+        // Method calls (Phase 76, D1a): the closed builtin
+        // table, encoded against the tag+payload forms.
+        // Every builtin is zero-argument; an argument, an
+        // unknown name, or a receiver of the wrong family
+        // is unencodable.
+        Expr::MethodCall {
+            receiver,
+            name,
+            args,
+        } => {
+            if !args.is_empty() {
+                return None;
+            }
+            let recv = encode_expr(receiver, env, ctx)?;
+            match (name.as_str(), recv) {
+                ("is_ok", Sym::Result { ok, .. }) => Some(Sym::Bool(ok.term())),
+                ("is_err", Sym::Result { ok, .. }) => {
+                    Some(Sym::Bool(ok.term().not()))
+                }
+                // unwrap projects the Ok payload. Its
+                // constraint uses are the guarded shapes
+                // (`is_err() || …unwrap()…`): on the Err
+                // branch the disjunction is already
+                // satisfied. When the receiver is a literal
+                // Err construction the payload slot is
+                // absent and there is nothing sound to
+                // project — unencodable, named here.
+                ("unwrap", Sym::Result { ok_payload, .. }) => {
+                    ok_payload.map(|p| *p)
+                }
+                ("len", v @ (Sym::List(_) | Sym::ListLen(_))) => sym_len(v),
+                _ => None,
+            }
+        }
+        // Lambda and comprehension have no encoding here.
+        Expr::Lambda(..) | Expr::Comprehension { .. } => None,
     }
 }
 
@@ -1062,7 +1846,7 @@ pub fn body_is_encodable_with(
     body: &IRNode,
     index: &SpecIndex,
 ) -> bool {
-    let mut env = param_env(spec);
+    let mut env = param_env(spec, index);
     sym_eval(body, &mut env, &EvalCtx::root(index)).is_some()
 }
 
@@ -1770,4 +2554,671 @@ mod tests {
             VerificationStatus::Inconclusive
         );
     }
+
+    // ── Phase 76 evidence: the restored tokenizer module ──
+    //
+    // The same restored module text the interpreter tests
+    // execute (eval.rs RESTORED_TOKENIZER_MODULE, Phase
+    // 75), judged here by the verifier with hand bodies
+    // transcribed from the hand-written mirror — the
+    // bodies Phase 75 executed. Per-spec verdicts are the
+    // phase's evidence table (the M1 gate re-run is Phase
+    // 80's): the classifiers and peek verify outright;
+    // skip_whitespace's identity body verifies;
+    // tokenize_all's weak postcondition verifies;
+    // tokenize_one's postconditions encode and REFUTE the
+    // partial bodies (no verifying body exists short of a
+    // real tokenizing loop); next_char's body encodes but
+    // its postconditions call peek, for which the resolver
+    // denotes no body — the named reason it stays
+    // Inconclusive.
+
+    const RESTORED_TOKENIZER_MODULE: &str = r#"
+ScratchTokenizer {
+
+type TokenKind = Int;
+
+type Token = {
+    kind: TokenKind,
+    lexeme: String,
+    line: Int,
+    col: Int
 }
+
+type TokenizerState = {
+    source: String,
+    pos: Int,
+    line: Int,
+    col: Int,
+    tokens: List<Token>
+}
+
+type StepResult = Result<TokenizerState, String>;
+
+spec peek {
+    input: state: TokenizerState
+    output: Option<Char>
+
+    constraint: state.pos<len(state.source)||output==None()
+    constraint: state.pos>=len(state.source)||output==Some(state.source[state.pos])
+
+    test "non-empty" { input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] } expect: Some('h') }
+    test "at-end" { input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] } expect: None() }
+}
+
+spec next_char {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos==state.pos+1
+    constraint: peek(state)!=Some('\n')||output.line==state.line+1
+    constraint: peek(state)!=Some('\n')||output.col==1
+    constraint: peek(state)==Some('\n')||output.col==state.col+1
+
+    test "normal" {
+        input: TokenizerState { source: "ab", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "ab", pos: 1, line: 1, col: 2, tokens: [] }
+    }
+}
+
+spec skip_whitespace {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos>=state.pos
+    constraint: len(output.source)==len(state.source)
+
+    test "no-whitespace" {
+        input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
+    }
+
+    test "skip-spaces" {
+        input: TokenizerState { source: "  hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "  hi", pos: 2, line: 1, col: 3, tokens: [] }
+    }
+}
+
+spec tokenize_one {
+    input: state: TokenizerState
+    output: StepResult
+
+    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+    constraint: output.is_ok() || state.pos >= len(state.source)
+
+    test "keyword-spec" {
+        input: TokenizerState { source: "spec", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok(TokenizerState { source: "spec", pos: 4, line: 1, col: 5, tokens: [
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 }
+        ] })
+    }
+
+    test "end-of-input" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok(TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] })
+    }
+}
+
+spec tokenize_all {
+    input: state: TokenizerState
+    output: Result<List<Token>, String>
+
+    constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
+    optimize: time < O(n)
+
+    test "simple-spec" {
+        input: TokenizerState { source: "spec sort", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 },
+            Token { kind: 0, lexeme: "sort", line: 1, col: 6 }
+        ])
+    }
+
+    test "empty" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([])
+    }
+}
+
+}"#;
+
+    #[cfg(feature = "z3-support")]
+    fn load_restored_module() -> Spec {
+        let parsed = crate::spec::parser::parse(RESTORED_TOKENIZER_MODULE)
+            .expect("restored module parses");
+        crate::spec::typeck::check(parsed)
+            .expect("restored module typechecks")
+            .spec
+    }
+
+    #[cfg(feature = "z3-support")]
+    fn restored_spec<'m>(module: &'m Spec, name: &str) -> &'m FunctionSpec {
+        module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("restored module has spec {}", name))
+    }
+
+    /// The hand-written mirror's peek, as an IR body (the
+    /// same transcription eval.rs executes in Phase 75).
+    #[cfg(feature = "z3-support")]
+    fn peek_mirror_body() -> IRNode {
+        IRNode::If {
+            condition: Box::new(IRNode::BinOp(
+                IRBinOp::Lt,
+                Box::new(IRNode::FieldAccess {
+                    base: Box::new(IRNode::Var("state".into())),
+                    field: "pos".into(),
+                }),
+                Box::new(IRNode::Call {
+                    function: "len".into(),
+                    args: vec![IRNode::FieldAccess {
+                        base: Box::new(IRNode::Var("state".into())),
+                        field: "source".into(),
+                    }],
+                }),
+            )),
+            then_branch: Box::new(IRNode::Call {
+                function: "Some".into(),
+                args: vec![IRNode::Index(
+                    Box::new(IRNode::FieldAccess {
+                        base: Box::new(IRNode::Var("state".into())),
+                        field: "source".into(),
+                    }),
+                    Box::new(IRNode::FieldAccess {
+                        base: Box::new(IRNode::Var("state".into())),
+                        field: "pos".into(),
+                    }),
+                )],
+            }),
+            else_branch: Box::new(IRNode::Call {
+                function: "None".into(),
+                args: vec![],
+            }),
+        }
+    }
+
+    /// The mirror's next_char, as an IR body (a RecordLit
+    /// over field projections — Phase 75's transcription).
+    #[cfg(feature = "z3-support")]
+    fn next_char_mirror_body() -> IRNode {
+        let field = |name: &str| IRNode::FieldAccess {
+            base: Box::new(IRNode::Var("state".into())),
+            field: name.into(),
+        };
+        IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), field("source")),
+                (
+                    "pos".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(field("pos")),
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                    ),
+                ),
+                ("line".into(), field("line")),
+                ("col".into(), field("col")),
+                ("tokens".into(), field("tokens")),
+            ],
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_classifiers_verify_and_wrong_bodies_refute() {
+        // The classifiers live in the standing examples
+        // module (the restored scratch declares only the
+        // five state specs) — same constraints, same
+        // resolver bodies.
+        let examples = {
+            let src = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/functional_tokenizer.morph"
+            ))
+            .expect("examples tokenizer reads");
+            let parsed = crate::spec::parser::parse(&src).expect("examples parses");
+            crate::spec::typeck::check(parsed)
+                .expect("examples typechecks")
+                .spec
+        };
+        let ex_index = SpecIndex::from_module(&examples);
+        let ex_verifier = Verifier::with_module(&examples);
+        for name in ["is_whitespace", "is_ident_start", "is_ident_continue"] {
+            let spec = restored_spec(&examples, name);
+            let exact = ex_index
+                .callee_body(name)
+                .unwrap_or_else(|| panic!("{}: resolver body", name));
+            let good = candidate(&spec, 76, exact);
+            assert_eq!(
+                ex_verifier.verify_one(&good, &spec).status,
+                VerificationStatus::Verified,
+                "{}: the classifier body must verify after D5a",
+                name
+            );
+            let wrong = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+            assert_eq!(
+                ex_verifier.verify_one(&wrong, &spec).status,
+                VerificationStatus::VerificationFailed,
+                "{}: the constant-true body must be refuted after D5a",
+                name
+            );
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_peek_mirror_body_is_verified() {
+        let module = load_restored_module();
+        let spec = restored_spec(&module, "peek");
+        let verifier = Verifier::with_module(&module);
+        let good = candidate(&spec, 76, peek_mirror_body());
+        assert_eq!(
+            verifier.verify_one(&good, &spec).status,
+            VerificationStatus::Verified,
+            "peek's mirror body must verify: record fields, the \
+             string-index bridge and Option equality all encode"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_next_char_body_encodes_but_peek_call_blocks_the_verdict() {
+        let module = load_restored_module();
+        let index = SpecIndex::from_module(&module);
+        let spec = restored_spec(&module, "next_char");
+        // The body itself is fully encodable now (RecordLit,
+        // FieldAccess, the bridge inside its line/col logic
+        // is constraint-side only).
+        assert!(
+            body_is_encodable_with(&spec, &next_char_mirror_body(), &index),
+            "next_char's mirror body must be encodable after Phase 76"
+        );
+        // But its postconditions call peek(state), and the
+        // resolver denotes NO body for peek (its
+        // postconditions are disjunctive guard rows over a
+        // computed Bool guard — neither an equation nor a
+        // key-indexed guard table), so the constraint side
+        // cannot inline the call: Inconclusive, for that
+        // named reason — a resolver gap, not an encoder gap.
+        assert!(
+            index.callee_body("peek").is_none(),
+            "the named blocker: no resolver body for peek"
+        );
+        let verifier = Verifier::with_module(&module);
+        let cand = candidate(&spec, 76, next_char_mirror_body());
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Inconclusive,
+            "next_char stays Inconclusive until peek has a resolver body"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_skip_whitespace_and_tokenize_all_verify() {
+        let module = load_restored_module();
+        let verifier = Verifier::with_module(&module);
+        // skip_whitespace's two stated postconditions are
+        // pos-monotonicity and source-length preservation;
+        // the identity body satisfies both, provably.
+        let spec = restored_spec(&module, "skip_whitespace");
+        let identity = candidate(&spec, 76, IRNode::Var("state".into()));
+        assert_eq!(
+            verifier.verify_one(&identity, &spec).status,
+            VerificationStatus::Verified,
+            "skip_whitespace identity body must verify"
+        );
+        // tokenize_all's single postcondition is the weak
+        // length bound; Ok(state.tokens) satisfies it.
+        let spec = restored_spec(&module, "tokenize_all");
+        let body = IRNode::Call {
+            function: "Ok".into(),
+            args: vec![IRNode::FieldAccess {
+                base: Box::new(IRNode::Var("state".into())),
+                field: "tokens".into(),
+            }],
+        };
+        let cand = candidate(&spec, 76, body);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Verified,
+            "tokenize_all's Ok(state.tokens) body must verify"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_tokenize_one_constraints_encode_and_refute_partial_bodies() {
+        let module = load_restored_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "tokenize_one");
+        // Ok(state): the is_err/is_ok/unwrap/len machinery
+        // encodes, and the first postcondition REFUTES this
+        // body (the token list does not grow) — the
+        // constraints bite; no partial body verifies, and
+        // none exists short of a real tokenizing loop.
+        let ok_state = IRNode::Call {
+            function: "Ok".into(),
+            args: vec![IRNode::Var("state".into())],
+        };
+        assert!(
+            body_is_encodable_with(&spec, &ok_state, &index),
+            "the Ok(state) body must be encodable"
+        );
+        let cand = candidate(&spec, 76, ok_state);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "tokenize_one must refute Ok(state): tokens do not grow"
+        );
+        // Err(_): the second postcondition refutes it (an
+        // error is only licensed at end of input).
+        let err = IRNode::Call {
+            function: "Err".into(),
+            args: vec![IRNode::Literal(IRLiteral::String("boom".into()))],
+        };
+        let cand = candidate(&spec, 76, err);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "tokenize_one must refute an unconditional Err body"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_char_range_side_condition_is_decisive() {
+        // A Char parameter ranges over Unicode scalar
+        // values ONLY because verify_constraint asserts the
+        // range side-condition; without it both specs below
+        // would be refutable (by a surrogate / out-of-range
+        // "char"). The Int control proves the condition is
+        // Char-specific.
+        let src = r#"
+CharRangeProbe {
+
+spec within_unicode {
+    input: c: Char
+    output: Bool
+    constraint: output == (c <= '\u{10FFFF}')
+}
+
+spec not_a_surrogate {
+    input: c: Char
+    output: Bool
+    constraint: output == (c <= '\u{D7FF}' || c >= '\u{E000}')
+}
+
+spec int_control {
+    input: n: Int
+    output: Bool
+    constraint: output == (n <= 1114111)
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("probe typechecks")
+            .spec;
+        let verifier = Verifier::with_module(&module);
+        for name in ["within_unicode", "not_a_surrogate"] {
+            let spec = restored_spec(&module, name);
+            let cand = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+            assert_eq!(
+                verifier.verify_one(&cand, &spec).status,
+                VerificationStatus::Verified,
+                "{}: true must verify ONLY via the Char range side-condition",
+                name
+            );
+        }
+        let spec = restored_spec(&module, "int_control");
+        let cand = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "the Int control must be refuted: no side-condition leaks to Int"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_bridge_boundary_indexed_char_vs_char_param() {
+        // The bridge's named boundary: an indexed char
+        // compares against Char LITERALS (and other indexed
+        // chars), never against a symbolic Char parameter —
+        // the z3 0.20 public API has no string-to-code
+        // bridge between the sequence sort and the scalar
+        // sort.
+        let src = r#"
+BridgeProbe {
+
+spec idx_vs_param {
+    input: s: String, c: Char
+    output: Bool
+    constraint: output == (s[0] == c)
+}
+
+spec idx_vs_lit {
+    input: s: String
+    output: Bool
+    constraint: output == (s[0] == 'a')
+}
+
+spec any_output {
+    input: s: String
+    output: Bool
+    constraint: output == true
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("probe typechecks")
+            .spec;
+        let verifier = Verifier::with_module(&module);
+        // Boundary: the constraint itself is unencodable.
+        let spec = restored_spec(&module, "idx_vs_param");
+        let cand = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Inconclusive,
+            "indexed char vs Char parameter is the named bridge boundary"
+        );
+        // Inside the fragment: the same comparison against
+        // a literal verifies with the mirror body.
+        let spec = restored_spec(&module, "idx_vs_lit");
+        let body = IRNode::BinOp(
+            IRBinOp::Eq,
+            Box::new(IRNode::Index(
+                Box::new(IRNode::Var("s".into())),
+                Box::new(IRNode::Literal(IRLiteral::Int(0))),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::Char('a'))),
+        );
+        let cand = candidate(&spec, 76, body);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Verified,
+            "indexed char vs Char literal must verify"
+        );
+        // A constant index into a literal string is EXACT:
+        // in-bounds yields the real scalar (verified
+        // against the true constraint); out-of-bounds is
+        // unencodable, never totalized.
+        let spec = restored_spec(&module, "any_output");
+        let exact = IRNode::BinOp(
+            IRBinOp::Eq,
+            Box::new(IRNode::Index(
+                Box::new(IRNode::Literal(IRLiteral::String("ab".into()))),
+                Box::new(IRNode::Literal(IRLiteral::Int(1))),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::Char('b'))),
+        );
+        let cand = candidate(&spec, 76, exact);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Verified,
+            "constant index into a literal string is the exact scalar"
+        );
+        let oob = IRNode::BinOp(
+            IRBinOp::Eq,
+            Box::new(IRNode::Index(
+                Box::new(IRNode::Literal(IRLiteral::String("ab".into()))),
+                Box::new(IRNode::Literal(IRLiteral::Int(5))),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::Char('b'))),
+        );
+        let cand = candidate(&spec, 76, oob);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Inconclusive,
+            "constant out-of-bounds index is unencodable, not totalized"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_record_params_fields_and_literals_verify() {
+        let src = r#"
+RecordProbe {
+
+type P = { x: Int, y: Int }
+
+spec move_x {
+    input: p: P
+    output: P
+    constraint: output.x == p.x + 1
+    constraint: output.y == p.y
+}
+
+spec move_x_lit {
+    input: p: P
+    output: P
+    constraint: output == P { x: p.x + 1, y: p.y }
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("probe typechecks")
+            .spec;
+        let verifier = Verifier::with_module(&module);
+        let field = |name: &str| IRNode::FieldAccess {
+            base: Box::new(IRNode::Var("p".into())),
+            field: name.into(),
+        };
+        let good_body = IRNode::RecordLit {
+            type_name: "P".into(),
+            fields: vec![
+                (
+                    "x".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(field("x")),
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                    ),
+                ),
+                ("y".into(), field("y")),
+            ],
+        };
+        for name in ["move_x", "move_x_lit"] {
+            let spec = restored_spec(&module, name);
+            let cand = candidate(&spec, 76, good_body.clone());
+            assert_eq!(
+                verifier.verify_one(&cand, &spec).status,
+                VerificationStatus::Verified,
+                "{}: the RecordLit body must verify against the record parameter",
+                name
+            );
+        }
+        // The identity body violates both statements.
+        let spec = restored_spec(&module, "move_x");
+        let cand = candidate(&spec, 76, IRNode::Var("p".into()));
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "the identity body must be refuted"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_guarded_unwrap_verifies_and_literal_err_unwrap_is_unencodable() {
+        // The guarded shape the tokenizer uses: is_ok
+        // guards unwrap; the payload encodes and the
+        // postcondition decides.
+        let src = r#"
+UnwrapProbe {
+
+spec guarded {
+    input: r: Result<Int, String>
+    output: Bool
+    constraint: output == (r.is_err() || r.unwrap() == 3)
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("probe typechecks")
+            .spec;
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "guarded");
+        // Body: the constraint's own RHS as a candidate is
+        // judged through verify — instead judge two
+        // constructed Result values via a body that returns
+        // the guard expression itself is not expressible in
+        // IR (no MethodCall kind); use constant bodies:
+        // `true` is refuted (an Ok(4) input falsifies it),
+        // proving unwrap encoded rather than vanished.
+        let cand = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "constant true must be refuted: unwrap of Ok(4) is 4, not 3"
+        );
+        // unwrap of a literal Err construction has no Ok
+        // payload to denote: the constraint is unencodable
+        // (the named case), so the verdict is Inconclusive
+        // for every body.
+        let hand = FunctionSpec {
+            name: "unwrap_of_err".into(),
+            doc: None,
+            generics: vec![],
+            params: vec![],
+            return_type: TypeRef::Int,
+            preconditions: vec![],
+            postconditions: vec![Constraint::Expr(SpecExpr::BinOp(
+                SpecBinOp::Eq,
+                Box::new(SpecExpr::Var("output".into())),
+                Box::new(SpecExpr::MethodCall {
+                    receiver: Box::new(SpecExpr::Call(
+                        "Err".into(),
+                        vec![SpecExpr::StringLit("x".into())],
+                    )),
+                    name: "unwrap".into(),
+                    args: vec![],
+                }),
+            ))],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: Default::default(),
+        };
+        let cand = candidate(&hand, 76, IRNode::Literal(IRLiteral::Int(0)));
+        assert_eq!(
+            verifier.verify_one(&cand, &hand).status,
+            VerificationStatus::Inconclusive,
+            "unwrap of a literal Err is unencodable by construction"
+        );
+    }
+}
+

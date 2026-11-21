@@ -4439,6 +4439,22 @@ fn char_classifier_tree_leaves(node: &IRNode, param: &str) -> Option<usize> {
 /// untouched; the golden fixture and the resolver-visible
 /// body diff prove no prior spec's seed moved.
 ///
+/// ── Phase 76 addendum (D5a): the premise above is
+/// retired. Char now encodes as its Unicode scalar value,
+/// so every classifier tree this builder's validator
+/// accepts (||/&&/! over param-vs-CharLit comparisons) is
+/// encodable, and by the precedence below the equation
+/// family owns every one of them — this builder's
+/// territory is empty in practice, and the classifiers'
+/// seeds are equation seeds with Z3 verdicts (Verified),
+/// their executed agreement re-measured as a cross-check.
+/// The builder and its precedence stay in place as the
+/// recorded fallback: it would admit exactly a classifier
+/// tree the equation family still cannot encode, should
+/// the encoder's Char fragment ever narrow again. The
+/// family's separate existence is now a historical record
+/// of the pre-D5a admission standard, not a live one.
+///
 /// Territory disjointness is by construction, on two
 /// independent discriminators. The signature — exactly
 /// one parameter, of type Char, with a Bool return — is
@@ -5011,6 +5027,13 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 8;
 #[derive(Debug, Clone, Default)]
 pub struct SpecIndex {
     by_name: HashMap<String, FunctionSpec>,
+    /// The module's type declarations, by name — carried
+    /// only when the index is built from a whole module
+    /// (`from_module`); `from_specs` leaves it empty, and
+    /// consumers that need declarations (the verifier's
+    /// record binding, Phase 76) degrade honestly to their
+    /// pre-declaration behavior when it is.
+    types: HashMap<String, TypeDef>,
 }
 
 impl SpecIndex {
@@ -5019,6 +5042,24 @@ impl SpecIndex {
             by_name: specs
                 .iter()
                 .map(|s| (s.name.clone(), s.clone()))
+                .collect(),
+            types: HashMap::new(),
+        }
+    }
+
+    /// An index over a whole parsed module: its specs AND
+    /// its type declarations.
+    pub fn from_module(module: &Spec) -> Self {
+        Self {
+            by_name: module
+                .functions
+                .iter()
+                .map(|s| (s.name.clone(), s.clone()))
+                .collect(),
+            types: module
+                .types
+                .iter()
+                .map(|t| (t.name.clone(), t.clone()))
                 .collect(),
         }
     }
@@ -5029,6 +5070,37 @@ impl SpecIndex {
 
     pub fn get(&self, name: &str) -> Option<&FunctionSpec> {
         self.by_name.get(name)
+    }
+
+    /// The declared fields of the record a name denotes,
+    /// following alias/newtype names to the declaration —
+    /// the typechecker's `declared_record_fields` reading,
+    /// as an Option: the resolved declaration's name and
+    /// its fields, or None when the name is undeclared,
+    /// cyclic, or not a record. Needs the declarations
+    /// (`from_module`); a `from_specs` index answers None.
+    pub fn record_fields(
+        &self,
+        name: &str,
+    ) -> Option<(String, Vec<(String, TypeRef)>)> {
+        let mut current = name;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let td = self.types.get(current)?;
+            match &td.kind {
+                TypeKind::Record { fields } => {
+                    return Some((td.name.clone(), fields.clone()));
+                }
+                TypeKind::Alias(TypeRef::Named(next))
+                | TypeKind::Newtype(TypeRef::Named(next)) => {
+                    if !seen.insert(current.to_string()) {
+                        return None;
+                    }
+                    current = next;
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// The body a call to `name` denotes: the callee's first
@@ -5574,15 +5646,16 @@ pub(crate) fn expr_to_ir(expr: &Expr) -> IRNode {
                 .map(|(name, value)| (name.clone(), expr_to_ir(value)))
                 .collect(),
         },
-        // MethodCall lowering is DEFERRED, deliberately: the
-        // IR kind table has no method-call kind (the audit's
-        // section 4 appends only FieldAccess/RecordLit), and
-        // method semantics land where the node is consumed —
-        // the typechecker's D1a builtin table (Phase 74) and
+        // MethodCall lowering is the Hole, by design
+        // (re-pinned in Phase 76): the IR kind table has no
+        // method-call kind (the audit's section 4 appends
+        // only FieldAccess/RecordLit), and method semantics
+        // land where the node is consumed — the
+        // typechecker's D1a builtin table (Phase 74) and
         // the Z3 encoder's Result/Option forms (Phase 76),
-        // both of which work on the spec Expr directly. Until
-        // an IR consumer exists this arm is the Hole, pinned
-        // by expr_to_ir_method_call_lowers_to_hole_pending_74_76.
+        // both of which work on the spec Expr directly.
+        // Pinned by
+        // expr_to_ir_method_call_lowers_to_hole_no_ir_kind.
         Expr::MethodCall { .. } => IRNode::Hole { id: 0, expected_type: None },
         _ => IRNode::Hole { id: 0, expected_type: None },
     }
@@ -7284,7 +7357,12 @@ spec exclaim {
     // char_equation_diagnosis_why_the_eight_families_refuse
     // below (every assertion in it holds before AND after
     // this phase — it documents the other families, which do
-    // not change):
+    // not change): [Phase 76: this framing is superseded —
+    // the test is re-stated as
+    // d5a_diagnosis_equation_family_now_admits_classifiers,
+    // and the equation bullet below is the pre-D5a record;
+    // see the Phase 76 re-statement at the end of this
+    // section.]
     //
     //  - equation: the shape MATCHES — equation_rhs converts
     //    each postcondition (CharLit → IR Char literal,
@@ -7355,6 +7433,28 @@ spec exclaim {
     // through. The body is the postcondition's own
     // right-hand side with spec calls inlined — the
     // equation family's body, verbatim.
+    //
+    // ── Phase 76 re-statement (D5a landed): the Char
+    // scalar encoding retires this family's premise. The
+    // three classifiers' bodies are now encodable, so the
+    // equation family's admission gate opens for them and
+    // — by char_equation's own precedence rule — the
+    // equation family owns them: their seeds are kind
+    // "equation", and Z3's verdict on them is Verified,
+    // not Inconclusive-by-construction. Every tree
+    // char_classifier_tree_leaves accepts is a Bool tree
+    // over param-vs-CharLit comparisons, all encodable
+    // under D5a, so char_equation's territory is empty in
+    // practice; the builder remains as the recorded
+    // fallback for a classifier tree the equation family
+    // cannot encode. The tests below were re-stated
+    // accordingly (the diagnosis's encodability assertions
+    // flipped; the seed-kind and verdict assertions moved
+    // to the equation family; the 774/774 executed
+    // agreement re-measured on the verified seed as a
+    // cross-check, per the audit's D5a terms — re-measured,
+    // not assumed carried). The seven row/key families'
+    // filter refusals are unchanged and still pinned.
 
     fn load_tokenizer_module() -> Vec<FunctionSpec> {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -7386,15 +7486,17 @@ spec exclaim {
         }
     }
 
-    /// The diagnosis, as measured (see the section comment):
-    /// for each classifier, the equation shape converts and
-    /// inlines, the encodability gate is the equation
-    /// family's refusal point, and every other family's raw
-    /// builder refuses on its stated filter. These facts are
-    /// about the OTHER families and hold after this phase
-    /// exactly as before it.
+    /// The diagnosis, as measured (see the section
+    /// comment). Phase 76 (D5a) flipped exactly one half of
+    /// it: the equation family's refusal point is GONE —
+    /// the classifier bodies now encode (Char is a scalar
+    /// sort), the equation family admits them, and
+    /// char_equation's precedence rule therefore leaves it
+    /// nothing. The seven row/key families' refusals are
+    /// the Phase 49 facts, unchanged: they refuse on their
+    /// stated filters, not on encodability.
     #[test]
-    fn char_equation_diagnosis_why_the_eight_families_refuse() {
+    fn d5a_diagnosis_equation_family_now_admits_classifiers() {
         let module = load_tokenizer_module();
         let index = SpecIndex::from_specs(&module);
         for name in ["is_whitespace", "is_ident_start", "is_ident_continue"] {
@@ -7405,17 +7507,24 @@ spec exclaim {
             let inlined = index
                 .inline_calls(&raw)
                 .unwrap_or_else(|| panic!("{}: calls must resolve", name));
-            // The refusal is the Z3-encodability gate:
-            // Char is Opaque, comparisons over Opaque do
-            // not encode.
+            // D5a: the body is encodable now — Char binds
+            // as its scalar value and Char comparisons
+            // encode (the Phase 49 gate is retired).
             assert!(
-                !crate::verify::verifier::body_is_encodable_with(&spec, &inlined, &index),
-                "{}: classifier body must be unencodable (Char is Opaque)",
+                crate::verify::verifier::body_is_encodable_with(&spec, &inlined, &index),
+                "{}: classifier body must be encodable after D5a",
                 name
             );
             assert!(
-                equation_seed_body(&spec, &index).is_none(),
-                "{}: equation family must refuse at the encodability gate",
+                equation_seed_body(&spec, &index).is_some(),
+                "{}: equation family must admit at its (now open) gate",
+                name
+            );
+            // char_equation's precedence leaves it nothing:
+            // the equation family owns every classifier tree.
+            assert!(
+                char_equation_seed_body(&spec, &index).is_none(),
+                "{}: char_equation must yield to the equation family",
                 name
             );
             // Every other family refuses on its stated
@@ -7443,16 +7552,16 @@ spec exclaim {
         }
     }
 
-    /// The three classifiers each gain exactly one seed,
-    /// of kind char_equation, whose body is the
-    /// postcondition's own right-hand side (calls inlined).
-    /// Z3's verdict on the seed is Inconclusive — Char is
-    /// Opaque, so the verifier cannot judge it; that is the
-    /// family's recorded admission standard, not a defect:
-    /// the evidence for these seeds is executed agreement
-    /// (next test), never a proof.
+    /// The three classifiers each gain exactly one seed —
+    /// since Phase 76 (D5a), of kind equation: the
+    /// postcondition's own right-hand side (calls inlined),
+    /// admitted at the equation family's Z3 gate and
+    /// Verified by it. (Phase 49's form of this test pinned
+    /// the char_equation kind and an Inconclusive verdict —
+    /// the pre-D5a admission standard, retired; see the
+    /// section comment.)
     #[test]
-    fn char_equation_seed_for_tokenizer_classifiers() {
+    fn equation_seed_for_tokenizer_classifiers_is_verified() {
         let module = load_tokenizer_module();
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
         for name in ["is_whitespace", "is_ident_start", "is_ident_continue"] {
@@ -7461,16 +7570,45 @@ spec exclaim {
             assert_eq!(
                 seeds.len(),
                 1,
-                "{}: exactly the char_equation seed",
+                "{}: exactly the equation seed",
                 name
             );
-            let seed = constraint_seed(&engine, &spec, "char_equation");
+            assert!(
+                !seeds.iter().any(|c| matches!(
+                    &c.provenance,
+                    Provenance::ConstraintInduced { kind } if kind == "char_equation"
+                )),
+                "{}: no char_equation seed after D5a",
+                name
+            );
+            let seed = constraint_seed(&engine, &spec, "equation");
             assert_eq!(count_holes(&seed.body), 0, "{}: seed must be hole-free", name);
-            let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+            // Module-aware, as the pipeline judges:
+            // is_ident_continue's constraint calls
+            // is_ident_start, which only the module index
+            // can inline on the constraint side.
+            let result =
+                crate::verify::verifier::Verifier::with_specs(&module)
+                    .verify_one(&seed, &spec);
+            // The verdict is configuration-shaped, per the
+            // standing pattern: with Z3 the seed is proven;
+            // the no-Z3 build returns the honest
+            // Inconclusive (the playground contract) — the
+            // seed itself is admitted in both, because
+            // admission runs on the pure encodability
+            // predicate.
+            #[cfg(feature = "z3-support")]
+            assert_eq!(
+                result.status,
+                crate::verify::verifier::VerificationStatus::Verified,
+                "{}: Z3 must verify the classifier seed after D5a",
+                name
+            );
+            #[cfg(not(feature = "z3-support"))]
             assert_eq!(
                 result.status,
                 crate::verify::verifier::VerificationStatus::Inconclusive,
-                "{}: Z3 cannot judge a Char classifier (Opaque) — Inconclusive expected",
+                "{}: the no-Z3 build must stay honestly Inconclusive",
                 name
             );
         }
@@ -7479,7 +7617,7 @@ spec exclaim {
         let index = SpecIndex::from_specs(&module);
         for name in ["is_whitespace", "is_ident_start"] {
             let spec = tokenizer_spec(&module, name);
-            let seed = constraint_seed(&engine, &spec, "char_equation");
+            let seed = constraint_seed(&engine, &spec, "equation");
             assert_eq!(
                 format!("{:?}", seed.body),
                 format!("{:?}", index.callee_body(name).unwrap()),
@@ -7491,7 +7629,7 @@ spec exclaim {
         // tree — is_ident_start's disjunction substituted
         // for the call, the digit range appended.
         let spec = tokenizer_spec(&module, "is_ident_continue");
-        let seed = constraint_seed(&engine, &spec, "char_equation");
+        let seed = constraint_seed(&engine, &spec, "equation");
         let ch = |c: char| IRNode::Literal(IRLiteral::Char(c));
         let var = || IRNode::Var("c".to_string());
         let bin = |op: IRBinOp, l: IRNode, r: IRNode| {
@@ -7517,12 +7655,17 @@ spec exclaim {
         );
     }
 
-    /// The family's evidence standard: executed agreement
-    /// over the full 774-char battery. Each classifier's
-    /// seed, executed on the IR interpreter, agrees with
-    /// the hand mirror on every battery char.
+    /// Executed agreement over the full 774-char battery,
+    /// re-measured after D5a (the audit's terms: the
+    /// standing result is re-measured, not assumed
+    /// carried). The seed is now the equation family's and
+    /// carries a Z3 proof (previous test); this battery is
+    /// the cross-check that the VERIFIED body also agrees
+    /// with the hand mirror on every executed char — a
+    /// Verified claim contradicted here would be a
+    /// soundness bug, not a statistic.
     #[test]
-    fn char_equation_seed_executes_exactly_over_char_battery() {
+    fn equation_seed_executes_exactly_over_char_battery() {
         let module = load_tokenizer_module();
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
         let battery = phase49_char_battery();
@@ -7534,7 +7677,7 @@ spec exclaim {
         ];
         for (name, mirror) in mirrors {
             let spec = tokenizer_spec(&module, name);
-            let seed = constraint_seed(&engine, &spec, "char_equation");
+            let seed = constraint_seed(&engine, &spec, "equation");
             let agree = battery
                 .iter()
                 .filter(|&&c| eval_char_body(&seed.body, c) == mirror(c))
@@ -7552,9 +7695,13 @@ spec exclaim {
     /// Admitted synthetic shapes: the range conjunction
     /// (Phase 45's is_digit shape), literal-on-the-left
     /// leaves, != and ! connectives, and a call composition
-    /// whose callee is itself a classifier.
+    /// whose callee is itself a classifier. Phase 49 pinned
+    /// these as char_equation admissions; since Phase 76
+    /// (D5a) every one of them is encodable, so the
+    /// equation family admits them (same bodies, same
+    /// executed behavior) and char_equation admits nothing.
     #[test]
-    fn char_equation_admitted_shapes() {
+    fn classifier_shapes_admitted_by_equation_family() {
         // (a) Range conjunction over the param.
         let src = r#"
         T {
@@ -7567,7 +7714,7 @@ spec exclaim {
         "#;
         let module = crate::spec::parser::parse(src).unwrap().functions;
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
-        let seed = constraint_seed(&engine, &module[0], "char_equation");
+        let seed = constraint_seed(&engine, &module[0], "equation");
         assert!((0..=0x2FFu32)
             .filter_map(char::from_u32)
             .all(|c| eval_char_body(&seed.body, c) == c.is_ascii_digit()));
@@ -7585,7 +7732,7 @@ spec exclaim {
         "#;
         let module = crate::spec::parser::parse(src).unwrap().functions;
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
-        let seed = constraint_seed(&engine, &module[0], "char_equation");
+        let seed = constraint_seed(&engine, &module[0], "equation");
         assert!((0..=0x2FFu32).filter_map(char::from_u32).all(|c| {
             eval_char_body(&seed.body, c)
                 == (('a'..='z').contains(&c) && c != 'x' && c != 'm')
@@ -7610,7 +7757,7 @@ spec exclaim {
         let module = crate::spec::parser::parse(src).unwrap().functions;
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
         let caller = module.iter().find(|f| f.name == "is_vowel_or_digit").unwrap();
-        let seed = constraint_seed(&engine, caller, "char_equation");
+        let seed = constraint_seed(&engine, caller, "equation");
         assert!(
             !format!("{:?}", seed.body).contains("Call"),
             "caller seed must be fully inlined: {:?}",
@@ -12638,15 +12785,25 @@ spec exclaim {
     }
 
     #[test]
-    fn expr_to_ir_method_call_lowers_to_hole_pending_74_76() {
-        // DEFERRED, pinned: no IR kind exists for a method call
-        // (audit section 4). The typechecker resolves methods
-        // against the D1a table in Phase 74 and the Z3 encoder
-        // gains the Result/Option forms in Phase 76; both work
-        // on Expr::MethodCall directly. Until an IR consumer
-        // exists, the lowering is the Hole arm — recorded here
-        // so a future phase that adds the IR kind updates this
-        // test deliberately.
+    fn expr_to_ir_method_call_lowers_to_hole_no_ir_kind() {
+        // STANDING, re-pinned by Phase 76 (was
+        // `..._pending_74_76`): the deferral it named is
+        // complete — the typechecker resolves methods
+        // against the D1a table (Phase 74) and the Z3
+        // encoder encodes MethodCall on the spec Expr
+        // against the Result/Option tag+payload forms
+        // (Phase 76), as does the interpreter's
+        // value_of_expr (Phase 75). The lowering STILL
+        // produces the Hole, now as a design fact rather
+        // than a deferral: the IR kind table has no
+        // method-call kind (the audit's section 4 appended
+        // only FieldAccess/RecordLit, kinds 28/29), and
+        // every consumer of method semantics works on the
+        // spec Expr directly. A constraint-derived seed
+        // built from a method-call constraint therefore
+        // carries a hole where the call was — recorded
+        // here so a future phase that adds an IR
+        // method-call kind updates this test deliberately.
         let expr = Expr::MethodCall {
             receiver: Box::new(Expr::Var("output".into())),
             name: "is_err".into(),
@@ -12655,7 +12812,7 @@ spec exclaim {
         let ir = expr_to_ir(&expr);
         assert!(
             matches!(ir, IRNode::Hole { .. }),
-            "method call lowering is deferred to Phases 74/76, got {:?}",
+            "method call lowering is the Hole (no IR kind), got {:?}",
             ir
         );
     }
