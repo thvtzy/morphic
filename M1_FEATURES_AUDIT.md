@@ -710,3 +710,12 @@ new value forms, two new Z3 forms, and a bootstrap cascade.
 
 *End of audit. Decisions D1–D5 await the owner's letters; the phase
 briefs for 73–80 are written from this document once they land.*
+
+---
+
+**Ratified 2026-11-22.** The owner accepted all five recommendations:
+**D1a**, **D2a**, **D3a**, **D4a**, **D5a** (see §6 for the lettered
+options). The phase briefs for 73–80 are written from this document
+under those decisions; Phase 77's scoped Rust-emitter unfreeze still
+requires its own owner approval when that phase opens, in the
+Phase 29/39/55/62 form.
