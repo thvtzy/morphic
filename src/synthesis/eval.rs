@@ -468,12 +468,37 @@ pub fn value_of_expr(expr: &Expr) -> Option<Value> {
 
 /// Build the environment for one test: the test input value is
 /// bound to the spec's parameter(s). A single parameter takes
-/// the value directly; multiple parameters require the input
-/// to map to a List of exactly the parameter count (the spec
-/// syntax currently cannot bind tuple test inputs, so in
-/// practice multi-param specs have no mappable tests — see the
-/// dialect note in examples/self_host/validator.morph).
+/// the value directly; multiple parameters bind elementwise
+/// from either of the two multi-value input forms:
+///
+/// - a TUPLE input `(v1, v2, ...)` — the parser lowers it to
+///   `Call("__tuple__", [v1, v2, ...])` (parser.rs), and each
+///   element is mapped through `value_of_expr` on its own
+///   (Phase 53: before this, the tuple was mapped as ONE
+///   value, which always failed — "__tuple__" is not an
+///   evaluable function — so tuple tests never bound);
+/// - a whole input that maps to a List of exactly the
+///   parameter count.
+///
+/// A tuple whose arity differs from the parameter count, or
+/// with an element that cannot be mapped (a lambda for a
+/// fn-typed parameter — the evaluator has no function values;
+/// a nested tuple — there is no tuple Value), does not bind:
+/// the test is excluded, exactly as before.
 fn bind_test_env(params: &[Param], input: &Expr) -> Option<Env> {
+    // Tuple form: bind elementwise. Checked before the
+    // whole-value mapping, which cannot represent a tuple.
+    if params.len() >= 2 {
+        if let Expr::Call(name, parts) = input {
+            if name == "__tuple__" && parts.len() == params.len() {
+                let mut env = Env::new();
+                for (param, part) in params.iter().zip(parts.iter()) {
+                    env.insert(param.name.clone(), value_of_expr(part)?);
+                }
+                return Some(env);
+            }
+        }
+    }
     let value = value_of_expr(input)?;
     let mut env = Env::new();
     match params.len() {
@@ -509,6 +534,25 @@ pub struct TestRun {
     pub passed: usize,
 }
 
+/// How many of the spec's tests can be bound at all — input
+/// AND expected output mappable to evaluator values. Binding
+/// never looks at a candidate body, so this is a property of
+/// the spec's test encodings alone: it equals `evaluable` for
+/// every candidate. A spec whose count falls short of its
+/// test count has tests the interpreter cannot judge (the
+/// lambda-carrying tuple residue) — the trigger signal for
+/// the compiled-runner final scoring in synthesis::runner
+/// (Phase 58), which exists for exactly that residue.
+pub fn bindable_test_count(spec: &FunctionSpec) -> usize {
+    spec.tests
+        .iter()
+        .filter(|t| {
+            bind_test_env(&spec.params, &t.input).is_some()
+                && value_of_expr(&t.expected_output).is_some()
+        })
+        .count()
+}
+
 /// Execute `body` against every mappable test in `spec.tests`.
 pub fn run_spec_tests(body: &IRNode, spec: &FunctionSpec) -> TestRun {
     let mut run = TestRun { evaluable: 0, passed: 0 };
@@ -527,6 +571,35 @@ pub fn run_spec_tests(body: &IRNode, spec: &FunctionSpec) -> TestRun {
         }
     }
     run
+}
+
+/// How many of the spec's bindable tests produce a VALUE
+/// under `body` — `eval` returns Ok — regardless of whether
+/// the value matches the expected output. `run_spec_tests`
+/// deliberately does not draw this distinction (a body that
+/// cannot be evaluated fails the test, like a wrong body);
+/// this count exists for the runner's Phase 60 trigger
+/// extension (synthesis::runner), which must tell "the body
+/// evaluated and answered wrong" (valued > 0 — the
+/// interpreter's 0.0 is behavioral truth) from "the body
+/// cannot be evaluated at all" (valued == 0 while tests
+/// bind — the 0.0 is a coverage fact about the
+/// interpreter's subset, e.g. a For/Alloc/Assign scan body,
+/// and the compiled vehicle is the honest judge).
+pub fn valued_test_count(body: &IRNode, spec: &FunctionSpec) -> usize {
+    let mut valued = 0;
+    for test in &spec.tests {
+        let (Some(env), Some(_)) = (
+            bind_test_env(&spec.params, &test.input),
+            value_of_expr(&test.expected_output),
+        ) else {
+            continue;
+        };
+        if eval(body, &env).is_ok() {
+            valued += 1;
+        }
+    }
+    valued
 }
 
 #[cfg(test)]
@@ -916,6 +989,41 @@ mod tests {
         assert_eq!(run, TestRun { evaluable: 3, passed: 0 });
     }
 
+    /// Phase 60: `valued_test_count` separates "the body
+    /// evaluated and answered wrong" from "the body cannot
+    /// be evaluated at all" — the distinction
+    /// `run_spec_tests` deliberately does not draw (both
+    /// score 0 on the test). The runner's Phase 60 trigger
+    /// extension reads it: a candidate valued on ZERO
+    /// bindable tests is interpreter-unevaluable, so its 0.0
+    /// is a coverage fact, not a behavioral one.
+    #[test]
+    fn valued_test_count_distinguishes_wrong_from_unevaluable() {
+        let spec = is_literal_kind_spec();
+        // Evaluable and correct: valued everywhere.
+        let correct = binop(IRBinOp::Eq, var("kind"), int(0));
+        assert_eq!(valued_test_count(&correct, &spec), 3);
+        // Evaluable and wrong: still valued — it produced an
+        // answer on every test.
+        assert_eq!(valued_test_count(&boolean(false), &spec), 3);
+        // Unevaluable (unbound variable / hole / a loop body
+        // over the parameter): valued nowhere.
+        assert_eq!(valued_test_count(&var("result"), &spec), 0);
+        assert_eq!(
+            valued_test_count(&IRNode::Hole { id: 0, expected_type: None }, &spec),
+            0
+        );
+        let loop_body = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "acc".into(),
+                ty: crate::spec::ast::TypeRef::Int,
+                initial: Box::new(int(0)),
+            },
+            IRNode::Return(Box::new(var("acc"))),
+        ]);
+        assert_eq!(valued_test_count(&loop_body, &spec), 0);
+    }
+
     #[test]
     fn run_spec_tests_unmappable_test_is_excluded() {
         let mut spec = is_literal_kind_spec();
@@ -931,5 +1039,250 @@ mod tests {
         let correct = binop(IRBinOp::Eq, var("kind"), int(0));
         let run = run_spec_tests(&correct, &spec);
         assert_eq!(run, TestRun { evaluable: 3, passed: 3 });
+    }
+
+    // ── Tuple-form test inputs (Phase 53) ─────────────────
+    //
+    // The parser lowers a tuple input `(v1, v2, ...)` to
+    // Call("__tuple__", [v1, v2, ...]) (parser.rs) and a list
+    // literal to Call("List", [...]). Before the Phase 53 fix,
+    // bind_test_env mapped the input as ONE value; a
+    // "__tuple__" call is not an evaluable function, so every
+    // tuple test was excluded (evaluable == 0) and multi-param
+    // specs fell to evaluate_candidate's FALLBACK — tpr 1.0
+    // for EVERY candidate (the Phase 52 finding: sort's
+    // crowned winners were trivial bodies).
+
+    fn list_lit(items: &[i64]) -> Expr {
+        Expr::Call(
+            "List".into(),
+            items.iter().map(|n| Expr::IntLit(*n)).collect(),
+        )
+    }
+
+    fn tuple(parts: Vec<Expr>) -> Expr {
+        Expr::Call("__tuple__".into(), parts)
+    }
+
+    fn two_int_params() -> Vec<Param> {
+        ["a", "b"]
+            .iter()
+            .map(|name| Param {
+                name: name.to_string(),
+                ty: crate::spec::ast::TypeRef::Int,
+                annotations: Default::default(),
+            })
+            .collect()
+    }
+
+    fn test(input: Expr, expected_output: Expr) -> Test {
+        Test {
+            name: None,
+            input,
+            expected_output,
+            timeout_ms: None,
+            property: false,
+        }
+    }
+
+    #[test]
+    fn run_spec_tests_tuple_input_binds_elementwise() {
+        // (a: Int, b: Int) -> Int, tuple tests — including one
+        // composite element (1 + 2), which maps through the
+        // same value_of_expr path as a whole input.
+        let mut spec = dummy_spec_with(
+            "add_pair",
+            two_int_params(),
+            crate::spec::ast::TypeRef::Int,
+        );
+        spec.tests = vec![
+            test(
+                tuple(vec![Expr::IntLit(1), Expr::IntLit(2)]),
+                Expr::IntLit(3),
+            ),
+            test(
+                tuple(vec![Expr::IntLit(10), Expr::IntLit(5)]),
+                Expr::IntLit(15),
+            ),
+            test(
+                tuple(vec![Expr::IntLit(0), Expr::IntLit(0)]),
+                Expr::IntLit(0),
+            ),
+            test(
+                tuple(vec![
+                    Expr::BinOp(
+                        SpecBinOp::Add,
+                        Box::new(Expr::IntLit(1)),
+                        Box::new(Expr::IntLit(2)),
+                    ),
+                    Expr::IntLit(4),
+                ]),
+                Expr::IntLit(7),
+            ),
+        ];
+        // Correct: a + b passes all four.
+        let correct = binop(IRBinOp::Add, var("a"), var("b"));
+        let run = run_spec_tests(&correct, &spec);
+        assert_eq!(run, TestRun { evaluable: 4, passed: 4 });
+        // Trivial: returns the first parameter — passes only
+        // the (0, 0) test. Before the fix both bodies saw
+        // evaluable == 0 here (and tpr 1.0 via the FALLBACK).
+        let trivial = var("a");
+        let run = run_spec_tests(&trivial, &spec);
+        assert_eq!(run, TestRun { evaluable: 4, passed: 1 });
+    }
+
+    #[test]
+    fn run_spec_tests_tuple_with_list_element_binds() {
+        // Mirrors examples/self_host/count_matching.morph:
+        // (list: List<Int>, threshold: Int) with tuple tests
+        // whose first element is a list literal.
+        let mut spec = dummy_spec_with(
+            "count_matching_shape",
+            vec![
+                Param {
+                    name: "list".into(),
+                    ty: crate::spec::ast::TypeRef::List(Box::new(
+                        crate::spec::ast::TypeRef::Int,
+                    )),
+                    annotations: Default::default(),
+                },
+                Param {
+                    name: "threshold".into(),
+                    ty: crate::spec::ast::TypeRef::Int,
+                    annotations: Default::default(),
+                },
+            ],
+            crate::spec::ast::TypeRef::Int,
+        );
+        spec.tests = vec![
+            test(tuple(vec![list_lit(&[10, 20, 30]), Expr::IntLit(5)]), Expr::IntLit(3)),
+            test(tuple(vec![list_lit(&[1, 2, 3]), Expr::IntLit(5)]), Expr::IntLit(0)),
+            test(tuple(vec![list_lit(&[1, 10, 2, 20]), Expr::IntLit(5)]), Expr::IntLit(2)),
+        ];
+        // The bindings are exactly the element values.
+        let env = bind_test_env(&spec.params, &spec.tests[0].input)
+            .expect("tuple input with a list element must bind");
+        assert_eq!(
+            env.get("list"),
+            Some(&Value::List(vec![Value::Int(10), Value::Int(20), Value::Int(30)]))
+        );
+        assert_eq!(env.get("threshold"), Some(&Value::Int(5)));
+        // len(list) passes exactly the first test; the constant
+        // 0 passes exactly the second. The point: all three
+        // tests now COUNT (evaluable 3, was 0) and the counts
+        // are the bodies' real pass counts.
+        let len_body = IRNode::UnaryOp(IRUnaryOp::Len, Box::new(var("list")));
+        let run = run_spec_tests(&len_body, &spec);
+        assert_eq!(run, TestRun { evaluable: 3, passed: 1 });
+        let run = run_spec_tests(&int(0), &spec);
+        assert_eq!(run, TestRun { evaluable: 3, passed: 1 });
+    }
+
+    #[test]
+    fn run_spec_tests_tuple_with_lambda_element_stays_excluded() {
+        // sort.morph's shape: (list, cmp) where cmp's test
+        // value is a lambda. The evaluator has no function
+        // values, so the element cannot be mapped and the test
+        // stays excluded — the FALLBACK's remaining legitimate
+        // domain, unchanged by the tuple fix.
+        let mut spec = dummy_spec_with(
+            "sort_shape",
+            vec![
+                Param {
+                    name: "list".into(),
+                    ty: crate::spec::ast::TypeRef::List(Box::new(
+                        crate::spec::ast::TypeRef::Int,
+                    )),
+                    annotations: Default::default(),
+                },
+                Param {
+                    name: "cmp".into(),
+                    ty: crate::spec::ast::TypeRef::Function(
+                        vec![
+                            crate::spec::ast::TypeRef::Int,
+                            crate::spec::ast::TypeRef::Int,
+                        ],
+                        Box::new(crate::spec::ast::TypeRef::Bool),
+                    ),
+                    annotations: Default::default(),
+                },
+            ],
+            crate::spec::ast::TypeRef::List(Box::new(crate::spec::ast::TypeRef::Int)),
+        );
+        let lambda = Expr::Lambda(
+            vec![
+                ("a".into(), crate::spec::ast::TypeRef::Named("_".into())),
+                ("b".into(), crate::spec::ast::TypeRef::Named("_".into())),
+            ],
+            Box::new(Expr::BinOp(
+                SpecBinOp::Lt,
+                Box::new(Expr::Var("a".into())),
+                Box::new(Expr::Var("b".into())),
+            )),
+        );
+        spec.tests = vec![test(
+            tuple(vec![list_lit(&[3, 1, 2]), lambda]),
+            list_lit(&[1, 2, 3]),
+        )];
+        let run = run_spec_tests(&var("list"), &spec);
+        assert_eq!(run, TestRun { evaluable: 0, passed: 0 });
+    }
+
+    #[test]
+    fn run_spec_tests_tuple_arity_mismatch_stays_excluded() {
+        // A tuple whose arity differs from the parameter count
+        // does not bind (it never bound before the fix either).
+        let mut spec = dummy_spec_with(
+            "add_pair",
+            two_int_params(),
+            crate::spec::ast::TypeRef::Int,
+        );
+        spec.tests = vec![test(
+            tuple(vec![Expr::IntLit(1), Expr::IntLit(2), Expr::IntLit(3)]),
+            Expr::IntLit(6),
+        )];
+        let correct = binop(IRBinOp::Add, var("a"), var("b"));
+        let run = run_spec_tests(&correct, &spec);
+        assert_eq!(run, TestRun { evaluable: 0, passed: 0 });
+    }
+
+    #[test]
+    fn run_spec_tests_nested_tuple_stays_excluded() {
+        // ((1, 2), 3) for a 2-param spec: the inner tuple is an
+        // element, and elements map through value_of_expr,
+        // which has no tuple value — the test stays excluded.
+        // (No repo spec uses this shape; recorded, not handled.)
+        let mut spec = dummy_spec_with(
+            "add_pair",
+            two_int_params(),
+            crate::spec::ast::TypeRef::Int,
+        );
+        spec.tests = vec![test(
+            tuple(vec![
+                tuple(vec![Expr::IntLit(1), Expr::IntLit(2)]),
+                Expr::IntLit(3),
+            ]),
+            Expr::IntLit(6),
+        )];
+        let correct = binop(IRBinOp::Add, var("a"), var("b"));
+        let run = run_spec_tests(&correct, &spec);
+        assert_eq!(run, TestRun { evaluable: 0, passed: 0 });
+    }
+
+    #[test]
+    fn run_spec_tests_list_form_multi_param_binding_unchanged() {
+        // The pre-existing multi-param arm, pinned: the input
+        // as a whole evaluates to a List of exactly the
+        // parameter count and binds elementwise from the List.
+        let mut spec = dummy_spec_with(
+            "add_pair",
+            two_int_params(),
+            crate::spec::ast::TypeRef::Int,
+        );
+        spec.tests = vec![test(list_lit(&[1, 2]), Expr::IntLit(3))];
+        let correct = binop(IRBinOp::Add, var("a"), var("b"));
+        let run = run_spec_tests(&correct, &spec);
+        assert_eq!(run, TestRun { evaluable: 1, passed: 1 });
     }
 }

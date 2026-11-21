@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/LLM-Ollama-purple?style=for-the-badge" alt="LLM: Ollama">
   <br>
   <a href="https://github.com/thvtzy/morphic/stargazers"><img src="https://img.shields.io/github/stars/thvtzy/morphic?style=for-the-badge&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-364%20passed-green?style=for-the-badge" alt="Tests: 364"></a>
+  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-410%20passed-green?style=for-the-badge" alt="Tests: 410"></a>
 </p>
 
 <p align="center">
@@ -260,21 +260,22 @@ morphic/
 | **[GUIDE.md](GUIDE.md)** | Beginner tutorial — from zero to first synthesized function |
 | **[LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md)** | Complete .morph language specification |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Full compiler pipeline + design decisions |
-| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 self-hosting roadmap — milestones M0–M5; M2, M3 and M4 gates closed 2026-11-20/21 |
+| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 self-hosting roadmap — milestones M0–M5; M2, M3, M4 and M5 gates closed 2026-11-20/21 |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to contribute + good first issues |
 
 ---
 
 ## 📍 Current Status — 2026-11-21
 
-v0.5 self-hosting: the **M2, M3 and M4 gates are all closed**, and the full stack (PRs #2–#5) is merged to master.
+v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 + tokenizer stack (PRs #2–#5) is merged to master; the M5 stack (Phases 50–64) stands on local branches, not yet pushed.
 
 - **M2 (validator + printer)** — closed 2026-11-20: Z3-verified winners **42/42**, 0 refuted, cross-validation **64/64 golden + 539/539 pinned**.
-- **M3 (codegen)** — closed 2026-11-21: all 112 Codegen specs specced and measured (110/112 constraint-seeded across nine seed families; verified winners 112/112; executed agreement **337/337 golden + 2962/2962 pinned**). The gate: winners composed through the proof assemblies produce **byte-identical output to the original emitter over a 2,527-case corpus**, and the synthesized 112-winner module compiles as a Rust library. Two scoped, owner-approved emitter unfreezes along the way (rendering trio; E0382 clone treatment); the spec language gained the `++` concat operator (F1) and char literals (F4).
-- **M4 (integration)** — closed 2026-11-21: the composed compiler (original pipeline + the M3 composed codegen) renders **every check-passing spec in the repo byte-identically** — 130/130 specs in two full runs, 138/138 after the tokenizer joined the corpus.
+- **M3 (codegen)** — closed 2026-11-21: all 117 Codegen specs specced and measured (114/117 constraint-seeded; verified winners 117/117; executed agreement **354/354 golden + 2997/2997 pinned** at the final re-derivation). The gate: winners composed through the proof assemblies produce **byte-identical output to the original emitter over a 2,573-case corpus** (re-derived as the specs were amended — real operator symbols and closure rendering in Phase 55, the Clone bound on generated signatures in Phase 62), and the synthesized module compiles as a Rust library. Two scoped, owner-approved emitter unfreezes along the way (rendering trio; E0382 clone treatment); the spec language gained the `++` concat operator (F1) and char literals (F4).
+- **M4 (integration)** — closed 2026-11-21: the composed compiler (original pipeline + the M3 composed codegen) renders **every check-passing spec in the repo byte-identically** — **143/143** at the final corpus re-derivation.
+- **M5 (bootstrap)** — closed 2026-11-21: the bootstrap binary is the original compiler with its Rust codegen stage replaced — behind the `bootstrap-codegen` Cargo feature — by the synthesized Codegen module itself (117 winners, checked in as a compiled artifact and called through a hand-written adapter; the original emitter is kept and reachable with the flag off). The synthesized stage is byte-identical to the original over both gate corpora; the flag-on binary synthesized a held-out component it was not built from (RustVisibility, Phase 63); the sort roundtrip is behaviorally correct on every measured draw in both configurations (the generation campaign G1–G3 + G6 and the Clone-bound decision closed it); and the SC3 render cost is recorded at **1.590× the original (≤ 2× threshold)** — measured in the debug profile, the release build being impossible in the measuring sandbox (recorded in the ROAD).
 - **Tokenizer (M1/S4)** — `functional_tokenizer.morph` re-authored into the accepted dialect (it passes `morphic check` for the first time) and measured: the three Char classifiers are **exact** (774/774 executed agreement via the `char_equation` seed family); the remaining specs are blocked on recorded structural gaps (no field access in the IR; method calls not yet in the spec language), so M1's formal gate stays open.
 
-**364 tests passing.** Next milestone: M5 (full bootstrap). Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
+**410 tests passing.** Recorded residue, itemized in the ROAD: binary_search's crowns still do not compile (i64 index typing — G5), is_sorted's correct template still cannot crown through interpreter judging (owner-reserved), the mutation stubs and GA/LLM decoupling (G7), and the open M1 formal gate. A v0.5 release/tag is a separate decision — the version badge stays v0.4.0. Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
 
 ---
 
@@ -286,7 +287,7 @@ v0.5 self-hosting: the **M2, M3 and M4 gates are all closed**, and the full stac
 | **0.2** | Z3 FFI: real formal verification (bundled binary) | ✅ Done |
 | **0.3** | LLM module: Ollama client + prompt + parser (local + remote) | ✅ Done |
 | **0.4** | Template library: 9 algorithmic patterns + spec shape detection | ✅ Done |
-| **0.5** | Self-hosting: Morphic compiler written in Morphic | 🔨 In progress — M0 ✅ · M2 ✅ · M3 ✅ · M4 ✅ gates closed · tokenizer measured · M5 next |
+| **0.5** | Self-hosting: Morphic compiler written in Morphic | ✅ Done — M0 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 ✅ gates closed · tokenizer measured (M1 formal gate open) |
 | **0.6** | WASM playground: Morphic in the browser | 📅 Planned |
 | **1.0** | Production-ready — verified standard library | 🎯 Target |
 

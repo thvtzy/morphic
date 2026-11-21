@@ -11,13 +11,36 @@ use crate::synthesis::engine::{CandidateImplementation, IRNode, IRLiteral, IRBin
 /// Generate source code from a verified candidate implementation
 pub fn generate(candidate: &CandidateImplementation, target: &str) -> Result<String, CodegenError> {
     match target {
-        "rust" => generate_rust(candidate),
+        "rust" => generate_rust_route(candidate),
         "c" => generate_c(candidate),
         "wasm" => generate_wasm(candidate),
         "python" => generate_python(candidate),
         "javascript" | "js" => generate_javascript(candidate),
         "ir" => Ok(debug_ir_string(&candidate.body, 0)),
         other => Err(CodegenError::UnsupportedTarget(other.into())),
+    }
+}
+
+/// The "rust" route of `generate` — the M5-S2 switch
+/// (Phase 52). With the Cargo feature `bootstrap-codegen`
+/// (owner decision D4, accepted 2026-11-21), the compiled
+/// synthesized adapter renders: that build IS the bootstrap
+/// binary of the M5 audit's definition (the original compiler
+/// with the synthesized Codegen module seated in the Rust
+/// emitter's place). Without the feature, the original
+/// `generate_rust` renders — byte-for-byte the pre-M5
+/// compiler. Every other route of `generate` is untouched in
+/// both configurations, and the original emitter stays in the
+/// tree in both (the ROAD anti-pattern rule: keep both,
+/// switch by feature flag).
+fn generate_rust_route(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
+    #[cfg(feature = "bootstrap-codegen")]
+    {
+        bootstrap_adapter::render_rust_synthesized(candidate)
+    }
+    #[cfg(not(feature = "bootstrap-codegen"))]
+    {
+        generate_rust(candidate)
     }
 }
 
@@ -63,6 +86,10 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
+// Kept-but-unselected under `bootstrap-codegen` (the M5-S2
+// switch routes around it there — the ROAD's keep-both
+// rule); the allow fires only in that configuration.
+#[cfg_attr(feature = "bootstrap-codegen", allow(dead_code))]
 fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
     let mut out = String::new();
 
@@ -75,12 +102,18 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
         out.push('\n');
     }
 
-    // Function signature
+    // Function signature. Every declared generic parameter
+    // carries a `: Clone` bound (Phase 62, owner decision
+    // (i)): the bound-free signature provably admits no
+    // element-reading construction (Phase 61 probe: E0507 /
+    // E0599 / E0631 by construction). The per-parameter
+    // text is specced (rust_generic_param_text in
+    // examples/self_host/codegen.morph).
     let generics = if candidate.spec.generics.is_empty() {
         String::new()
     } else {
         let g = candidate.spec.generics.iter()
-            .map(|gp| rust_ident(&gp.name))
+            .map(|gp| format!("{}: Clone", rust_ident(&gp.name)))
             .collect::<Vec<_>>()
             .join(", ");
         format!("<{}>", g)
@@ -92,7 +125,18 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
 
     let ret = ty_to_rust(&candidate.spec.return_type);
 
-    // Precondition asserts (debug-only)
+    // Function definition
+    out.push_str(&format!(
+        "pub fn {}{}({}) -> {} {{\n",
+        rust_ident(&candidate.spec.name), generics, params.join(", "), ret
+    ));
+
+    // Precondition asserts (debug-only), at the head of the
+    // function body (Phase 55): through Phase 54 this block
+    // was emitted before the signature as a free-standing
+    // module-level block, which no Rust file can parse; the
+    // block's text is unchanged, only its position moved
+    // (rust_file_text's equation states the order).
     if !candidate.spec.preconditions.is_empty() {
         out.push_str("#[cfg(debug_assertions)]\n");
         out.push_str("{\n");
@@ -102,12 +146,6 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
         }
         out.push_str("}\n\n");
     }
-
-    // Function definition
-    out.push_str(&format!(
-        "pub fn {}{}({}) -> {} {{\n",
-        rust_ident(&candidate.spec.name), generics, params.join(", "), ret
-    ));
 
     // Body — a tail position: its value is the function's return
     // value, so it is rendered with the tail renderer (the same
@@ -136,10 +174,29 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
             let test_name = test.name.clone().unwrap_or_else(|| format!("test_{}", i));
             out.push_str(&format!("    #[test]\n"));
             out.push_str(&format!("    fn {}() {{\n", rust_ident(&test_name)));
+            // A tuple test input whose arity equals the
+            // parameter count spreads its elements into the
+            // call positionally (rust_test_case's doc states
+            // the rule; the same arity rule Phase 53's
+            // evaluation binding uses). Every other input
+            // renders as a single expression.
+            let input_text = match &test.input {
+                Expr::Call(name, args)
+                    if name == "__tuple__"
+                        && args.len() == candidate.spec.params.len() =>
+                {
+                    args.iter()
+                        .map(expr_to_rust)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+                other => expr_to_rust(other),
+            };
             out.push_str(&format!(
-                "        let result = {}({});\n",
+                "        let result = {}{}({});\n",
                 rust_ident(&candidate.spec.name),
-                expr_to_rust(&test.input)
+                test_call_generics_text(&candidate.spec, test),
+                input_text
             ));
             out.push_str(&format!(
                 "        assert_eq!(result, {});\n",
@@ -152,6 +209,128 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
     }
 
     Ok(out)
+}
+
+/// The turbofish annotation for one generated test's call
+/// (Phase 61, campaign slice G6) — the `generics_text` the
+/// driver hands `rust_test_case` (its spec doc states the
+/// rule). The empty string for every test except the
+/// E0283 class: a generic spec with a function-typed
+/// parameter, where the test passes an empty collection
+/// literal for a `List<generic>` parameter and no other
+/// argument of the test pins the generic — without the
+/// annotation the empty collection leaves the element
+/// type unpinned against the unconstrained fn-typed
+/// signature and the generated test module does not
+/// compile (E0283; measured on sort in Phases 56/58/61).
+/// A generic is pinned by a scalar literal at a
+/// bare-generic parameter position, or by a scalar
+/// literal inside a non-empty list literal at a
+/// `List<generic>` position; a lambda never pins. The
+/// concrete type is derived from the spec's own test
+/// literals (the first scalar literal kind across the
+/// spec's tests — the G1 runner harness's derivation,
+/// `synthesis::runner` — defaulting to i64), repeated
+/// once per generic parameter. `pub(crate)`: the compiled
+/// bootstrap adapter (bootstrap_adapter) shares this
+/// driver rule; the proof assemblies carry their own
+/// copies, pinned by the gates.
+pub(crate) fn test_call_generics_text(spec: &FunctionSpec, test: &Test) -> String {
+    if spec.generics.is_empty() {
+        return String::new();
+    }
+    if !spec.params.iter().any(|p| matches!(p.ty, TypeRef::Function(..))) {
+        return String::new();
+    }
+    // Argument positions, under the same spread rule the
+    // call's input text follows (rust_test_case's doc).
+    let positions: Vec<(&Expr, &TypeRef)> = match &test.input {
+        Expr::Call(name, args) if name == "__tuple__" && args.len() == spec.params.len() => {
+            args.iter()
+                .zip(spec.params.iter().map(|p| &p.ty))
+                .collect()
+        }
+        other if spec.params.len() == 1 => vec![(other, &spec.params[0].ty)],
+        _ => return String::new(),
+    };
+    let generic_names: Vec<&str> = spec.generics.iter().map(|g| g.name.as_str()).collect();
+    // Does a type position denote the generic `g`? (The
+    // parser carries type parameters as Named; the AST's
+    // Generic form is the same fact in the other spelling.)
+    let is_generic = |t: &TypeRef, g: &str| -> bool {
+        matches!(t, TypeRef::Generic(n) | TypeRef::Named(n) if n == g)
+    };
+    let is_scalar_literal = |e: &Expr| -> bool {
+        matches!(
+            e,
+            Expr::IntLit(_)
+                | Expr::FloatLit(_)
+                | Expr::BoolLit(_)
+                | Expr::StringLit(_)
+                | Expr::CharLit(_)
+        )
+    };
+    let unpinned_empty = generic_names.iter().any(|g| {
+        let has_empty = positions.iter().any(|(e, t)| {
+            matches!(t, TypeRef::List(inner) if is_generic(inner, g))
+                && matches!(e, Expr::Call(n, a) if n == "List" && a.is_empty())
+        });
+        if !has_empty {
+            return false;
+        }
+        let pinned = positions.iter().any(|(e, t)| {
+            (is_generic(t, g) && is_scalar_literal(e))
+                || (matches!(t, TypeRef::List(inner) if is_generic(inner, g))
+                    && matches!(e, Expr::Call(n, a) if n == "List" && a.iter().any(|el| is_scalar_literal(el))))
+        });
+        !pinned
+    });
+    if !unpinned_empty {
+        return String::new();
+    }
+    let ty = concrete_type_for_spec(spec);
+    let types = vec![ty; spec.generics.len()].join(", ");
+    format!("::<{}>", types)
+}
+
+/// The concrete type the annotation pins a spec's
+/// generics to: the first scalar literal kind found in
+/// the spec's own tests (DFS over inputs, then expected
+/// outputs, test by test), defaulting to i64 — the G1
+/// runner harness's derivation (synthesis::runner's
+/// `concrete_type_for_spec`), carried here for the
+/// shipped rendering.
+fn concrete_type_for_spec(spec: &FunctionSpec) -> &'static str {
+    for test in &spec.tests {
+        if let Some(ty) = first_literal_type(&test.input) {
+            return ty;
+        }
+        if let Some(ty) = first_literal_type(&test.expected_output) {
+            return ty;
+        }
+    }
+    "i64"
+}
+
+fn first_literal_type(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::IntLit(_) => Some("i64"),
+        Expr::FloatLit(_) => Some("f64"),
+        Expr::BoolLit(_) => Some("bool"),
+        Expr::StringLit(_) => Some("String"),
+        Expr::CharLit(_) => Some("char"),
+        Expr::Var(_) => None,
+        Expr::Field(inner, _) => first_literal_type(inner),
+        Expr::Index(a, b) => first_literal_type(a).or_else(|| first_literal_type(b)),
+        Expr::Call(_, args) => args.iter().find_map(|a| first_literal_type(a)),
+        Expr::BinOp(_, l, r) => first_literal_type(l).or_else(|| first_literal_type(r)),
+        Expr::UnaryOp(_, e) => first_literal_type(e),
+        Expr::Lambda(_, body) => first_literal_type(body),
+        Expr::Length(e) => first_literal_type(e),
+        Expr::Comprehension {
+            collection, body, ..
+        } => first_literal_type(collection).or_else(|| first_literal_type(body)),
+    }
 }
 
 // ── C Codegen ─────────────────────────────────────────────
@@ -1361,17 +1540,41 @@ fn expr_to_rust(expr: &Expr) -> String {
         Expr::Var(name) => rust_ident(name),
         Expr::Call(name, args) => {
             let args_str: Vec<String> = args.iter().map(expr_to_rust).collect();
-            format!("{}({})", rust_ident(name), args_str.join(", "))
+            // The parser's pseudo-calls (rust_expr_call_form,
+            // Phase 55): the list literal renders as the vec
+            // literal, the tuple literal as a Rust tuple, and
+            // the zero-argument None as the bare constructor.
+            // Every other call keeps the plain call template.
+            match name.as_str() {
+                "List" => format!("vec![{}]", args_str.join(", ")),
+                "__tuple__" => format!("({})", args_str.join(", ")),
+                "None" => "None".to_string(),
+                _ => format!("{}({})", rust_ident(name), args_str.join(", ")),
+            }
         }
         Expr::BinOp(op, lhs, rhs) => {
             let rust_op = match op {
                 BinOp::Add => "+", BinOp::Sub => "-",
                 BinOp::Mul => "*", BinOp::Div => "/",
+                BinOp::Mod => "%",
                 BinOp::Eq => "==", BinOp::Neq => "!=",
                 BinOp::And => "&&", BinOp::Or => "||",
-                _ => "?",
+                BinOp::Lt => "<", BinOp::Le => "<=",
+                BinOp::Gt => ">", BinOp::Ge => ">=",
+                BinOp::Concat => "+",
             };
             format!("({} {} {})", expr_to_rust(lhs), rust_op, expr_to_rust(rhs))
+        }
+        // The closure template (rust_expr_lambda_text,
+        // Phase 55): parameter names only — the generated
+        // closure is unannotated, as in the IR walker's
+        // Lambda arm.
+        Expr::Lambda(params, body) => {
+            let names: Vec<String> = params
+                .iter()
+                .map(|(name, _)| rust_ident(name))
+                .collect();
+            format!("|{}| {}", names.join(", "), expr_to_rust(body))
         }
         _ => "??".into(),
     }
@@ -1423,6 +1626,65 @@ impl std::fmt::Display for CodegenError {
 impl std::error::Error for CodegenError {}
 
 // ── Tests ─────────────────────────────────────────────────
+
+/// The M5-S1 bootstrap artifact (Phase 51): the M3 Codegen
+/// module's 112 synthesized winners, checked in as a versioned
+/// file and compiled into the crate — the compiled codegen the
+/// bootstrap adapter calls. GENERATED FILE (its own header
+/// carries the regeneration command and provenance). Since
+/// M5-S2 (Phase 52) the adapter that calls it sits in
+/// `generate`'s "rust" route behind the `bootstrap-codegen`
+/// Cargo feature; with the feature off, no production path
+/// reaches this module.
+pub(crate) mod synthesized_codegen;
+
+/// The M5-S1 bootstrap adapter (Phase 51): the M3 gate's
+/// composed emitter transcribed from IR-interpreter calls to
+/// direct calls into `synthesized_codegen`'s compiled winner
+/// functions, plus the audit's 9-item shim inventory as
+/// ordinary Rust helpers. Since M5-S2 (Phase 52) it is wired
+/// into `generate`'s "rust" route behind the Cargo feature
+/// `bootstrap-codegen` (see `generate_rust_route`); with the
+/// feature off, the original emitter renders and this module
+/// is reached only from tests. (dead_code allowed: in a
+/// feature-off production build nothing calls it — the
+/// ROAD's keep-both rule.)
+#[allow(dead_code)]
+pub(crate) mod bootstrap_adapter;
+
+/// M5-S1 proof (Phase 51): the checked-in bootstrap artifact's
+/// byte-identity against a fresh gate-style extraction +
+/// render, and the compiled adapter's equivalence with the
+/// original emitter (and with the interpreter composition it
+/// transcribes) over the M3 gate corpus and the M4 whole-file
+/// corpus. Test-only; reuses the M3 gate's and M4 harness's
+/// machinery by reference.
+#[cfg(test)]
+mod m5_s1;
+
+/// M5-S2 (Phase 52): the feature-flag switch's routing,
+/// pinned in both configurations, and the M5 roundtrip in
+/// the Phase 50 audit's chosen form — (a) the extract-once
+/// byte comparison (one pipeline extraction per standalone
+/// file; that winner rendered by the original emitter and by
+/// the feature-on dispatch path, byte-compared) and (b) the
+/// process-level behavioral roundtrip (the binary built with
+/// and without `bootstrap-codegen`; each builds sort.morph
+/// repeatedly, every drawn winner function compiled and
+/// executed against sort's in-spec tests). Test-only.
+#[cfg(test)]
+mod m5_s2;
+
+/// M5-S4 (Phase 64): the SC3 recorded measurement for the M5
+/// gate — the codegen render (the only stage that differs
+/// between the configurations) timed for the original emitter
+/// vs the compiled adapter over the M3 gate corpus and the M4
+/// whole-file corpus, median of interleaved rounds, per the
+/// Phase 50 audit's design (item E) and owner decision D3
+/// (a recorded measurement with a mandatory baseline, not a
+/// hard gate item). Test-only.
+#[cfg(test)]
+mod m5_s4;
 
 /// The M3 gate harness (Phase 42): composes the Codegen
 /// module's 112 synthesized winners through the assembly
@@ -1499,6 +1761,183 @@ mod tests {
             timeout_ms: None,
             property: false,
         }
+    }
+
+    // ── Phase 61 (G6): the test-call turbofish rule ──────
+
+    fn generic_param(name: &str) -> crate::spec::ast::GenericParam {
+        crate::spec::ast::GenericParam {
+            name: name.into(),
+            bounds: vec![],
+        }
+    }
+
+    fn named(name: &str) -> TypeRef {
+        TypeRef::Named(name.into())
+    }
+
+    fn sort_shaped_spec() -> FunctionSpec {
+        FunctionSpec {
+            name: "sort".into(),
+            doc: None,
+            generics: vec![generic_param("T")],
+            params: vec![
+                Param {
+                    name: "list".into(),
+                    ty: TypeRef::List(Box::new(named("T"))),
+                    annotations: HashMap::new(),
+                },
+                Param {
+                    name: "cmp".into(),
+                    ty: TypeRef::Function(
+                        vec![named("T"), named("T")],
+                        Box::new(TypeRef::Bool),
+                    ),
+                    annotations: HashMap::new(),
+                },
+            ],
+            return_type: TypeRef::List(Box::new(named("T"))),
+            preconditions: vec![],
+            postconditions: vec![],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: HashMap::new(),
+        }
+    }
+
+    fn tuple_test(name: &str, args: Vec<Expr>, expected: Expr) -> Test {
+        Test {
+            name: Some(name.into()),
+            input: Expr::Call("__tuple__".into(), args),
+            expected_output: expected,
+            timeout_ms: None,
+            property: false,
+        }
+    }
+
+    fn lt_lambda() -> Expr {
+        Expr::Lambda(
+            vec![("a".into(), named("T")), ("b".into(), named("T"))],
+            Box::new(Expr::BinOp(
+                crate::spec::ast::BinOp::Lt,
+                Box::new(Expr::Var("a".into())),
+                Box::new(Expr::Var("b".into())),
+            )),
+        )
+    }
+
+    fn list_lit(elems: Vec<Expr>) -> Expr {
+        Expr::Call("List".into(), elems)
+    }
+
+    #[test]
+    fn generics_text_annotates_only_the_unpinned_empty_collection_test() {
+        let mut spec = sort_shaped_spec();
+        let empty = tuple_test(
+            "empty",
+            vec![list_lit(vec![]), lt_lambda()],
+            list_lit(vec![]),
+        );
+        let single = tuple_test(
+            "single",
+            vec![list_lit(vec![Expr::IntLit(5)]), lt_lambda()],
+            list_lit(vec![Expr::IntLit(5)]),
+        );
+        spec.tests = vec![empty.clone(), single.clone()];
+        // The empty list leaves T unpinned (the lambda
+        // cannot pin it): annotate, with the concrete type
+        // derived from the spec's own tests (the [5] test).
+        assert_eq!(test_call_generics_text(&spec, &empty), "::<i64>");
+        // A non-empty list pins T itself: no annotation,
+        // byte-identical rendering.
+        assert_eq!(test_call_generics_text(&spec, &single), "");
+    }
+
+    #[test]
+    fn generics_text_skips_specs_the_rule_does_not_cover() {
+        // binary_search's shape: the needle argument sits
+        // at a bare-generic position and its literal pins
+        // T even for the empty-list test — no annotation.
+        let mut spec = sort_shaped_spec();
+        spec.name = "binary_search".into();
+        spec.params = vec![
+            Param {
+                name: "haystack".into(),
+                ty: TypeRef::List(Box::new(named("T"))),
+                annotations: HashMap::new(),
+            },
+            Param {
+                name: "needle".into(),
+                ty: named("T"),
+                annotations: HashMap::new(),
+            },
+            Param {
+                name: "cmp".into(),
+                ty: TypeRef::Function(
+                    vec![named("T"), named("T")],
+                    Box::new(TypeRef::Int),
+                ),
+                annotations: HashMap::new(),
+            },
+        ];
+        spec.return_type = TypeRef::Option(Box::new(TypeRef::I64));
+        let empty = tuple_test(
+            "empty",
+            vec![list_lit(vec![]), Expr::IntLit(5), lt_lambda()],
+            Expr::Var("None".into()),
+        );
+        spec.tests = vec![empty.clone()];
+        assert_eq!(test_call_generics_text(&spec, &empty), "");
+
+        // No fn-typed parameter: no annotation even with an
+        // unpinned empty list.
+        let mut spec2 = sort_shaped_spec();
+        spec2.params.remove(1);
+        let t = tuple_test("empty", vec![list_lit(vec![])], list_lit(vec![]));
+        spec2.tests = vec![t.clone()];
+        assert_eq!(test_call_generics_text(&spec2, &t), "");
+
+        // No generics at all: never annotated.
+        let mut spec3 = sort_shaped_spec();
+        spec3.generics = vec![];
+        let t3 = tuple_test(
+            "empty",
+            vec![list_lit(vec![]), lt_lambda()],
+            list_lit(vec![]),
+        );
+        spec3.tests = vec![t3.clone()];
+        assert_eq!(test_call_generics_text(&spec3, &t3), "");
+    }
+
+    #[test]
+    fn generated_test_module_carries_the_annotation() {
+        let mut cand = candidate("sort", IRNode::Var("list".into()));
+        cand.spec = sort_shaped_spec();
+        cand.spec.tests = vec![
+            tuple_test(
+                "empty",
+                vec![list_lit(vec![]), lt_lambda()],
+                list_lit(vec![]),
+            ),
+            tuple_test(
+                "single",
+                vec![list_lit(vec![Expr::IntLit(5)]), lt_lambda()],
+                list_lit(vec![Expr::IntLit(5)]),
+            ),
+        ];
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("let result = sort::<i64>(vec![], |a, b| (a < b));"),
+            "the empty test's call must be annotated:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let result = sort(vec![5], |a, b| (a < b));"),
+            "the pinned test's call must stay bare:\n{}",
+            code
+        );
     }
 
     // Regression (M2 synthesis run, defect 1): spec test names were

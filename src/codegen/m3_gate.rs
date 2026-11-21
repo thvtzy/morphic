@@ -18,9 +18,17 @@
 //    identical provenance classes — the Phase 41 finding
 //    (winner set fixed and run-independent: 110 constraint
 //    seeds + the 2 by-design pool winners) re-proven inside
-//    the gate itself.
+//    the gate itself. Phase 56 re-record (2026-11-21): after
+//    the Phase 55 spec amendments the module holds 116 specs
+//    and the fixed set is 113 constraint seeds + the 3
+//    by-design pool winners (rust_ident_empty,
+//    rust_target_route, rust_expr_call_form). Phase 62
+//    re-record (2026-11-21): the Clone-bound amendment adds
+//    rust_generic_param_text — the module holds 117 specs
+//    and the fixed set is 114 constraint seeds + the same 3
+//    by-design pool winners.
 //
-//  * The synthesized-codegen ARTIFACT is the 112 winners
+//  * The synthesized-codegen ARTIFACT is the 117 winners
 //    rendered through the ORIGINAL `generate` into one Rust
 //    module (each winner file wrapped in its own `mod`, so
 //    the per-file `mod tests` cannot collide), compiled with
@@ -88,7 +96,7 @@
 //          output, and the harness asserts the ORIGINAL side
 //          reproduces it, so a transcription slip stops the
 //          gate loudly instead of manufacturing a mismatch;
-//          (ii)  every M3 winner body (112) and every M2 winner
+//          (ii)  every M3 winner body (117) and every M2 winner
 //          body (14), plus every unique subtree of those
 //          bodies, each rendered three ways (expression,
 //          statement, tail) by both emitters;
@@ -111,7 +119,7 @@
 use super::{
     constraint_to_rust, escape_rust_char, escape_rust_str, expr_to_rust, generate,
     ir_pattern_to_rust, ir_to_rust, ir_to_rust_expr, ir_to_rust_tail, rust_ident,
-    ty_to_rust, CodegenError,
+    test_call_generics_text, ty_to_rust, CodegenError,
 };
 use crate::spec::ast::{
     BinOp as SpecBinOp, Constraint, Expr as SpecExpr, FunctionSpec, OrderOp, TypeRef,
@@ -319,7 +327,7 @@ fn constraint_kind(cons: &Constraint) -> i64 {
 
 // ── Winner extraction (the real pipeline) ─────────────────
 
-fn load_module(file: &str) -> Vec<FunctionSpec> {
+pub(super) fn load_module(file: &str) -> Vec<FunctionSpec> {
     let root = env!("CARGO_MANIFEST_DIR");
     let path = format!("{}/examples/self_host/{}", root, file);
     let source = std::fs::read_to_string(&path).unwrap();
@@ -344,16 +352,16 @@ fn provenance_name(p: &Provenance) -> String {
 /// whole-file rendering), its raw body, its call-resolved
 /// body (what the executor runs), and the bookkeeping the
 /// gate asserts on.
-struct WinnerEntry {
-    candidate: CandidateImplementation,
+pub(super) struct WinnerEntry {
+    pub(super) candidate: CandidateImplementation,
     resolved: IRNode,
-    provenance: String,
+    pub(super) provenance: String,
     seed_kind: Option<String>,
     verified: bool,
     tpr: f64,
     /// Structural key of the raw body (its Debug text): the
     /// reproducibility evidence across extraction passes.
-    body_key: String,
+    pub(super) body_key: String,
 }
 
 pub(super) struct WinnerSet {
@@ -369,7 +377,7 @@ impl WinnerSet {
         self.order.len()
     }
 
-    fn get(&self, name: &str) -> Result<&WinnerEntry, String> {
+    pub(super) fn get(&self, name: &str) -> Result<&WinnerEntry, String> {
         self.entries
             .get(name)
             .ok_or_else(|| format!("no winner extracted for spec {}", name))
@@ -1037,7 +1045,23 @@ impl<'a> Composed<'a> {
             SpecExpr::Call(name, args) => {
                 let rendered: Result<Vec<String>, String> =
                     args.iter().map(|a| self.sexpr_text(a)).collect();
-                format!("{}({})", rust_ident(name), rendered?.join(", "))
+                let joined = rendered?.join(", ");
+                // The pseudo-call dispatch (Phase 55): the
+                // classification is the rust_expr_call_form
+                // winner's; the vec/tuple forms render through
+                // their template winners; the bare constructor
+                // (form 3) is the name itself, as in the
+                // assembly; every other call keeps the plain
+                // call template.
+                let form = self
+                    .w
+                    .call_int("rust_expr_call_form", &[v_text(name)])?;
+                match form {
+                    1 => self.text1("rust_expr_list_text", v_text(&joined))?,
+                    2 => self.text1("rust_expr_tuple_text", v_text(&joined))?,
+                    3 => "None".to_string(),
+                    _ => format!("{}({})", rust_ident(name), joined),
+                }
             }
             SpecExpr::BinOp(op, lhs, rhs) => format!(
                 "({} {} {})",
@@ -1045,15 +1069,31 @@ impl<'a> Composed<'a> {
                 self.text1("spec_binop_symbol", v_int(spec_binop_code(*op)))?,
                 self.sexpr_text(rhs)?,
             ),
+            // The closure template (Phase 55): parameter
+            // names only, the body rendered by this same
+            // walker, composed through the
+            // rust_expr_lambda_text winner.
+            SpecExpr::Lambda(params, body) => {
+                let names: Vec<String> =
+                    params.iter().map(|(n, _)| rust_ident(n)).collect();
+                self.w.call_text(
+                    "rust_expr_lambda_text",
+                    &[
+                        v_text(&names.join(", ")),
+                        v_text(&self.sexpr_text(body)?),
+                    ],
+                )?
+            }
             // Every kind without an arm: the fixed text the
-            // rust_expr_fixed_text table pins ("??").
+            // rust_expr_fixed_text table pins ("??"). (Kind
+            // 10, Lambda, left this table in Phase 55 — it
+            // has its own arm above.)
             other => {
                 let kind = match other {
                     SpecExpr::FloatLit(_) => 2,
                     SpecExpr::Field(..) => 5,
                     SpecExpr::Index(..) => 6,
                     SpecExpr::UnaryOp(..) => 9,
-                    SpecExpr::Lambda(..) => 10,
                     SpecExpr::Length(_) => 11,
                     SpecExpr::Comprehension { .. } => 12,
                     _ => unreachable!(),
@@ -1715,13 +1755,24 @@ impl<'a> Composed<'a> {
                 .call_text("rust_driver_section_text", &[v_bool(false), v_text("")])?,
         };
 
-        // Signature parts.
-        let generic_names: Vec<String> =
-            spec.generics.iter().map(|g| rust_ident(&g.name)).collect();
+        // Signature parts. Each generic parameter's text
+        // is the rust_generic_param_text winner over the
+        // ident-rendered name (Phase 62: the name + its
+        // Clone bound); the join is assembly glue.
+        let generic_names: Result<Vec<String>, String> = spec
+            .generics
+            .iter()
+            .map(|g| {
+                self.text1(
+                    "rust_generic_param_text",
+                    v_text(&rust_ident(&g.name)),
+                )
+            })
+            .collect();
         let generics = self.w.call_text(
             "rust_generics_text",
             &[
-                v_text(&generic_names.join(", ")),
+                v_text(&generic_names?.join(", ")),
                 v_bool(!spec.generics.is_empty()),
             ],
         )?;
@@ -1746,7 +1797,10 @@ impl<'a> Composed<'a> {
         )?;
 
         // Precondition block: presence is non-emptiness,
-        // placed BEFORE the signature by rust_file_text.
+        // placed AFTER the signature (at the head of the
+        // function body) by rust_file_text — the Phase 55
+        // placement; through Phase 54 it stood before the
+        // signature as a free-standing block.
         let pre_block = if spec.preconditions.is_empty() {
             self.w
                 .call_text("rust_driver_section_text", &[v_bool(false), v_text("")])?
@@ -1793,12 +1847,36 @@ impl<'a> Composed<'a> {
                         .name
                         .clone()
                         .unwrap_or_else(|| format!("test_{}", i));
+                    // The tuple spread (Phase 55;
+                    // rust_test_case's doc states the rule):
+                    // a tuple input whose arity equals the
+                    // parameter count spreads its elements
+                    // into the call; every other input
+                    // renders as a single expression.
+                    let input_text = match &t.input {
+                        SpecExpr::Call(name, args)
+                            if name == "__tuple__"
+                                && args.len() == spec.params.len() =>
+                        {
+                            let rendered: Result<Vec<String>, String> =
+                                args.iter().map(|a| self.sexpr_text(a)).collect();
+                            rendered?.join(", ")
+                        }
+                        other => self.sexpr_text(other)?,
+                    };
                     self.w.call_text(
                         "rust_test_case",
                         &[
                             v_text(&rust_ident(&raw_name)),
                             v_text(&rust_ident(&spec.name)),
-                            v_text(&self.sexpr_text(&t.input)?),
+                            // The call's generics text
+                            // (Phase 61): the driver's rule,
+                            // shared with the original
+                            // (mod.rs) exactly as rust_ident
+                            // is; the m3_proof mirror pins
+                            // the rule independently.
+                            v_text(&test_call_generics_text(spec, t)),
+                            v_text(&input_text),
                             v_text(&self.sexpr_text(&t.expected_output)?),
                         ],
                     )
@@ -1865,7 +1943,7 @@ fn is_bare_string_literal(node: &IRNode) -> bool {
 
 // ── Corpus ────────────────────────────────────────────────
 
-enum CaseKind {
+pub(super) enum CaseKind {
     Ty(TypeRef),
     Pat(IRPattern),
     SExpr(SpecExpr),
@@ -1877,19 +1955,19 @@ enum CaseKind {
     Dispatch(String),
 }
 
-struct Case {
-    class: &'static str,
-    label: String,
+pub(super) struct Case {
+    pub(super) class: &'static str,
+    pub(super) label: String,
     /// The tests/m3_proof.rs golden expectation for the
     /// ORIGINAL side, where the proof file states one: the
     /// harness asserts the original reproduces it, so the
     /// transcription itself is verified.
-    expected: Option<&'static str>,
-    original: String,
-    kind: CaseKind,
+    pub(super) expected: Option<&'static str>,
+    pub(super) original: String,
+    pub(super) kind: CaseKind,
 }
 
-fn render(composed: &Composed, case: &Case) -> Result<String, String> {
+pub(super) fn render(composed: &Composed, case: &Case) -> Result<String, String> {
     Ok(match &case.kind {
         CaseKind::Ty(ty) => composed.ty_text(ty)?,
         CaseKind::Pat(p) => composed.pattern_text(p)?,
@@ -1945,7 +2023,7 @@ fn lam(params: &[&str], body: IRNode) -> IRNode {
 /// carries the proof file's expected output; the gate
 /// asserts the original side reproduces it before judging
 /// the composed side.
-fn proof_corpus() -> Vec<Case> {
+pub(super) fn proof_corpus() -> Vec<Case> {
     let mut cases: Vec<Case> = Vec::new();
     let mut push = |class: &'static str,
                     label: &str,
@@ -2151,22 +2229,60 @@ fn proof_corpus() -> Vec<Case> {
             "(1 + 2)",
         ),
         (
-            "binop-mod-question",
+            "binop-mod-symbol",
             SpecExpr::BinOp(
                 SpecBinOp::Mod,
                 Box::new(SpecExpr::IntLit(1)),
                 Box::new(SpecExpr::IntLit(2)),
             ),
-            "(1 ? 2)",
+            "(1 % 2)",
         ),
         (
-            "binop-concat-question",
+            "binop-concat-symbol",
             SpecExpr::BinOp(
                 SpecBinOp::Concat,
                 Box::new(SpecExpr::StringLit("a".to_string())),
                 Box::new(SpecExpr::StringLit("b".to_string())),
             ),
-            "(\"a\" ? \"b\")",
+            "(\"a\" + \"b\")",
+        ),
+        (
+            "call-list",
+            SpecExpr::Call(
+                "List".to_string(),
+                vec![SpecExpr::IntLit(1), SpecExpr::IntLit(2)],
+            ),
+            "vec![1, 2]",
+        ),
+        ("call-list-empty", SpecExpr::Call("List".to_string(), vec![]), "vec![]"),
+        (
+            "call-tuple",
+            SpecExpr::Call(
+                "__tuple__".to_string(),
+                vec![SpecExpr::IntLit(1), SpecExpr::Var("x".to_string())],
+            ),
+            "(1, x)",
+        ),
+        ("call-none", SpecExpr::Call("None".to_string(), vec![]), "None"),
+        (
+            "call-some",
+            SpecExpr::Call("Some".to_string(), vec![SpecExpr::IntLit(1)]),
+            "Some(1)",
+        ),
+        (
+            "lambda-lt",
+            SpecExpr::Lambda(
+                vec![
+                    ("a".to_string(), TypeRef::Int),
+                    ("b".to_string(), TypeRef::Int),
+                ],
+                Box::new(SpecExpr::BinOp(
+                    SpecBinOp::Lt,
+                    Box::new(SpecExpr::Var("a".to_string())),
+                    Box::new(SpecExpr::Var("b".to_string())),
+                )),
+            ),
+            "|a, b| (a < b)",
         ),
         (
             "binop-nested",
@@ -2954,7 +3070,7 @@ pub(super) fn make_candidate(
 
 /// Corpus (iii): the slice-6 DriverSpec end-to-end cases as
 /// real candidates (original side: the real `generate`).
-fn driver_corpus() -> Vec<Case> {
+pub(super) fn driver_corpus() -> Vec<Case> {
     let mut cases = Vec::new();
     let mut push = |label: &str,
                     expected: &'static str,
@@ -2974,12 +3090,12 @@ fn driver_corpus() -> Vec<Case> {
             "//! Sorts things.\n",
             "//! Does it well.\n",
             "\n",
+            "pub fn clamp_value<T: Clone>(x: i64, limit: i64) -> i64 {\n",
             "#[cfg(debug_assertions)]\n",
             "{\n",
             "    debug_assert!(x == 3, \"Precondition violated\");\n",
             "}\n",
             "\n",
-            "pub fn clamp_value<T>(x: i64, limit: i64) -> i64 {\n",
             "    x\n",
             "}\n",
             "\n#[cfg(test)]\n",
@@ -3016,6 +3132,84 @@ fn driver_corpus() -> Vec<Case> {
                     SpecExpr::IntLit(3),
                 ),
                 (None, SpecExpr::IntLit(0), SpecExpr::IntLit(0)),
+            ],
+        ),
+    );
+    push(
+        "test-value-shapes",
+        concat!(
+            "pub fn sort_by(xs: i64, cmp: i64) -> i64 {\n",
+            "    xs\n",
+            "}\n",
+            "\n#[cfg(test)]\n",
+            "mod tests {\n",
+            "    use super::*;\n",
+            "\n",
+            "    #[test]\n",
+            "    fn spread() {\n",
+            "        let result = sort_by(vec![2, 1], |a, b| (a < b));\n",
+            "        assert_eq!(result, vec![1, 2]);\n",
+            "    }\n",
+            "    #[test]\n",
+            "    fn pair_out() {\n",
+            "        let result = sort_by(1, None);\n",
+            "        assert_eq!(result, (1, None));\n",
+            "    }\n",
+            "}\n",
+        ),
+        make_candidate(
+            "sort_by",
+            None,
+            vec![],
+            vec![("xs", TypeRef::Int), ("cmp", TypeRef::Int)],
+            TypeRef::Int,
+            vec![],
+            vr("xs"),
+            vec![
+                (
+                    Some("spread"),
+                    SpecExpr::Call(
+                        "__tuple__".to_string(),
+                        vec![
+                            SpecExpr::Call(
+                                "List".to_string(),
+                                vec![SpecExpr::IntLit(2), SpecExpr::IntLit(1)],
+                            ),
+                            SpecExpr::Lambda(
+                                vec![
+                                    ("a".to_string(), TypeRef::Int),
+                                    ("b".to_string(), TypeRef::Int),
+                                ],
+                                Box::new(SpecExpr::BinOp(
+                                    SpecBinOp::Lt,
+                                    Box::new(SpecExpr::Var("a".to_string())),
+                                    Box::new(SpecExpr::Var("b".to_string())),
+                                )),
+                            ),
+                        ],
+                    ),
+                    SpecExpr::Call(
+                        "List".to_string(),
+                        vec![SpecExpr::IntLit(1), SpecExpr::IntLit(2)],
+                    ),
+                ),
+                (
+                    Some("pair-out"),
+                    SpecExpr::Call(
+                        "__tuple__".to_string(),
+                        vec![
+                            SpecExpr::IntLit(1),
+                            SpecExpr::Call("None".to_string(), vec![]),
+                        ],
+                    ),
+                    SpecExpr::Call(
+                        "__tuple__".to_string(),
+                        vec![
+                            SpecExpr::IntLit(1),
+                            SpecExpr::Call("None".to_string(), vec![]),
+                        ],
+                    ),
+                ),
             ],
         ),
     );
@@ -3079,11 +3273,108 @@ fn driver_corpus() -> Vec<Case> {
             )],
         ),
     );
+    push(
+        "generic-annotation",
+        concat!(
+            "pub fn sort<T: Clone>(list: Vec<T>, cmp: fn(T, T) -> bool) -> Vec<T> {\n",
+            "    list\n",
+            "}\n",
+            "\n#[cfg(test)]\n",
+            "mod tests {\n",
+            "    use super::*;\n",
+            "\n",
+            "    #[test]\n",
+            "    fn empty() {\n",
+            "        let result = sort::<i64>(vec![], |a, b| (a < b));\n",
+            "        assert_eq!(result, vec![]);\n",
+            "    }\n",
+            "    #[test]\n",
+            "    fn single() {\n",
+            "        let result = sort(vec![5], |a, b| (a < b));\n",
+            "        assert_eq!(result, vec![5]);\n",
+            "    }\n",
+            "}\n",
+        ),
+        make_candidate(
+            "sort",
+            None,
+            vec!["T"],
+            vec![
+                (
+                    "list",
+                    TypeRef::List(Box::new(TypeRef::Named("T".to_string()))),
+                ),
+                (
+                    "cmp",
+                    TypeRef::Function(
+                        vec![
+                            TypeRef::Named("T".to_string()),
+                            TypeRef::Named("T".to_string()),
+                        ],
+                        Box::new(TypeRef::Bool),
+                    ),
+                ),
+            ],
+            TypeRef::List(Box::new(TypeRef::Named("T".to_string()))),
+            vec![],
+            vr("list"),
+            vec![
+                (
+                    Some("empty"),
+                    SpecExpr::Call(
+                        "__tuple__".to_string(),
+                        vec![
+                            SpecExpr::Call("List".to_string(), vec![]),
+                            SpecExpr::Lambda(
+                                vec![
+                                    ("a".to_string(), TypeRef::Named("T".to_string())),
+                                    ("b".to_string(), TypeRef::Named("T".to_string())),
+                                ],
+                                Box::new(SpecExpr::BinOp(
+                                    SpecBinOp::Lt,
+                                    Box::new(SpecExpr::Var("a".to_string())),
+                                    Box::new(SpecExpr::Var("b".to_string())),
+                                )),
+                            ),
+                        ],
+                    ),
+                    SpecExpr::Call("List".to_string(), vec![]),
+                ),
+                (
+                    Some("single"),
+                    SpecExpr::Call(
+                        "__tuple__".to_string(),
+                        vec![
+                            SpecExpr::Call(
+                                "List".to_string(),
+                                vec![SpecExpr::IntLit(5)],
+                            ),
+                            SpecExpr::Lambda(
+                                vec![
+                                    ("a".to_string(), TypeRef::Named("T".to_string())),
+                                    ("b".to_string(), TypeRef::Named("T".to_string())),
+                                ],
+                                Box::new(SpecExpr::BinOp(
+                                    SpecBinOp::Lt,
+                                    Box::new(SpecExpr::Var("a".to_string())),
+                                    Box::new(SpecExpr::Var("b".to_string())),
+                                )),
+                            ),
+                        ],
+                    ),
+                    SpecExpr::Call(
+                        "List".to_string(),
+                        vec![SpecExpr::IntLit(5)],
+                    ),
+                ),
+            ],
+        ),
+    );
     cases
 }
 
 /// Corpus (v): the dispatch battery.
-fn dispatch_corpus(dummy: &CandidateImplementation) -> Vec<Case> {
+pub(super) fn dispatch_corpus(dummy: &CandidateImplementation) -> Vec<Case> {
     [
         "rust",
         "c",
@@ -3132,7 +3423,7 @@ fn collect_subtrees(node: &IRNode, out: &mut Vec<IRNode>) {
 /// Corpus (ii) + (iv): the winner bodies and their unique
 /// subtrees (three renderings each), and every winner as a
 /// whole candidate file.
-fn winner_corpus(sets: &[(&str, &WinnerSet)]) -> Vec<Case> {
+pub(super) fn winner_corpus(sets: &[(&str, &WinnerSet)]) -> Vec<Case> {
     let mut cases = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for (module, set) in sets {
@@ -3198,7 +3489,7 @@ struct ClassStats {
     a_unreconciled: Vec<String>,
 }
 
-fn diff_detail(label: &str, original: &str, composed: &str) -> String {
+pub(super) fn diff_detail(label: &str, original: &str, composed: &str) -> String {
     let (a, b) = (original.as_bytes(), composed.as_bytes());
     let i = a
         .iter()
@@ -3290,7 +3581,7 @@ fn run_corpus(
 // ── The gate ──────────────────────────────────────────────
 
 #[test]
-#[ignore = "M3 gate: 2 randomized synthesis passes x 112 specs + corpus execution; run explicitly with --ignored --nocapture"]
+#[ignore = "M3 gate: 2 randomized synthesis passes x 117 specs + corpus execution; run explicitly with --ignored --nocapture"]
 fn m3_gate() {
     let root = env!("CARGO_MANIFEST_DIR");
     let out_dir = format!("{}/target/m3-gate", root);
@@ -3304,7 +3595,7 @@ fn m3_gate() {
 
     // ── 1. Winner extraction, twice (reproducibility) ──
     let functions3 = load_module("codegen.morph");
-    assert_eq!(functions3.len(), 112, "Codegen module spec count");
+    assert_eq!(functions3.len(), 117, "Codegen module spec count");
     let pass1 = extract_winners(&functions3);
     let pass2 = extract_winners(&functions3);
     for name in &pass1.order {
@@ -3337,11 +3628,11 @@ fn m3_gate() {
         "GATE3|winners|seeds={}|pool={:?}",
         seed_count, pool
     ));
-    assert_eq!(seed_count, 110, "Phase 41 measured 110 constraint seeds");
+    assert_eq!(seed_count, 114, "Phase 62 measured 114 constraint seeds (Phase 55: 113; + rust_generic_param_text, equation)");
     assert_eq!(
         pool,
-        vec!["rust_ident_empty", "rust_target_route"],
-        "the by-design seedless pair"
+        vec!["rust_expr_call_form", "rust_ident_empty", "rust_target_route"],
+        "the by-design seedless trio"
     );
     for name in &pool {
         assert_eq!(
@@ -3418,7 +3709,7 @@ fn m3_gate() {
             name, out, spec.return_type
         );
     }
-    writelnr("GATE3|executor-smoke|112/112 winners execute on canonical inputs");
+    writelnr("GATE3|executor-smoke|117/117 winners execute on canonical inputs");
 
     // ── 2. M2 winners (corpus sources) ──
     let mut m2_sets: Vec<(&str, WinnerSet)> = Vec::new();
@@ -3444,7 +3735,7 @@ fn m3_gate() {
     // ── 3. The synthesized-codegen artifact ──
     let mut module_text = String::new();
     module_text.push_str(
-        "// The synthesized codegen: the Codegen module's 112 winners,\n\
+        "// The synthesized codegen: the Codegen module's 117 winners,\n\
          // each rendered by the original `generate` and wrapped in its\n\
          // own module (so the per-file `mod tests` cannot collide).\n\
          // Judged by the M3 gate harness (src/codegen/m3_gate.rs).\n\n",

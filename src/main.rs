@@ -14,6 +14,13 @@ mod m3_synthesis_probe;
 mod m3_cross_validation;
 mod tokenizer_synthesis_probe;
 mod tokenizer_cross_validation;
+mod phase53_measurement;
+mod phase58_measurement;
+mod phase59_measurement;
+mod phase60_measurement;
+mod phase61_measurement;
+mod phase62_measurement;
+
 
 use clap::{Parser, Subcommand};
 use colored::*;
@@ -128,6 +135,23 @@ fn main() -> anyhow::Result<()> {
             if verified.is_empty() {
                 anyhow::bail!("No implementation satisfied all constraints");
             }
+
+            // Phase 4b (Phase 58, G1; extended Phase 60, G3):
+            // compiled-runner final scoring. For specs whose
+            // in-spec tests the IR interpreter cannot fully
+            // bind (the lambda-carrying tuple residue — sort,
+            // binary_search), the FALLBACK test_pass_ratio 1.0
+            // is replaced for a bounded finalist set by a
+            // measured compiled-runner ratio before selection;
+            // since Phase 60 the stage likewise judges a
+            // constraint-constructed seed the interpreter
+            // cannot evaluate at all (the forall-fold scan —
+            // count_matching), whose interpreter ratio is 0.0
+            // by coverage rather than behavior. A no-op for
+            // every other spec; infrastructure failure
+            // degrades to the fallback behavior — it never
+            // fails the build.
+            let verified = synthesis::runner::rescore_finalists(verified, &spec);
 
             // Phase 5: Optimize & select
             println!("  {} Selecting optimal implementation...", "→".dimmed());

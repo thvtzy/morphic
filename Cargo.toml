@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [features]
 default = ["z3-support"]
+bootstrap-codegen = []
 llm-remote = ["tokio"]
 llm-local = ["llama-cpp-2"]
 z3-support = ["z3", "z3/gh-release"]

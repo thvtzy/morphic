@@ -156,24 +156,27 @@ fn is_rust_keyword(name: &str) -> bool {
 /// Mirror of the operator table of `expr_to_rust`
 /// (src/codegen/mod.rs:1188) — the spec-expression emitter used
 /// for generated test assertions. A separate, weaker table than
-/// `rust_binop_symbol`: the operators it does not map fall
-/// through to "?" in the original, pinned here as rows.
+/// `rust_binop_symbol`. Through Phase 54 the operators it did
+/// not map fell through to "?" in the original, pinned here as
+/// rows; the Phase 55 amendment (2026-11-21) gives them their
+/// real Rust symbols — Concat shares Add's "+", exactly as the
+/// IR table's Concat row does.
 fn spec_binop_symbol(op: i64) -> Option<&'static str> {
     match op {
         0 => Some("+"),  // Add
         1 => Some("-"),  // Sub
         2 => Some("*"),  // Mul
         3 => Some("/"),  // Div
-        4 => Some("?"),  // Mod — unmapped in the original
+        4 => Some("%"),  // Mod
         5 => Some("&&"), // And
         6 => Some("||"), // Or
         7 => Some("=="), // Eq
         8 => Some("!="), // Neq
-        9 => Some("?"),  // Lt — unmapped in the original
-        10 => Some("?"), // Le — unmapped
-        11 => Some("?"), // Gt — unmapped
-        12 => Some("?"), // Ge — unmapped
-        13 => Some("?"), // Concat — unmapped
+        9 => Some("<"),  // Lt
+        10 => Some("<="), // Le
+        11 => Some(">"), // Gt
+        12 => Some(">="), // Ge
+        13 => Some("+"), // Concat — shares Add's symbol
         _ => None,
     }
 }
@@ -364,9 +367,10 @@ fn rust_pattern_ctor_name(name: &str, has_subs: bool) -> Option<String> {
 /// `expr_to_rust` (src/codegen/mod.rs:1177): 0 = name,
 /// 1 = decimal text, 2 = Bool value text, 3 = quoted-raw
 /// template, 4 = call template, 5 = binary template,
-/// 6 = "??" fallback. Total over the thirteen Expr kinds.
-/// FloatLit (2) and UnaryOp (9) have no arm in the original
-/// and land in family 6.
+/// 6 = "??" fallback, 7 = closure template. Total over the
+/// thirteen Expr kinds. FloatLit (2) and UnaryOp (9) have no
+/// arm in the original and land in family 6; Lambda (10)
+/// joins family 7 by the Phase 55 amendment (2026-11-21).
 fn rust_expr_form(kind: i64) -> Option<i64> {
     match kind {
         0 => Some(0),       // Var
@@ -375,19 +379,54 @@ fn rust_expr_form(kind: i64) -> Option<i64> {
         4 => Some(3),       // StringLit
         7 => Some(4),       // Call
         8 => Some(5),       // BinOp
-        2 | 5 | 6 | 9 | 10 | 11 | 12 => Some(6), // FloatLit, Field, Index, UnaryOp, Lambda, Length, Comprehension
+        10 => Some(7),      // Lambda — closure template (Phase 55)
+        2 | 5 | 6 | 9 | 11 | 12 => Some(6), // FloatLit, Field, Index, UnaryOp, Length, Comprehension
         _ => None,
     }
 }
 
 /// Mirror of the catch-all of `expr_to_rust`
 /// (src/codegen/mod.rs:1199): every kind without an arm
-/// renders "??".
+/// renders "??". Lambda (10) left this table in the
+/// Phase 55 amendment (2026-11-21).
 fn rust_expr_fixed_text(kind: i64) -> Option<&'static str> {
     match kind {
-        2 | 5 | 6 | 9 | 10 | 11 | 12 => Some("??"),
+        2 | 5 | 6 | 9 | 11 | 12 => Some("??"),
         _ => None,
     }
+}
+
+/// Mirror of `rust_expr_call_form` (Phase 55): which
+/// rendering a Call takes, keyed by the call's name —
+/// 0 = plain call template, 1 = vec literal ("List"),
+/// 2 = tuple ("__tuple__"), 3 = bare constructor
+/// ("None"). Total: every other name is family 0.
+fn rust_expr_call_form(name: &str) -> i64 {
+    match name {
+        "List" => 1,
+        "__tuple__" => 2,
+        "None" => 3,
+        _ => 0,
+    }
+}
+
+/// Mirror of `rust_expr_list_text` (Phase 55): the vec
+/// literal over pre-rendered, pre-joined elements.
+fn rust_expr_list_text(args: &str) -> String {
+    format!("vec![{}]", args)
+}
+
+/// Mirror of `rust_expr_tuple_text` (Phase 55): the Rust
+/// tuple over pre-rendered, pre-joined elements.
+fn rust_expr_tuple_text(args: &str) -> String {
+    format!("({})", args)
+}
+
+/// Mirror of `rust_expr_lambda_text` (Phase 55): the
+/// closure template over pre-rendered, pre-joined
+/// parameter names and the walker's body rendering.
+fn rust_expr_lambda_text(params: &str, body: &str) -> String {
+    format!("|{}| {}", params, body)
 }
 
 /// Mirror of the rendering-family classification of
@@ -623,6 +662,14 @@ fn rust_param_text(name: &str, ty: &str) -> String {
     format!("{}: {}", name, ty)
 }
 
+/// Mirror of one generic parameter's text inside the
+/// generics bracket (Phase 62, owner decision (i)):
+/// rendered name + ": Clone" — every declared generic
+/// parameter of a generated signature carries the bound.
+fn rust_generic_param_text(name: &str) -> String {
+    format!("{}: Clone", name)
+}
+
 /// Mirror of the signature's generics bracket
 /// (src/codegen/mod.rs:80-88) over the pre-joined rendered
 /// generic names.
@@ -682,10 +729,15 @@ fn rust_test_name_default(index: usize) -> String {
 
 /// Mirror of one generated test's block
 /// (src/codegen/mod.rs:139-150), push for push, over
-/// pre-rendered parts.
+/// pre-rendered parts. The generics text (Phase 61) is
+/// the call's turbofish annotation, placed between the
+/// function name and the argument list — empty unless
+/// the driver's E0283-class rule supplies it (see
+/// test_call_generics_text below).
 fn rust_test_case(
     test_name: &str,
     fn_name: &str,
+    generics_text: &str,
     input_text: &str,
     expected_text: &str,
 ) -> String {
@@ -693,8 +745,8 @@ fn rust_test_case(
     out.push_str("    #[test]\n");
     out.push_str(&format!("    fn {}() {{\n", test_name));
     out.push_str(&format!(
-        "        let result = {}({});\n",
-        fn_name, input_text
+        "        let result = {}{}({});\n",
+        fn_name, generics_text, input_text
     ));
     out.push_str(&format!(
         "        assert_eq!(result, {});\n",
@@ -872,6 +924,8 @@ fn ir_pattern_assembled(pat: &Pat) -> String {
 /// Tree form of the spec `Expr` for the assembled
 /// `expr_to_rust` mirror. The fallback variants carry no
 /// payload: their content is irrelevant, all render "??".
+/// Lambda carries its parameter names and body since the
+/// Phase 55 amendment gave it the closure template.
 #[allow(dead_code)]
 enum SExpr {
     Var(&'static str),
@@ -884,14 +938,18 @@ enum SExpr {
     Call(&'static str, Vec<SExpr>),
     BinOp(i64, Box<SExpr>, Box<SExpr>),
     UnaryOp,
-    Lambda,
+    Lambda(Vec<&'static str>, Box<SExpr>),
     Length,
     Comprehension,
 }
 
 /// Faithful assembly of `expr_to_rust`
 /// (src/codegen/mod.rs:1177-1200), with the operator symbol
-/// from the slice-1 spec_binop_symbol mirror and "??" for
+/// from the slice-1 spec_binop_symbol mirror, the Call
+/// dispatch from the rust_expr_call_form mirror (Phase 55:
+/// 'List' renders as the vec literal, '__tuple__' as a Rust
+/// tuple, 'None' as the bare constructor), the Lambda arm
+/// as the rust_expr_lambda_text template, and "??" for
 /// every kind without an arm.
 fn expr_to_rust_assembled(expr: &SExpr) -> String {
     match expr {
@@ -902,7 +960,13 @@ fn expr_to_rust_assembled(expr: &SExpr) -> String {
         SExpr::StringLit(s) => format!("\"{}\"", s),
         SExpr::Call(name, args) => {
             let rendered: Vec<String> = args.iter().map(expr_to_rust_assembled).collect();
-            format!("{}({})", name, rendered.join(", "))
+            let joined = rendered.join(", ");
+            match rust_expr_call_form(name) {
+                1 => rust_expr_list_text(&joined),
+                2 => rust_expr_tuple_text(&joined),
+                3 => "None".to_string(),
+                _ => format!("{}({})", name, joined),
+            }
         }
         SExpr::BinOp(op, lhs, rhs) => format!(
             "({} {} {})",
@@ -910,6 +974,9 @@ fn expr_to_rust_assembled(expr: &SExpr) -> String {
             spec_binop_symbol(*op).unwrap(),
             expr_to_rust_assembled(rhs)
         ),
+        SExpr::Lambda(params, body) => {
+            rust_expr_lambda_text(&params.join(", "), &expr_to_rust_assembled(body))
+        }
         _ => "??".to_string(),
     }
 }
@@ -983,9 +1050,11 @@ fn condition_text(kind: i64, rendered: &str) -> String {
 /// the body pre-rendered (the walker slices own it), and
 /// the test blocks pre-joined. The presence branches are
 /// the original's own: header iff a doc exists, block iff
-/// preconditions are non-empty (emitted BEFORE the
-/// signature — surprise 13), test module iff test blocks
-/// exist.
+/// preconditions are non-empty (emitted AFTER the
+/// signature, at the head of the function body — the
+/// Phase 55 amendment moved it inside; through Phase 54
+/// it stood before the signature at module level,
+/// surprise 13), test module iff test blocks exist.
 fn generate_rust_assembled(
     doc_lines: Option<&[&str]>,
     signature: &str,
@@ -1000,6 +1069,7 @@ fn generate_rust_assembled(
         }
         out.push_str(rust_file_fixed_text(1).unwrap());
     }
+    out.push_str(signature);
     if !precondition_renderings.is_empty() {
         let asserts: String = precondition_renderings
             .iter()
@@ -1007,7 +1077,6 @@ fn generate_rust_assembled(
             .collect();
         out.push_str(&rust_precondition_block(&asserts));
     }
-    out.push_str(signature);
     out.push_str(body);
     out.push_str(rust_file_fixed_text(0).unwrap());
     if let Some(blocks) = test_blocks {
@@ -2261,8 +2330,11 @@ fn rust_driver_section_text(present: bool, text: &str) -> String {
 
 /// Mirror of `generate_rust`'s whole-file assembly
 /// (src/codegen/mod.rs:66-155) over pre-rendered
-/// sections, in emission order: doc header, precondition
-/// block, signature, body, the function's closing brace
+/// sections, in emission order: doc header, signature,
+/// precondition block (at the head of the function
+/// body — moved there by the Phase 55 amendment;
+/// through Phase 54 it stood before the signature),
+/// body, the function's closing brace
 /// (rust_file_fixed_text piece 0), test module.
 fn rust_file_text(
     header: &str,
@@ -2274,8 +2346,8 @@ fn rust_file_text(
     format!(
         "{}{}{}{}{}{}",
         header,
-        pre_block,
         signature,
+        pre_block,
         body,
         rust_file_fixed_text(0).unwrap(),
         test_module
@@ -2307,6 +2379,96 @@ struct DriverSpec {
     tests: Vec<DriverTest>,
 }
 
+/// Mirror of the driver's test-call generics rule
+/// (src/codegen/mod.rs, `test_call_generics_text`): the
+/// turbofish text for one generated test's call — the
+/// empty string except the E0283 class (a generic spec
+/// with a function-typed parameter, a test passing an
+/// empty List literal at a List<generic> position, and
+/// no argument pinning the generic: a scalar literal at
+/// a bare-generic position, or a scalar literal inside
+/// a non-empty List literal at a List<generic> position;
+/// a lambda never pins). The concrete type is derived
+/// from the spec's own tests (first scalar literal kind,
+/// Int when none), repeated per generic. The mirror
+/// walks the Ty/SExpr trees it has; payload-less SExpr
+/// forms carry no literal and cannot pin — the mirror's
+/// usual partial view.
+fn test_call_generics_text(spec: &DriverSpec, test: &DriverTest) -> String {
+    if spec.generics.is_empty() {
+        return String::new();
+    }
+    if !spec.params.iter().any(|(_, t)| matches!(t, Ty::Func(..))) {
+        return String::new();
+    }
+    let positions: Vec<(&SExpr, &Ty)> = match &test.input {
+        SExpr::Call(name, args) if *name == "__tuple__" && args.len() == spec.params.len() => {
+            args.iter().zip(spec.params.iter().map(|(_, t)| t)).collect()
+        }
+        other if spec.params.len() == 1 => vec![(other, &spec.params[0].1)],
+        _ => return String::new(),
+    };
+    let is_generic = |t: &Ty, g: &str| matches!(t, Ty::Name(n) if *n == g);
+    let is_list_of = |t: &Ty, g: &str| {
+        matches!(t, Ty::Wrap1(16, inner) if is_generic(inner, g))
+    };
+    let is_scalar = |e: &SExpr| {
+        matches!(
+            e,
+            SExpr::IntLit(_) | SExpr::FloatLit(_) | SExpr::BoolLit(_) | SExpr::StringLit(_)
+        )
+    };
+    let unpinned_empty = spec.generics.iter().any(|&g| {
+        let has_empty = positions.iter().any(|(e, t)| {
+            is_list_of(t, g) && matches!(e, SExpr::Call(n, a) if *n == "List" && a.is_empty())
+        });
+        if !has_empty {
+            return false;
+        }
+        let pinned = positions.iter().any(|(e, t)| {
+            (is_generic(t, g) && is_scalar(e))
+                || (is_list_of(t, g)
+                    && matches!(e, SExpr::Call(n, a) if *n == "List" && a.iter().any(|el| is_scalar(el))))
+        });
+        !pinned
+    });
+    if !unpinned_empty {
+        return String::new();
+    }
+    let ty = driver_concrete_type(spec);
+    let types = vec![ty; spec.generics.len()].join(", ");
+    format!("::<{}>", types)
+}
+
+/// The concrete type the mirror's annotation derivation
+/// pins (mirror of `concrete_type_for_spec` in
+/// src/codegen/mod.rs): the first scalar literal kind
+/// across the spec's tests, i64 when none.
+fn driver_concrete_type(spec: &DriverSpec) -> &'static str {
+    for test in &spec.tests {
+        if let Some(ty) = sexpr_literal_type(&test.input) {
+            return ty;
+        }
+        if let Some(ty) = sexpr_literal_type(&test.expected) {
+            return ty;
+        }
+    }
+    "i64"
+}
+
+fn sexpr_literal_type(expr: &SExpr) -> Option<&'static str> {
+    match expr {
+        SExpr::IntLit(_) => Some("i64"),
+        SExpr::FloatLit(_) => Some("f64"),
+        SExpr::BoolLit(_) => Some("bool"),
+        SExpr::StringLit(_) => Some("String"),
+        SExpr::Call(_, args) => args.iter().find_map(sexpr_literal_type),
+        SExpr::BinOp(_, l, r) => sexpr_literal_type(l).or_else(|| sexpr_literal_type(r)),
+        SExpr::Lambda(_, body) => sexpr_literal_type(body),
+        _ => None,
+    }
+}
+
 /// Faithful assembly of `generate_rust`
 /// (src/codegen/mod.rs:66-155) from the slice 1-5
 /// mirrors, at the SPEC level: where the slice-3
@@ -2318,7 +2480,8 @@ struct DriverSpec {
 /// slice-6 mirrors exactly as the original composes its
 /// pushes — the header and the test module gated by
 /// `rust_driver_section_text`, the precondition block
-/// placed BEFORE the signature by `rust_file_text`'s
+/// placed AFTER the signature (at the head of the
+/// function body) by `rust_file_text`'s
 /// order, the body rendered by the tail assembly at
 /// indent 1 with the return type's code as both fn_ret
 /// and the Some expectation (the driver's own seed —
@@ -2341,8 +2504,11 @@ fn generate_rust_from_spec_assembled(spec: &DriverSpec) -> String {
     // pairs joined ", " (the joins are the mirror-only
     // iteration).
     let generics = {
-        let rendered: Vec<String> =
-            spec.generics.iter().map(|g| rust_ident_verbatim(g)).collect();
+        let rendered: Vec<String> = spec
+            .generics
+            .iter()
+            .map(|g| rust_generic_param_text(&rust_ident_verbatim(g)))
+            .collect();
         rust_generics_text(&rendered.join(", "), !spec.generics.is_empty())
     };
     let params: Vec<String> = spec
@@ -2382,6 +2548,9 @@ fn generate_rust_from_spec_assembled(spec: &DriverSpec) -> String {
     // expected arrive as expr_to_rust renderings placed
     // BARE in call / assert position — the recorded
     // E0308 placement for String-typed positions.
+    // A tuple input whose arity equals the parameter
+    // count spreads its elements into the call instead
+    // (Phase 55; rust_test_case's doc states the rule).
     let test_module = if spec.tests.is_empty() {
         rust_driver_section_text(false, "")
     } else {
@@ -2394,10 +2563,22 @@ fn generate_rust_from_spec_assembled(spec: &DriverSpec) -> String {
                     Some(n) => rust_ident_verbatim(n),
                     None => rust_ident_verbatim(&rust_test_name_default(i)),
                 };
+                let input_text = match &t.input {
+                    SExpr::Call("__tuple__", args)
+                        if args.len() == spec.params.len() =>
+                    {
+                        args.iter()
+                            .map(expr_to_rust_assembled)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                    other => expr_to_rust_assembled(other),
+                };
                 rust_test_case(
                     &name,
                     &rust_ident_verbatim(spec.name),
-                    &expr_to_rust_assembled(&t.input),
+                    &test_call_generics_text(spec, t),
+                    &input_text,
                     &expr_to_rust_assembled(&t.expected),
                 )
             })
@@ -2577,11 +2758,12 @@ mod golden_tests {
 
     #[test]
     fn spec_binop_symbols_full_table() {
-        // .morph tests: add-symbol, neq-symbol, mod-fallback, lt-fallback
+        // .morph tests: add-symbol, neq-symbol, mod-symbol,
+        // lt-symbol, concat-symbol
         assert_eq!(spec_binop_symbol(0), Some("+"));
         assert_eq!(spec_binop_symbol(8), Some("!="));
-        assert_eq!(spec_binop_symbol(4), Some("?"));
-        assert_eq!(spec_binop_symbol(9), Some("?"));
+        assert_eq!(spec_binop_symbol(4), Some("%"));
+        assert_eq!(spec_binop_symbol(9), Some("<"));
         // Remaining rows of the table
         assert_eq!(spec_binop_symbol(1), Some("-"));
         assert_eq!(spec_binop_symbol(2), Some("*"));
@@ -2589,10 +2771,10 @@ mod golden_tests {
         assert_eq!(spec_binop_symbol(5), Some("&&"));
         assert_eq!(spec_binop_symbol(6), Some("||"));
         assert_eq!(spec_binop_symbol(7), Some("=="));
-        assert_eq!(spec_binop_symbol(10), Some("?"));
-        assert_eq!(spec_binop_symbol(11), Some("?"));
-        assert_eq!(spec_binop_symbol(12), Some("?"));
-        assert_eq!(spec_binop_symbol(13), Some("?"));
+        assert_eq!(spec_binop_symbol(10), Some("<="));
+        assert_eq!(spec_binop_symbol(11), Some(">"));
+        assert_eq!(spec_binop_symbol(12), Some(">="));
+        assert_eq!(spec_binop_symbol(13), Some("+"));
         // Off-range
         assert_eq!(spec_binop_symbol(-1), None);
         assert_eq!(spec_binop_symbol(14), None);
@@ -2616,15 +2798,17 @@ mod golden_tests {
         assert_eq!(rust_type_name(0), rust_type_name(9));
         // Concat shares Add's symbol in the IR table.
         assert_eq!(rust_binop_symbol(16), rust_binop_symbol(0));
-        // The two operator tables DIVERGE by name (codes differ
-        // between the enums; compared here by operator name):
-        // Mod is spec-code 4 / IR-code 4, Lt is 9 / 10,
-        // Concat is 13 / 16.
-        assert_eq!(spec_binop_symbol(4), Some("?")); // spec Mod
+        // The two operator tables AGREE on the shared
+        // operators by name since the Phase 55 amendment
+        // (codes differ between the enums; compared here
+        // by operator name): Mod is spec-code 4 / IR-code
+        // 4, Lt is 9 / 10, Concat is 13 / 16. Through
+        // Phase 54 the spec table's "?" rows diverged.
+        assert_eq!(spec_binop_symbol(4), Some("%")); // spec Mod
         assert_eq!(rust_binop_symbol(4), Some("%")); // IR Mod
-        assert_eq!(spec_binop_symbol(9), Some("?")); // spec Lt
+        assert_eq!(spec_binop_symbol(9), Some("<")); // spec Lt
         assert_eq!(rust_binop_symbol(10), Some("<")); // IR Lt
-        assert_eq!(spec_binop_symbol(13), Some("?")); // spec Concat
+        assert_eq!(spec_binop_symbol(13), Some("+")); // spec Concat
         assert_eq!(rust_binop_symbol(16), Some("+")); // IR Concat
     }
 
@@ -2919,18 +3103,21 @@ mod golden_tests {
 
     #[test]
     fn expr_tables_full() {
-        // .morph tests: var/floatlit/call/binop/comprehension
-        // forms, floatlit/unaryop fixed texts
+        // .morph tests: var/floatlit/call/binop/lambda/
+        // comprehension forms, floatlit/unaryop fixed texts
         assert_eq!(rust_expr_form(0), Some(0));
         assert_eq!(rust_expr_form(2), Some(6));
         assert_eq!(rust_expr_form(7), Some(4));
         assert_eq!(rust_expr_form(8), Some(5));
+        assert_eq!(rust_expr_form(10), Some(7));
         assert_eq!(rust_expr_form(12), Some(6));
         assert_eq!(rust_expr_form(1), Some(1));
         assert_eq!(rust_expr_form(3), Some(2));
         assert_eq!(rust_expr_form(4), Some(3));
         assert_eq!(rust_expr_fixed_text(2), Some("??"));
         assert_eq!(rust_expr_fixed_text(9), Some("??"));
+        // Lambda left the fixed-text table in Phase 55
+        assert_eq!(rust_expr_fixed_text(10), None);
         // The fallback family and the fixed-text table coincide
         for kind in 0..=12 {
             assert_eq!(
@@ -2944,6 +3131,28 @@ mod golden_tests {
         assert_eq!(rust_expr_form(13), None);
         assert_eq!(rust_expr_form(-1), None);
         assert_eq!(rust_expr_fixed_text(13), None);
+    }
+
+    #[test]
+    fn expr_call_forms_full() {
+        // .morph tests: list/tuple/none forms, some/plain/
+        // case/empty calls
+        assert_eq!(rust_expr_call_form("List"), 1);
+        assert_eq!(rust_expr_call_form("__tuple__"), 2);
+        assert_eq!(rust_expr_call_form("None"), 3);
+        assert_eq!(rust_expr_call_form("Some"), 0);
+        assert_eq!(rust_expr_call_form("max"), 0);
+        assert_eq!(rust_expr_call_form("list"), 0);
+        assert_eq!(rust_expr_call_form(""), 0);
+        // The templates over pre-rendered, pre-joined parts
+        // (.morph tests: list-text/list-empty, tuple-text/
+        // tuple-three; the lambda template's golden)
+        assert_eq!(rust_expr_list_text("1, 2"), "vec![1, 2]");
+        assert_eq!(rust_expr_list_text(""), "vec![]");
+        assert_eq!(rust_expr_tuple_text("1, 2"), "(1, 2)");
+        assert_eq!(rust_expr_tuple_text("a, b, c"), "(a, b, c)");
+        assert_eq!(rust_expr_lambda_text("a, b", "(a < b)"), "|a, b| (a < b)");
+        assert_eq!(rust_expr_lambda_text("x", "x"), "|x| x");
     }
 
     #[test]
@@ -2965,7 +3174,7 @@ mod golden_tests {
         );
         assert_eq!(expr_to_rust_assembled(&SExpr::Call("g", vec![])), "g()");
         // Binary template with the slice-1 symbol table,
-        // including its "?" rows
+        // including the rows the Phase 55 amendment filled
         assert_eq!(
             expr_to_rust_assembled(&SExpr::BinOp(
                 0,
@@ -2980,7 +3189,7 @@ mod golden_tests {
                 Box::new(SExpr::IntLit(1)),
                 Box::new(SExpr::IntLit(2))
             )),
-            "(1 ? 2)"
+            "(1 % 2)"
         );
         assert_eq!(
             expr_to_rust_assembled(&SExpr::BinOp(
@@ -2988,7 +3197,43 @@ mod golden_tests {
                 Box::new(SExpr::StringLit("a")),
                 Box::new(SExpr::StringLit("b"))
             )),
-            "(\"a\" ? \"b\")"
+            "(\"a\" + \"b\")"
+        );
+        // The pseudo-call forms (Phase 55): List renders as
+        // the vec literal, __tuple__ as a Rust tuple, None
+        // as the bare constructor; Some keeps the plain
+        // call template
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::Call(
+                "List",
+                vec![SExpr::IntLit(1), SExpr::IntLit(2)]
+            )),
+            "vec![1, 2]"
+        );
+        assert_eq!(expr_to_rust_assembled(&SExpr::Call("List", vec![])), "vec![]");
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::Call(
+                "__tuple__",
+                vec![SExpr::IntLit(1), SExpr::Var("x")]
+            )),
+            "(1, x)"
+        );
+        assert_eq!(expr_to_rust_assembled(&SExpr::Call("None", vec![])), "None");
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::Call("Some", vec![SExpr::IntLit(1)])),
+            "Some(1)"
+        );
+        // The closure template (Phase 55): sort's comparator
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::Lambda(
+                vec!["a", "b"],
+                Box::new(SExpr::BinOp(
+                    9,
+                    Box::new(SExpr::Var("a")),
+                    Box::new(SExpr::Var("b"))
+                ))
+            )),
+            "|a, b| (a < b)"
         );
         // Nested binary, two levels
         assert_eq!(
@@ -3320,6 +3565,10 @@ mod golden_tests {
         // Parameters: rendered name, ": ", rendered type
         assert_eq!(rust_param_text("a", "i64"), "a: i64");
         assert_eq!(rust_param_text("list", "Vec<String>"), "list: Vec<String>");
+        // Generic parameters (Phase 62): rendered name +
+        // the Clone bound every declared generic carries
+        assert_eq!(rust_generic_param_text("T"), "T: Clone");
+        assert_eq!(rust_generic_param_text("Elem"), "Elem: Clone");
         // Generics: absent is empty, present is bracketed
         assert_eq!(rust_generics_text("", false), "");
         assert_eq!(rust_generics_text("T", true), "<T>");
@@ -3377,14 +3626,20 @@ mod golden_tests {
         assert_eq!(rust_test_name_default(12), "test_12");
         // One test block over pre-rendered parts
         assert_eq!(
-            rust_test_case("adds", "add", "3", "7"),
+            rust_test_case("adds", "add", "", "3", "7"),
             "    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n"
         );
         // A String test input sits BARE in call position —
         // the recorded E0308 property of this path
         assert_eq!(
-            rust_test_case("names", "f", "\"Int\"", "\"Int\""),
+            rust_test_case("names", "f", "", "\"Int\"", "\"Int\""),
             "    #[test]\n    fn names() {\n        let result = f(\"Int\");\n        assert_eq!(result, \"Int\");\n    }\n"
+        );
+        // The Phase 61 generics text: the turbofish sits
+        // between the function name and the argument list
+        assert_eq!(
+            rust_test_case("empty_list", "sort", "::<i64>", "vec![], |a, b| (a < b)", "vec![]"),
+            "    #[test]\n    fn empty_list() {\n        let result = sort::<i64>(vec![], |a, b| (a < b));\n        assert_eq!(result, vec![]);\n    }\n"
         );
         // .morph test: the module wrapper over a marker
         assert_eq!(
@@ -3392,7 +3647,7 @@ mod golden_tests {
             "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\nX}\n"
         );
         // The wrapper over one real block
-        let block = rust_test_case("adds", "add", "3", "7");
+        let block = rust_test_case("adds", "add", "", "3", "7");
         assert_eq!(
             rust_test_module(&block),
             "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n}\n"
@@ -3401,11 +3656,13 @@ mod golden_tests {
 
     #[test]
     fn generate_rust_assembly() {
-        // Full fixed structure: doc header, precondition
-        // block (BEFORE the signature — surprise 13),
-        // signature, body, closing brace, test module
+        // Full fixed structure: doc header, signature,
+        // precondition block (at the head of the function
+        // body — the Phase 55 amendment moved it inside;
+        // through Phase 54 it stood BEFORE the signature,
+        // surprise 13), body, closing brace, test module
         let sig = rust_signature("add", "", "a: i64, b: i64", "i64");
-        let case = rust_test_case("adds", "add", "3", "7");
+        let case = rust_test_case("adds", "add", "", "3", "7");
         let out = generate_rust_assembled(
             Some(&["Adds things"]),
             &sig,
@@ -3415,7 +3672,7 @@ mod golden_tests {
         );
         assert_eq!(
             out,
-            "//! Adds things\n\n#[cfg(debug_assertions)]\n{\n    debug_assert!(a > 0, \"Precondition violated\");\n}\n\npub fn add(a: i64, b: i64) -> i64 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n}\n"
+            "//! Adds things\n\npub fn add(a: i64, b: i64) -> i64 {\n#[cfg(debug_assertions)]\n{\n    debug_assert!(a > 0, \"Precondition violated\");\n}\n\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n}\n"
         );
         // Minimal: no doc, no preconditions, no tests —
         // signature, body, closing brace only
@@ -4439,9 +4696,9 @@ mod golden_tests {
         assert_eq!(rust_driver_section_text(true, ""), "");
         assert_eq!(rust_driver_section_text(false, ""), "");
         // The whole-file equation over marker sections:
-        // order is header, precondition block, signature,
+        // order is header, signature, precondition block,
         // body, closing brace, test module.
-        assert_eq!(rust_file_text("H", "P", "S", "B", "T"), "HPSB}\nT");
+        assert_eq!(rust_file_text("H", "P", "S", "B", "T"), "HSPB}\nT");
         assert_eq!(rust_file_text("", "", "S", "B", ""), "SB}\n");
     }
 
@@ -4449,7 +4706,8 @@ mod golden_tests {
     fn generate_rust_end_to_end_full() {
         // Doc + generics + preconditions + tests: every
         // section present. The precondition block lands
-        // BEFORE the signature, at module level; the
+        // at the head of the function body, after the
+        // signature (the Phase 55 placement); the
         // named test's hyphen sanitizes; the unnamed test
         // takes its indexed default.
         let spec = DriverSpec {
@@ -4479,12 +4737,12 @@ mod golden_tests {
                 "//! Sorts things.\n",
                 "//! Does it well.\n",
                 "\n",
+                "pub fn clamp_value<T: Clone>(x: i64, limit: i64) -> i64 {\n",
                 "#[cfg(debug_assertions)]\n",
                 "{\n",
                 "    debug_assert!(x == 3, \"Precondition violated\");\n",
                 "}\n",
                 "\n",
-                "pub fn clamp_value<T>(x: i64, limit: i64) -> i64 {\n",
                 "    x\n",
                 "}\n",
                 "\n#[cfg(test)]\n",
@@ -4500,6 +4758,170 @@ mod golden_tests {
                 "    fn test_1() {\n",
                 "        let result = clamp_value(0);\n",
                 "        assert_eq!(result, 0);\n",
+                "    }\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn generate_rust_end_to_end_test_value_shapes() {
+        // The Phase 55 test-value shapes through the
+        // whole driver: a two-parameter function whose
+        // test input is a tuple SPREADS into the call
+        // positionally; a tuple in expected position
+        // renders as a Rust tuple; a lambda test input
+        // renders as a closure; a List renders as the
+        // vec literal; None renders bare. The spec is
+        // sort-shaped: (xs, cmp) -> xs.
+        let spec = DriverSpec {
+            doc: None,
+            name: "sort_by",
+            generics: vec![],
+            params: vec![("xs", Ty::Leaf(0)), ("cmp", Ty::Leaf(0))],
+            ret: Ty::Leaf(0),
+            preconditions: vec![],
+            body: Stmt::Expr(Expr::Var("xs")),
+            tests: vec![
+                DriverTest {
+                    name: Some("spread"),
+                    input: SExpr::Call(
+                        "__tuple__",
+                        vec![
+                            SExpr::Call(
+                                "List",
+                                vec![SExpr::IntLit(2), SExpr::IntLit(1)],
+                            ),
+                            SExpr::Lambda(
+                                vec!["a", "b"],
+                                Box::new(SExpr::BinOp(
+                                    9,
+                                    Box::new(SExpr::Var("a")),
+                                    Box::new(SExpr::Var("b")),
+                                )),
+                            ),
+                        ],
+                    ),
+                    expected: SExpr::Call(
+                        "List",
+                        vec![SExpr::IntLit(1), SExpr::IntLit(2)],
+                    ),
+                },
+                DriverTest {
+                    name: Some("pair-out"),
+                    input: SExpr::Call(
+                        "__tuple__",
+                        vec![SExpr::IntLit(1), SExpr::Call("None", vec![])],
+                    ),
+                    expected: SExpr::Call(
+                        "__tuple__",
+                        vec![SExpr::IntLit(1), SExpr::Call("None", vec![])],
+                    ),
+                },
+            ],
+        };
+        assert_eq!(
+            generate_rust_from_spec_assembled(&spec),
+            concat!(
+                "pub fn sort_by(xs: i64, cmp: i64) -> i64 {\n",
+                "    xs\n",
+                "}\n",
+                "\n#[cfg(test)]\n",
+                "mod tests {\n",
+                "    use super::*;\n",
+                "\n",
+                "    #[test]\n",
+                "    fn spread() {\n",
+                "        let result = sort_by(vec![2, 1], |a, b| (a < b));\n",
+                "        assert_eq!(result, vec![1, 2]);\n",
+                "    }\n",
+                "    #[test]\n",
+                "    fn pair_out() {\n",
+                "        let result = sort_by(1, None);\n",
+                "        assert_eq!(result, (1, None));\n",
+                "    }\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn generate_rust_end_to_end_generic_annotation() {
+        // The Phase 61 (G6) annotation through the whole
+        // driver: a genuinely generic sort-shaped spec
+        // whose empty-list test leaves T unpinned against
+        // the fn-typed comparator parameter — that test's
+        // call carries the turbofish (concrete type from
+        // the spec's own tests), the pinned test's call
+        // stays bare.
+        let lt = || {
+            SExpr::Lambda(
+                vec!["a", "b"],
+                Box::new(SExpr::BinOp(
+                    9,
+                    Box::new(SExpr::Var("a")),
+                    Box::new(SExpr::Var("b")),
+                )),
+            )
+        };
+        let spec = DriverSpec {
+            doc: None,
+            name: "sort",
+            generics: vec!["T"],
+            params: vec![
+                ("list", Ty::Wrap1(16, Box::new(Ty::Name("T")))),
+                (
+                    "cmp",
+                    Ty::Func(
+                        vec![Ty::Name("T"), Ty::Name("T")],
+                        Box::new(Ty::Leaf(2)),
+                    ),
+                ),
+            ],
+            ret: Ty::Wrap1(16, Box::new(Ty::Name("T"))),
+            preconditions: vec![],
+            body: Stmt::Expr(Expr::Var("list")),
+            tests: vec![
+                DriverTest {
+                    name: Some("empty"),
+                    input: SExpr::Call(
+                        "__tuple__",
+                        vec![SExpr::Call("List", vec![]), lt()],
+                    ),
+                    expected: SExpr::Call("List", vec![]),
+                },
+                DriverTest {
+                    name: Some("single"),
+                    input: SExpr::Call(
+                        "__tuple__",
+                        vec![
+                            SExpr::Call("List", vec![SExpr::IntLit(5)]),
+                            lt(),
+                        ],
+                    ),
+                    expected: SExpr::Call("List", vec![SExpr::IntLit(5)]),
+                },
+            ],
+        };
+        assert_eq!(
+            generate_rust_from_spec_assembled(&spec),
+            concat!(
+                "pub fn sort<T: Clone>(list: Vec<T>, cmp: fn(T, T) -> bool) -> Vec<T> {\n",
+                "    list\n",
+                "}\n",
+                "\n#[cfg(test)]\n",
+                "mod tests {\n",
+                "    use super::*;\n",
+                "\n",
+                "    #[test]\n",
+                "    fn empty() {\n",
+                "        let result = sort::<i64>(vec![], |a, b| (a < b));\n",
+                "        assert_eq!(result, vec![]);\n",
+                "    }\n",
+                "    #[test]\n",
+                "    fn single() {\n",
+                "        let result = sort(vec![5], |a, b| (a < b));\n",
+                "        assert_eq!(result, vec![5]);\n",
                 "    }\n",
                 "}\n",
             )
@@ -4657,13 +5079,14 @@ spec bad {
     fn spec_file_has_expected_shape() {
         // Supplementary shape check (the pipeline test above is the
         // real validation): the file declares the 8 slice-1 specs
-        // plus the 20 slice-2 specs plus the 16 slice-3 specs plus
+        // plus the 24 slice-2 specs (20 + the 4 Phase 55 specs)
+        // plus the 16 slice-3 specs plus
         // the 35 slice-4 specs plus the 27 slice-5 specs plus the
-        // 6 slice-6 specs.
+        // 6 slice-6 specs, plus rust_generic_param_text (Phase 62).
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 112, "codegen.morph should declare 112 specs");
+        assert_eq!(spec_decls, 117, "codegen.morph should declare 117 specs");
         assert!(src.matches("test \"").count() >= 174, "codegen.morph should carry in-spec tests");
     }
 }

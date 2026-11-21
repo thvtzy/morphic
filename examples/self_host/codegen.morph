@@ -298,7 +298,7 @@ spec rust_keyword {
 // -- Spec-expression operator table ------------------------------
 
 spec spec_binop_symbol {
-    doc: "Operator symbol expr_to_rust uses when emitting a spec expression into generated Rust (test assertions in generate_rust's output) -- a SEPARATE, weaker table than rust_binop_symbol. The '?' rows are the emitter's real fallback for the operators it does not map (Mod, Lt, Le, Gt, Ge, Concat) and are pinned deliberately: a synthesized replacement must reproduce today's bytes, fallback included. Fixing the fallback is a separate later decision. Total over all fourteen operators."
+    doc: "Operator symbol expr_to_rust uses when emitting a spec expression into generated Rust (test assertions in generate_rust's output) -- a SEPARATE, weaker table than rust_binop_symbol. Through Phase 54 the six rows Mod/Lt/Le/Gt/Ge/Concat carried the emitter's real '?' fallback, pinned deliberately with the reservation that fixing the fallback was a separate later decision; that decision was taken on 2026-11-21 (Phase 55) and the six rows now carry their real Rust symbols: Mod '%', Lt '<', Le '<=', Gt '>', Ge '>=', and Concat '+', sharing Add's symbol exactly as the IR table's Concat row does (rust_binop_symbol op 16). Concat's '+' is the honest symbol in this walker too: expr_to_rust applies no operand-ownership treatment anywhere (a StringLit renders as a bare quoted literal in every position -- the recorded placement property), so the symbol table states the operator's symbol and nothing more. Total over all fourteen operators."
     input: op: Int
     output: String
 
@@ -306,23 +306,24 @@ spec spec_binop_symbol {
     constraint: op<1||op>1||output=="-"
     constraint: op<2||op>2||output=="*"
     constraint: op<3||op>3||output=="/"
-    constraint: op<4||op>4||output=="?"
+    constraint: op<4||op>4||output=="%"
     constraint: op<5||op>5||output=="&&"
     constraint: op<6||op>6||output=="||"
     constraint: op<7||op>7||output=="=="
     constraint: op<8||op>8||output=="!="
-    constraint: op<9||op>9||output=="?"
-    constraint: op<10||op>10||output=="?"
-    constraint: op<11||op>11||output=="?"
-    constraint: op<12||op>12||output=="?"
-    constraint: op<13||op>13||output=="?"
+    constraint: op<9||op>9||output=="<"
+    constraint: op<10||op>10||output=="<="
+    constraint: op<11||op>11||output==">"
+    constraint: op<12||op>12||output==">="
+    constraint: op<13||op>13||output=="+"
 
     optimize: time < O(n)
 
     test "add-symbol" { input: 0 expect: "+" }
     test "neq-symbol" { input: 8 expect: "!=" }
-    test "mod-fallback" { input: 4 expect: "?" }
-    test "lt-fallback" { input: 9 expect: "?" }
+    test "mod-symbol" { input: 4 expect: "%" }
+    test "lt-symbol" { input: 9 expect: "<" }
+    test "concat-symbol" { input: 13 expect: "+" }
 }
 
 // -- Slice 2: small template families -------------------------
@@ -595,7 +596,7 @@ spec rust_pattern_ctor_name {
 // -- Spec-expression templates (expr_to_rust) -------------------
 
 spec rust_expr_form {
-    doc: "Rendering family of a spec expression in expr_to_rust (src/codegen/mod.rs:1177-1200) -- the walker that emits spec tests into generated code (generate_rust's test module) and constraint operands into precondition asserts: 0 = name (Var: the rust_ident-rendered name), 1 = decimal text (IntLit), 2 = value text (BoolLit, via rust_literal_bool), 3 = quoted template (StringLit: a quote, the escaped contents, a quote -- the escape rule is per-character and mirror-pinned, Phase 29), 4 = call template (the name, then '(' + args joined ', ' + ')'), 5 = binary template ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from spec_binop_symbol, slice 1), 6 = fallback fixed text '??' (via rust_expr_fixed_text). Total over all thirteen Expr kinds. Two sharp edges of the original are pinned deliberately: FloatLit (2) and UnaryOp (9) have NO arm and fall through to '??' like the structural kinds -- a float literal in a spec test renders as '??' in the generated test. And StringLit's rendering carries a placement caveat, pinned as-is: the E0308 it can cause (a &str literal passed where the synthesized function takes String) is a property of generate_rust placing this rendering in call position -- the driver slice owns it; the IR side's ownership rewrite (ir_to_rust_expr_typed) has no counterpart here."
+    doc: "Rendering family of a spec expression in expr_to_rust (src/codegen/mod.rs:1177-1200) -- the walker that emits spec tests into generated code (generate_rust's test module) and constraint operands into precondition asserts: 0 = name (Var: the rust_ident-rendered name), 1 = decimal text (IntLit), 2 = value text (BoolLit, via rust_literal_bool), 3 = quoted template (StringLit: a quote, the escaped contents, a quote -- the escape rule is per-character and mirror-pinned, Phase 29), 4 = call template (the name, then '(' + args joined ', ' + ')' -- with the pseudo-call forms of rust_expr_call_form selecting the vec-literal / tuple / bare-constructor renderings instead, Phase 55), 5 = binary template ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from spec_binop_symbol, slice 1), 6 = fallback fixed text '??' (via rust_expr_fixed_text), 7 = closure template (Lambda: '|' + the parameter names joined ', ' + '| ' + the body rendering, via rust_expr_lambda_text). Total over all thirteen Expr kinds. Two sharp edges of the original are pinned deliberately: FloatLit (2) and UnaryOp (9) have NO arm and fall through to '??' like the structural kinds -- a float literal in a spec test renders as '??' in the generated test. Lambda (10) shared that fate through Phase 54; the Phase 55 amendment (2026-11-21) gives it family 7. And StringLit's rendering carries a placement caveat, pinned as-is: the E0308 it can cause (a &str literal passed where the synthesized function takes String) is a property of generate_rust placing this rendering in call position -- the driver slice owns it; the IR side's ownership rewrite (ir_to_rust_expr_typed) has no counterpart here."
     input: kind: Int
     output: Int
 
@@ -609,7 +610,7 @@ spec rust_expr_form {
     constraint: kind<7||kind>7||output==4
     constraint: kind<8||kind>8||output==5
     constraint: kind<9||kind>9||output==6
-    constraint: kind<10||kind>10||output==6
+    constraint: kind<10||kind>10||output==7
     constraint: kind<11||kind>11||output==6
     constraint: kind<12||kind>12||output==6
 
@@ -619,11 +620,12 @@ spec rust_expr_form {
     test "floatlit-fallback" { input: 2 expect: 6 }
     test "call-form" { input: 7 expect: 4 }
     test "binop-form" { input: 8 expect: 5 }
+    test "lambda-form" { input: 10 expect: 7 }
     test "comprehension-fallback" { input: 12 expect: 6 }
 }
 
 spec rust_expr_fixed_text {
-    doc: "Fixed text of expr_to_rust's catch-all (src/codegen/mod.rs:1199): every Expr kind without an arm -- FloatLit (2), Field (5), Index (6), UnaryOp (9), Lambda (10), Length (11), Comprehension (12) -- renders '??'."
+    doc: "Fixed text of expr_to_rust's catch-all (src/codegen/mod.rs:1199): every Expr kind without an arm -- FloatLit (2), Field (5), Index (6), UnaryOp (9), Length (11), Comprehension (12) -- renders '??'. Lambda (10) stood in this table through Phase 54; the Phase 55 amendment (2026-11-21) gives Lambda its own template (rust_expr_lambda_text, rust_expr_form family 7) and its row is removed here."
     input: kind: Int
     output: String
 
@@ -631,7 +633,6 @@ spec rust_expr_fixed_text {
     constraint: kind<5||kind>5||output=="??"
     constraint: kind<6||kind>6||output=="??"
     constraint: kind<9||kind>9||output=="??"
-    constraint: kind<10||kind>10||output=="??"
     constraint: kind<11||kind>11||output=="??"
     constraint: kind<12||kind>12||output=="??"
 
@@ -639,6 +640,63 @@ spec rust_expr_fixed_text {
 
     test "floatlit-text" { input: 2 expect: "??" }
     test "unaryop-text" { input: 9 expect: "??" }
+}
+
+spec rust_expr_call_form {
+    doc: "Which rendering a Call in expr_to_rust takes, keyed by the call's NAME (Phase 55 amendment, 2026-11-21): 0 = the plain call template (the name, then '(' + args joined ', ' + ')' -- every genuine function call, and pseudo-calls like Some(x) whose Rust form is the call itself), 1 = the vec-literal template (rust_expr_list_text) for the parser's list pseudo-call 'List', 2 = the tuple template (rust_expr_tuple_text) for the parser's tuple pseudo-call '__tuple__', 3 = the bare constructor: 'None' renders as the bare name with no parentheses (its pseudo-call carries no arguments, so the plain template produced 'None()', which is not a value). Matching is exact and case-sensitive. The rows are String-equality guards -- the rust_target_route shape: fully statable in the spec, and (like it) outside every admitted seed family, whose guards key on Int/Bool/Char only."
+    input: name: String
+    output: Int
+
+    constraint: name!="List"||output==1
+    constraint: name!="__tuple__"||output==2
+    constraint: name!="None"||output==3
+    constraint: name=="List"||name=="__tuple__"||name=="None"||output==0
+
+    optimize: time < O(n)
+
+    test "list-form" { input: "List" expect: 1 }
+    test "tuple-form" { input: "__tuple__" expect: 2 }
+    test "none-form" { input: "None" expect: 3 }
+    test "some-call" { input: "Some" expect: 0 }
+    test "plain-call" { input: "max" expect: 0 }
+    test "case-form" { input: "list" expect: 0 }
+    test "empty-form" { input: "" expect: 0 }
+}
+
+spec rust_expr_list_text {
+    doc: "The list-literal rendering of expr_to_rust's Call arm (Phase 55 amendment, 2026-11-21): the parser lowers a spec list literal [a, b, ...] to the pseudo-call Call(\"List\", ...) (parser.rs), and the walker renders that pseudo-call as the Rust vec literal 'vec![' + the element renderings joined ', ' + ']'. The elements arrive pre-rendered by expr_to_rust itself and pre-joined (the join is iteration, mirror-only); WHICH calls take this form is rust_expr_call_form's classification (family 1)."
+    input: args: String
+    output: String
+
+    constraint: output == "vec![" ++ args ++ "]"
+
+    optimize: time < O(n)
+
+    test "list-text" { input: "1, 2" expect: "vec![1, 2]" }
+    test "list-empty" { input: "" expect: "vec![]" }
+}
+
+spec rust_expr_tuple_text {
+    doc: "The tuple rendering of expr_to_rust's Call arm (Phase 55 amendment, 2026-11-21): the parser lowers a spec tuple (a, b, ...) to the pseudo-call Call(\"__tuple__\", ...) (parser.rs) -- always two or more elements, since a parenthesized single expression is not a tuple in the grammar -- and the walker renders that pseudo-call as the Rust tuple '(' + the element renderings joined ', ' + ')'. The elements arrive pre-rendered by expr_to_rust itself and pre-joined (the join is iteration, mirror-only); WHICH calls take this form is rust_expr_call_form's classification (family 2). This is the VALUE-position rendering (expected outputs, nested positions): in test-INPUT position the driver may instead spread the elements into the generated call -- rust_test_case's doc states that rule."
+    input: args: String
+    output: String
+
+    constraint: output == "(" ++ args ++ ")"
+
+    optimize: time < O(n)
+
+    test "tuple-text" { input: "1, 2" expect: "(1, 2)" }
+    test "tuple-three" { input: "a, b, c" expect: "(a, b, c)" }
+}
+
+spec rust_expr_lambda_text {
+    doc: "The Lambda rendering of expr_to_rust (its Lambda arm, added by the Phase 55 amendment, 2026-11-21): '|' + the parameter names joined ', ' + '| ' + the body rendering -- a Rust closure whose body is the walker's own rendering of the lambda's body (a BinOp body arrives already parenthesized by the binary template, so sort's |a, b| a < b renders '|a, b| (a < b)'). The names arrive rust_ident-rendered and pre-joined (the join is iteration, mirror-only); the parameters' TYPES are dropped, as in the IR walker's closure arm (rust_lambda_text) -- the generated closure is unannotated. The body is rendered by expr_to_rust itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: params: String, body: String
+    output: String
+
+    constraint: output == "|" ++ params ++ "| " ++ body
+
+    optimize: time < O(n)
 }
 
 // -- Constraint templates (constraint_to_rust) ------------------
@@ -867,8 +925,21 @@ spec rust_param_text {
     optimize: time < O(n)
 }
 
+spec rust_generic_param_text {
+    doc: "One generic parameter of the generated signature, as it appears inside rust_generics_text's bracket (src/codegen/mod.rs:80-88): the rust_ident-rendered name + ': Clone'. Phase 62 (2026-11-21, owner decision (i)): generated Rust signatures carry a Clone bound on EVERY declared generic parameter -- the Phase 61 probe proved no element-reading construction compiles under the bound-free signature (plain index reads E0507, clone-mediated reads E0599, the Sort node E0631), while the shipped scan-form sort construction compiles and passes 6/6 under 'T: Clone'. The name arrives already rendered by rust_ident (slice 3 owns sanitization); the ', ' join over the parameter list is iteration and lives in the driver/mirror, exactly as rust_param_text's join does."
+    input: name: String
+    output: String
+
+    constraint: output == name ++ ": Clone"
+
+    optimize: time < O(n)
+
+    test "generic-clone" { input: "T" expect: "T: Clone" }
+    test "generic-named" { input: "Elem" expect: "Elem: Clone" }
+}
+
 spec rust_generics_text {
-    doc: "The generics bracket of the generated signature (src/codegen/mod.rs:80-88): no generics renders the empty string; otherwise '<' + the ', '-joined rust_ident-rendered generic names + '>'. The joined text arrives pre-rendered -- the join is iteration, mirror-only. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    doc: "The generics bracket of the generated signature (src/codegen/mod.rs:80-88): no generics renders the empty string; otherwise '<' + the ', '-joined generic parameter texts + '>'. The joined text arrives pre-rendered -- the join is iteration, mirror-only -- and since Phase 62 (2026-11-21) each element of the join is a rust_generic_param_text rendering (the rust_ident-rendered name + ': Clone', owner decision (i)); through Phase 61 the elements were the bare rendered names. This spec's own rule -- the bracket over whatever joined text arrives -- is unchanged by that amendment. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
     input: joined: String, present: Bool
     output: String
 
@@ -902,7 +973,7 @@ spec rust_precondition_assert {
 }
 
 spec rust_precondition_block {
-    doc: "generate_rust's precondition block (src/codegen/mod.rs:96-104) over the pre-joined assert lines (rust_precondition_assert): the '#[cfg(debug_assertions)]' attribute line, '{', the asserts, '}' and a blank line. The block exists only when the spec has preconditions -- that branch is the driver's. Recorded as-is (surprise 13 in the ROAD M3 notes): the block is emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters -- outside the function body entirely."
+    doc: "generate_rust's precondition block (src/codegen/mod.rs:96-104) over the pre-joined assert lines (rust_precondition_assert): the '#[cfg(debug_assertions)]' attribute line, '{', the asserts, '}' and a blank line. The block exists only when the spec has preconditions -- that branch is the driver's. Placement amended in Phase 55 (2026-11-21): through Phase 54 the block was emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters -- outside the function body entirely (surprise 13 in the ROAD M3 notes) -- which no Rust file can parse ('expected item after attributes'). It is now emitted at the head of the function body, immediately after the signature (rust_file_text's equation states the order), where the parameters are in scope. The block's TEXT is unchanged by the amendment; only its position moved."
     input: asserts: String
     output: String
 
@@ -928,11 +999,11 @@ spec rust_test_name_form {
 }
 
 spec rust_test_case {
-    doc: "One generated test's block (src/codegen/mod.rs:139-150) over pre-rendered parts: the '#[test]' attribute and 'fn' line at four spaces with the test's final name (rust_ident-rendered, chosen per rust_test_name_form), then at eight spaces the call 'let result = <fn>(<input>);' and the assertion 'assert_eq!(result, <expected>);', then the closing brace at four spaces. The function name arrives rust_ident-rendered; input and expected arrive as expr_to_rust renderings (slice 2 owns that walker) placed BARE in call/assert position -- the recorded E0308 property of the generated-test path (a String test input renders as a &str literal against a String parameter) is a property of this placement, pinned as-is. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
-    input: test_name: String, fn_name: String, input_text: String, expected_text: String
+    doc: "One generated test's block (src/codegen/mod.rs:139-150) over pre-rendered parts: the '#[test]' attribute and 'fn' line at four spaces with the test's final name (rust_ident-rendered, chosen per rust_test_name_form), then at eight spaces the call 'let result = <fn><generics>(<input>);' and the assertion 'assert_eq!(result, <expected>);', then the closing brace at four spaces. The function name arrives rust_ident-rendered; input and expected arrive as expr_to_rust renderings (slice 2 owns that walker) placed BARE in call/assert position -- the recorded E0308 property of the generated-test path (a String test input renders as a &str literal against a String parameter) is a property of this placement, pinned as-is. The generics text (Phase 61 amendment, 2026-11-21) is the call's turbofish annotation, arriving pre-rendered like rust_signature's generics bracket: the empty string for every test except the E0283 class -- a generic spec with a function-typed parameter, where a test passes an empty collection literal for a List<generic> parameter and no other argument of that test pins the generic (a scalar literal at a bare-generic parameter position, or a scalar literal inside a non-empty list literal at a List<generic> position, pins it; a lambda never pins). For that class the driver supplies '::<' + the concrete types joined ', ' + '>', one per generic parameter, the concrete type derived from the spec's own test literals (the first scalar literal kind across the spec's tests -- the G1 runner harness's derivation -- Int when the tests carry none); without it the empty-collection test leaves the element type unpinned against the unconstrained fn-typed signature and the generated module does not compile (E0283). The choice and the derivation are the driver's -- they are spec-AST analysis, like the tuple spread below; only the annotated call's TEXT is pinned here. The input text the driver hands this template is the test input's ARGUMENT rendering (Phase 55 amendment, 2026-11-21): for a tuple input (the parser's '__tuple__' pseudo-call) whose arity equals the function's parameter count, the driver spreads the elements -- their expr_to_rust renderings joined ', ' -- so the call receives its arguments positionally (the same arity rule Phase 53's evaluation binding uses); every other input arrives as its single expr_to_rust rendering, and a tuple in EXPECTED position arrives as its Rust-tuple rendering (rust_expr_tuple_text). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: test_name: String, fn_name: String, generics_text: String, input_text: String, expected_text: String
     output: String
 
-    constraint: output == "    #[test]\n    fn " ++ test_name ++ "() {\n        let result = " ++ fn_name ++ "(" ++ input_text ++ ");\n        assert_eq!(result, " ++ expected_text ++ ");\n    }\n"
+    constraint: output == "    #[test]\n    fn " ++ test_name ++ "() {\n        let result = " ++ fn_name ++ generics_text ++ "(" ++ input_text ++ ");\n        assert_eq!(result, " ++ expected_text ++ ");\n    }\n"
 
     optimize: time < O(n)
 }
@@ -1946,11 +2017,11 @@ spec rust_driver_section_text {
 }
 
 spec rust_file_text {
-    doc: "generate_rust's whole-file assembly (src/codegen/mod.rs:66-155) over pre-rendered sections, in emission order: the doc header (rust_doc_header_text, via rust_driver_section_text), the precondition block (rust_precondition_block, via rust_driver_section_text -- emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters: slice 3 recorded the placement surprise, this equation is where it lands in the file), the signature (rust_signature), the body, the function's closing brace (the text of rust_file_fixed_text piece 0), and the test module (rust_test_module, via rust_driver_section_text). Absent sections arrive as the empty string (rust_driver_section_text's absent arm), so the equation is unconditional. The body arrives rendered by ir_to_rust_tail at indent 1, with the function's return type as both fn_ret and the Some expectation -- the driver's own seed, the one expectation site outside rust_expectation_source's table (that table's doc names this site as the driver's); statement-shaped bodies fall through the tail renderer to the statement walker unchanged, bare-expression bodies keep their value as the function's return. Exactly one function per file, and NO import is ever generated at file level -- the only use statement in the output is the test module's inner 'use super::*;', inside rust_test_module. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    doc: "generate_rust's whole-file assembly (src/codegen/mod.rs:66-155) over pre-rendered sections, in emission order: the doc header (rust_doc_header_text, via rust_driver_section_text), the signature (rust_signature), the precondition block (rust_precondition_block, via rust_driver_section_text -- emitted AFTER the signature, at the head of the function body, where its asserts name the function's parameters in scope; through Phase 54 it stood before the signature as a free-standing block at module level -- slice 3 recorded the placement surprise, and the Phase 55 amendment (2026-11-21) moves it inside, the block's own text unchanged), the body, the function's closing brace (the text of rust_file_fixed_text piece 0), and the test module (rust_test_module, via rust_driver_section_text). Absent sections arrive as the empty string (rust_driver_section_text's absent arm), so the equation is unconditional. The body arrives rendered by ir_to_rust_tail at indent 1, with the function's return type as both fn_ret and the Some expectation -- the driver's own seed, the one expectation site outside rust_expectation_source's table (that table's doc names this site as the driver's); statement-shaped bodies fall through the tail renderer to the statement walker unchanged, bare-expression bodies keep their value as the function's return. Exactly one function per file, and NO import is ever generated at file level -- the only use statement in the output is the test module's inner 'use super::*;', inside rust_test_module. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
     input: header: String, pre_block: String, signature: String, body: String, test_module: String
     output: String
 
-    constraint: output == header ++ pre_block ++ signature ++ body ++ "}\n" ++ test_module
+    constraint: output == header ++ signature ++ pre_block ++ body ++ "}\n" ++ test_module
 
     optimize: time < O(n)
 }

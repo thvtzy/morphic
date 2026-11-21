@@ -1,0 +1,90 @@
+// =================================================================
+//  Rust item visibility -- a qualifier component for the Rust
+//  emitter's signature assembly.
+//
+//  generate_rust's signature head is fixed text today ('pub fn ',
+//  stated by the Codegen module's rust_signature): every generated
+//  function is public. This component states the decision that
+//  head suppresses -- which visibility qualifier an item carries
+//  -- as pure functions over an Int code, in the same idiom as the
+//  Codegen module's leaf tables (per-row guards for the lookup,
+//  an equation for the range check, an equation over a sibling
+//  call for the composition). Enums are simulated with Int codes,
+//  as in M0/M1/M2/M3.
+//
+//  This file is deliberately NOT part of the examples/ inventory:
+//  it is the M5 held-out component (Phase 63), written fresh in
+//  the gate phase and absent from every prior corpus. It lives
+//  outside the tree the corpus walkers scan so that property is
+//  structural, not promised.
+// =================================================================
+
+RustVisibility {
+
+// -- Types ---------------------------------------------------
+
+// Item visibility, coded for the signature assembly.
+// 0=Private, 1=Public, 2=CrateVisible
+type VisibilityCode = Int;
+
+// -- The qualifier table --------------------------------------
+
+spec rust_visibility_text {
+    doc: "Text of an item-visibility code (VisibilityCode) as it appears at the head of a generated Rust item: code 0 is private and renders as the empty string; code 1 is public ('pub '); code 2 is crate-visible ('pub(crate) '). The trailing space is part of the rendering -- the qualifier is emitted immediately before the item keyword, which supplies no separator of its own. Codes outside 0..2 are not pinned here; rust_visibility_is_known is the assembly's rejection rule for them."
+    input: code: Int
+    output: String
+
+    constraint: code<0||code>0||output==""
+    constraint: code<1||code>1||output=="pub "
+    constraint: code<2||code>2||output=="pub(crate) "
+
+    optimize: time < O(n)
+
+    test "private-renders-empty" { input: 0 expect: "" }
+    test "public-renders-pub" { input: 1 expect: "pub " }
+    test "crate-renders-pub-crate" { input: 2 expect: "pub(crate) " }
+}
+
+spec rust_visibility_is_known {
+    doc: "Whether a visibility code names one of the three qualifiers rust_visibility_text renders (0..2). The signature assembly rejects an unknown code instead of guessing a qualifier for it."
+    input: code: Int
+    output: Bool
+
+    constraint: output == (code>=0&&code<=2)
+
+    optimize: time < O(n)
+
+    test "private-known" { input: 0 expect: true }
+    test "crate-known" { input: 2 expect: true }
+    test "above-range" { input: 3 expect: false }
+}
+
+// -- Composition ----------------------------------------------
+// The prefix table states final rendered text per code. A first
+// stating of this spec as an equation over a call to
+// rust_visibility_text (output == rust_visibility_text(code) ++
+// "fn ") was measured during this component's authoring (Phase
+// 63): the seed inlines the callee's table as a match of &str
+// arms and the concatenation renders unowned -- rustc E0369 in
+// BOTH emitters (they render that body byte-identically). The
+// finding is recorded in the ROAD Phase 63 note; the table form
+// below is the module's idiom for exactly this reason (leaf
+// tables state final text; cf. spec_binop_symbol).
+
+spec rust_signature_prefix {
+    doc: "The head of a generated function signature over a visibility code: the code's qualifier text (rust_visibility_text) followed by the fn keyword and its separating space. This is the text rust_signature's fixed 'pub fn ' head generalizes when the item is not public: a private item's head is 'fn ', a crate-visible item's is 'pub(crate) fn '. The composition is stated as a table of final rendered text -- the module's leaf-table idiom -- and each row must agree with rust_visibility_text's row for the same code; that agreement is a stated cross-spec property of this component."
+    input: code: Int
+    output: String
+
+    constraint: code<0||code>0||output=="fn "
+    constraint: code<1||code>1||output=="pub fn "
+    constraint: code<2||code>2||output=="pub(crate) fn "
+
+    optimize: time < O(n)
+
+    test "private-prefix" { input: 0 expect: "fn " }
+    test "public-prefix" { input: 1 expect: "pub fn " }
+    test "crate-prefix" { input: 2 expect: "pub(crate) fn " }
+}
+
+}
