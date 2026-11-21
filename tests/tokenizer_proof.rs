@@ -76,13 +76,28 @@ fn skip_whitespace(mut state: TokenizerState) -> TokenizerState {
     state
 }
 
-fn push_token(state: TokenizerState, kind: TokenKind, lexeme: String) -> TokenizerState {
+/// Append a token to the END state's token list, stamped
+/// with the START state's line/col — the position where
+/// the token starts. D4a (ratified 2026-11-22, applied in
+/// Phase 79): START is normative, per the spec's tests.
+/// Through Phase 78 this function took only the
+/// already-advanced state and stamped the token END; the
+/// mirrors carried the START form and a dedicated test
+/// pinned the divergence. The correction is this
+/// signature: the caller passes the state the token
+/// started in, exactly as mirror_push_token below does.
+fn push_token(
+    start: &TokenizerState,
+    state: TokenizerState,
+    kind: TokenKind,
+    lexeme: String,
+) -> TokenizerState {
     let mut tokens = state.tokens;
     tokens.push(Token {
         kind,
         lexeme,
-        line: state.line,
-        col: state.col,
+        line: start.line,
+        col: start.col,
     });
     TokenizerState { tokens, ..state }
 }
@@ -92,24 +107,25 @@ fn tokenize_one(state: TokenizerState) -> Result<TokenizerState, String> {
     match peek(&state) {
         None => Ok(state), // EOF
         Some(c) if is_ident_start(c) => {
-            // Read entire identifier
+            // Read entire identifier; the token is stamped
+            // where the identifier starts (D4a).
             let mut lexeme = String::new();
-            let mut s = state;
+            let mut s = state.clone();
             while peek(&s).map_or(false, |ch| is_ident_continue(ch)) {
                 if let Some(ch) = peek(&s) { lexeme.push(ch); }
                 s = next_char(s);
             }
-            Ok(push_token(s, TokenKind::Ident, lexeme))
+            Ok(push_token(&state, s, TokenKind::Ident, lexeme))
         }
-        Some(':') => Ok(push_token(next_char(state), TokenKind::Colon, ":".into())),
-        Some('{') => Ok(push_token(next_char(state), TokenKind::LBrace, "{".into())),
-        Some('}') => Ok(push_token(next_char(state), TokenKind::RBrace, "}".into())),
-        Some('(') => Ok(push_token(next_char(state), TokenKind::LParen, "(".into())),
-        Some(')') => Ok(push_token(next_char(state), TokenKind::RParen, ")".into())),
-        Some(',') => Ok(push_token(next_char(state), TokenKind::Comma, ",".into())),
-        Some('<') => Ok(push_token(next_char(state), TokenKind::Lt, "<".into())),
-        Some('>') => Ok(push_token(next_char(state), TokenKind::Gt, ">".into())),
-        Some('=') => Ok(push_token(next_char(state), TokenKind::Eq, "=".into())),
+        Some(':') => Ok(push_token(&state, next_char(state.clone()), TokenKind::Colon, ":".into())),
+        Some('{') => Ok(push_token(&state, next_char(state.clone()), TokenKind::LBrace, "{".into())),
+        Some('}') => Ok(push_token(&state, next_char(state.clone()), TokenKind::RBrace, "}".into())),
+        Some('(') => Ok(push_token(&state, next_char(state.clone()), TokenKind::LParen, "(".into())),
+        Some(')') => Ok(push_token(&state, next_char(state.clone()), TokenKind::RParen, ")".into())),
+        Some(',') => Ok(push_token(&state, next_char(state.clone()), TokenKind::Comma, ",".into())),
+        Some('<') => Ok(push_token(&state, next_char(state.clone()), TokenKind::Lt, "<".into())),
+        Some('>') => Ok(push_token(&state, next_char(state.clone()), TokenKind::Gt, ">".into())),
+        Some('=') => Ok(push_token(&state, next_char(state.clone()), TokenKind::Eq, "=".into())),
         Some(other) => Err(format!("Unexpected character '{}' at line {}", other, state.line)),
     }
 }
@@ -204,11 +220,14 @@ mod tests {
 // functional content lived in their tests — the mirror
 // completes it the way the original file's tests intend:
 // untouched fields carry over, and the tokenizing behavior
-// is the hand-written tokenizer's above, with ONE recorded
-// divergence: a token is stamped with the line/col where
-// it STARTS (the spec's tests), not where it ends (the
-// hand-written push_token reads the already-advanced
-// state). String positions are char indices, as in the
+// is the hand-written tokenizer's above. A token is
+// stamped with the line/col where it STARTS (the spec's
+// tests): through Phase 78 the hand-written push_token
+// stamped the token END and this was the one recorded
+// divergence between the artifacts; D4a (ratified
+// 2026-11-22) made START normative and Phase 79 corrected
+// push_token, so the two agree — pinned by the flipped
+// agreement test below. String positions are char indices, as in the
 // hand-written tokenizer (chars().nth(pos)); the spec's
 // len() / indexing read the same way over the batteries
 // below. The M0 code above is untouched; these mirrors sit
@@ -261,10 +280,11 @@ fn mirror_skip_whitespace(state: TokenizerState) -> TokenizerState {
 
 /// Append a token stamped with the START state's line/col
 /// (the spec's tests) to the END state's token list; the
-/// rest of the result is the end state. This is the one
-/// place the mirrors deliberately differ from the
-/// hand-written push_token above, which stamps the token
-/// from the single, already-advanced state it is given.
+/// rest of the result is the end state. This was the one
+/// place the mirrors deliberately differed from the
+/// hand-written push_token above; since the D4a correction
+/// (Phase 79) push_token takes the same (start, end) pair
+/// and the two stamp identically.
 fn mirror_push_token(
     start: &TokenizerState,
     end: TokenizerState,
@@ -490,8 +510,9 @@ mod s4_mirror_tests {
     #[test]
     fn s4_tokenize_one_golden() {
         // test "keyword-spec": the token is stamped where it
-        // starts (line 1, col 1) — see the divergence test
-        // below for the hand-written tokenizer's col 5.
+        // starts (line 1, col 1) — START is normative since
+        // D4a; the hand-written tokenizer agrees (see the
+        // agreement test below).
         let out = mirror_tokenize_one(st("spec", 0, 1, 1)).unwrap();
         assert_eq!(
             out,
@@ -525,39 +546,40 @@ mod s4_mirror_tests {
     }
 
     // The cross-check against the hand-written tokenizer,
-    // seeded by its own punctuation case — and the recorded
-    // stamping divergence, pinned on both sides so any
-    // future change to either artifact is loud.
+    // seeded by its own punctuation case — and the stamping
+    // question, settled by owner decision D4a (2026-11-22,
+    // applied in Phase 79): token columns are
+    // START-normative. Through Phase 78 this test pinned
+    // the divergence (the spec stamps token starts, the
+    // hand-written push_token stamped token ends); with
+    // push_token corrected, the pin flips to agreement —
+    // full token equality, columns included.
 
     #[test]
-    fn s4_tokenize_crosscheck_and_stamping_divergence() {
+    fn s4_tokenize_crosscheck_and_stamping_agreement() {
         let src = "spec{input:()}";
         let mirror_tokens = mirror_tokenize_all(st(src, 0, 1, 1)).unwrap();
         let proof_tokens = tokenize_all(st(src, 0, 1, 1)).unwrap();
         assert_eq!(mirror_tokens.len(), 7);
         assert_eq!(proof_tokens.len(), 7);
-        // Lexemes, kinds, and lines agree everywhere.
-        for (m, p) in mirror_tokens.iter().zip(&proof_tokens) {
-            assert_eq!(m.lexeme, p.lexeme);
-            assert_eq!(m.kind, p.kind);
-            assert_eq!(m.line, p.line);
-        }
-        // Columns diverge exactly as recorded: the spec
-        // stamps token starts, the hand-written tokenizer
-        // stamps token ends.
-        let mirror_cols: Vec<usize> = mirror_tokens.iter().map(|t| t.col).collect();
-        let proof_cols: Vec<usize> = proof_tokens.iter().map(|t| t.col).collect();
-        assert_eq!(mirror_cols, vec![1, 5, 6, 11, 12, 13, 14]);
-        assert_eq!(proof_cols, vec![5, 6, 11, 12, 13, 14, 15]);
+        // Full agreement since D4a: lexemes, kinds, lines,
+        // and START columns.
+        assert_eq!(mirror_tokens, proof_tokens);
+        let cols: Vec<usize> = proof_tokens.iter().map(|t| t.col).collect();
+        assert_eq!(cols, vec![1, 5, 6, 11, 12, 13, 14]);
 
-        // The same divergence on the spec's own case.
+        // The spec's own case, on both sides.
         let proof_simple = tokenize_all(st("spec sort", 0, 1, 1)).unwrap();
         assert_eq!(
             proof_simple,
             vec![
-                tok(TokenKind::Ident, "spec", 1, 5),
-                tok(TokenKind::Ident, "sort", 1, 10),
+                tok(TokenKind::Ident, "spec", 1, 1),
+                tok(TokenKind::Ident, "sort", 1, 6),
             ]
+        );
+        assert_eq!(
+            mirror_tokenize_all(st("spec sort", 0, 1, 1)).unwrap(),
+            proof_simple
         );
     }
 

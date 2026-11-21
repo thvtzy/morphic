@@ -6,19 +6,22 @@
 //  (src/m2_cross_validation.rs, src/m3_cross_validation.rs)
 //  to the FunctionalTokenizer module
 //  (examples/functional_tokenizer.morph, 8 specs, re-authored
-//  in Phase 47). For every spec this harness runs the real
-//  pipeline at opt level 1 — parse → typecheck →
-//  synthesize_with_module → Z3 verify_all (module-aware) →
-//  select_best — then EXECUTES the winning implementation
+//  in Phase 47 and completed in Phase 79). For every spec
+//  this harness runs the real pipeline at opt level 1 —
+//  parse → typecheck → synthesize_with_module → Z3
+//  verify_all (module-aware: specs + type declarations
+//  since Phase 76) → select_best — then EXECUTES the
+//  winning implementation
 //  and compares its behavior against the Phase 47 mirrors
 //  (copied below from tests/tokenizer_proof.rs, the source
 //  of truth; if the two ever diverge, update this copy).
 //  The mirrors follow the SPEC — including the token
-//  START-column stamping, where the spec's tests and the
-//  hand-written tokenizer diverge (the hand-written
-//  push_token stamps token ENDs). Winners are judged
-//  against the mirrors, never against the hand-written
-//  tokenizer.
+//  START-column stamping. Through Phase 78 the
+//  hand-written tokenizer diverged there (its push_token
+//  stamped token ENDs); D4a made START normative and
+//  Phase 79 corrected push_token, so the two artifacts
+//  agree now (pinned in tests/tokenizer_proof.rs).
+//  Winners are judged against the mirrors, as before.
 //
 //  EXECUTION ROUTES, per spec family — the two routes the
 //  earlier harnesses established, chosen by what the value
@@ -28,41 +31,47 @@
 //     Phase 45 route: the winner body is call-resolved over
 //     the winner index (a body may call a sibling spec —
 //     is_ident_continue calls is_ident_start) and evaluated
-//     per char. Crowning and tpr are NOT evidence here:
-//     Char is Opaque to Z3 (Phase 45), no constraint-seed
-//     family builds Char-keyed bodies, and the is_digit
-//     precedent crowned a wildcard-`true` completion that
-//     was wrong on every untested char. A classifier winner
-//     is exact only on total agreement over the full
+//     per char. Phase 79 note: the Phase 48 framing of this
+//     route is retired — since D5a (Phase 76) a Char
+//     encodes in Z3 as its Unicode scalar value, the
+//     equation family builds the classifiers' seeds, and
+//     the crowned seeds are Z3-Verified, so crowning now
+//     has the Z3 backstop the is_digit precedent lacked.
+//     The harness's classifier standard nonetheless stays
+//     what it was: total executed agreement over the full
 //     774-char battery (the Phase 45 battery: U+0000..=U+02FF
 //     plus Arabic-Indic / Extended Arabic-Indic /
 //     superscript / fullwidth digit probes, an emoji, and
-//     U+10FFFF). The harness additionally scans each
-//     classifier's RAW pool (pre-verification) and reports
-//     whether an exact body exists in it at all.
+//     U+10FFFF) — the D5a cross-check, re-measured every
+//     run, never carried. The harness additionally scans
+//     each classifier's RAW pool (pre-verification) and
+//     reports whether an exact body exists in it at all.
 //   - The five record specs (TokenizerState in/out, Option /
 //     Result outputs) execute through the M2/M3 compiled
-//     runner: the IR interpreter's Value has no record,
-//     Option, or Result variant, so there is nothing to bind
-//     `state` to. The winner's generated Rust (plus the
-//     generated Rust of every module winner it transitively
-//     calls) is compiled with rustc into a runner whose main
-//     drives the battery states through the winner and
-//     prints one canonical line per input, under the
-//     standing 10 s wall-clock limit (a hung winner reads
-//     as total disagreement, never hangs the harness — the
-//     Phase 16 lesson). Each call is panic-isolated
-//     (catch_unwind), so a panicking winner yields a
-//     per-input PANIC outcome instead of killing the run.
-//     A winner whose generated code fails rustc is an
-//     execution failure with the rustc excerpt recorded:
-//     no COMPILE_EDGE bucket is kept here, because the M3
-//     edge families were rendering defects of template
-//     winners whose IR was independently measured correct —
-//     here the IR bodies themselves are the object of
-//     measurement and none is known correct a priori (for
-//     peek, no IR body can even read the state's fields:
-//     the IR has no field-access node).
+//     runner. Phase 79 note: the original reason for this
+//     route is gone — since Phase 75 the interpreter's
+//     Value HAS record, Option, and Result forms and the
+//     record specs' tests bind in-process (Phase 75's
+//     evidence, on hand-written bodies). The compiled
+//     route is kept because this harness's object is the
+//     pipeline's GENERATED code, executed end-to-end: the
+//     winner's generated Rust (plus the generated Rust of
+//     every module winner it transitively calls) is
+//     compiled with rustc into a runner whose main drives
+//     the battery states through the winner and prints one
+//     canonical line per input, under the standing 10 s
+//     wall-clock limit (a hung winner reads as total
+//     disagreement, never hangs the harness — the Phase 16
+//     lesson). Each call is panic-isolated (catch_unwind),
+//     so a panicking winner yields a per-input PANIC
+//     outcome instead of killing the run. A winner whose
+//     generated code fails rustc is an execution failure
+//     with the rustc excerpt recorded: no COMPILE_EDGE
+//     bucket is kept here, because the M3 edge families
+//     were rendering defects of template winners whose IR
+//     was independently measured correct — here the IR
+//     bodies themselves are the object of measurement and
+//     none is known correct a priori.
 //
 //  PINNED vs SPEC-SILENT (the Phase 23 rule): a case is
 //  pinned exactly where the spec's constraints decide the
@@ -88,34 +97,41 @@
 //     full mirror agreement are reported separately, and a
 //     shortfall against the mirror is a property of the
 //     spec as stated, not a machinery failure.
-//   - tokenize_one / tokenize_all: NO constraints are
-//     statable (both originals call methods on Result
-//     values; the spec language has no method-call
-//     expression — an owner decision, still open). There is
-//     nothing to seed and nothing for Z3 to judge, so these
-//     two are pipeline SMOKE ONLY: the harness confirms a
-//     winner is crowned and reports the winner's executed
-//     agreement against the mirrors as a pure statistic —
-//     expected arbitrary, since an unconstrained spec
-//     admits any body of the right type. The number is
-//     never dressed up as a correctness measurement.
+//   - tokenize_one / tokenize_all: their constraints are
+//     RESTORED (Phase 79; the D1a method calls), and Z3
+//     judges bodies against them — tokenize_one's rows
+//     refute both partial bodies and tokenize_all's row
+//     verifies the Ok(state.tokens) body (Phase 76). The
+//     rows pin PARTIAL content, not full outputs:
+//     tokenize_one pins the Ok/Err split, exact token-count
+//     growth on the Ok side, and end-of-input on the Err
+//     side; tokenize_all pins the split plus a length
+//     floor. So executed agreement against the mirrors
+//     remains these two specs' verdict content (the
+//     mirror states the full behavior), now paired with
+//     the winners' real Z3 statuses — no longer smoke: a
+//     crowned body can be REFUTED by the constraints,
+//     which before the restoration it could not.
 //
 //  VERDICTS (computed per spec across the 3 runs, stated in
-//  the report and the Phase 48 record):
+//  the report; the Phase 48 verdicts are the historical
+//  baseline, the Phase 79 record states the current ones):
 //   - EXACT: the winner agrees with the mirror on every
 //     battery case in every run (classifiers: 774/774;
-//     peek: full battery; next_char: full-state).
+//     peek: full battery; next_char: full-state;
+//     tokenize_one / tokenize_all: full battery).
 //   - PARTIAL: anything less, with the exact region stated
 //     (for next_char, pinned-fields-exact is distinguished
 //     from pinned-field disagreement; for skip_whitespace,
 //     the postcondition / mirror-agreement pair is the
 //     verdict content).
-//   - SMOKE-ONLY: tokenize_one, tokenize_all, by design.
-//  No M1 checkbox is ticked by this harness: the M1 gate
-//  demands 100% golden pass + Z3 verified, and Z3 cannot
-//  verify Char-keyed or record-shaped bodies today — the
-//  per-spec verdicts above are the honest substitute, and
-//  the M1-completion call is the owner's.
+//  No M1 checkbox is ticked by this harness — the gate
+//  run is Phase 80's. What changed since Phase 48: Z3 CAN
+//  now verify Char-keyed and record-shaped bodies
+//  (Phases 73–76), so the report pairs executed agreement
+//  with the winners' real Z3 statuses, and a shortfall is
+//  a synthesis result (no exact body found, a resolver
+//  gap), not an encodability wall.
 //
 //  Run with:
 //
@@ -828,13 +844,13 @@ mod xval_tok {
         out
     }
 
-    fn load_tokenizer_module() -> Vec<FunctionSpec> {
+    fn load_tokenizer_module() -> (Vec<FunctionSpec>, spec::ast::Spec) {
         let root = env!("CARGO_MANIFEST_DIR");
         let path = format!("{}/examples/functional_tokenizer.morph", root);
         let source = std::fs::read_to_string(&path).unwrap();
         let parsed = spec::parser::parse(&source).expect("parse must succeed");
         let checked = spec::typeck::check(parsed).expect("typeck must succeed");
-        checked.spec.functions
+        (checked.spec.functions.clone(), checked.spec)
     }
 
     // ─────────────────────────────────────────────────────────
@@ -1400,16 +1416,16 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         let root = env!("CARGO_MANIFEST_DIR");
         let out_dir = format!("{}/target/tokenizer-synthesis", root);
         std::fs::create_dir_all(&out_dir).unwrap();
-        let functions = load_tokenizer_module();
+        let (functions, module) = load_tokenizer_module();
         assert_eq!(functions.len(), 8, "tokenizer module spec count");
         let module_names: Vec<String> = functions.iter().map(|f| f.name.clone()).collect();
         let battery = char_battery();
         assert_eq!(battery.len(), 774, "Phase 45 char battery size");
 
         let mut md = String::new();
-        let _ = writeln!(md, "# Tokenizer cross-validation (Phase 48; classifiers re-measured in Phase 49 with the char_equation seed family): synthesized winners vs tests/tokenizer_proof.rs mirrors (S4 copies in src/tokenizer_cross_validation.rs)");
+        let _ = writeln!(md, "# Tokenizer cross-validation (Phase 48; classifiers re-measured in Phase 49 with the char_equation seed family; re-instrumented in Phase 79 for the completed module — post-D5a verdicts, D4a agreement, restored tokenize constraints): synthesized winners vs tests/tokenizer_proof.rs mirrors (S4 copies in src/tokenizer_cross_validation.rs)");
         let _ = writeln!(md);
-        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best. Classifiers execute on the IR interpreter over the 774-char Phase 45 battery, judged by executed mirror agreement ONLY (Char is Opaque to Z3; crowning/tpr are not evidence — the Phase 45 is_digit precedent). Record specs execute through compiled runners (10 s limit, per-input panic isolation) over the Phase 47 batteries. Pinned vs spec-silent per the header: peek fully pinned; next_char pinned on pos+col always and line only on newlines; skip_whitespace pinned only on its two stated postconditions; tokenize_one/tokenize_all are pipeline smoke (no statable constraints) and their agreement is a pure statistic.");
+        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware: specs + type declarations) → select_best. Classifiers execute on the IR interpreter over the 774-char Phase 45 battery, judged by executed mirror agreement (the standing D5a cross-check, re-measured every run); their winners' Z3 statuses are real since Phase 76 and appear in the table. Record specs execute through compiled runners (10 s limit, per-input panic isolation) over the Phase 47 batteries. Pinned vs spec-silent per the header: peek fully pinned; next_char pinned on pos+col always and line only on newlines; skip_whitespace pinned only on its two stated postconditions; tokenize_one/tokenize_all carry their restored constraints — the rows pin partial content (the Ok/Err split + growth/length rows), so executed agreement against the mirrors is their verdict content, paired with the winners' Z3 statuses.");
         let _ = writeln!(md);
         let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 status | Winner prov | Seed in pool | Agreement | Exec |");
         let _ = writeln!(md, "|---|---|---|---|---|---|---|---|");
@@ -1449,7 +1465,7 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
                     }
                 };
                 pools.insert(name.clone(), candidates.clone());
-                let verified = match verify::verifier::Verifier::with_specs(&functions)
+                let verified = match verify::verifier::Verifier::with_module(&module)
                     .verify_all(candidates, func)
                 {
                     Ok(v) => v,
@@ -1661,11 +1677,25 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
                     }
                 }
                 _ => {
-                    format!(
-                        "SMOKE-ONLY — winner crowned in every run; executed agreement [{}/{}] is a pure statistic (no statable constraints)",
-                        agrees.join(", "),
-                        total
-                    )
+                    // tokenize_one / tokenize_all (Phase 79):
+                    // no longer smoke-only — the constraints
+                    // are restored and Z3 judges the winners
+                    // (their statuses are in the table above);
+                    // the verdict content is executed
+                    // agreement, EXACT/PARTIAL as peek's.
+                    if runs.iter().all(|m| m.agree == total) {
+                        format!(
+                            "EXACT — winner agreed with the mirror on every battery case in every run (agreement [{}/{}])",
+                            agrees.join(", "),
+                            total
+                        )
+                    } else {
+                        format!(
+                            "PARTIAL — executed agreement [{}/{}]; the restored constraints pin partial content (the Ok/Err split + growth/length rows), not full outputs, so the shortfall is measured against the mirror's completion",
+                            agrees.join(", "),
+                            total
+                        )
+                    }
                 }
             };
             let line = format!(
@@ -1718,8 +1748,8 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
             st("   hello", 3, 1, 4)
         );
         // tokenize_one ("keyword-spec": token stamped at its
-        // START, col 1 — the spec side of the recorded
-        // divergence; "end-of-input")
+        // START, col 1 — D4a-normative on both sides since
+        // Phase 79; "end-of-input")
         let out = mirror_tokenize_one(st("spec", 0, 1, 1)).unwrap();
         assert_eq!(
             out,

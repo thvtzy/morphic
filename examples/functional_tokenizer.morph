@@ -73,6 +73,39 @@
 //  reads the already-advanced state). The mirrors follow
 //  the spec. Everything else — lexemes, kinds, positions,
 //  error cases — agrees with the hand-written tokenizer.
+//
+// ── Phase 79 completion record (2026-11-22) ─────────────
+//  This file is COMPLETED in this phase. The Phase 47
+//  record above stands as the history of the interim
+//  shape; every item it left open is closed here:
+//
+//   1. tokenize_one / tokenize_all constraints RESTORED.
+//      The language-owner decisions the Phase 47 record
+//      waited on were taken in the M1-features audit
+//      (M1_FEATURES_AUDIT.md) and ratified 2026-11-22:
+//      D1a method calls (native method-call expressions
+//      + the closed builtin table), D2a IR field access
+//      (a field-access IR node + record values in the
+//      interpreter and in Z3), D3a named record literals,
+//      D5a the Z3 Char scalar encoding. Phases 73–78
+//      built that machinery and proved it on a scratch
+//      restoration of this module; the two specs below
+//      now carry the original constraint text verbatim.
+//   2. The 9 record-literal tests RESTORED in-spec, in
+//      the D3a named form (TokenizerState { … },
+//      Token { … }); inputs and expected outputs are
+//      identical to the mirror golden's transcriptions,
+//      which stay in tests/tokenizer_proof.rs as the
+//      cross-check. The module again carries all 18 of
+//      the original tests in-spec.
+//   3. The divergence recorded above is RESOLVED by
+//      D4a: token columns are START-normative. The
+//      hand-written tokenizer's push_token is corrected
+//      to stamp the token's start, and the dedicated
+//      test in tests/tokenizer_proof.rs flips from
+//      pinning the divergence to pinning the agreement.
+//      The mirrors followed the spec throughout; nothing
+//      in this file moved for D4a.
 
 FunctionalTokenizer {
 
@@ -110,10 +143,14 @@ spec peek {
     output: Option<Char>
 
     // Original form: two if-then constraints (guard rows
-    // per re-authoring note 3). Tests moved to the mirror
-    // golden (record literals — see header).
+    // per re-authoring note 3). Tests restored in-spec in
+    // the D3a named form (Phase 79); the mirror golden in
+    // tests/tokenizer_proof.rs keeps its copies.
     constraint: state.pos<len(state.source)||output==None()
     constraint: state.pos>=len(state.source)||output==Some(state.source[state.pos])
+
+    test "non-empty" { input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] } expect: Some('h') }
+    test "at-end" { input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] } expect: None() }
 }
 
 spec next_char {
@@ -126,11 +163,17 @@ spec next_char {
     // Fields no row pins (line in the else case, source,
     // tokens) are carried over unchanged — the mirror in
     // tests/tokenizer_proof.rs states the full update.
-    // Tests moved to the mirror golden (record literals).
+    // Test restored in-spec in the D3a named form
+    // (Phase 79); the mirror golden keeps its copy.
     constraint: output.pos==state.pos+1
     constraint: peek(state)!=Some('\n')||output.line==state.line+1
     constraint: peek(state)!=Some('\n')||output.col==1
     constraint: peek(state)==Some('\n')||output.col==state.col+1
+
+    test "normal" {
+        input: TokenizerState { source: "ab", pos: 0, line: 1, col: 1, tokens: [] }
+        expect: TokenizerState { source: "ab", pos: 1, line: 1, col: 2, tokens: [] }
+    }
 }
 
 // ── Tokenizer Core ────────────────────────────────────────
@@ -179,33 +222,79 @@ spec skip_whitespace {
     // They are all the spec states: the full behavior
     // (advance to the first non-whitespace char, tracking
     // line/col through next_char) is the mirror's.
-    // Tests moved to the mirror golden (record literals).
+    // Tests restored in-spec in the D3a named form
+    // (Phase 79); the mirror golden keeps its copies.
     constraint: output.pos>=state.pos
     constraint: len(output.source)==len(state.source)
+
+    test "no-whitespace" {
+        input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
+        expect: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
+    }
+
+    test "skip-spaces" {
+        input: TokenizerState { source: "  hi", pos: 0, line: 1, col: 1, tokens: [] }
+        expect: TokenizerState { source: "  hi", pos: 2, line: 1, col: 3, tokens: [] }
+    }
 }
 
 spec tokenize_one {
     input: state: TokenizerState
     output: StepResult
 
-    // Both original constraints dropped: they call methods
-    // on the Result output (is_err / unwrap / is_ok), which
-    // the spec language cannot express (see header).
-    // Behavior is pinned by the mirror golden in
-    // tests/tokenizer_proof.rs. Tests likewise moved there
-    // (record literals).
+    // Both original constraints RESTORED (Phase 79): they
+    // call the D1a builtin methods on the Result output
+    // (is_err / unwrap / is_ok) — typechecker-resolved
+    // since Phase 74, Z3-encodable since Phase 76. The
+    // constraint text is the original's verbatim, spacing
+    // included: the one place the module's tight dialect
+    // (note 6) is not applied, because the restoration is
+    // verbatim by design. Tests restored in-spec in the
+    // D3a named form; the mirror golden in
+    // tests/tokenizer_proof.rs keeps its copies.
+    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+    constraint: output.is_ok() || state.pos >= len(state.source)
+
+    test "keyword-spec" {
+        input: TokenizerState { source: "spec", pos: 0, line: 1, col: 1, tokens: [] }
+        expect: Ok(TokenizerState { source: "spec", pos: 4, line: 1, col: 5, tokens: [
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 }
+        ] })
+    }
+
+    test "end-of-input" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] }
+        expect: Ok(TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] })
+    }
 }
 
 spec tokenize_all {
     input: state: TokenizerState
     output: Result<List<Token>, String>
 
-    // The original constraint dropped: it calls methods on
-    // the Result output (is_err / unwrap), not expressible
-    // (see header). Behavior is pinned by the mirror golden
-    // in tests/tokenizer_proof.rs. Tests likewise moved
-    // there (record literals).
+    // The original constraint RESTORED (Phase 79): it
+    // calls the D1a builtin methods on the Result output
+    // (is_err / unwrap, then the List method len) —
+    // expressible and encodable since Phases 74/76. The
+    // constraint text is the original's verbatim (see
+    // tokenize_one's note). Tests restored in-spec in the
+    // D3a named form; the mirror golden in
+    // tests/tokenizer_proof.rs keeps its copies.
+    constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
     optimize: time < O(n)
+
+    test "simple-spec" {
+        input: TokenizerState { source: "spec sort", pos: 0, line: 1, col: 1, tokens: [] }
+        expect: Ok([
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 },
+            Token { kind: 0, lexeme: "sort", line: 1, col: 6 }
+        ])
+    }
+
+    test "empty" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] }
+        expect: Ok([])
+    }
 }
 
 }
