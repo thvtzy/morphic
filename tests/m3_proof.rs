@@ -1,7 +1,7 @@
 // ┌────────────────────────────────────────────────────────────┐
-// │  M3: Codegen — Proof Tests (slices 1–5: leaf mappings,   │
+// │  M3: Codegen — Proof Tests (slices 1–6: leaf mappings,   │
 // │  template families, name/text assembly, the expression  │
-// │  walker, the statement walker)                          │
+// │  walker, the statement walker, the driver)               │
 // │                                                            │
 // │  Two layers, mirroring tests/m2_proof.rs:                  │
 // │                                                            │
@@ -2195,6 +2195,220 @@ fn ir_tail_assembled(s: &Stmt, indent: usize, fn_ret: i64, expected: i64) -> Str
 }
 
 // ═════════════════════════════════════════════════════════════
+// A7. MIRRORS — slice 6: the driver (generate + generate_rust)
+// ═════════════════════════════════════════════════════════════
+
+/// Mirror of `generate`'s dispatch on the target name
+/// (src/codegen/mod.rs:12-22): the exact, case-sensitive
+/// &str match. Total — every name routes somewhere, the
+/// fallback being route 6 (unsupported).
+fn rust_target_route(target: &str) -> i64 {
+    match target {
+        "rust" => 0,
+        "c" => 1,
+        "wasm" => 2,
+        "python" => 3,
+        "javascript" | "js" => 4,
+        "ir" => 5,
+        _ => 6,
+    }
+}
+
+/// Mirror of the result form of a `generate` route:
+/// 0 = Ok (routes 0..=5), 1 = Err (route 6, the
+/// UnsupportedTarget error). Route codes outside 0..=6
+/// never occur in the original and are unpinned in the
+/// spec: None here.
+fn rust_target_result_form(route: i64) -> Option<i64> {
+    match route {
+        0..=5 => Some(0),
+        6 => Some(1),
+        _ => None,
+    }
+}
+
+/// Mirror of the Display text of
+/// `CodegenError::UnsupportedTarget`
+/// (src/codegen/mod.rs:1415): the target name carried
+/// verbatim — no sanitization, no case folding.
+fn rust_unsupported_target_text(target: &str) -> String {
+    format!("Unsupported target language: {}", target)
+}
+
+/// Mirror of `generate_rust`'s doc header, assembled
+/// (src/codegen/mod.rs:70-76) over the pre-joined
+/// `rust_doc_line` outputs: the lines plus the blank
+/// line (rust_file_fixed_text piece 1, composed here
+/// exactly as the original pushes it inside the doc
+/// branch).
+fn rust_doc_header_text(lines: &str) -> String {
+    format!("{}{}", lines, rust_file_fixed_text(1).unwrap())
+}
+
+/// Mirror of the driver's conditional-section rule: the
+/// section's assembled text when its presence flag
+/// holds, the empty string otherwise. One mirror serves
+/// the three call sites (doc header, precondition
+/// block, test module), as the original's three branches
+/// share the shape.
+fn rust_driver_section_text(present: bool, text: &str) -> String {
+    if present {
+        text.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Mirror of `generate_rust`'s whole-file assembly
+/// (src/codegen/mod.rs:66-155) over pre-rendered
+/// sections, in emission order: doc header, precondition
+/// block, signature, body, the function's closing brace
+/// (rust_file_fixed_text piece 0), test module.
+fn rust_file_text(
+    header: &str,
+    pre_block: &str,
+    signature: &str,
+    body: &str,
+    test_module: &str,
+) -> String {
+    format!(
+        "{}{}{}{}{}{}",
+        header,
+        pre_block,
+        signature,
+        body,
+        rust_file_fixed_text(0).unwrap(),
+        test_module
+    )
+}
+
+/// A generated test at the driver's level: an optional
+/// RAW name, and the input / expected spec expressions
+/// (`expr_to_rust` renders them — slice 2's SExpr tree).
+struct DriverTest {
+    name: Option<&'static str>,
+    input: SExpr,
+    expected: SExpr,
+}
+
+/// A function spec at the driver's level of
+/// abstraction: everything `generate_rust` reads from a
+/// candidate + its spec. Names are RAW — the assembly
+/// applies `rust_ident_verbatim` at exactly the points
+/// the original applies `rust_ident`.
+struct DriverSpec {
+    doc: Option<&'static str>,
+    name: &'static str,
+    generics: Vec<&'static str>,
+    params: Vec<(&'static str, Ty)>,
+    ret: Ty,
+    preconditions: Vec<Cons>,
+    body: Stmt,
+    tests: Vec<DriverTest>,
+}
+
+/// Faithful assembly of `generate_rust`
+/// (src/codegen/mod.rs:66-155) from the slice 1-5
+/// mirrors, at the SPEC level: where the slice-3
+/// assembly above (`generate_rust_assembled`) composes
+/// pre-rendered parts, this one starts from the raw
+/// spec — names, type trees, constraint trees, the IR
+/// body tree, spec-test trees — and renders every part
+/// itself. The sections are composed through the
+/// slice-6 mirrors exactly as the original composes its
+/// pushes — the header and the test module gated by
+/// `rust_driver_section_text`, the precondition block
+/// placed BEFORE the signature by `rust_file_text`'s
+/// order, the body rendered by the tail assembly at
+/// indent 1 with the return type's code as both fn_ret
+/// and the Some expectation (the driver's own seed —
+/// the one expectation site outside
+/// `rust_expectation_source`'s table), and no import
+/// anywhere at file level.
+fn generate_rust_from_spec_assembled(spec: &DriverSpec) -> String {
+    // Module header (mod.rs:70-76): presence is the
+    // doc's Some-ness; the lines split is str::lines.
+    let header = match spec.doc {
+        Some(doc) => {
+            let lines: Vec<String> = doc.lines().map(rust_doc_line).collect();
+            rust_driver_section_text(true, &rust_doc_header_text(&lines.concat()))
+        }
+        None => rust_driver_section_text(false, ""),
+    };
+
+    // Signature parts (mod.rs:79-94): generics and
+    // params are rust_ident-rendered names / name-type
+    // pairs joined ", " (the joins are the mirror-only
+    // iteration).
+    let generics = {
+        let rendered: Vec<String> =
+            spec.generics.iter().map(|g| rust_ident_verbatim(g)).collect();
+        rust_generics_text(&rendered.join(", "), !spec.generics.is_empty())
+    };
+    let params: Vec<String> = spec
+        .params
+        .iter()
+        .map(|(n, t)| rust_param_text(&rust_ident_verbatim(n), &ty_to_rust_assembled(t)))
+        .collect();
+    let signature = rust_signature(
+        &rust_ident_verbatim(spec.name),
+        &generics,
+        &params.join(", "),
+        &ty_to_rust_assembled(&spec.ret),
+    );
+
+    // Precondition block (mod.rs:96-104): presence is
+    // the list's non-emptiness.
+    let pre_block = if spec.preconditions.is_empty() {
+        rust_driver_section_text(false, "")
+    } else {
+        let asserts: Vec<String> = spec
+            .preconditions
+            .iter()
+            .map(|c| rust_precondition_assert(&constraint_to_rust_assembled(c)))
+            .collect();
+        rust_driver_section_text(true, &rust_precondition_block(&asserts.concat()))
+    };
+
+    // Body (mod.rs:113-127): the tail assembly at
+    // indent 1, fn_ret and expectation both the return
+    // type's code.
+    let body = ir_tail_assembled(&spec.body, 1, ty_code(&spec.ret), ty_code(&spec.ret));
+
+    // Test module (mod.rs:131-152): a test's name is
+    // its own (rust_ident-rendered) or the indexed
+    // default (rust_test_name_form's choice; the
+    // default's text is F2, mirror-only). Input and
+    // expected arrive as expr_to_rust renderings placed
+    // BARE in call / assert position — the recorded
+    // E0308 placement for String-typed positions.
+    let test_module = if spec.tests.is_empty() {
+        rust_driver_section_text(false, "")
+    } else {
+        let cases: Vec<String> = spec
+            .tests
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let name = match t.name {
+                    Some(n) => rust_ident_verbatim(n),
+                    None => rust_ident_verbatim(&rust_test_name_default(i)),
+                };
+                rust_test_case(
+                    &name,
+                    &rust_ident_verbatim(spec.name),
+                    &expr_to_rust_assembled(&t.input),
+                    &expr_to_rust_assembled(&t.expected),
+                )
+            })
+            .collect();
+        rust_driver_section_text(true, &rust_test_module(&cases.concat()))
+    };
+
+    rust_file_text(&header, &pre_block, &signature, &body, &test_module)
+}
+
+// ═════════════════════════════════════════════════════════════
 // A. GOLDEN TESTS — full mapping range + off-range inputs
 // ═════════════════════════════════════════════════════════════
 
@@ -4162,6 +4376,226 @@ mod golden_tests {
         assert_eq!(ir_tail_assembled(&typed, 0, 0, 26), "\"s\".to_string()\n");
         assert_eq!(ir_stmt_assembled(&typed, 0, 0), "\"s\";\n");
     }
+
+    // ── Slice 6: the driver ──────────────────────────
+
+    #[test]
+    fn target_route_full_table() {
+        assert_eq!(rust_target_route("rust"), 0);
+        assert_eq!(rust_target_route("c"), 1);
+        assert_eq!(rust_target_route("wasm"), 2);
+        assert_eq!(rust_target_route("python"), 3);
+        assert_eq!(rust_target_route("javascript"), 4);
+        assert_eq!(rust_target_route("js"), 4);
+        assert_eq!(rust_target_route("ir"), 5);
+        // The fallback is an exact match's fallback:
+        // case variants, whitespace, near names and the
+        // empty name are all unsupported.
+        for name in ["java", "Rust", "JS", "rs", "", "rust ", " rust", "c++", "j"] {
+            assert_eq!(rust_target_route(name), 6, "{}", name);
+        }
+    }
+
+    #[test]
+    fn target_result_form_table() {
+        for route in 0..=5 {
+            assert_eq!(rust_target_result_form(route), Some(0));
+        }
+        assert_eq!(rust_target_result_form(6), Some(1));
+        // Off-table route codes never occur: unpinned.
+        assert_eq!(rust_target_result_form(-1), None);
+        assert_eq!(rust_target_result_form(7), None);
+        // The composition generate exposes: every named
+        // target is Ok; an unknown name is the
+        // UnsupportedTarget error with its verbatim text.
+        assert_eq!(rust_target_result_form(rust_target_route("java")), Some(1));
+        assert_eq!(
+            rust_unsupported_target_text("java"),
+            "Unsupported target language: java"
+        );
+    }
+
+    #[test]
+    fn unsupported_target_text_golden() {
+        assert_eq!(
+            rust_unsupported_target_text("java"),
+            "Unsupported target language: java"
+        );
+        assert_eq!(rust_unsupported_target_text(""), "Unsupported target language: ");
+        // Verbatim: spaces and punctuation pass through
+        // unsanitized.
+        assert_eq!(
+            rust_unsupported_target_text("my lang!"),
+            "Unsupported target language: my lang!"
+        );
+    }
+
+    #[test]
+    fn doc_header_and_section_golden() {
+        assert_eq!(rust_doc_header_text("//! Sorts a list\n"), "//! Sorts a list\n\n");
+        assert_eq!(rust_doc_header_text(""), "\n");
+        assert_eq!(rust_driver_section_text(true, "X"), "X");
+        assert_eq!(rust_driver_section_text(false, "X"), "");
+        assert_eq!(rust_driver_section_text(true, ""), "");
+        assert_eq!(rust_driver_section_text(false, ""), "");
+        // The whole-file equation over marker sections:
+        // order is header, precondition block, signature,
+        // body, closing brace, test module.
+        assert_eq!(rust_file_text("H", "P", "S", "B", "T"), "HPSB}\nT");
+        assert_eq!(rust_file_text("", "", "S", "B", ""), "SB}\n");
+    }
+
+    #[test]
+    fn generate_rust_end_to_end_full() {
+        // Doc + generics + preconditions + tests: every
+        // section present. The precondition block lands
+        // BEFORE the signature, at module level; the
+        // named test's hyphen sanitizes; the unnamed test
+        // takes its indexed default.
+        let spec = DriverSpec {
+            doc: Some("Sorts things.\nDoes it well."),
+            name: "clamp_value",
+            generics: vec!["T"],
+            params: vec![("x", Ty::Leaf(0)), ("limit", Ty::Leaf(0))],
+            ret: Ty::Leaf(0),
+            preconditions: vec![Cons::Eq(SExpr::Var("x"), SExpr::IntLit(3))],
+            body: Stmt::Expr(Expr::Var("x")),
+            tests: vec![
+                DriverTest {
+                    name: Some("x-is-three"),
+                    input: SExpr::IntLit(3),
+                    expected: SExpr::IntLit(3),
+                },
+                DriverTest {
+                    name: None,
+                    input: SExpr::IntLit(0),
+                    expected: SExpr::IntLit(0),
+                },
+            ],
+        };
+        assert_eq!(
+            generate_rust_from_spec_assembled(&spec),
+            concat!(
+                "//! Sorts things.\n",
+                "//! Does it well.\n",
+                "\n",
+                "#[cfg(debug_assertions)]\n",
+                "{\n",
+                "    debug_assert!(x == 3, \"Precondition violated\");\n",
+                "}\n",
+                "\n",
+                "pub fn clamp_value<T>(x: i64, limit: i64) -> i64 {\n",
+                "    x\n",
+                "}\n",
+                "\n#[cfg(test)]\n",
+                "mod tests {\n",
+                "    use super::*;\n",
+                "\n",
+                "    #[test]\n",
+                "    fn x_is_three() {\n",
+                "        let result = clamp_value(3);\n",
+                "        assert_eq!(result, 3);\n",
+                "    }\n",
+                "    #[test]\n",
+                "    fn test_1() {\n",
+                "        let result = clamp_value(0);\n",
+                "        assert_eq!(result, 0);\n",
+                "    }\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn generate_rust_end_to_end_bare() {
+        // No doc, no generics, no preconditions, no
+        // tests: the file is the signature, the body and
+        // the closing brace — nothing else, no import.
+        let spec = DriverSpec {
+            doc: None,
+            name: "answer",
+            generics: vec![],
+            params: vec![("n", Ty::Leaf(0))],
+            ret: Ty::Leaf(2),
+            preconditions: vec![],
+            body: Stmt::Expr(Expr::Lit(Lit::Bool(true))),
+            tests: vec![],
+        };
+        assert_eq!(
+            generate_rust_from_spec_assembled(&spec),
+            "pub fn answer(n: i64) -> bool {\n    true\n}\n"
+        );
+    }
+
+    #[test]
+    fn generate_rust_empty_doc_still_emits_blank_line() {
+        // doc = Some(""): str::lines yields zero lines,
+        // so the header is exactly the blank line and the
+        // file STARTS with a newline. Presence is the
+        // doc's Some-ness, not its non-emptiness.
+        let spec = DriverSpec {
+            doc: Some(""),
+            name: "answer",
+            generics: vec![],
+            params: vec![("n", Ty::Leaf(0))],
+            ret: Ty::Leaf(2),
+            preconditions: vec![],
+            body: Stmt::Expr(Expr::Lit(Lit::Bool(true))),
+            tests: vec![],
+        };
+        assert_eq!(
+            generate_rust_from_spec_assembled(&spec),
+            "\npub fn answer(n: i64) -> bool {\n    true\n}\n"
+        );
+    }
+
+    #[test]
+    fn generate_rust_string_param_test_placement() {
+        // The generated test places the expr_to_rust
+        // rendering of a String test input BARE in call
+        // position — a &str literal against the
+        // function's String parameter, and the expected
+        // value bare in the assert. Pinned byte-exactly,
+        // as the driver performs it. The consequence, for
+        // the gate phase: the file compiles as a library
+        // (the test module is cfg(test)-gated, and the
+        // probe's lib compile never exercises it), but
+        // compiling it WITH tests (`rustc --test`) rejects
+        // the call with E0308 — the spec-Expr side has no
+        // counterpart to the IR side's ownership rewrite.
+        let spec = DriverSpec {
+            doc: None,
+            name: "shout",
+            generics: vec![],
+            params: vec![("s", Ty::Leaf(3))],
+            ret: Ty::Leaf(3),
+            preconditions: vec![],
+            body: Stmt::Expr(Expr::Var("s")),
+            tests: vec![DriverTest {
+                name: None,
+                input: SExpr::StringLit("hey"),
+                expected: SExpr::StringLit("hey"),
+            }],
+        };
+        assert_eq!(
+            generate_rust_from_spec_assembled(&spec),
+            concat!(
+                "pub fn shout(s: String) -> String {\n",
+                "    s\n",
+                "}\n",
+                "\n#[cfg(test)]\n",
+                "mod tests {\n",
+                "    use super::*;\n",
+                "\n",
+                "    #[test]\n",
+                "    fn test_0() {\n",
+                "        let result = shout(\"hey\");\n",
+                "        assert_eq!(result, \"hey\");\n",
+                "    }\n",
+                "}\n",
+            )
+        );
+    }
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -4224,11 +4658,12 @@ spec bad {
         // Supplementary shape check (the pipeline test above is the
         // real validation): the file declares the 8 slice-1 specs
         // plus the 20 slice-2 specs plus the 16 slice-3 specs plus
-        // the 35 slice-4 specs plus the 27 slice-5 specs.
+        // the 35 slice-4 specs plus the 27 slice-5 specs plus the
+        // 6 slice-6 specs.
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 106, "codegen.morph should declare 106 specs");
-        assert!(src.matches("test \"").count() >= 157, "codegen.morph should carry in-spec tests");
+        assert_eq!(spec_decls, 112, "codegen.morph should declare 112 specs");
+        assert!(src.matches("test \"").count() >= 174, "codegen.morph should carry in-spec tests");
     }
 }
