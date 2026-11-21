@@ -1,17 +1,19 @@
 // ─────────────────────────────────────────────────────────────
-//  M3 SYNTHESIS PROBE (test-only) — slices 1–4: leaf mappings,
+//  M3 SYNTHESIS PROBE (test-only) — slices 1–5: leaf mappings,
 //  small template families, name/text assembly, the
-//  expression walker
+//  expression walker, the statement walker
 //
 //  Generalizes the M2 synthesis probe (src/m2_synthesis_probe.rs)
 //  to the Codegen module: runs the real build pipeline (parse →
 //  typecheck → synthesize at opt level 1 → verify_all (Z3) →
 //  select_best → codegen) for every spec in
-//  examples/self_host/codegen.morph (all 79: the 8 slice-1 leaf
+//  examples/self_host/codegen.morph (all 106: the 8 slice-1 leaf
 //  mappings, the 20 slice-2 template families, the 16 slice-3
-//  name/text-assembly specs, and the 35 slice-4 expression-
-//  walker specs — String inputs, multi-String tuples up to 4
-//  params, Int-code pairs, Bool+String and Bool-only inputs),
+//  name/text-assembly specs, the 35 slice-4 expression-
+//  walker specs, and the 27 slice-5 statement-walker specs —
+//  String inputs, multi-String tuples up to 5 params,
+//  Int-code pairs, Bool+String and Bool-only inputs,
+//  an Int x Bool pair),
 //  through the module-aware
 //  path (synthesize_with_module + Verifier::with_specs), exactly
 //  as the M2 probe does for validator.morph / printer.morph.
@@ -32,7 +34,7 @@
 //  compiled; Phase 29 fixed that rendering family under the
 //  user's unfreeze, and its re-measurement recorded 44/44
 //  compiles per run over slices 1–3 — the probe now runs all
-//  79 specs and reports the rustc verdict per winner, never
+//  106 specs and reports the rustc verdict per winner, never
 //  a judgment.
 //
 //  For the specs the phase records predict seedless the probe
@@ -68,6 +70,19 @@
 //  constraint seed; the watch list stays as the historical
 //  record of the shapes that were once open, and its CAND3
 //  dumps now document the pools the seeds win against.
+//
+//  Phase 36 extends the probe to slice 5 (Phase 35's 27
+//  statement-walker specs) and adds its three recorded
+//  questions to the watch list: rust_stmt_seq_form — the
+//  candidate gap, whose decisive row guards jointly on
+//  an Int key (position) AND a Bool key (last), a mixed
+//  two-key table no current family admits;
+//  rust_stmt_while_text (rust_break_text's shape: a Bool
+//  parameter guard with compound pins, predicted
+//  composition_guard); and rust_stmt_collection_text
+//  (the equation composing two guard-table calls inside
+//  its `++` chain, rust_binop_infix_text's precedent,
+//  predicted equation).
 //
 //  The probe never asserts on synthesis *quality* — the engine
 //  is randomized — only on pipeline invariants: parse/typecheck
@@ -144,8 +159,11 @@ mod probe3 {
     /// The specs whose pools are dumped candidate by
     /// candidate (CAND3 lines): Phase 26's four slice-3
     /// predictions plus Phase 31's eight slice-4 open
-    /// shapes (see the module header).
-    const SEEDLESS_WATCH: [&str; 12] = [
+    /// shapes (see the module header), joined in Phase 36
+    /// by slice 5's three recorded questions
+    /// (rust_stmt_seq_form, the candidate mixed-key gap;
+    /// rust_stmt_while_text; rust_stmt_collection_text).
+    const SEEDLESS_WATCH: [&str; 15] = [
         "rust_ident_suffix",
         "rust_ident_empty",
         "rust_string_ownership",
@@ -158,6 +176,10 @@ mod probe3 {
         "rust_match_scrutinee_bare",
         "rust_concat_left_owned",
         "rust_concat_left_text",
+        // ── slice 5 (Phase 36) ──
+        "rust_stmt_seq_form",
+        "rust_stmt_while_text",
+        "rust_stmt_collection_text",
     ];
 
     /// Body facts for the CAND3 pool dump: the spec names this
@@ -398,7 +420,7 @@ mod probe3 {
                 }
 
                 // Seedless-watch pool dump (Phase 27, extended
-                // in Phase 31): for the watched specs,
+                // in Phases 31 and 36): for the watched specs,
                 // characterize EVERY candidate in the verified
                 // pool — provenance, verdict, measured tpr,
                 // called spec names, root shape.
