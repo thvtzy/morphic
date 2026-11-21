@@ -1,16 +1,17 @@
 // ─────────────────────────────────────────────────────────────
-//  M3 SYNTHESIS PROBE (test-only) — slices 1–5: leaf mappings,
+//  M3 SYNTHESIS PROBE (test-only) — slices 1–6: leaf mappings,
 //  small template families, name/text assembly, the
-//  expression walker, the statement walker
+//  expression walker, the statement walker, the driver
 //
 //  Generalizes the M2 synthesis probe (src/m2_synthesis_probe.rs)
 //  to the Codegen module: runs the real build pipeline (parse →
 //  typecheck → synthesize at opt level 1 → verify_all (Z3) →
 //  select_best → codegen) for every spec in
-//  examples/self_host/codegen.morph (all 106: the 8 slice-1 leaf
+//  examples/self_host/codegen.morph (all 112: the 8 slice-1 leaf
 //  mappings, the 20 slice-2 template families, the 16 slice-3
 //  name/text-assembly specs, the 35 slice-4 expression-
-//  walker specs, and the 27 slice-5 statement-walker specs —
+//  walker specs, the 27 slice-5 statement-walker specs, and
+//  the 6 slice-6 driver specs —
 //  String inputs, multi-String tuples up to 5 params,
 //  Int-code pairs, Bool+String and Bool-only inputs,
 //  an Int x Bool pair),
@@ -34,7 +35,7 @@
 //  compiled; Phase 29 fixed that rendering family under the
 //  user's unfreeze, and its re-measurement recorded 44/44
 //  compiles per run over slices 1–3 — the probe now runs all
-//  106 specs and reports the rustc verdict per winner, never
+//  112 specs and reports the rustc verdict per winner, never
 //  a judgment.
 //
 //  For the specs the phase records predict seedless the probe

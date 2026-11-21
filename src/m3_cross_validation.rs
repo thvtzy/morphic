@@ -1,5 +1,10 @@
 // ─────────────────────────────────────────────────────────────
 //  M3 CROSS-VALIDATION HARNESS (test-only) — slices 1–5
+//  (Phase 40 scoping: the module now declares 112 specs —
+//  slice 6's 6 driver specs are specced + mirrored in
+//  tests/m3_proof.rs but NOT yet swept here; extending the
+//  sweeps to slice 6 belongs to its measurement phase.
+//  The seed-shape diagnostic below already counts 112.)
 //
 //  Generalizes the M2 cross-validation harness
 //  (src/m2_cross_validation.rs) to the Codegen module. For
@@ -4324,6 +4329,25 @@ mod xval3 {
         // crossed with the Bool domain — so it moves to
         // the recognized set (93) and rust_ident_empty
         // stands alone below, unrecognized BY DESIGN.
+        //
+        // Phase 40 scoping (the Phase 30/35 precedent):
+        // slice 6 added 6 specs to the module (112 total)
+        // — the driver's dispatch table, result form,
+        // error text, doc-header assembly, section rule
+        // and whole-file equation. Which of their shapes
+        // the builders recognize (the `++` equations over
+        // pre-rendered sections, the Bool-guarded section
+        // selection, the String-equality dispatch rows —
+        // the rust_ident_empty shape, expected to stay
+        // unrecognized by design) is the next phase's
+        // measurement question, not something to assert
+        // ahead of the evidence. The recognition
+        // assertions below therefore keep iterating the
+        // same 93 names; only the module count assertion
+        // moves, to 112. The sweep harness above
+        // (ALL_SPECS / PINNED_TOTALS) likewise still
+        // covers slices 1–5; extending the sweeps to
+        // slice 6 belongs to the measurement phase.
         const RECOGNIZED: [&str; 93] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
@@ -4384,7 +4408,7 @@ mod xval3 {
             "rust_stmt_seq_form",
         ];
         let functions = load_codegen_module();
-        assert_eq!(functions.len(), 106, "module spec count");
+        assert_eq!(functions.len(), 112, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
             if !RECOGNIZED.contains(&func.name.as_str()) {
