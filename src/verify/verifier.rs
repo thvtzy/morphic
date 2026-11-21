@@ -2929,6 +2929,269 @@ spec tokenize_all {
         );
     }
 
+    /// Phase 80 (M1 gate re-run) — the tokenize_one
+    /// end-of-input contradiction, proven mechanically at
+    /// the point, with the production encoder and solver.
+    ///
+    /// The spec's own "end-of-input" test: input
+    /// `TokenizerState { source: "", pos: 0, line: 1,
+    /// col: 1, tokens: [] }`, expected output `Ok` of that
+    /// same state. At that input, len(state.tokens) = 0,
+    /// len(state.source) = 0, and state.pos >=
+    /// len(state.source) holds (0 >= 0). Row 1 —
+    /// `output.is_err() || len(output.unwrap().tokens) ==
+    /// len(state.tokens) + 1` — instantiated at the point:
+    ///
+    ///   * for the golden output itself (Ok, 0 tokens):
+    ///     is_err() = false and len(unwrap().tokens) = 0,
+    ///     so the row reads `false || 0 == 0 + 1` — FALSE.
+    ///     `verify_constraint` must REFUTE row 1 under the
+    ///     golden output (and PROVE row 2, which is not
+    ///     the problem: is_ok() = true).
+    ///   * the outputs that DO satisfy both rows at this
+    ///     input are exactly: Err (row 1 via is_err();
+    ///     row 2 via 0 >= 0 — proven below under a literal
+    ///     Err output), or Ok carrying EXACTLY ONE token
+    ///     (1 == 0 + 1). Both fail the golden test, which
+    ///     expects Ok with zero tokens. The tag case
+    ///     analysis is discharged with a free tag: row 1
+    ///     under a free is_ok flag b and an Ok payload of
+    ///     token-length L encodes to `!b || L == 0 + 1`,
+    ///     so (L=0 ∧ b) is UNSAT, (L=0 ∧ !b) is SAT,
+    ///     (L=1 ∧ b) is SAT, (L=2 ∧ b) is UNSAT — the row
+    ///     admits an Ok output at EOF only with a
+    ///     fabricated token, never with the golden one.
+    ///     (Under a LITERAL Err tag, row 1 is the
+    ///     encoder's named unencodable case — no Ok
+    ///     payload exists to project — which is why the
+    ///     Err branch is discharged through the free tag:
+    ///     there the left disjunct is the very is_err()
+    ///     term that is definitionally true under the
+    ///     literal Err tag.)
+    ///
+    /// Conclusion the gate records: NO body can be both
+    /// test-correct and Z3-Verified against tokenize_one
+    /// as written — a body returning the golden output at
+    /// EOF violates row 1, and every row-satisfying EOF
+    /// output fails the test. The token lists are bound
+    /// as ListLen(n): the rows observe them only through
+    /// len, and ListLen is the encoder's own model of a
+    /// list observed through len.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase80_tokenize_one_eof_contradiction() {
+        use crate::verify::smt::{SmtResult, Z3Session};
+
+        // The REAL completed module (examples/), not the
+        // Phase 76 scratch: the gate judges this file.
+        let module = {
+            let src = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/functional_tokenizer.morph"
+            ))
+            .expect("examples tokenizer reads");
+            let parsed = crate::spec::parser::parse(&src).expect("examples parses");
+            crate::spec::typeck::check(parsed)
+                .expect("examples typechecks")
+                .spec
+        };
+        let spec = restored_spec(&module, "tokenize_one");
+        assert_eq!(spec.postconditions.len(), 2, "tokenize_one has two rows");
+        assert!(
+            format!("{:?}", spec.postconditions[0]).contains("is_err"),
+            "row 1 is the is_err row"
+        );
+        assert!(
+            format!("{:?}", spec.postconditions[1]).contains("is_ok"),
+            "row 2 is the is_ok row"
+        );
+        let verifier = Verifier::with_module(&module);
+        let index = SpecIndex::from_module(&module);
+
+        // ── The golden fact, read off the spec's own
+        // test: the EOF input and the Ok/0-token output
+        // it demands.
+        let test = spec
+            .tests
+            .iter()
+            .find(|t| t.name.as_deref() == Some("end-of-input"))
+            .expect("the end-of-input test is in-spec");
+        fn rec_fields(e: &SpecExpr) -> &Vec<(String, SpecExpr)> {
+            match e {
+                SpecExpr::RecordLit { type_name, fields } if type_name == "TokenizerState" => {
+                    fields
+                }
+                other => panic!("expected a TokenizerState literal, got {:?}", other),
+            }
+        }
+        fn field<'f>(fields: &'f [(String, SpecExpr)], name: &str) -> &'f SpecExpr {
+            fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, e)| e)
+                .unwrap_or_else(|| panic!("field {} present", name))
+        }
+        let is_empty_list = |e: &SpecExpr| {
+            matches!(e, SpecExpr::Call(n, a) if n == "List" && a.is_empty())
+        };
+        let in_fields = rec_fields(&test.input);
+        assert!(
+            matches!(field(in_fields, "source"), SpecExpr::StringLit(s) if s.is_empty()),
+            "EOF input: empty source"
+        );
+        assert!(
+            matches!(field(in_fields, "pos"), SpecExpr::IntLit(0)),
+            "EOF input: pos 0"
+        );
+        assert!(
+            is_empty_list(field(in_fields, "tokens")),
+            "EOF input: no tokens yet"
+        );
+        let (ctor, ctor_args) = match &test.expected_output {
+            SpecExpr::Call(n, a) => (n.as_str(), a),
+            other => panic!("expected output is a constructor call, got {:?}", other),
+        };
+        assert_eq!(ctor, "Ok", "the golden EOF output is Ok");
+        assert_eq!(ctor_args.len(), 1);
+        assert!(
+            is_empty_list(field(rec_fields(&ctor_args[0]), "tokens")),
+            "the golden EOF output carries NO token"
+        );
+
+        // ── Point instantiation. state := the EOF state;
+        // outputs observed through exactly what the rows
+        // read (tag; payload token-list length).
+        let int = |n: i64| Sym::Int(z3::ast::Int::from_i64(n));
+        let state_with = |tok_len: i64| Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::from_str("").unwrap()),
+                ),
+                ("pos".into(), int(0)),
+                ("line".into(), int(1)),
+                ("col".into(), int(1)),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::from_i64(tok_len)),
+                ),
+            ],
+        };
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_with(0));
+        let ok_with = |tok_len: i64| Sym::Result {
+            ok: Tag::True,
+            ok_payload: Some(Box::new(state_with(tok_len))),
+            err_payload: None,
+        };
+
+        // (A) The golden output: row 1 REFUTED (0 == 0+1),
+        // row 2 Proven.
+        let golden = ok_with(0);
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[0],
+            "row1@golden-eof",
+            spec,
+            &env,
+            &Some(golden.clone()),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row 1 must refute the golden EOF output: 0 == 0 + 1 is false"
+        );
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@golden-eof",
+            spec,
+            &env,
+            &Some(golden),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "row 2 holds for the golden output (is_ok)"
+        );
+
+        // (B) A literal Err output satisfies row 2 at EOF
+        // (0 >= 0): the Err escape the rows leave open.
+        let err = Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(
+                Sym::Str(z3::ast::String::from_str("boom").unwrap()),
+            )),
+        };
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@err-eof",
+            spec,
+            &env,
+            &Some(err),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "row 2 licenses Err at end of input (pos 0 >= len 0)"
+        );
+
+        // (C) Row 1's satisfying set at EOF, by tag case
+        // analysis over a free tag.
+        let row1_free = |tok_len: i64, is_ok: &z3::ast::Bool| -> z3::ast::Bool {
+            let mut e = env.clone();
+            e.insert(
+                "output".into(),
+                Sym::Result {
+                    ok: Tag::Free(is_ok.clone()),
+                    ok_payload: Some(Box::new(state_with(tok_len))),
+                    err_payload: Some(Box::new(
+                        Sym::Str(z3::ast::String::from_str("boom").unwrap()),
+                    )),
+                },
+            );
+            encode_constraint(&spec.postconditions[0], &e, &EvalCtx::root(&index))
+                .expect("row 1 encodes under a free tag")
+        };
+        let check = |formula: &z3::ast::Bool, extra: &z3::ast::Bool| -> SmtResult {
+            let z3 = Z3Session::new(10_000);
+            z3.assert(formula);
+            z3.assert(extra);
+            z3.check()
+        };
+        let is_ok = z3::ast::Bool::new_const("out_is_ok");
+        // L = 0 (the golden payload): no Ok output
+        // satisfies row 1; the Err branch does.
+        assert!(
+            matches!(
+                check(&row1_free(0, &is_ok), &is_ok),
+                SmtResult::Unsat
+            ),
+            "row 1 ∧ is_ok ∧ 0 tokens: UNSAT — the golden output cannot satisfy row 1"
+        );
+        assert!(
+            matches!(
+                check(&row1_free(0, &is_ok), &is_ok.not()),
+                SmtResult::Sat(_)
+            ),
+            "row 1 ∧ is_err: SAT — an Err output satisfies row 1 at EOF"
+        );
+        // L = 1: an Ok output satisfies row 1 — with a
+        // token the input does not contain.
+        assert!(
+            matches!(
+                check(&row1_free(1, &is_ok), &is_ok),
+                SmtResult::Sat(_)
+            ),
+            "row 1 ∧ is_ok ∧ 1 token: SAT — a fabricated token satisfies row 1"
+        );
+        // L = 2: the row demands EXACTLY one more token.
+        assert!(
+            matches!(
+                check(&row1_free(2, &is_ok), &is_ok),
+                SmtResult::Unsat
+            ),
+            "row 1 ∧ is_ok ∧ 2 tokens: UNSAT — the growth demanded is exactly +1"
+        );
+    }
+
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase76_char_range_side_condition_is_decisive() {
