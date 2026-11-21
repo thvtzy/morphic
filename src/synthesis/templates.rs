@@ -33,8 +33,29 @@ use super::engine::{IRNode, IRLiteral, IRBinOp, IRUnaryOp};
 /// All available template patterns
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateKind {
-    /// The IR's own Sort primitive driven by the spec's
-    /// comparator parameter: `Sort { cmp, list }`.
+    /// A manual bubble sort in the proven scan vocabulary
+    /// (Alloc/For/Index/Assign/Let/If), calling the spec's
+    /// comparator parameter DIRECTLY as a function value.
+    /// Phase 61 replaced the Phase 59 construction (the IR
+    /// Sort node): the Sort node renders `sort_by(cmp)`,
+    /// which rustc rejects E0631 against the generated
+    /// signature `cmp: fn(T, T) -> bool` — and no adapter
+    /// lambda reaches an `Ordering` either (Phase 59's
+    /// support matrix). The scan form's remaining wall is
+    /// one level deeper and is recorded, not hidden: every
+    /// element read goes through `.clone()` (the IR's
+    /// Clone unary op), because a plain index read is a
+    /// move out of the list (E0507, probed in Phase 61 for
+    /// the plain-read and insertion constructions alike);
+    /// under the generated signature's bound-free `T` the
+    /// clone read itself is E0599. The construction is the
+    /// unique probed one that compiles the moment the
+    /// signature carries a `Clone` bound (Phase 61 priced
+    /// the unlock: probe-only `sort<T: Clone>` renders of
+    /// this body compile and pass 6/6; the plain-read body
+    /// still dies E0507 there). The bound is an
+    /// emitter-contract decision, reserved for the owner;
+    /// this template is the ready construction for it.
     SortPrimitive,
     /// Adjacent-pair scan: Alloc a Bool accumulator, walk
     /// `1..len(list)` once, clear the accumulator on any
@@ -67,7 +88,7 @@ pub fn generate_templates(spec: &FunctionSpec) -> Vec<(TemplateKind, IRNode)> {
     let mut templates = Vec::new();
 
     if let Some(shape) = sort_shape(spec) {
-        templates.push((TemplateKind::SortPrimitive, build_sort_primitive(&shape)));
+        templates.push((TemplateKind::SortPrimitive, build_sort_primitive(&shape, spec)));
     } else if let Some(shape) = search_shape(spec) {
         templates.push((TemplateKind::BinarySearch, build_binary_search(&shape)));
     } else if let Some(shape) = scan_shape(spec) {
@@ -212,11 +233,86 @@ pub(crate) fn is_concrete_ordered_scalar(ty: &TypeRef) -> bool {
 
 // ── Template Builders ──────────────────────────────────────
 
-fn build_sort_primitive(shape: &SortShape) -> IRNode {
-    IRNode::Sort {
-        comparator: Box::new(IRNode::Var(shape.cmp_param.clone())),
-        collection: Box::new(IRNode::Var(shape.list_param.clone())),
-    }
+fn build_sort_primitive(shape: &SortShape, spec: &FunctionSpec) -> IRNode {
+    let list = &shape.list_param;
+    let cmp = &shape.cmp_param;
+    let taken: Vec<&str> = vec![list.as_str(), cmp.as_str()];
+    let a = fresh_name("a", &taken);
+    let i = fresh_name("i", &[taken[0], taken[1], a.as_str()]);
+    let j = fresh_name("j", &[taken[0], taken[1], a.as_str(), i.as_str()]);
+    let tmp = fresh_name("tmp", &[taken[0], taken[1], a.as_str(), i.as_str(), j.as_str()]);
+
+    let var = |n: &str| IRNode::Var(n.to_string());
+    let int = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+    // An element read: the Index place through the Clone
+    // unary op — see the TemplateKind::SortPrimitive doc
+    // for why a plain read cannot be used (E0507) and why
+    // the clone is the priced-unlock form (E0599 today).
+    let read = |index: IRNode| {
+        IRNode::UnaryOp(
+            IRUnaryOp::Clone,
+            Box::new(IRNode::Index(Box::new(var(&a)), Box::new(index))),
+        )
+    };
+    let jm1 = || {
+        IRNode::BinOp(
+            IRBinOp::Sub,
+            Box::new(var(&j)),
+            Box::new(int(1)),
+        )
+    };
+
+    IRNode::Block(vec![
+        IRNode::Alloc {
+            name: a.clone(),
+            ty: spec.return_type.clone(),
+            initial: Box::new(var(list)),
+        },
+        IRNode::For {
+            var: i.clone(),
+            start: Box::new(int(0)),
+            end: Box::new(IRNode::UnaryOp(
+                IRUnaryOp::Len,
+                Box::new(var(&a)),
+            )),
+            body: Box::new(IRNode::For {
+                var: j.clone(),
+                start: Box::new(int(1)),
+                end: Box::new(IRNode::UnaryOp(
+                    IRUnaryOp::Len,
+                    Box::new(var(&a)),
+                )),
+                body: Box::new(IRNode::If {
+                    condition: Box::new(IRNode::Call {
+                        function: cmp.clone(),
+                        args: vec![read(var(&j)), read(jm1())],
+                    }),
+                    then_branch: Box::new(IRNode::Let {
+                        name: tmp.clone(),
+                        value: Box::new(read(jm1())),
+                        body: Box::new(IRNode::Block(vec![
+                            IRNode::Assign {
+                                target: Box::new(IRNode::Index(
+                                    Box::new(var(&a)),
+                                    Box::new(jm1()),
+                                )),
+                                value: Box::new(read(var(&j))),
+                            },
+                            IRNode::Assign {
+                                target: Box::new(IRNode::Index(
+                                    Box::new(var(&a)),
+                                    Box::new(var(&j)),
+                                )),
+                                value: Box::new(var(&tmp)),
+                            },
+                        ])),
+                    }),
+                    else_branch: Box::new(IRNode::Block(vec![])),
+                }),
+            }),
+        },
+        IRNode::Return(Box::new(var(&a))),
+    ])
 }
 
 fn build_adjacent_scan(shape: &ScanShape) -> IRNode {
@@ -462,13 +558,36 @@ mod tests {
         let templates = generate_templates(&sort_spec("sort"));
         assert_eq!(templates.len(), 1);
         assert_eq!(templates[0].0, TemplateKind::SortPrimitive);
-        match &templates[0].1 {
-            IRNode::Sort { comparator, collection } => {
-                assert!(matches!(**comparator, IRNode::Var(ref n) if n == "cmp"));
-                assert!(matches!(**collection, IRNode::Var(ref n) if n == "list"));
+        // Phase 61: the construction is the scan-form bubble
+        // sort — a Block, no Sort node anywhere, the
+        // comparator parameter called directly, hole-free.
+        fn contains_sort(node: &IRNode) -> bool {
+            match node {
+                IRNode::Sort { .. } => true,
+                IRNode::Block(stmts) => stmts.iter().any(contains_sort),
+                IRNode::Let { value, body, .. } => contains_sort(value) || contains_sort(body),
+                IRNode::If { condition, then_branch, else_branch } => {
+                    contains_sort(condition) || contains_sort(then_branch) || contains_sort(else_branch)
+                }
+                IRNode::For { start, end, body, .. } => {
+                    contains_sort(start) || contains_sort(end) || contains_sort(body)
+                }
+                IRNode::Call { args, .. } => args.iter().any(contains_sort),
+                IRNode::Return(inner) => contains_sort(inner),
+                IRNode::BinOp(_, l, r) => contains_sort(l) || contains_sort(r),
+                IRNode::UnaryOp(_, inner) => contains_sort(inner),
+                IRNode::Index(c, i) => contains_sort(c) || contains_sort(i),
+                IRNode::Assign { target, value } => contains_sort(target) || contains_sort(value),
+                IRNode::Alloc { initial, .. } => contains_sort(initial),
+                _ => false,
             }
-            other => panic!("expected a Sort node, got {:?}", other),
         }
+        let body = &templates[0].1;
+        assert!(matches!(body, IRNode::Block(_)), "scan form is a Block: {:?}", body);
+        assert!(!contains_sort(body), "the IR Sort node must not appear: {:?}", body);
+        let text = format!("{:?}", body);
+        assert!(text.contains("function: \"cmp\""), "comparator called directly: {}", text);
+        assert_eq!(crate::synthesis::engine::count_holes(body), 0, "template bodies are hole-free");
     }
 
     #[test]

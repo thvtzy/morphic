@@ -32,7 +32,7 @@
 //
 //  2. THE COMPILED ADAPTER ≡ THE ORIGINAL EMITTER, over both
 //     corpora (m5_s1_adapter_equivalence):
-//       A. the M3 gate corpus (2,559 cases, built by the
+//       A. the M3 gate corpus (2,566 cases, built by the
 //          gate's own corpus builders): adapter vs original
 //          vs the interpreter composition (mode B) — three
 //          ways, byte-compared per case, tallied per class;
@@ -334,7 +334,7 @@ struct ClassTally {
 }
 
 #[test]
-#[ignore = "M5-S1 equivalence: M3 corpus (2,559 cases) + M4 corpus (142 whole files, 142 pipeline runs); run explicitly with --ignored --nocapture m5_s1_adapter_equivalence"]
+#[ignore = "M5-S1 equivalence: M3 corpus (2,566 cases) + M4 corpus (142 whole files, 142 pipeline runs); run explicitly with --ignored --nocapture m5_s1_adapter_equivalence"]
 fn m5_s1_adapter_equivalence() {
     let root = env!("CARGO_MANIFEST_DIR");
     let out_dir = format!("{}/target/m5-s1", root);
@@ -373,7 +373,7 @@ fn m5_s1_adapter_equivalence() {
         sets.push((file, set));
     }
     cases.extend(m3_gate::winner_corpus(&sets));
-    assert_eq!(cases.len(), 2559, "the M3 gate corpus size (Phase 56 re-derivation)");
+    assert_eq!(cases.len(), 2566, "the M3 gate corpus size (Phase 61 re-derivation: Phase 56's 2,559 + 6 — the amended rust_test_case winner's larger concat tree contributes 2 new unique subtrees x the corpus's 3 case kinds — + 1 driver-corpus transcription of the Phase 61 annotated whole-file case)");
 
     let composed_b = Composed {
         w: &winners,

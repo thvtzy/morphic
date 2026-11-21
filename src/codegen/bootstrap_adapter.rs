@@ -1132,6 +1132,11 @@ impl Adapter {
                     Ok(syn::rust_test_case::rust_test_case(
                         rust_ident(&raw_name),
                         rust_ident(&spec.name),
+                        // The call's generics text
+                        // (Phase 61): the driver's rule,
+                        // shared with the original
+                        // (super::test_call_generics_text).
+                        super::test_call_generics_text(spec, t),
                         input_text,
                         self.sexpr_text(&t.expected_output)?,
                     ))

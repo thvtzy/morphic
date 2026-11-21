@@ -187,8 +187,9 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
                 other => expr_to_rust(other),
             };
             out.push_str(&format!(
-                "        let result = {}({});\n",
+                "        let result = {}{}({});\n",
                 rust_ident(&candidate.spec.name),
+                test_call_generics_text(&candidate.spec, test),
                 input_text
             ));
             out.push_str(&format!(
@@ -202,6 +203,128 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
     }
 
     Ok(out)
+}
+
+/// The turbofish annotation for one generated test's call
+/// (Phase 61, campaign slice G6) — the `generics_text` the
+/// driver hands `rust_test_case` (its spec doc states the
+/// rule). The empty string for every test except the
+/// E0283 class: a generic spec with a function-typed
+/// parameter, where the test passes an empty collection
+/// literal for a `List<generic>` parameter and no other
+/// argument of the test pins the generic — without the
+/// annotation the empty collection leaves the element
+/// type unpinned against the unconstrained fn-typed
+/// signature and the generated test module does not
+/// compile (E0283; measured on sort in Phases 56/58/61).
+/// A generic is pinned by a scalar literal at a
+/// bare-generic parameter position, or by a scalar
+/// literal inside a non-empty list literal at a
+/// `List<generic>` position; a lambda never pins. The
+/// concrete type is derived from the spec's own test
+/// literals (the first scalar literal kind across the
+/// spec's tests — the G1 runner harness's derivation,
+/// `synthesis::runner` — defaulting to i64), repeated
+/// once per generic parameter. `pub(crate)`: the compiled
+/// bootstrap adapter (bootstrap_adapter) shares this
+/// driver rule; the proof assemblies carry their own
+/// copies, pinned by the gates.
+pub(crate) fn test_call_generics_text(spec: &FunctionSpec, test: &Test) -> String {
+    if spec.generics.is_empty() {
+        return String::new();
+    }
+    if !spec.params.iter().any(|p| matches!(p.ty, TypeRef::Function(..))) {
+        return String::new();
+    }
+    // Argument positions, under the same spread rule the
+    // call's input text follows (rust_test_case's doc).
+    let positions: Vec<(&Expr, &TypeRef)> = match &test.input {
+        Expr::Call(name, args) if name == "__tuple__" && args.len() == spec.params.len() => {
+            args.iter()
+                .zip(spec.params.iter().map(|p| &p.ty))
+                .collect()
+        }
+        other if spec.params.len() == 1 => vec![(other, &spec.params[0].ty)],
+        _ => return String::new(),
+    };
+    let generic_names: Vec<&str> = spec.generics.iter().map(|g| g.name.as_str()).collect();
+    // Does a type position denote the generic `g`? (The
+    // parser carries type parameters as Named; the AST's
+    // Generic form is the same fact in the other spelling.)
+    let is_generic = |t: &TypeRef, g: &str| -> bool {
+        matches!(t, TypeRef::Generic(n) | TypeRef::Named(n) if n == g)
+    };
+    let is_scalar_literal = |e: &Expr| -> bool {
+        matches!(
+            e,
+            Expr::IntLit(_)
+                | Expr::FloatLit(_)
+                | Expr::BoolLit(_)
+                | Expr::StringLit(_)
+                | Expr::CharLit(_)
+        )
+    };
+    let unpinned_empty = generic_names.iter().any(|g| {
+        let has_empty = positions.iter().any(|(e, t)| {
+            matches!(t, TypeRef::List(inner) if is_generic(inner, g))
+                && matches!(e, Expr::Call(n, a) if n == "List" && a.is_empty())
+        });
+        if !has_empty {
+            return false;
+        }
+        let pinned = positions.iter().any(|(e, t)| {
+            (is_generic(t, g) && is_scalar_literal(e))
+                || (matches!(t, TypeRef::List(inner) if is_generic(inner, g))
+                    && matches!(e, Expr::Call(n, a) if n == "List" && a.iter().any(|el| is_scalar_literal(el))))
+        });
+        !pinned
+    });
+    if !unpinned_empty {
+        return String::new();
+    }
+    let ty = concrete_type_for_spec(spec);
+    let types = vec![ty; spec.generics.len()].join(", ");
+    format!("::<{}>", types)
+}
+
+/// The concrete type the annotation pins a spec's
+/// generics to: the first scalar literal kind found in
+/// the spec's own tests (DFS over inputs, then expected
+/// outputs, test by test), defaulting to i64 — the G1
+/// runner harness's derivation (synthesis::runner's
+/// `concrete_type_for_spec`), carried here for the
+/// shipped rendering.
+fn concrete_type_for_spec(spec: &FunctionSpec) -> &'static str {
+    for test in &spec.tests {
+        if let Some(ty) = first_literal_type(&test.input) {
+            return ty;
+        }
+        if let Some(ty) = first_literal_type(&test.expected_output) {
+            return ty;
+        }
+    }
+    "i64"
+}
+
+fn first_literal_type(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::IntLit(_) => Some("i64"),
+        Expr::FloatLit(_) => Some("f64"),
+        Expr::BoolLit(_) => Some("bool"),
+        Expr::StringLit(_) => Some("String"),
+        Expr::CharLit(_) => Some("char"),
+        Expr::Var(_) => None,
+        Expr::Field(inner, _) => first_literal_type(inner),
+        Expr::Index(a, b) => first_literal_type(a).or_else(|| first_literal_type(b)),
+        Expr::Call(_, args) => args.iter().find_map(|a| first_literal_type(a)),
+        Expr::BinOp(_, l, r) => first_literal_type(l).or_else(|| first_literal_type(r)),
+        Expr::UnaryOp(_, e) => first_literal_type(e),
+        Expr::Lambda(_, body) => first_literal_type(body),
+        Expr::Length(e) => first_literal_type(e),
+        Expr::Comprehension {
+            collection, body, ..
+        } => first_literal_type(collection).or_else(|| first_literal_type(body)),
+    }
 }
 
 // ── C Codegen ─────────────────────────────────────────────
@@ -1621,6 +1744,183 @@ mod tests {
             timeout_ms: None,
             property: false,
         }
+    }
+
+    // ── Phase 61 (G6): the test-call turbofish rule ──────
+
+    fn generic_param(name: &str) -> crate::spec::ast::GenericParam {
+        crate::spec::ast::GenericParam {
+            name: name.into(),
+            bounds: vec![],
+        }
+    }
+
+    fn named(name: &str) -> TypeRef {
+        TypeRef::Named(name.into())
+    }
+
+    fn sort_shaped_spec() -> FunctionSpec {
+        FunctionSpec {
+            name: "sort".into(),
+            doc: None,
+            generics: vec![generic_param("T")],
+            params: vec![
+                Param {
+                    name: "list".into(),
+                    ty: TypeRef::List(Box::new(named("T"))),
+                    annotations: HashMap::new(),
+                },
+                Param {
+                    name: "cmp".into(),
+                    ty: TypeRef::Function(
+                        vec![named("T"), named("T")],
+                        Box::new(TypeRef::Bool),
+                    ),
+                    annotations: HashMap::new(),
+                },
+            ],
+            return_type: TypeRef::List(Box::new(named("T"))),
+            preconditions: vec![],
+            postconditions: vec![],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: HashMap::new(),
+        }
+    }
+
+    fn tuple_test(name: &str, args: Vec<Expr>, expected: Expr) -> Test {
+        Test {
+            name: Some(name.into()),
+            input: Expr::Call("__tuple__".into(), args),
+            expected_output: expected,
+            timeout_ms: None,
+            property: false,
+        }
+    }
+
+    fn lt_lambda() -> Expr {
+        Expr::Lambda(
+            vec![("a".into(), named("T")), ("b".into(), named("T"))],
+            Box::new(Expr::BinOp(
+                crate::spec::ast::BinOp::Lt,
+                Box::new(Expr::Var("a".into())),
+                Box::new(Expr::Var("b".into())),
+            )),
+        )
+    }
+
+    fn list_lit(elems: Vec<Expr>) -> Expr {
+        Expr::Call("List".into(), elems)
+    }
+
+    #[test]
+    fn generics_text_annotates_only_the_unpinned_empty_collection_test() {
+        let mut spec = sort_shaped_spec();
+        let empty = tuple_test(
+            "empty",
+            vec![list_lit(vec![]), lt_lambda()],
+            list_lit(vec![]),
+        );
+        let single = tuple_test(
+            "single",
+            vec![list_lit(vec![Expr::IntLit(5)]), lt_lambda()],
+            list_lit(vec![Expr::IntLit(5)]),
+        );
+        spec.tests = vec![empty.clone(), single.clone()];
+        // The empty list leaves T unpinned (the lambda
+        // cannot pin it): annotate, with the concrete type
+        // derived from the spec's own tests (the [5] test).
+        assert_eq!(test_call_generics_text(&spec, &empty), "::<i64>");
+        // A non-empty list pins T itself: no annotation,
+        // byte-identical rendering.
+        assert_eq!(test_call_generics_text(&spec, &single), "");
+    }
+
+    #[test]
+    fn generics_text_skips_specs_the_rule_does_not_cover() {
+        // binary_search's shape: the needle argument sits
+        // at a bare-generic position and its literal pins
+        // T even for the empty-list test — no annotation.
+        let mut spec = sort_shaped_spec();
+        spec.name = "binary_search".into();
+        spec.params = vec![
+            Param {
+                name: "haystack".into(),
+                ty: TypeRef::List(Box::new(named("T"))),
+                annotations: HashMap::new(),
+            },
+            Param {
+                name: "needle".into(),
+                ty: named("T"),
+                annotations: HashMap::new(),
+            },
+            Param {
+                name: "cmp".into(),
+                ty: TypeRef::Function(
+                    vec![named("T"), named("T")],
+                    Box::new(TypeRef::Int),
+                ),
+                annotations: HashMap::new(),
+            },
+        ];
+        spec.return_type = TypeRef::Option(Box::new(TypeRef::I64));
+        let empty = tuple_test(
+            "empty",
+            vec![list_lit(vec![]), Expr::IntLit(5), lt_lambda()],
+            Expr::Var("None".into()),
+        );
+        spec.tests = vec![empty.clone()];
+        assert_eq!(test_call_generics_text(&spec, &empty), "");
+
+        // No fn-typed parameter: no annotation even with an
+        // unpinned empty list.
+        let mut spec2 = sort_shaped_spec();
+        spec2.params.remove(1);
+        let t = tuple_test("empty", vec![list_lit(vec![])], list_lit(vec![]));
+        spec2.tests = vec![t.clone()];
+        assert_eq!(test_call_generics_text(&spec2, &t), "");
+
+        // No generics at all: never annotated.
+        let mut spec3 = sort_shaped_spec();
+        spec3.generics = vec![];
+        let t3 = tuple_test(
+            "empty",
+            vec![list_lit(vec![]), lt_lambda()],
+            list_lit(vec![]),
+        );
+        spec3.tests = vec![t3.clone()];
+        assert_eq!(test_call_generics_text(&spec3, &t3), "");
+    }
+
+    #[test]
+    fn generated_test_module_carries_the_annotation() {
+        let mut cand = candidate("sort", IRNode::Var("list".into()));
+        cand.spec = sort_shaped_spec();
+        cand.spec.tests = vec![
+            tuple_test(
+                "empty",
+                vec![list_lit(vec![]), lt_lambda()],
+                list_lit(vec![]),
+            ),
+            tuple_test(
+                "single",
+                vec![list_lit(vec![Expr::IntLit(5)]), lt_lambda()],
+                list_lit(vec![Expr::IntLit(5)]),
+            ),
+        ];
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("let result = sort::<i64>(vec![], |a, b| (a < b));"),
+            "the empty test's call must be annotated:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let result = sort(vec![5], |a, b| (a < b));"),
+            "the pinned test's call must stay bare:\n{}",
+            code
+        );
     }
 
     // Regression (M2 synthesis run, defect 1): spec test names were

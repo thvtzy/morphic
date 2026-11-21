@@ -64,6 +64,26 @@
 //  one an interpreter-evaluable constraint seed — stay
 //  byte-identical.
 //
+//  TRIGGER EXTENSION (Phase 61, campaign slice G6): the
+//  Phase 60 extension guaranteed the TRIGGERING seeds a
+//  finalist slot. The same gap exists one provenance over
+//  inside the ORIGINAL trigger's territory: when the stage
+//  fires via UnbindableTests, a template seed (a complete,
+//  hole-free constructed body) can rank outside the top-k
+//  on composite — sort's scan template measured finalist
+//  in 0/5 draws (Phase 61), so the stage never priced the
+//  one constructed body in the pool. Within an
+//  already-triggered UnbindableTests stage, Template-
+//  provenance candidates are therefore guaranteed finalist
+//  slots by the same displacement rule. Scope, recorded:
+//  the TRIGGER is unchanged — Template provenance does
+//  not fire the stage (a bindable-tests spec holding a
+//  template, is_sorted's shape, still never triggers;
+//  that wall remains reserved for a separate decision,
+//  exactly as Phase 60 left it), and the Phase 60 arm's
+//  guarantee set is exactly its triggering seeds,
+//  unchanged.
+//
 //  FINALISTS: the top `RUNNER_FINALISTS` candidates by the
 //  existing composite ranking, with the would-be winner
 //  (what `select_best` crowns on the un-rescored pool)
@@ -72,7 +92,9 @@
 //  extension the triggering seeds are guaranteed slots by
 //  the same rule, displacing the lowest-ranked unprotected
 //  finalists (never the would-be winner, never another
-//  guaranteed seed).
+//  guaranteed seed); under the Phase 61 extension the
+//  same holds for Template-provenance candidates inside
+//  an UnbindableTests stage.
 //
 //  RANKING SEMANTICS (explicit): a finalist's runner ratio
 //  replaces its test_pass_ratio (times the same per-hole
@@ -210,12 +232,15 @@ pub fn rescore_finalists_report(
     spec: &FunctionSpec,
 ) -> (Vec<CandidateImplementation>, RunnerOutcome) {
     // Trigger (hard invariant + Phase 60 extension — see
-    // the module header).
-    let guaranteed: Vec<usize> = match trigger(&candidates, spec) {
+    // the module header). The guarantee set: the Phase 60
+    // arm's triggering seeds, or — Phase 61 — the pool's
+    // Template-provenance candidates inside an
+    // UnbindableTests stage.
+    let trig = match trigger(&candidates, spec) {
         None => return (candidates, RunnerOutcome::NotTriggered),
-        Some(Trigger::UnbindableTests) => Vec::new(),
-        Some(Trigger::ConstructedSeeds(indices)) => indices,
+        Some(t) => t,
     };
+    let guaranteed: Vec<usize> = guaranteed_finalists(&candidates, &trig);
 
     let started = Instant::now();
     let dir = std::env::temp_dir().join(format!(
@@ -253,6 +278,31 @@ pub fn rescore_finalists_report(
             elapsed: started.elapsed(),
         },
     )
+}
+
+/// The guarantee set for a triggered stage (see the
+/// module header's TRIGGER EXTENSION sections). Pure —
+/// unit-tested without rustc.
+/// - Phase 60 arm: exactly the triggering constraint
+///   seeds' pool indices.
+/// - Phase 61 (inside the original UnbindableTests
+///   trigger only): the pool's Template-provenance
+///   candidates — constructed bodies the composite ranking
+///   can leave outside the top-k (sort's scan template:
+///   finalist in 0/5 draws before this extension).
+fn guaranteed_finalists(
+    candidates: &[CandidateImplementation],
+    trigger: &Trigger,
+) -> Vec<usize> {
+    match trigger {
+        Trigger::ConstructedSeeds(indices) => indices.clone(),
+        Trigger::UnbindableTests => candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c.provenance, Provenance::Template { .. }))
+            .map(|(i, _)| i)
+            .collect(),
+    }
 }
 
 /// The finalist set: top `RUNNER_FINALISTS` by the existing
@@ -609,6 +659,14 @@ fn annotate_call(call: &str, spec: &FunctionSpec) -> Option<String> {
         return None;
     }
     let rest = &call[name.len()..];
+    // Phase 61 (G6): the shipped test module itself now
+    // annotates its E0283-class calls (the generics_text
+    // the driver hands rust_test_case) — a re-read call
+    // that already carries a turbofish is used as-is,
+    // never annotated twice.
+    if rest.starts_with("::<") {
+        return Some(call.to_string());
+    }
     if !rest.starts_with('(') {
         return None;
     }
@@ -1080,6 +1138,103 @@ spec add_one {
         // Without the guarantee the seed is not chosen.
         let plain = choose_finalists(&pool, &spec, &[]);
         assert!(!plain.contains(&9));
+    }
+
+    /// Phase 61 guarantee extension: inside an
+    /// UnbindableTests stage the guarantee set is exactly
+    /// the pool's Template-provenance indices; inside the
+    /// Phase 60 arm it remains exactly the triggering
+    /// seeds (a template there is NOT added — the two arms'
+    /// scopes are distinct, as recorded).
+    #[test]
+    fn guaranteed_finalists_scopes_per_trigger_arm() {
+        let spec = spec_from(MINI_SORT);
+        let template = candidate_with_provenance(
+            1,
+            &spec,
+            IRNode::Var("list".into()),
+            1.0,
+            Provenance::Template { template_name: "sort_primitive".into() },
+        );
+        let mutation = candidate_with_provenance(
+            2,
+            &spec,
+            IRNode::Var("list".into()),
+            1.0,
+            Provenance::Mutation { parent_id: 0, mutation_kind: "test".into() },
+        );
+        let seed = candidate_with_provenance(
+            3,
+            &spec,
+            IRNode::Var("list".into()),
+            1.0,
+            Provenance::ConstraintInduced { kind: "equation".into() },
+        );
+        let pool = vec![mutation, template, seed];
+        assert_eq!(
+            guaranteed_finalists(&pool, &Trigger::UnbindableTests),
+            vec![1],
+            "the template's pool index, and only it"
+        );
+        assert_eq!(
+            guaranteed_finalists(&pool, &Trigger::ConstructedSeeds(vec![2])),
+            vec![2],
+            "the Phase 60 arm's set is its triggering seeds, unchanged"
+        );
+        // And the composed rule: a bottom-ranked template in
+        // an unbindable-tests pool becomes a finalist.
+        let mut big: Vec<CandidateImplementation> = Vec::new();
+        for i in 0..10u64 {
+            let mut c = candidate_with_provenance(
+                i + 1,
+                &spec,
+                IRNode::Var("list".into()),
+                1.0,
+                Provenance::Mutation { parent_id: 0, mutation_kind: "test".into() },
+            );
+            c.scores.quality_score = 1.0 - (i as f64) * 0.05;
+            c.score = composite_score(&c.scores);
+            big.push(c);
+        }
+        big[9] = candidate_with_provenance(
+            10,
+            &spec,
+            IRNode::Var("list".into()),
+            1.0,
+            Provenance::Template { template_name: "sort_primitive".into() },
+        );
+        let guaranteed = guaranteed_finalists(&big, &Trigger::UnbindableTests);
+        assert_eq!(guaranteed, vec![9]);
+        let chosen = choose_finalists(&big, &spec, &guaranteed);
+        assert_eq!(chosen.len(), RUNNER_FINALISTS);
+        assert!(chosen.contains(&9), "the template must be a finalist under the Phase 61 guarantee");
+    }
+
+    /// Phase 61 (G6): generate's shipped test module now
+    /// annotates E0283-class calls itself; the runner's
+    /// re-read of such a call must use it as-is (the stage
+    /// must not degrade on the new shape, and must never
+    /// annotate twice).
+    #[test]
+    fn runner_source_keeps_shipped_turbofish() {
+        let spec = spec_from(MINI_SORT);
+        let three = GENERATED_SORT_SHAPE.replace(
+            "    #[test]\n    fn reverse() {",
+            "    #[test]\n    fn single() {\n        let result = mini_sort(vec![5], |a, b| (a < b));\n        assert_eq!(result, vec![5]);\n    }\n    #[test]\n    fn reverse() {",
+        );
+        let annotated = three.replace(
+            "mini_sort(vec![], |a, b| (a < b))",
+            "mini_sort::<i64>(vec![], |a, b| (a < b))",
+        );
+        assert_ne!(annotated, three, "setup: the shipped annotation must be present");
+        let source = build_runner_source(&annotated, &spec).expect("runner source");
+        assert!(source.contains("mini_sort::<i64>(vec![], |a, b| (a < b))"));
+        assert!(!source.contains("::<i64>::<"), "never annotated twice: {}", source);
+        assert_eq!(
+            source.matches("mini_sort::<i64>(vec![], |a, b| (a < b))").count(),
+            1,
+            "the shipped call is used exactly as-is, once"
+        );
     }
 
     /// End-to-end in miniature (ignored: drives real rustc):

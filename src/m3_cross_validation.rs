@@ -910,12 +910,13 @@ mod xval3 {
     fn rust_test_case(
         test_name: &str,
         fn_name: &str,
+        generics_text: &str,
         input_text: &str,
         expected_text: &str,
     ) -> Mirror {
         Mirror::Owned(format!(
-            "    #[test]\n    fn {}() {{\n        let result = {}({});\n        assert_eq!(result, {});\n    }}\n",
-            test_name, fn_name, input_text, expected_text
+            "    #[test]\n    fn {}() {{\n        let result = {}{}({});\n        assert_eq!(result, {});\n    }}\n",
+            test_name, fn_name, generics_text, input_text, expected_text
         ))
     }
 
@@ -1605,7 +1606,7 @@ mod xval3 {
             ("rust_precondition_assert", In::Text(s)) => rust_precondition_assert(s),
             ("rust_precondition_block", In::Text(s)) => rust_precondition_block(s),
             ("rust_test_name_form", In::Bool(b)) => rust_test_name_form(*b),
-            ("rust_test_case", In::Str4(t, f, i, e)) => rust_test_case(t, f, i, e),
+            ("rust_test_case", In::Str5(t, f, g, i, e)) => rust_test_case(t, f, g, i, e),
             ("rust_test_module", In::Text(s)) => rust_test_module(s),
             ("rust_file_fixed_text", In::Int(a)) => rust_file_fixed_text(*a),
             // ── slice 4 ──
@@ -2112,10 +2113,26 @@ mod xval3 {
         "    debug_assert!(a, \"Precondition violated\");\n    debug_assert!(b, \"Precondition violated\");\n",
     ];
 
-    /// Test-block 4-tuples for rust_test_case (total equation).
-    const TEST_CASES: [(&str, &str, &str, &str); 2] = [
-        ("adds", "add", "3", "7"),
-        ("names", "f", "\"Int\"", "\"Int\""),
+    /// Test-block 5-tuples for rust_test_case (total equation).
+    const TEST_CASES: [(&str, &str, &str, &str, &str); 4] = [
+        ("adds", "add", "", "3", "7"),
+        ("names", "f", "", "\"Int\"", "\"Int\""),
+        // Phase 61: the generics text sits between the
+        // function name and the argument list.
+        (
+            "empty_list",
+            "sort",
+            "::<i64>",
+            "vec![], |a, b| (a < b)",
+            "vec![]",
+        ),
+        (
+            "pair",
+            "zip_with",
+            "::<String, bool>",
+            "\"a\", true",
+            "(\"a\", true)",
+        ),
     ];
 
     /// Pre-joined test blocks for rust_test_module.
@@ -2597,7 +2614,7 @@ mod xval3 {
             "rust_test_name_form" => vec![In::Bool(false), In::Bool(true)],
             "rust_test_case" => TEST_CASES
                 .iter()
-                .map(|(t, f, i, e)| In::Str4(t, f, i, e))
+                .map(|(t, f, g, i, e)| In::Str5(t, f, g, i, e))
                 .collect(),
             "rust_expr_call_form" => CALL_FORM_NAMES
                 .iter()
@@ -3011,7 +3028,7 @@ mod xval3 {
             // test-block assertions
             "rust_test_case" => TEST_CASES
                 .iter()
-                .map(|(t, f, i, e)| In::Str4(t, f, i, e))
+                .map(|(t, f, g, i, e)| In::Str5(t, f, g, i, e))
                 .collect(),
             // test: module over the marker "X"
             "rust_test_module" => vec![In::Text("X")],
@@ -4230,7 +4247,10 @@ mod xval3 {
     /// (Phase 55: rust_expr_fixed_text drops to 6 — the
     /// Lambda row left its table — and the four new specs
     /// join, each total over its battery: call_form 12,
-    /// list_text 6, tuple_text 6, lambda_text 5.)
+    /// list_text 6, tuple_text 6, lambda_text 5. Phase 61:
+    /// rust_test_case's battery grows 2 → 4 with the
+    /// generics-text argument's annotated cases; the spec
+    /// is a total equation, so all four pin.)
     const PINNED_TOTALS: [(&str, usize); 116] = [
         ("rust_type_name", 14),
         ("rust_binop_symbol", 17),
@@ -4277,7 +4297,7 @@ mod xval3 {
         ("rust_precondition_assert", 4),
         ("rust_precondition_block", 3),
         ("rust_test_name_form", 2),
-        ("rust_test_case", 2),
+        ("rust_test_case", 4),
         ("rust_test_module", 3),
         ("rust_file_fixed_text", 2),
         // ── slice 4 ──
@@ -4555,8 +4575,8 @@ mod xval3 {
             let (_, pinned, unpinned) = totals(name, &sw);
             assert_eq!((pinned, unpinned), (n, 0), "{}", name);
         }
-        // Grand totals across the module: 3910 cases per
-        // run, 2990 pinned, 913 spec-silent, 7 out of
+        // Grand totals across the module: 3912 cases per
+        // run, 2992 pinned, 913 spec-silent, 7 out of
         // contract. (Slices 1–3: 2196 cases, 1533 pinned,
         // 656 silent — Phase 29 moved the literal specs'
         // three special-contents cases each from pinned to
@@ -4575,11 +4595,14 @@ mod xval3 {
         // pinned — the four new specs' batteries (12 + 6
         // + 6 + 5) — and moves one case from pinned to
         // spec-silent: rust_expr_fixed_text's kind-10
-        // case, unpinned since Lambda left its table.)
+        // case, unpinned since Lambda left its table.
+        // Phase 61 adds 2 cases, both pinned:
+        // rust_test_case's battery grows with the
+        // generics-text argument's annotated cases.)
         let total_cases: usize = ALL_SPECS.iter().map(|n| sweep(n).len()).sum();
         let total_pinned: usize = PINNED_TOTALS.iter().map(|(_, t)| t).sum();
-        assert_eq!(total_cases, 3910);
-        assert_eq!(total_pinned, 2990);
+        assert_eq!(total_cases, 3912);
+        assert_eq!(total_pinned, 2992);
     }
 
     #[test]

@@ -721,10 +721,15 @@ fn rust_test_name_default(index: usize) -> String {
 
 /// Mirror of one generated test's block
 /// (src/codegen/mod.rs:139-150), push for push, over
-/// pre-rendered parts.
+/// pre-rendered parts. The generics text (Phase 61) is
+/// the call's turbofish annotation, placed between the
+/// function name and the argument list — empty unless
+/// the driver's E0283-class rule supplies it (see
+/// test_call_generics_text below).
 fn rust_test_case(
     test_name: &str,
     fn_name: &str,
+    generics_text: &str,
     input_text: &str,
     expected_text: &str,
 ) -> String {
@@ -732,8 +737,8 @@ fn rust_test_case(
     out.push_str("    #[test]\n");
     out.push_str(&format!("    fn {}() {{\n", test_name));
     out.push_str(&format!(
-        "        let result = {}({});\n",
-        fn_name, input_text
+        "        let result = {}{}({});\n",
+        fn_name, generics_text, input_text
     ));
     out.push_str(&format!(
         "        assert_eq!(result, {});\n",
@@ -2366,6 +2371,96 @@ struct DriverSpec {
     tests: Vec<DriverTest>,
 }
 
+/// Mirror of the driver's test-call generics rule
+/// (src/codegen/mod.rs, `test_call_generics_text`): the
+/// turbofish text for one generated test's call — the
+/// empty string except the E0283 class (a generic spec
+/// with a function-typed parameter, a test passing an
+/// empty List literal at a List<generic> position, and
+/// no argument pinning the generic: a scalar literal at
+/// a bare-generic position, or a scalar literal inside
+/// a non-empty List literal at a List<generic> position;
+/// a lambda never pins). The concrete type is derived
+/// from the spec's own tests (first scalar literal kind,
+/// Int when none), repeated per generic. The mirror
+/// walks the Ty/SExpr trees it has; payload-less SExpr
+/// forms carry no literal and cannot pin — the mirror's
+/// usual partial view.
+fn test_call_generics_text(spec: &DriverSpec, test: &DriverTest) -> String {
+    if spec.generics.is_empty() {
+        return String::new();
+    }
+    if !spec.params.iter().any(|(_, t)| matches!(t, Ty::Func(..))) {
+        return String::new();
+    }
+    let positions: Vec<(&SExpr, &Ty)> = match &test.input {
+        SExpr::Call(name, args) if *name == "__tuple__" && args.len() == spec.params.len() => {
+            args.iter().zip(spec.params.iter().map(|(_, t)| t)).collect()
+        }
+        other if spec.params.len() == 1 => vec![(other, &spec.params[0].1)],
+        _ => return String::new(),
+    };
+    let is_generic = |t: &Ty, g: &str| matches!(t, Ty::Name(n) if *n == g);
+    let is_list_of = |t: &Ty, g: &str| {
+        matches!(t, Ty::Wrap1(16, inner) if is_generic(inner, g))
+    };
+    let is_scalar = |e: &SExpr| {
+        matches!(
+            e,
+            SExpr::IntLit(_) | SExpr::FloatLit(_) | SExpr::BoolLit(_) | SExpr::StringLit(_)
+        )
+    };
+    let unpinned_empty = spec.generics.iter().any(|&g| {
+        let has_empty = positions.iter().any(|(e, t)| {
+            is_list_of(t, g) && matches!(e, SExpr::Call(n, a) if *n == "List" && a.is_empty())
+        });
+        if !has_empty {
+            return false;
+        }
+        let pinned = positions.iter().any(|(e, t)| {
+            (is_generic(t, g) && is_scalar(e))
+                || (is_list_of(t, g)
+                    && matches!(e, SExpr::Call(n, a) if *n == "List" && a.iter().any(|el| is_scalar(el))))
+        });
+        !pinned
+    });
+    if !unpinned_empty {
+        return String::new();
+    }
+    let ty = driver_concrete_type(spec);
+    let types = vec![ty; spec.generics.len()].join(", ");
+    format!("::<{}>", types)
+}
+
+/// The concrete type the mirror's annotation derivation
+/// pins (mirror of `concrete_type_for_spec` in
+/// src/codegen/mod.rs): the first scalar literal kind
+/// across the spec's tests, i64 when none.
+fn driver_concrete_type(spec: &DriverSpec) -> &'static str {
+    for test in &spec.tests {
+        if let Some(ty) = sexpr_literal_type(&test.input) {
+            return ty;
+        }
+        if let Some(ty) = sexpr_literal_type(&test.expected) {
+            return ty;
+        }
+    }
+    "i64"
+}
+
+fn sexpr_literal_type(expr: &SExpr) -> Option<&'static str> {
+    match expr {
+        SExpr::IntLit(_) => Some("i64"),
+        SExpr::FloatLit(_) => Some("f64"),
+        SExpr::BoolLit(_) => Some("bool"),
+        SExpr::StringLit(_) => Some("String"),
+        SExpr::Call(_, args) => args.iter().find_map(sexpr_literal_type),
+        SExpr::BinOp(_, l, r) => sexpr_literal_type(l).or_else(|| sexpr_literal_type(r)),
+        SExpr::Lambda(_, body) => sexpr_literal_type(body),
+        _ => None,
+    }
+}
+
 /// Faithful assembly of `generate_rust`
 /// (src/codegen/mod.rs:66-155) from the slice 1-5
 /// mirrors, at the SPEC level: where the slice-3
@@ -2471,6 +2566,7 @@ fn generate_rust_from_spec_assembled(spec: &DriverSpec) -> String {
                 rust_test_case(
                     &name,
                     &rust_ident_verbatim(spec.name),
+                    &test_call_generics_text(spec, t),
                     &input_text,
                     &expr_to_rust_assembled(&t.expected),
                 )
@@ -3515,14 +3611,20 @@ mod golden_tests {
         assert_eq!(rust_test_name_default(12), "test_12");
         // One test block over pre-rendered parts
         assert_eq!(
-            rust_test_case("adds", "add", "3", "7"),
+            rust_test_case("adds", "add", "", "3", "7"),
             "    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n"
         );
         // A String test input sits BARE in call position —
         // the recorded E0308 property of this path
         assert_eq!(
-            rust_test_case("names", "f", "\"Int\"", "\"Int\""),
+            rust_test_case("names", "f", "", "\"Int\"", "\"Int\""),
             "    #[test]\n    fn names() {\n        let result = f(\"Int\");\n        assert_eq!(result, \"Int\");\n    }\n"
+        );
+        // The Phase 61 generics text: the turbofish sits
+        // between the function name and the argument list
+        assert_eq!(
+            rust_test_case("empty_list", "sort", "::<i64>", "vec![], |a, b| (a < b)", "vec![]"),
+            "    #[test]\n    fn empty_list() {\n        let result = sort::<i64>(vec![], |a, b| (a < b));\n        assert_eq!(result, vec![]);\n    }\n"
         );
         // .morph test: the module wrapper over a marker
         assert_eq!(
@@ -3530,7 +3632,7 @@ mod golden_tests {
             "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\nX}\n"
         );
         // The wrapper over one real block
-        let block = rust_test_case("adds", "add", "3", "7");
+        let block = rust_test_case("adds", "add", "", "3", "7");
         assert_eq!(
             rust_test_module(&block),
             "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn adds() {\n        let result = add(3);\n        assert_eq!(result, 7);\n    }\n}\n"
@@ -3545,7 +3647,7 @@ mod golden_tests {
         // through Phase 54 it stood BEFORE the signature,
         // surprise 13), body, closing brace, test module
         let sig = rust_signature("add", "", "a: i64, b: i64", "i64");
-        let case = rust_test_case("adds", "add", "3", "7");
+        let case = rust_test_case("adds", "add", "", "3", "7");
         let out = generate_rust_assembled(
             Some(&["Adds things"]),
             &sig,
@@ -4722,6 +4824,89 @@ mod golden_tests {
                 "    fn pair_out() {\n",
                 "        let result = sort_by(1, None);\n",
                 "        assert_eq!(result, (1, None));\n",
+                "    }\n",
+                "}\n",
+            )
+        );
+    }
+
+    #[test]
+    fn generate_rust_end_to_end_generic_annotation() {
+        // The Phase 61 (G6) annotation through the whole
+        // driver: a genuinely generic sort-shaped spec
+        // whose empty-list test leaves T unpinned against
+        // the fn-typed comparator parameter — that test's
+        // call carries the turbofish (concrete type from
+        // the spec's own tests), the pinned test's call
+        // stays bare.
+        let lt = || {
+            SExpr::Lambda(
+                vec!["a", "b"],
+                Box::new(SExpr::BinOp(
+                    9,
+                    Box::new(SExpr::Var("a")),
+                    Box::new(SExpr::Var("b")),
+                )),
+            )
+        };
+        let spec = DriverSpec {
+            doc: None,
+            name: "sort",
+            generics: vec!["T"],
+            params: vec![
+                ("list", Ty::Wrap1(16, Box::new(Ty::Name("T")))),
+                (
+                    "cmp",
+                    Ty::Func(
+                        vec![Ty::Name("T"), Ty::Name("T")],
+                        Box::new(Ty::Leaf(2)),
+                    ),
+                ),
+            ],
+            ret: Ty::Wrap1(16, Box::new(Ty::Name("T"))),
+            preconditions: vec![],
+            body: Stmt::Expr(Expr::Var("list")),
+            tests: vec![
+                DriverTest {
+                    name: Some("empty"),
+                    input: SExpr::Call(
+                        "__tuple__",
+                        vec![SExpr::Call("List", vec![]), lt()],
+                    ),
+                    expected: SExpr::Call("List", vec![]),
+                },
+                DriverTest {
+                    name: Some("single"),
+                    input: SExpr::Call(
+                        "__tuple__",
+                        vec![
+                            SExpr::Call("List", vec![SExpr::IntLit(5)]),
+                            lt(),
+                        ],
+                    ),
+                    expected: SExpr::Call("List", vec![SExpr::IntLit(5)]),
+                },
+            ],
+        };
+        assert_eq!(
+            generate_rust_from_spec_assembled(&spec),
+            concat!(
+                "pub fn sort<T>(list: Vec<T>, cmp: fn(T, T) -> bool) -> Vec<T> {\n",
+                "    list\n",
+                "}\n",
+                "\n#[cfg(test)]\n",
+                "mod tests {\n",
+                "    use super::*;\n",
+                "\n",
+                "    #[test]\n",
+                "    fn empty() {\n",
+                "        let result = sort::<i64>(vec![], |a, b| (a < b));\n",
+                "        assert_eq!(result, vec![]);\n",
+                "    }\n",
+                "    #[test]\n",
+                "    fn single() {\n",
+                "        let result = sort(vec![5], |a, b| (a < b));\n",
+                "        assert_eq!(result, vec![5]);\n",
                 "    }\n",
                 "}\n",
             )

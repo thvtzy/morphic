@@ -115,7 +115,7 @@
 use super::{
     constraint_to_rust, escape_rust_char, escape_rust_str, expr_to_rust, generate,
     ir_pattern_to_rust, ir_to_rust, ir_to_rust_expr, ir_to_rust_tail, rust_ident,
-    ty_to_rust, CodegenError,
+    test_call_generics_text, ty_to_rust, CodegenError,
 };
 use crate::spec::ast::{
     BinOp as SpecBinOp, Constraint, Expr as SpecExpr, FunctionSpec, OrderOp, TypeRef,
@@ -1854,6 +1854,13 @@ impl<'a> Composed<'a> {
                         &[
                             v_text(&rust_ident(&raw_name)),
                             v_text(&rust_ident(&spec.name)),
+                            // The call's generics text
+                            // (Phase 61): the driver's rule,
+                            // shared with the original
+                            // (mod.rs) exactly as rust_ident
+                            // is; the m3_proof mirror pins
+                            // the rule independently.
+                            v_text(&test_call_generics_text(spec, t)),
                             v_text(&input_text),
                             v_text(&self.sexpr_text(&t.expected_output)?),
                         ],
@@ -3249,6 +3256,103 @@ pub(super) fn driver_corpus() -> Vec<Case> {
                 SpecExpr::StringLit("hey".to_string()),
                 SpecExpr::StringLit("hey".to_string()),
             )],
+        ),
+    );
+    push(
+        "generic-annotation",
+        concat!(
+            "pub fn sort<T>(list: Vec<T>, cmp: fn(T, T) -> bool) -> Vec<T> {\n",
+            "    list\n",
+            "}\n",
+            "\n#[cfg(test)]\n",
+            "mod tests {\n",
+            "    use super::*;\n",
+            "\n",
+            "    #[test]\n",
+            "    fn empty() {\n",
+            "        let result = sort::<i64>(vec![], |a, b| (a < b));\n",
+            "        assert_eq!(result, vec![]);\n",
+            "    }\n",
+            "    #[test]\n",
+            "    fn single() {\n",
+            "        let result = sort(vec![5], |a, b| (a < b));\n",
+            "        assert_eq!(result, vec![5]);\n",
+            "    }\n",
+            "}\n",
+        ),
+        make_candidate(
+            "sort",
+            None,
+            vec!["T"],
+            vec![
+                (
+                    "list",
+                    TypeRef::List(Box::new(TypeRef::Named("T".to_string()))),
+                ),
+                (
+                    "cmp",
+                    TypeRef::Function(
+                        vec![
+                            TypeRef::Named("T".to_string()),
+                            TypeRef::Named("T".to_string()),
+                        ],
+                        Box::new(TypeRef::Bool),
+                    ),
+                ),
+            ],
+            TypeRef::List(Box::new(TypeRef::Named("T".to_string()))),
+            vec![],
+            vr("list"),
+            vec![
+                (
+                    Some("empty"),
+                    SpecExpr::Call(
+                        "__tuple__".to_string(),
+                        vec![
+                            SpecExpr::Call("List".to_string(), vec![]),
+                            SpecExpr::Lambda(
+                                vec![
+                                    ("a".to_string(), TypeRef::Named("T".to_string())),
+                                    ("b".to_string(), TypeRef::Named("T".to_string())),
+                                ],
+                                Box::new(SpecExpr::BinOp(
+                                    SpecBinOp::Lt,
+                                    Box::new(SpecExpr::Var("a".to_string())),
+                                    Box::new(SpecExpr::Var("b".to_string())),
+                                )),
+                            ),
+                        ],
+                    ),
+                    SpecExpr::Call("List".to_string(), vec![]),
+                ),
+                (
+                    Some("single"),
+                    SpecExpr::Call(
+                        "__tuple__".to_string(),
+                        vec![
+                            SpecExpr::Call(
+                                "List".to_string(),
+                                vec![SpecExpr::IntLit(5)],
+                            ),
+                            SpecExpr::Lambda(
+                                vec![
+                                    ("a".to_string(), TypeRef::Named("T".to_string())),
+                                    ("b".to_string(), TypeRef::Named("T".to_string())),
+                                ],
+                                Box::new(SpecExpr::BinOp(
+                                    SpecBinOp::Lt,
+                                    Box::new(SpecExpr::Var("a".to_string())),
+                                    Box::new(SpecExpr::Var("b".to_string())),
+                                )),
+                            ),
+                        ],
+                    ),
+                    SpecExpr::Call(
+                        "List".to_string(),
+                        vec![SpecExpr::IntLit(5)],
+                    ),
+                ),
+            ],
         ),
     );
     cases
