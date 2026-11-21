@@ -1,0 +1,18 @@
+// ─────────────────────────────────────────────────────────
+//  INVALID EXAMPLE — type error (deliberate, for the
+//  playground's diagnostics demo).
+//
+//  This file PARSES fine. It fails the TYPECHECKER:
+//  `++` concatenates strings and lists, and applying it
+//  to Int operands is a type error. (Type errors carry
+//  no source position in today's checker — the message
+//  names the spec instead.)
+// ─────────────────────────────────────────────────────────
+
+Typed {
+spec bad_concat {
+    input: a: Int
+    output: Int
+    constraint: output == a ++ 2
+}
+}

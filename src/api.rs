@@ -45,6 +45,19 @@ pub struct StageError {
     /// "parse" | "typecheck" | "synthesis" | "selection"
     pub stage: String,
     pub message: String,
+    /// 1-based source line of the diagnostic, when the
+    /// failing stage carries one (Phase 67, W2). Parse
+    /// errors always carry line + column (the parser's
+    /// ParseError tracks them). Typecheck errors carry
+    /// NONE today: TypeError has a span field, but every
+    /// constructor leaves it unset, so the honest value
+    /// here is None — the typecheck message names the
+    /// spec instead. Absent from the JSON when None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    /// 1-based source column; see `line`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +130,8 @@ pub fn check(source: &str) -> CheckReport {
                 error: Some(StageError {
                     stage: "parse".into(),
                     message: e.to_string(),
+                    line: Some(e.line),
+                    column: Some(e.column),
                 }),
                 specs: vec![],
             };
@@ -134,6 +149,10 @@ pub fn check(source: &str) -> CheckReport {
             error: Some(StageError {
                 stage: "typecheck".into(),
                 message: e.to_string(),
+                // TypeError's span is never populated by any
+                // constructor today — no position to report.
+                line: None,
+                column: None,
             }),
             specs,
         },
@@ -215,8 +234,15 @@ pub fn synthesize_seeded(source: &str, seed: u64) -> Result<SynthesisReport, Sta
     let err = |stage: &str, e: &dyn std::fmt::Display| StageError {
         stage: stage.into(),
         message: e.to_string(),
+        line: None,
+        column: None,
     };
-    let parsed = crate::spec::parser::parse(source).map_err(|e| err("parse", &e))?;
+    let parsed = crate::spec::parser::parse(source).map_err(|e| StageError {
+        stage: "parse".into(),
+        message: e.to_string(),
+        line: Some(e.line),
+        column: Some(e.column),
+    })?;
     let checked = crate::spec::typeck::check(parsed).map_err(|e| err("typecheck", &e))?;
     let functions = &checked.spec.functions;
     let spec = functions
@@ -224,6 +250,8 @@ pub fn synthesize_seeded(source: &str, seed: u64) -> Result<SynthesisReport, Sta
         .ok_or_else(|| StageError {
             stage: "synthesis".into(),
             message: "No spec functions found".into(),
+            line: None,
+            column: None,
         })?
         .clone();
 
@@ -287,6 +315,42 @@ mod tests {
         let error = report.error.expect("a failing stage is named");
         assert_eq!(error.stage, "parse");
         assert!(report.specs.is_empty());
+    }
+
+    /// W2's positioning contract (Phase 67): parse
+    /// diagnostics carry the parser's 1-based line/column
+    /// through the DTO; typecheck diagnostics carry none
+    /// (TypeError populates no span today) — the UI must
+    /// render the first kind in the source and show the
+    /// second as a stage message only.
+    #[test]
+    fn check_parse_error_carries_position_typecheck_carries_none() {
+        // Truncated mid-constraint: the parser stops at the
+        // end of the single-line source.
+        let report = check(INVALID);
+        let error = report.error.expect("parse error");
+        assert_eq!(error.line, Some(1));
+        assert!(error.column.is_some_and(|c| c > 1));
+
+        // Parses fine, fails typecheck: `++` (concat)
+        // applied to Int operands — the typeck suite's own
+        // pinned rejection shape.
+        let type_err = "Typed {\n\
+        spec f {\n\
+            input: a: Int\n\
+            output: Int\n\
+            constraint: output == a ++ 2\n\
+        }\n\
+        }";
+        let report = check(type_err);
+        assert!(!report.ok);
+        let error = report.error.expect("typecheck error");
+        assert_eq!(error.stage, "typecheck");
+        assert_eq!(error.line, None);
+        assert_eq!(error.column, None);
+        // The parsed specs are still reported (readable
+        // module, failed check) — W2 renders them.
+        assert_eq!(report.specs.len(), 1);
     }
 
     /// D3's pin: same seed + same source → same crowned

@@ -1,0 +1,15 @@
+// ─────────────────────────────────────────────────────────
+//  INVALID EXAMPLE — syntax error (deliberate, for the
+//  playground's diagnostics demo).
+//
+//  The spec below is truncated: the constraint line is
+//  unfinished and the closing braces are missing, so the
+//  PARSER rejects this file. The playground should point
+//  at the line where parsing stopped.
+// ─────────────────────────────────────────────────────────
+
+Broken {
+spec halve {
+    input: x: Int
+    output: Int
+    constraint: output == x /
