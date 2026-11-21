@@ -770,6 +770,9 @@ impl SynthesisEngine {
         if let Some(body) = mixed_pair_guard_table_seed_body(spec, &self.spec_index) {
             admit("mixed_pair_guard_table", body);
         }
+        if let Some(body) = char_equation_seed_body(spec, &self.spec_index) {
+            admit("char_equation", body);
+        }
         seeds
     }
 
@@ -4243,6 +4246,132 @@ fn mixed_pair_guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> O
     }
 }
 
+/// The Char-classifier tree validator: the number of
+/// comparison leaves in `node` when the tree is a pure
+/// classifier over the parameter `param` — `||` / `&&` /
+/// `!` connectives over leaves that each compare the
+/// parameter against a Char literal, in either order, with
+/// any of the six comparison operators — and None on any
+/// other node (arithmetic, a call the inliner left behind,
+/// a match, a literal, a comparison between the parameter
+/// and itself, a constant comparison). The leaf count is
+/// the caller's evidence the tree mentions the parameter
+/// at all: a tree with zero leaves is a constant, not a
+/// classifier.
+fn char_classifier_tree_leaves(node: &IRNode, param: &str) -> Option<usize> {
+    match node {
+        IRNode::BinOp(IRBinOp::And | IRBinOp::Or, l, r) => Some(
+            char_classifier_tree_leaves(l, param)?
+                + char_classifier_tree_leaves(r, param)?,
+        ),
+        IRNode::BinOp(
+            IRBinOp::Eq | IRBinOp::Neq | IRBinOp::Lt | IRBinOp::Le | IRBinOp::Gt | IRBinOp::Ge,
+            l,
+            r,
+        ) => {
+            let leaf = matches!(
+                (l.as_ref(), r.as_ref()),
+                (IRNode::Var(v), IRNode::Literal(IRLiteral::Char(_)))
+                | (IRNode::Literal(IRLiteral::Char(_)), IRNode::Var(v))
+                    if v == param
+            );
+            if leaf {
+                Some(1)
+            } else {
+                None
+            }
+        }
+        IRNode::UnaryOp(IRUnaryOp::Not, inner) => char_classifier_tree_leaves(inner, param),
+        _ => None,
+    }
+}
+
+/// The char-equation seed's body: the postcondition's own
+/// right-hand side, with spec calls inlined — the equation
+/// family's body, admitted for the one signature that
+/// family's admission gate cannot judge.
+///
+/// The measured shape (Phase 48) is the tokenizer's three
+/// Char classifiers: a total Bool equation over ONE Char
+/// parameter, built from CharLit equalities and Char range
+/// comparisons joined by `||`/`&&`. Every earlier family
+/// refuses it on a stated predicate (the Phase 49
+/// diagnosis, pinned by test): the equation family at its
+/// Z3-encodability gate — the shape converts and inlines,
+/// but the Char parameter binds `Sym::Opaque`, Char
+/// literals encode Opaque, and `sym_binop` has no
+/// comparison arm for Opaque operands, so the body is
+/// unencodable by construction; guard_table on its
+/// Int/Bool param-type filter; guarded_identity on arity;
+/// composition_guard and multi_guard on their guard-row
+/// shape (and BoolLit leaves); expr_pin_guard on its
+/// Int-only key search; pair_guard_table and
+/// mixed_pair_guard_table on arity and key types.
+///
+/// This is a separate family rather than an extension of
+/// the equation builder, for two recorded reasons. (1)
+/// The admission standard differs categorically: equation
+/// seeds are admitted BECAUSE Z3 can judge them (every
+/// measured equation winner is Verified), while these
+/// seeds are admitted knowing Z3 CANNOT judge them —
+/// Char is Opaque, so the seed's verdict is Inconclusive
+/// by construction, and its evidence standard is the
+/// Phase 48 one: executed agreement over the full
+/// 774-char battery. One kind name covering both would
+/// falsify the equation family's recorded meaning. (2) A
+/// separate builder leaves `equation_seed_body` — and
+/// with it all 54 measured equation bodies — literally
+/// untouched; the golden fixture and the resolver-visible
+/// body diff prove no prior spec's seed moved.
+///
+/// Territory disjointness is by construction, on two
+/// independent discriminators. The signature — exactly
+/// one parameter, of type Char, with a Bool return — is
+/// a region the seven row/key families refuse on the
+/// filters above. Against the equation family the builder
+/// carries the Phase 34 precedence (right of first
+/// refusal): it admits only when `equation_seed_body`
+/// returns None, so a Char spec the equation family can
+/// state encodably (a constant equation, an encodable
+/// second postcondition) stays the equation family's.
+/// Within the shape, the inlined body must validate as a
+/// Char-classifier tree (see `char_classifier_tree_leaves`)
+/// with at least one comparison leaf — constant
+/// comparisons, param-vs-param leaves and arithmetic are
+/// refused even where the precedence would let them
+/// through, and a call that does not inline to a
+/// classifier tree (an unindexed callee, a cycle, a
+/// callee denoting a match) leaves a node the validator
+/// refuses. The first postcondition (in spec order) whose
+/// inlined body validates is the seed — the equation
+/// family's iteration discipline.
+fn char_equation_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    if spec.params.len() != 1 {
+        return None;
+    }
+    let param = &spec.params[0];
+    if !matches!(param.ty, TypeRef::Char) {
+        return None;
+    }
+    if !matches!(spec.return_type, TypeRef::Bool) {
+        return None;
+    }
+    // Precedence: the equation family owns anything it
+    // can state encodably.
+    if equation_seed_body(spec, index).is_some() {
+        return None;
+    }
+    for c in &spec.postconditions {
+        let Some(raw) = equation_rhs(c) else { continue };
+        let Some(body) = index.inline_calls(&raw) else { continue };
+        match char_classifier_tree_leaves(&body, &param.name) {
+            Some(leaves) if leaves > 0 => return Some(body),
+            _ => continue,
+        }
+    }
+    None
+}
+
 /// One composition-guard row: row-shaped (see
 /// `guard_row_parts`), its guard leaves all comparing ONE
 /// guard expression against BoolLit constants and pinning a
@@ -6518,6 +6647,534 @@ spec exclaim {
         }
     }
 
+    // ── Phase 49: char-equation seeds ─────────────────────
+    //
+    // The tokenizer's three Char classifiers (is_whitespace,
+    // is_ident_start, is_ident_continue) state total Bool
+    // equations over one Char parameter — CharLit equalities
+    // and Char range comparisons joined by ||/&&. Phase 48
+    // measured: no seed reached any of their pools in any
+    // run, no pool contained an exact body, and the crowned
+    // winners were wildcard-`true` test-induced completions
+    // agreeing with the mirrors on only 5/774, 54/774 and
+    // 64/774 of the char battery.
+    //
+    // The diagnosis, pinned by
+    // char_equation_diagnosis_why_the_eight_families_refuse
+    // below (every assertion in it holds before AND after
+    // this phase — it documents the other families, which do
+    // not change):
+    //
+    //  - equation: the shape MATCHES — equation_rhs converts
+    //    each postcondition (CharLit → IR Char literal,
+    //    comparisons → BinOp, no holes) and inline_calls
+    //    resolves is_ident_continue's call. The refusal is
+    //    the admission gate: body_is_encodable_with runs
+    //    sym_eval, the Char parameter binds Sym::Opaque,
+    //    Char literals encode Opaque, and sym_binop has no
+    //    (Eq|Neq|Lt|Le|Gt|Ge, Opaque, Opaque) arm — an
+    //    Opaque operand makes the whole expression
+    //    unencodable. A Z3-encodability gate, not a shape
+    //    refusal.
+    //  - guard_table: param-type filter — the dispatch
+    //    requires an Int-family or Bool parameter; Char
+    //    falls through to None. (The postcondition is an
+    //    equation, not guard rows, besides.)
+    //  - guarded_identity: arity filter — exactly two
+    //    parameters (guard + identity target); the
+    //    classifiers have one.
+    //  - composition_guard / multi_guard: shape matchers —
+    //    the postcondition is not a guard row
+    //    (guard_row_parts returns None, so no rows parse),
+    //    and their leaves must compare a guard expression
+    //    against BoolLit constants, not a Char parameter
+    //    against CharLits. Both wrappers also apply the
+    //    encodability gate.
+    //  - expr_pin_guard: key-type filter — the key search
+    //    tries Int-family parameters only; a Char parameter
+    //    is never tried. Guard rows required besides, and
+    //    the encodability gate applies.
+    //  - pair_guard_table: arity + key-type filters —
+    //    exactly two parameters, both Int-family.
+    //  - mixed_pair_guard_table: arity + key-signature
+    //    filter — exactly two parameters, one Int-family
+    //    and one Bool.
+    //
+    // The fix is a NINTH family, char_equation — not an
+    // equation-family extension, for two recorded reasons:
+    // (1) the admission standard differs categorically:
+    // equation seeds are admitted BECAUSE Z3 can judge them
+    // (every measured equation winner is Verified), while
+    // char-equation seeds are admitted knowing Z3 CANNOT
+    // judge them — their verdict is Inconclusive by
+    // construction and their evidence standard is executed
+    // agreement over the char battery; one kind name
+    // covering both would falsify the equation family's
+    // recorded meaning. (2) The established pattern: each
+    // admitted shape with a distinct discriminator got its
+    // own family and kind name (Phases 28/32/33/34/38), and
+    // a separate builder leaves equation_seed_body — and
+    // therefore all 54 measured equation bodies — literally
+    // untouched.
+    //
+    // Territory disjointness: the signature discriminator
+    // (exactly one parameter, of type Char; Bool return)
+    // is a region the seven row/key families refuse on
+    // their stated filters above, and against the equation
+    // family the builder carries the Phase 34 precedence:
+    // it admits only when equation_seed_body returns None
+    // (right of first refusal — if the equation family can
+    // state the spec encodably, it owns it). Within the
+    // shape, the inlined body must be a pure Char-classifier
+    // tree: ||/&&/! over comparison leaves, each leaf
+    // comparing the parameter against a Char literal (in
+    // either order), with at least one leaf — so constant
+    // equations, param-vs-param comparisons and arithmetic
+    // are refused even where the precedence would let them
+    // through. The body is the postcondition's own
+    // right-hand side with spec calls inlined — the
+    // equation family's body, verbatim.
+
+    fn load_tokenizer_module() -> Vec<FunctionSpec> {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/functional_tokenizer.morph", root);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        let checked = crate::spec::typeck::check(parsed).unwrap();
+        checked.spec.functions
+    }
+
+    fn tokenizer_spec(module: &[FunctionSpec], name: &str) -> FunctionSpec {
+        module.iter().find(|f| f.name == name).unwrap().clone()
+    }
+
+    /// The Phase 45 char battery, as the cross-validation
+    /// harness builds it: U+0000..=U+02FF plus six probes.
+    fn phase49_char_battery() -> Vec<char> {
+        let mut battery: Vec<char> = ('\u{0}'..='\u{2FF}').collect();
+        battery.extend(['\u{660}', '\u{6F0}', '\u{B2}', '\u{FF10}', '😀', '\u{10FFFF}']);
+        battery
+    }
+
+    fn eval_char_body(body: &IRNode, c: char) -> bool {
+        let mut env = crate::synthesis::eval::Env::new();
+        env.insert("c".into(), crate::synthesis::eval::Value::Char(c));
+        match crate::synthesis::eval::eval(body, &env) {
+            Ok(crate::synthesis::eval::Value::Bool(b)) => b,
+            other => panic!("classifier body not Bool-evaluable on {:?}: {:?}", c, other),
+        }
+    }
+
+    /// The diagnosis, as measured (see the section comment):
+    /// for each classifier, the equation shape converts and
+    /// inlines, the encodability gate is the equation
+    /// family's refusal point, and every other family's raw
+    /// builder refuses on its stated filter. These facts are
+    /// about the OTHER families and hold after this phase
+    /// exactly as before it.
+    #[test]
+    fn char_equation_diagnosis_why_the_eight_families_refuse() {
+        let module = load_tokenizer_module();
+        let index = SpecIndex::from_specs(&module);
+        for name in ["is_whitespace", "is_ident_start", "is_ident_continue"] {
+            let spec = tokenizer_spec(&module, name);
+            // The equation shape converts and resolves.
+            let raw = first_equation_body(&spec)
+                .unwrap_or_else(|| panic!("{}: equation_rhs must convert", name));
+            let inlined = index
+                .inline_calls(&raw)
+                .unwrap_or_else(|| panic!("{}: calls must resolve", name));
+            // The refusal is the Z3-encodability gate:
+            // Char is Opaque, comparisons over Opaque do
+            // not encode.
+            assert!(
+                !crate::verify::verifier::body_is_encodable_with(&spec, &inlined, &index),
+                "{}: classifier body must be unencodable (Char is Opaque)",
+                name
+            );
+            assert!(
+                equation_seed_body(&spec, &index).is_none(),
+                "{}: equation family must refuse at the encodability gate",
+                name
+            );
+            // Every other family refuses on its stated
+            // filter (param type / arity / row shape / key
+            // type — see the section comment).
+            assert!(guard_table_body(&spec).is_none(), "{}: guard_table", name);
+            assert!(guarded_identity_body(&spec).is_none(), "{}: guarded_identity", name);
+            assert!(
+                composition_guard_body(&spec, &index).is_none(),
+                "{}: composition_guard",
+                name
+            );
+            assert!(multi_guard_body(&spec, &index).is_none(), "{}: multi_guard", name);
+            assert!(
+                expr_pin_guard_body(&spec, &index).is_none(),
+                "{}: expr_pin_guard",
+                name
+            );
+            assert!(pair_guard_table_body(&spec).is_none(), "{}: pair_guard_table", name);
+            assert!(
+                mixed_pair_guard_table_body(&spec).is_none(),
+                "{}: mixed_pair_guard_table",
+                name
+            );
+        }
+    }
+
+    /// The three classifiers each gain exactly one seed,
+    /// of kind char_equation, whose body is the
+    /// postcondition's own right-hand side (calls inlined).
+    /// Z3's verdict on the seed is Inconclusive — Char is
+    /// Opaque, so the verifier cannot judge it; that is the
+    /// family's recorded admission standard, not a defect:
+    /// the evidence for these seeds is executed agreement
+    /// (next test), never a proof.
+    #[test]
+    fn char_equation_seed_for_tokenizer_classifiers() {
+        let module = load_tokenizer_module();
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        for name in ["is_whitespace", "is_ident_start", "is_ident_continue"] {
+            let spec = tokenizer_spec(&module, name);
+            let seeds = engine.seed_from_constraints(&spec);
+            assert_eq!(
+                seeds.len(),
+                1,
+                "{}: exactly the char_equation seed",
+                name
+            );
+            let seed = constraint_seed(&engine, &spec, "char_equation");
+            assert_eq!(count_holes(&seed.body), 0, "{}: seed must be hole-free", name);
+            let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+            assert_eq!(
+                result.status,
+                crate::verify::verifier::VerificationStatus::Inconclusive,
+                "{}: Z3 cannot judge a Char classifier (Opaque) — Inconclusive expected",
+                name
+            );
+        }
+        // is_whitespace / is_ident_start: the seed body IS
+        // the resolver-visible equation body, verbatim.
+        let index = SpecIndex::from_specs(&module);
+        for name in ["is_whitespace", "is_ident_start"] {
+            let spec = tokenizer_spec(&module, name);
+            let seed = constraint_seed(&engine, &spec, "char_equation");
+            assert_eq!(
+                format!("{:?}", seed.body),
+                format!("{:?}", index.callee_body(name).unwrap()),
+                "{}: seed body must be the postcondition RHS verbatim",
+                name
+            );
+        }
+        // is_ident_continue: the seed body is the INLINED
+        // tree — is_ident_start's disjunction substituted
+        // for the call, the digit range appended.
+        let spec = tokenizer_spec(&module, "is_ident_continue");
+        let seed = constraint_seed(&engine, &spec, "char_equation");
+        let ch = |c: char| IRNode::Literal(IRLiteral::Char(c));
+        let var = || IRNode::Var("c".to_string());
+        let bin = |op: IRBinOp, l: IRNode, r: IRNode| {
+            IRNode::BinOp(op, Box::new(l), Box::new(r))
+        };
+        let expected = bin(
+            IRBinOp::Or,
+            bin(
+                IRBinOp::Or,
+                bin(
+                    IRBinOp::Or,
+                    bin(IRBinOp::And, bin(IRBinOp::Ge, var(), ch('a')), bin(IRBinOp::Le, var(), ch('z'))),
+                    bin(IRBinOp::And, bin(IRBinOp::Ge, var(), ch('A')), bin(IRBinOp::Le, var(), ch('Z'))),
+                ),
+                bin(IRBinOp::Eq, var(), ch('_')),
+            ),
+            bin(IRBinOp::And, bin(IRBinOp::Ge, var(), ch('0')), bin(IRBinOp::Le, var(), ch('9'))),
+        );
+        assert_eq!(
+            format!("{:?}", seed.body),
+            format!("{:?}", expected),
+            "is_ident_continue: seed body must be the inlined classifier tree"
+        );
+    }
+
+    /// The family's evidence standard: executed agreement
+    /// over the full 774-char battery. Each classifier's
+    /// seed, executed on the IR interpreter, agrees with
+    /// the hand mirror on every battery char.
+    #[test]
+    fn char_equation_seed_executes_exactly_over_char_battery() {
+        let module = load_tokenizer_module();
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let battery = phase49_char_battery();
+        assert_eq!(battery.len(), 774);
+        let mirrors: Vec<(&str, fn(char) -> bool)> = vec![
+            ("is_whitespace", |c: char| matches!(c, ' ' | '\t' | '\n' | '\r')),
+            ("is_ident_start", |c: char| c.is_ascii_alphabetic() || c == '_'),
+            ("is_ident_continue", |c: char| c.is_ascii_alphanumeric() || c == '_'),
+        ];
+        for (name, mirror) in mirrors {
+            let spec = tokenizer_spec(&module, name);
+            let seed = constraint_seed(&engine, &spec, "char_equation");
+            let agree = battery
+                .iter()
+                .filter(|&&c| eval_char_body(&seed.body, c) == mirror(c))
+                .count();
+            assert_eq!(
+                agree,
+                774,
+                "{}: seed must execute exactly over the battery (got {}/774)",
+                name,
+                agree
+            );
+        }
+    }
+
+    /// Admitted synthetic shapes: the range conjunction
+    /// (Phase 45's is_digit shape), literal-on-the-left
+    /// leaves, != and ! connectives, and a call composition
+    /// whose callee is itself a classifier.
+    #[test]
+    fn char_equation_admitted_shapes() {
+        // (a) Range conjunction over the param.
+        let src = r#"
+        T {
+        spec is_digit {
+            input: c: Char
+            output: Bool
+            constraint: output == (c >= '0' && c <= '9')
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &module[0], "char_equation");
+        assert!((0..=0x2FFu32)
+            .filter_map(char::from_u32)
+            .all(|c| eval_char_body(&seed.body, c) == c.is_ascii_digit()));
+
+        // (b) Literal-on-the-left leaves, a != leaf, and a
+        // negated comparison under the connectives.
+        let src = r#"
+        T {
+        spec not_x_lower {
+            input: c: Char
+            output: Bool
+            constraint: output == (('a' <= c && c <= 'z') && c != 'x' && !('m' == c))
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seed = constraint_seed(&engine, &module[0], "char_equation");
+        assert!((0..=0x2FFu32).filter_map(char::from_u32).all(|c| {
+            eval_char_body(&seed.body, c)
+                == (('a'..='z').contains(&c) && c != 'x' && c != 'm')
+        }));
+
+        // (c) Call composition: the caller's seed is the
+        // callee's tree inlined under its own leaf.
+        let src = r#"
+        T {
+        spec is_vowel {
+            input: c: Char
+            output: Bool
+            constraint: output == (c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u')
+        }
+        spec is_vowel_or_digit {
+            input: c: Char
+            output: Bool
+            constraint: output == (is_vowel(c) || (c >= '0' && c <= '9'))
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let caller = module.iter().find(|f| f.name == "is_vowel_or_digit").unwrap();
+        let seed = constraint_seed(&engine, caller, "char_equation");
+        assert!(
+            !format!("{:?}", seed.body).contains("Call"),
+            "caller seed must be fully inlined: {:?}",
+            seed.body
+        );
+        assert!((0..=0x2FFu32).filter_map(char::from_u32).all(|c| {
+            eval_char_body(&seed.body, c)
+                == ("aeiou".contains(c) || c.is_ascii_digit())
+        }));
+    }
+
+    /// Refused shapes: each must yield NO char_equation
+    /// seed (the comments name the refusing predicate).
+    #[test]
+    fn char_equation_refused_shapes() {
+        let cases: Vec<(&str, &str)> = vec![
+            // Arity: a second parameter exists, even though
+            // the equation mentions only the Char param.
+            (
+                "two params",
+                r#"
+                T {
+                spec f {
+                    input: c: Char, n: Int
+                    output: Bool
+                    constraint: output == (c == ' ')
+                }
+                }
+                "#,
+            ),
+            // Arity + leaf discipline: the equation mentions
+            // a second (Char) parameter — param-vs-param is
+            // not a classifier leaf.
+            (
+                "second param in equation",
+                r#"
+                T {
+                spec f {
+                    input: c: Char, d: Char
+                    output: Bool
+                    constraint: output == (c == d)
+                }
+                }
+                "#,
+            ),
+            // Leaf discipline on a single param: param vs
+            // param is not a comparison against a literal.
+            (
+                "param vs param",
+                r#"
+                T {
+                spec f {
+                    input: c: Char
+                    output: Bool
+                    constraint: output == (c == c)
+                }
+                }
+                "#,
+            ),
+            // Leaf discipline: a constant comparison mentions
+            // no parameter — there is no classifier leaf.
+            (
+                "constant comparison",
+                r#"
+                T {
+                spec f {
+                    input: c: Char
+                    output: Bool
+                    constraint: output == ('a' == 'a')
+                }
+                }
+                "#,
+            ),
+            // Non-comparison leaf: arithmetic inside the
+            // equation is outside the classifier tree.
+            (
+                "arithmetic leaf",
+                r#"
+                T {
+                spec f {
+                    input: c: Char
+                    output: Bool
+                    constraint: output == (c >= 'a' && c + 'a' == 'b')
+                }
+                }
+                "#,
+            ),
+            // Return-type filter: the output is not Bool.
+            (
+                "non-Bool output",
+                r#"
+                T {
+                spec f {
+                    input: c: Char
+                    output: Int
+                    constraint: output == 1
+                }
+                }
+                "#,
+            ),
+            // Signature filter: a String parameter's
+            // equality equation is the recorded unadmitted
+            // String territory (rust_ident_empty's family),
+            // not this one — and the equation family states
+            // it encodably besides.
+            (
+                "String-keyed lookalike",
+                r#"
+                T {
+                spec f {
+                    input: s: String
+                    output: Bool
+                    constraint: output == (s == "x" || s == "y")
+                }
+                }
+                "#,
+            ),
+            // Signature filter: a Bool parameter's equation
+            // is encodable territory the equation family
+            // owns; the discriminator is Char.
+            (
+                "Bool-param lookalike",
+                r#"
+                T {
+                spec f {
+                    input: b: Bool
+                    output: Bool
+                    constraint: output == (b == true)
+                }
+                }
+                "#,
+            ),
+            // Signature filter: an Int range equation is
+            // the equation family's home shape.
+            (
+                "Int range lookalike",
+                r#"
+                T {
+                spec f {
+                    input: n: Int
+                    output: Bool
+                    constraint: output == (n >= 0 && n <= 8)
+                }
+                }
+                "#,
+            ),
+        ];
+        for (label, src) in cases {
+            let module = crate::spec::parser::parse(src).unwrap().functions;
+            let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+            let seeds = engine.seed_from_constraints(&module[0]);
+            assert!(
+                !seeds.iter().any(|c| matches!(
+                    &c.provenance,
+                    Provenance::ConstraintInduced { kind } if kind == "char_equation"
+                )),
+                "{}: must not gain a char_equation seed (got {:?})",
+                label,
+                seeds.iter().map(|c| format!("{:?}", c.provenance)).collect::<Vec<_>>()
+            );
+        }
+
+        // Precedence (the Phase 34 right of first refusal):
+        // a spec the equation family CAN state encodably —
+        // here via a second, constant equation — belongs to
+        // the equation family even though its first
+        // postcondition is classifier-shaped. The
+        // char-equation builder must refuse it wholesale.
+        let src = r#"
+        T {
+        spec f {
+            input: c: Char
+            output: Bool
+            constraint: output == (c == ' ')
+            constraint: output == true
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).unwrap().functions;
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&module[0]);
+        assert_eq!(seeds.len(), 1, "precedence case: exactly the equation seed");
+        let _ = constraint_seed(&engine, &module[0], "equation");
+    }
+
     /// Guard generalizations (regression): the generalizations
     /// must not move any body the builders already produced.
     /// The golden fixture (tests/seed_body_golden.txt) was
@@ -6569,7 +7226,20 @@ spec exclaim {
     /// byte-identical below, unchanged, which is also the
     /// proof that the eighth family claims only the
     /// (Int, Bool) key signature and moves no earlier
-    /// family's body.
+    /// family's body. Phase 49 extends it with the three
+    /// Char classifiers of the tokenizer module
+    /// (is_whitespace, is_ident_start, is_ident_continue):
+    /// 55 prior bodies plus the tokenizer's 3, 58
+    /// total — the 55 prior bodies are asserted
+    /// byte-identical below, unchanged.
+    /// The classifiers were always resolver-visible (their
+    /// first equation body is what a call denotes — for
+    /// is_ident_continue, the raw body with its Call, like
+    /// validate_kind_tag's); what Phase 49 adds is their
+    /// SEED (the char_equation family admits the inlined
+    /// body the gate kept Z3 from judging), and the
+    /// resolver-visible diff over all 138 specs shows the
+    /// new family moved no resolver body anywhere.
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -6582,12 +7252,16 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 55, "41 Codegen + 14 M2 golden bodies");
-        for file in ["validator", "printer", "codegen"] {
-            let module = load_m2_module(file);
-            let index = SpecIndex::from_specs(&module);
-            for func in &module {
-                let Some(want) = expected.get(&(file.to_string(), func.name.clone())) else {
+        assert_eq!(expected.len(), 58, "41 Codegen + 14 M2 + 3 tokenizer golden bodies");
+        let mut modules: Vec<(String, Vec<FunctionSpec>)> = ["validator", "printer", "codegen"]
+            .iter()
+            .map(|f| (f.to_string(), load_m2_module(f)))
+            .collect();
+        modules.push(("tokenizer".to_string(), load_tokenizer_module()));
+        for (file, module) in &modules {
+            let index = SpecIndex::from_specs(module);
+            for func in module {
+                let Some(want) = expected.get(&(file.clone(), func.name.clone())) else {
                     continue;
                 };
                 let body = index

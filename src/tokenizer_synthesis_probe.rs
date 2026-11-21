@@ -14,9 +14,7 @@
 //  Unlike the M2/M3 probes, EVERY spec's verified pool is
 //  dumped candidate by candidate (CANDT lines): the pools
 //  here are small (tens, not hundreds) and the pool IS the
-//  story for this module — the three Char classifiers can
-//  have no constraint seed (no seed family builds Char-keyed
-//  bodies; Char is Opaque to Z3, Phase 45), the five record
+//  story for this module — the five record
 //  specs' constraints convert to IR Holes wherever they use
 //  field access / indexing / constructors (expr_to_ir), and
 //  tokenize_one / tokenize_all carry no constraints at all
@@ -26,6 +24,18 @@
 //  measured here; executed agreement against the Phase 47
 //  mirrors is the cross-validation harness's job
 //  (src/tokenizer_cross_validation.rs).
+//
+//  Phase 49 update: the three Char classifiers DO have a
+//  constraint seed now — the char_equation family admits
+//  the postcondition's own right-hand side for a single
+//  Char parameter (the equation family's admission gate
+//  refuses it: Char is Opaque to Z3, so the body is
+//  unencodable and the seed's verdict is Inconclusive by
+//  construction). The probe's seeds=[...] instrumentation
+//  shows char_equation in their pools and the seed crowned
+//  in every run; the cross-validation harness's verdicts
+//  record the classifiers EXACT (774/774 executed
+//  agreement, all runs).
 //
 //  The probe never asserts on synthesis *quality* — the
 //  engine is randomized — only on pipeline invariants:

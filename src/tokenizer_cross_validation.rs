@@ -1395,7 +1395,7 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         assert_eq!(battery.len(), 774, "Phase 45 char battery size");
 
         let mut md = String::new();
-        let _ = writeln!(md, "# Tokenizer cross-validation (Phase 48): synthesized winners vs tests/tokenizer_proof.rs mirrors (S4 copies in src/tokenizer_cross_validation.rs)");
+        let _ = writeln!(md, "# Tokenizer cross-validation (Phase 48; classifiers re-measured in Phase 49 with the char_equation seed family): synthesized winners vs tests/tokenizer_proof.rs mirrors (S4 copies in src/tokenizer_cross_validation.rs)");
         let _ = writeln!(md);
         let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best. Classifiers execute on the IR interpreter over the 774-char Phase 45 battery, judged by executed mirror agreement ONLY (Char is Opaque to Z3; crowning/tpr are not evidence — the Phase 45 is_digit precedent). Record specs execute through compiled runners (10 s limit, per-input panic isolation) over the Phase 47 batteries. Pinned vs spec-silent per the header: peek fully pinned; next_char pinned on pos+col always and line only on newlines; skip_whitespace pinned only on its two stated postconditions; tokenize_one/tokenize_all are pipeline smoke (no statable constraints) and their agreement is a pure statistic.");
         let _ = writeln!(md);
