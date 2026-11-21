@@ -53,5 +53,6 @@ echo "== generating playground/pkg/ (--target web)"
   "$REPO_ROOT/target/wasm32-unknown-unknown/release/morphic_wasm.wasm"
 
 WASM_BYTES="$(stat -c%s "$PLAYGROUND_DIR/pkg/morphic_wasm_bg.wasm")"
-echo "== done: playground/pkg/morphic_wasm_bg.wasm is ${WASM_BYTES} bytes"
-echo "   (W1 post-bindgen baseline: 546229 bytes; W4 owns the size budget)"
+BUDGET_BYTES="$(head -n 1 "$PLAYGROUND_DIR/budget.txt" | tr -d '[:space:]')"
+echo "== done: playground/pkg/morphic_wasm_bg.wasm is ${WASM_BYTES} bytes (budget: ${BUDGET_BYTES} bytes, playground/budget.txt)"
+echo "   (history: W1 baseline 546229 B; W2 547342 B; W3/W4 611728 B — the budget is enforced in CI: .github/workflows/playground.yml)"

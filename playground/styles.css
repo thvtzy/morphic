@@ -126,6 +126,14 @@ input[type="number"] {
 }
 .synth-button { font-size: 0.85rem; padding: 0.25rem 0.6rem; white-space: nowrap; }
 .synth-button:disabled { opacity: 0.45; cursor: default; }
+#cancel-synth { font-size: 0.85rem; padding: 0.25rem 0.6rem; }
+#cancel-synth:disabled { opacity: 0.45; cursor: default; }
+.worker-note {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.9rem;
+}
 .fraction-line { margin: 0.35rem 0 0.15rem; }
 .fraction { font: 15px var(--mono); color: var(--accent); }
 .verification-panel {

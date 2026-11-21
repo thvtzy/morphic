@@ -34,7 +34,12 @@ bootstrap-codegen = []
 #     HTTP client; also pulled in by llm-remote, whose engine
 #     path calls reqwest directly.
 compiled-runner = []
-interactive = []
+# Phase 69 (W4 bundle diet): indicatif is used only by the
+# interactive TUI, so it rides behind this feature instead of
+# sitting in every build graph (it never reaches the WASM
+# binary's bytes — the linker pulls reachable code only —
+# but it no longer compiles for the browser profile at all).
+interactive = ["dep:indicatif"]
 llm-client = ["dep:reqwest"]
 llm-remote = ["tokio", "llm-client"]
 llm-local = ["llama-cpp-2"]
@@ -48,7 +53,6 @@ wasm-playground = []
 # CLI & error handling
 clap = { version = "4.5", features = ["derive"] }
 colored = "2"
-indicatif = "0.17"
 thiserror = "2"
 anyhow = "1"
 
@@ -56,8 +60,9 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Concurrency
-rayon = "1.10"
+# Synthesis. (rayon was declared here until Phase 69/W4: no
+# production or test code ever used it — the Phase 66 audit
+# flagged it as a passenger — so the declaration is gone.)
 rand = "0.8"
 
 # HTTP client (Ollama + optional remote LLM). Optional since
@@ -65,6 +70,10 @@ rand = "0.8"
 # and `llm-remote` need it; the browser graph must not
 # contain it.
 reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
+
+# TUI progress (native `morphic synthesize` only). Optional
+# since Phase 69: only the `interactive` feature needs it.
+indicatif = { version = "0.17", optional = true }
 
 # Formal verification (v0.2: bundled Z3 via z3 crate FFI)
 z3 = { version = "0.20", optional = true, features = ["gh-release"] }

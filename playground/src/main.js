@@ -1,15 +1,29 @@
 // ─────────────────────────────────────────────────────────
-//  MORPHIC PLAYGROUND (v0.6 W3) — check + synthesis.
+//  MORPHIC PLAYGROUND (v0.6 W4) — check + synthesis in
+//  Web Workers, draft persistence, cancel.
 //
 //  Drives the WASM build of the Morphic compiler (the
 //  pkg/ package generated from crates/morphic-wasm):
 //  `check` for parse + typecheck, `synthesize_seeded_spec`
 //  for the seeded playground-profile synthesis of one
-//  named spec. Everything runs locally; the source never
-//  leaves the page. Synthesis is synchronous on the main
-//  thread in W3 (the worker shell is W4's milestone); the
-//  profile is bounded, and the panel reports each run's
-//  measured duration.
+//  named spec. W4 moves both off the UI thread: two
+//  instances of src/worker.js (a check worker and a
+//  synthesis worker, so a long synthesis never queues a
+//  check behind it) load the same pkg/ module. Everything
+//  runs locally; the source never leaves the device. The
+//  editor draft (source + seed) persists in this browser's
+//  local storage only.
+//
+//  Cancel: synthesis runs to completion or not at all —
+//  the Cancel button terminates the synthesis worker and
+//  spawns a fresh one; the page stays usable throughout.
+//
+//  Fallback: if Web Workers are unavailable (or a worker
+//  fails to become ready), the page says so in a visible
+//  notice and calls the same pkg/ module directly on the
+//  UI thread — the W3 behaviour. In fallback mode there
+//  is no Cancel: a running synthesis blocks the page
+//  until it finishes, exactly as the notice states.
 //
 //  Honesty rules (v0.6 anti-patterns, applied to UI copy):
 //  the check panel's test list is an INVENTORY with
@@ -23,7 +37,6 @@
 //  build reports it. The WAT pane is a text preview —
 //  nothing is assembled or executed.
 // ─────────────────────────────────────────────────────────
-import init, { check, synthesize_seeded_spec } from '../pkg/morphic_wasm.js';
 
 const EXAMPLES = [
   { file: 'validator.morph', label: 'Validator module — valid (7 specs)' },
@@ -45,6 +58,8 @@ const TARGET_EXT = {
   rust: 'rs', c: 'c', wasm: 'wat', python: 'py', javascript: 'js', ir: 'ir.txt',
 };
 
+const DRAFT_KEY = 'morphic-playground:draft:v1';
+
 const editor = document.getElementById('editor');
 const gutter = document.getElementById('gutter');
 const backdrop = document.getElementById('backdrop');
@@ -61,14 +76,25 @@ const synthSummaryEl = document.getElementById('synth-summary');
 const verificationEl = document.getElementById('verification-panel');
 const synthTestsEl = document.getElementById('synth-tests');
 const winnerBlockEl = document.getElementById('winner-block');
+const cancelButton = document.getElementById('cancel-synth');
+const workerNoteEl = document.getElementById('worker-note');
 
 let errorLine = null; // 1-based, from the diagnostic when it carries one
-let wasmReady = false;
+let compilerReady = false;
+let fallbackMode = false;
 let synthBusy = false;
 let currentRenders = null; // winner renders of the last run
 let currentSpecName = null;
+let currentBodyDebug = null;
 let activeTarget = 'rust';
 
+// The draft option exists only as the picker's state when
+// a saved draft (not a bundled example) is in the editor.
+const draftOption = document.createElement('option');
+draftOption.value = '__draft';
+draftOption.textContent = 'Saved draft (this device only)';
+draftOption.hidden = true;
+picker.appendChild(draftOption);
 for (const ex of EXAMPLES) {
   const opt = document.createElement('option');
   opt.value = ex.file;
@@ -78,6 +104,154 @@ for (const ex of EXAMPLES) {
 
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ── Draft persistence (local storage, this device only) ─
+function saveDraft() {
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({
+      source: editor.value,
+      seed: seedInput.value,
+      example: picker.value,
+    }));
+  } catch {
+    // Storage can be unavailable (private mode, quota):
+    // the playground keeps working without persistence.
+  }
+}
+
+function loadDraft() {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+let draftTimer = null;
+function saveDraftSoon() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, 300);
+}
+
+// ── Compiler transport: workers, with a main-thread fallback ──
+class WorkerClient {
+  constructor() {
+    this.nextId = 1;
+    this.pending = new Map(); // id -> { resolve, reject }
+    this.waiting = [];        // requests sent before 'ready'
+    this.isReady = false;
+    this.readyPromise = new Promise((resolve) => { this.markReady = resolve; });
+    this.spawn();
+  }
+
+  spawn() {
+    this.worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    this.worker.onmessage = (event) => this.onMessage(event.data);
+    this.worker.onerror = () => {
+      // A dead worker must not hang the page: fail what is
+      // pending and let the boot path fall back if this
+      // happens before readiness.
+      for (const { reject } of this.pending.values()) reject(new Error('worker error'));
+      this.pending.clear();
+      if (!this.isReady) this.markReady(false);
+    };
+  }
+
+  onMessage(data) {
+    if (!data) return;
+    if (data.kind === 'ready') {
+      this.isReady = true;
+      const queued = this.waiting.splice(0);
+      for (const item of queued) this.worker.postMessage(item);
+      this.markReady(true);
+      return;
+    }
+    const entry = this.pending.get(data.id);
+    if (!entry) return;
+    this.pending.delete(data.id);
+    if (data.ok) entry.resolve(data.report);
+    else entry.reject(new Error(data.error ?? 'worker request failed'));
+  }
+
+  request(message) {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      const wire = { ...message, id };
+      if (this.isReady) this.worker.postMessage(wire);
+      else this.waiting.push(wire);
+    });
+  }
+
+  // Terminate + respawn: every pending request rejects as
+  // cancelled; the fresh instance re-initialises the WASM
+  // module and queues later requests until it is ready.
+  terminateAndRespawn() {
+    this.worker.terminate();
+    for (const { reject } of this.pending.values()) {
+      const err = new Error('cancelled');
+      err.cancelled = true;
+      reject(err);
+    }
+    this.pending.clear();
+    this.waiting = [];
+    this.isReady = false;
+    this.readyPromise = new Promise((resolve) => { this.markReady = resolve; });
+    this.spawn();
+  }
+}
+
+// Fallback transport: the same pkg/ module, called
+// directly on the UI thread (the W3 behaviour).
+class DirectClient {
+  constructor(pkg) {
+    this.pkg = pkg;
+    this.readyPromise = Promise.resolve(true);
+  }
+
+  async request(message) {
+    if (message.kind === 'check') return this.pkg.check(message.source);
+    if (message.kind === 'synthesize') {
+      return this.pkg.synthesize_seeded_spec(message.source, message.specName, message.seed);
+    }
+    throw new Error(`unknown request kind: ${String(message.kind)}`);
+  }
+
+  terminateAndRespawn() { /* nothing to terminate on the UI thread */ }
+}
+
+let checkClient = null;
+let synthClient = null;
+
+async function bootCompiler() {
+  if (typeof Worker !== 'undefined') {
+    try {
+      checkClient = new WorkerClient();
+      synthClient = new WorkerClient();
+      const ready = await Promise.race([
+        Promise.all([checkClient.readyPromise, synthClient.readyPromise]),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 20000)),
+      ]);
+      if (ready !== 'timeout' && ready.every(Boolean)) return; // worker mode
+    } catch {
+      // fall through to the direct fallback
+    }
+  }
+  fallbackMode = true;
+  try { checkClient?.worker.terminate(); } catch { /* already gone */ }
+  try { synthClient?.worker.terminate(); } catch { /* already gone */ }
+  const pkg = await import('../pkg/morphic_wasm.js');
+  await pkg.default();
+  checkClient = new DirectClient(pkg);
+  synthClient = checkClient;
+  workerNoteEl.hidden = false;
+  workerNoteEl.textContent =
+    'Background workers are unavailable in this browser, so check and synthesis ' +
+    'run on the page thread (the pre-W4 behaviour): a long synthesis will pause ' +
+    'the page until it finishes, and Cancel is unavailable in this mode.';
+  cancelButton.title = 'Cancel is unavailable when synthesis runs on the page thread.';
 }
 
 // ── Editor chrome: line numbers + error-line backdrop ───
@@ -113,6 +287,7 @@ function signature(spec) {
 function clearSynthesis(message) {
   currentRenders = null;
   currentSpecName = null;
+  currentBodyDebug = null;
   synthStatusEl.textContent = message;
   synthSummaryEl.innerHTML = '';
   verificationEl.innerHTML = '';
@@ -181,11 +356,13 @@ function render(report) {
   paintEditorChrome();
 }
 
-function runCheck() {
-  if (!wasmReady) return;
+let checkSeq = 0;
+async function runCheck() {
+  if (!compilerReady) return;
+  const seq = ++checkSeq;
   let report;
   try {
-    report = JSON.parse(check(editor.value));
+    report = JSON.parse(await checkClient.request({ kind: 'check', source: editor.value }));
   } catch (e) {
     report = {
       ok: false,
@@ -193,6 +370,7 @@ function runCheck() {
       specs: [],
     };
   }
+  if (seq !== checkSeq) return; // a newer edit already superseded this result
   render(report);
   clearSynthesis('No synthesis run yet for the current source.');
 }
@@ -300,8 +478,6 @@ function renderWinnerBlock() {
   document.getElementById('download-render').addEventListener('click', downloadRender);
 }
 
-let currentBodyDebug = null;
-
 function activeRenderText() {
   const active = currentRenders?.find((r) => r.target === activeTarget);
   return active && !active.error ? active.text : null;
@@ -343,29 +519,22 @@ function setSynthButtonsEnabled(enabled) {
   }
 }
 
-function runSynthesis(specName) {
-  if (!wasmReady || synthBusy) return;
+async function runSynthesis(specName) {
+  if (!compilerReady || synthBusy) return;
   const seed = currentSeed();
+  const source = editor.value;
   synthBusy = true;
   setSynthButtonsEnabled(false);
-  synthStatusEl.textContent = `Synthesizing ${specName} with seed ${seed} — running locally…`;
-  // Let the busy state paint before the synchronous WASM
-  // call blocks the main thread.
-  setTimeout(() => {
-    const t0 = performance.now();
-    let report = null;
-    let failure = null;
-    try {
-      report = JSON.parse(synthesize_seeded_spec(editor.value, specName, seed));
-    } catch (e) {
-      failure = String(e);
-    }
+  cancelButton.disabled = fallbackMode;
+  synthStatusEl.textContent = `Synthesizing ${specName} with seed ${seed} — running locally in the background worker…`;
+  const t0 = performance.now();
+  try {
+    const raw = await synthClient.request({ kind: 'synthesize', source, specName, seed });
+    const report = JSON.parse(raw);
     const elapsed = performance.now() - t0;
-    synthBusy = false;
-    setSynthButtonsEnabled(true);
-    if (failure || !report || !report.winner) {
+    if (!report || !report.winner) {
       const stage = report?.stage ?? 'internal';
-      const message = report?.message ?? failure ?? 'unknown error';
+      const message = report?.message ?? 'unknown error';
       clearSynthesis('');
       synthStatusEl.innerHTML =
         `<span class="verdict-err">✗ synthesis failed (${escapeHtml(stage)})</span> — ${escapeHtml(message)}`;
@@ -373,8 +542,28 @@ function runSynthesis(specName) {
     }
     currentBodyDebug = report.winner.body_debug;
     renderSynthesis(report, seed, elapsed);
-  }, 30);
+  } catch (e) {
+    if (e && e.cancelled) {
+      clearSynthesis('');
+      synthStatusEl.textContent =
+        `Synthesis of ${specName} cancelled — the worker was terminated and restarted; ` +
+        'no winner was crowned. The page is ready for another run.';
+    } else {
+      clearSynthesis('');
+      synthStatusEl.innerHTML =
+        `<span class="verdict-err">✗ synthesis failed (internal)</span> — ${escapeHtml(String(e))}`;
+    }
+  } finally {
+    synthBusy = false;
+    cancelButton.disabled = true;
+    setSynthButtonsEnabled(true);
+  }
 }
+
+cancelButton.addEventListener('click', () => {
+  if (!synthBusy || fallbackMode) return;
+  synthClient.terminateAndRespawn();
+});
 
 specListEl.addEventListener('click', (e) => {
   const btn = e.target.closest('.synth-button');
@@ -385,25 +574,50 @@ specListEl.addEventListener('click', (e) => {
 let debounce = null;
 editor.addEventListener('input', () => {
   paintEditorChrome();
+  saveDraftSoon();
   clearTimeout(debounce);
   debounce = setTimeout(runCheck, 400);
 });
+seedInput.addEventListener('change', saveDraft);
 document.getElementById('check-button').addEventListener('click', runCheck);
 
-async function loadExample(file) {
+async function loadExample(file, { save = true } = {}) {
   const response = await fetch(`examples/${file}`);
   editor.value = await response.text();
   errorLine = null;
   paintEditorChrome();
+  if (save) saveDraft();
   runCheck();
 }
-picker.addEventListener('change', () => loadExample(picker.value));
+picker.addEventListener('change', () => {
+  if (picker.value === '__draft') return; // the draft state itself is not a load action
+  draftOption.hidden = true;
+  loadExample(picker.value);
+});
 
 // ── Boot ────────────────────────────────────────────────
-await init();
-wasmReady = true;
+await bootCompiler();
+compilerReady = true;
 pill.textContent = 'ready';
 const wanted = new URLSearchParams(location.search).get('example');
-const initial = EXAMPLES.some((e) => e.file === wanted) ? wanted : EXAMPLES[0].file;
-picker.value = initial;
-await loadExample(initial);
+const draft = loadDraft();
+if (EXAMPLES.some((e) => e.file === wanted)) {
+  // An explicit example link always wins over a saved
+  // draft for display (preview/corpus links must show
+  // what they name) — and it does not overwrite the
+  // stored draft; only editing or picking an example
+  // from the list does that.
+  picker.value = wanted;
+  await loadExample(wanted, { save: false });
+} else if (draft && typeof draft.source === 'string' && draft.source.length > 0) {
+  editor.value = draft.source;
+  if (typeof draft.seed === 'string') seedInput.value = draft.seed;
+  draftOption.hidden = false;
+  picker.value = '__draft';
+  errorLine = null;
+  paintEditorChrome();
+  runCheck();
+} else {
+  picker.value = EXAMPLES[0].file;
+  await loadExample(EXAMPLES[0].file);
+}
