@@ -539,6 +539,13 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<SymFl
         | IRNode::Fold { .. }
         | IRNode::Sort { .. }
         | IRNode::StructDef { .. }
+        // M1 features (Phase 73): the nodes exist, but the
+        // encoder has no record VALUE yet — Sym::Record and
+        // the FieldAccess projection land in Phase 76. Until
+        // then a body using them is unencodable, exactly like
+        // the rest of this list.
+        | IRNode::FieldAccess { .. }
+        | IRNode::RecordLit { .. }
         | IRNode::TryPropagate(_) => None,
     }
 }
@@ -1008,7 +1015,16 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
         Expr::Index(coll, idx) => {
             sym_index(encode_expr(coll, env, ctx)?, encode_expr(idx, env, ctx)?)
         }
-        Expr::Field(..) | Expr::Lambda(..) | Expr::Comprehension { .. } => None,
+        // Field joins this list until Phase 76 (Sym::Record
+        // projection); the M1 forms (Phase 73) join it until
+        // their Phase 76 encodings land — MethodCall needs
+        // the Result/Option tag+payload form, RecordLit the
+        // record construction. Unencodable, never guessed.
+        Expr::Field(..)
+        | Expr::Lambda(..)
+        | Expr::Comprehension { .. }
+        | Expr::MethodCall { .. }
+        | Expr::RecordLit { .. } => None,
     }
 }
 

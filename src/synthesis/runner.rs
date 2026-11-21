@@ -713,6 +713,14 @@ fn first_literal_type(expr: &Expr) -> Option<&'static str> {
         Expr::Comprehension {
             collection, body, ..
         } => first_literal_type(collection).or_else(|| first_literal_type(body)),
+        // M1 features (Phase 73): same structural walk as
+        // codegen's copy of this heuristic — receiver before
+        // arguments, field values in written order.
+        Expr::MethodCall { receiver, args, .. } => first_literal_type(receiver)
+            .or_else(|| args.iter().find_map(|a| first_literal_type(a))),
+        Expr::RecordLit { fields, .. } => fields
+            .iter()
+            .find_map(|(_, v)| first_literal_type(v)),
     }
 }
 

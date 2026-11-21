@@ -330,6 +330,14 @@ fn first_literal_type(expr: &Expr) -> Option<&'static str> {
         Expr::Comprehension {
             collection, body, ..
         } => first_literal_type(collection).or_else(|| first_literal_type(body)),
+        // M1 features (Phase 73): the literal search walks
+        // the new forms structurally — receiver before
+        // arguments, field values in written order.
+        Expr::MethodCall { receiver, args, .. } => first_literal_type(receiver)
+            .or_else(|| args.iter().find_map(|a| first_literal_type(a))),
+        Expr::RecordLit { fields, .. } => fields
+            .iter()
+            .find_map(|(_, v)| first_literal_type(v)),
     }
 }
 
@@ -1163,6 +1171,14 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
         // value of its own, so there is no honest expression
         // form — the loud fallback applies.
         IRNode::Alloc { .. } => unsupported_expr("Alloc"),
+        // M1 features (Phase 73): the nodes exist, but their
+        // rendering in this emitter is Phase 77's scoped
+        // unfreeze (new arms only, no existing byte moves).
+        // Until then the loud fallback applies — no node of
+        // either kind could be produced before this phase, so
+        // no existing winner's bytes change.
+        IRNode::FieldAccess { .. } => unsupported_expr("FieldAccess"),
+        IRNode::RecordLit { .. } => unsupported_expr("RecordLit"),
         IRNode::Typed { node, ty } => ir_to_rust_expr_typed(node, Some(ty)),
     }
 }

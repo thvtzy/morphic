@@ -248,6 +248,11 @@ fn abs_eval_flow(node: &IRNode, env: &mut AbsEnv, ctx: &AbsCtx) -> Option<AbsFlo
         | IRNode::Fold { .. }
         | IRNode::Sort { .. }
         | IRNode::StructDef { .. }
+        // M1 features (Phase 73): in lockstep with the real
+        // evaluator — no record value exists in either walk
+        // until Phase 76 (Sym::Record).
+        | IRNode::FieldAccess { .. }
+        | IRNode::RecordLit { .. }
         | IRNode::TryPropagate(_) => None,
     }
 }

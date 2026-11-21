@@ -66,6 +66,11 @@ mod probe {
             Break { value } => value.as_ref().map(|v| count_holes(v)).unwrap_or(0),
             StructDef { body, .. } => count_holes(body),
             TryPropagate(e) => count_holes(e),
+            // M1 features (Phase 73): structural recursion.
+            FieldAccess { base, .. } => count_holes(base),
+            RecordLit { fields, .. } => {
+                fields.iter().map(|(_, v)| count_holes(v)).sum()
+            }
             Literal(_) | Var(_) => 0,
         }
     }

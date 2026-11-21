@@ -183,6 +183,16 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
         IRNode::Sort { .. } => Err(not_evaluable("Sort (higher-order)")),
         IRNode::StructDef { .. } => Err(not_evaluable("StructDef (declaration)")),
         IRNode::TryPropagate(_) => Err(not_evaluable("TryPropagate (no Result values)")),
+        // M1 features (Phase 73): the nodes exist, but the
+        // interpreter has no record VALUE yet — Value::Record
+        // lands in Phase 75, and these arms become real
+        // evaluation there. Until then, honestly not evaluable.
+        IRNode::FieldAccess { .. } => {
+            Err(not_evaluable("FieldAccess (record values land in Phase 75)"))
+        }
+        IRNode::RecordLit { .. } => {
+            Err(not_evaluable("RecordLit (record values land in Phase 75)"))
+        }
     }
 }
 

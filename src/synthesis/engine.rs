@@ -321,6 +321,33 @@ pub enum IRNode {
     /// Try-operand: if Result is Err, propagate it up
     /// Equivalent to Rust's `?` operator
     TryPropagate(Box<IRNode>),
+
+    // ── M1 feature additions (Phase 73) ────────────────────
+
+    /// Field access on a record value: base.field
+    /// (M1 feature 2, decision D2a). Appended at the END of
+    /// this enum: kind 28 in the IRNode kind-code table the
+    /// Codegen specs pin (0–27 through TryPropagate); no
+    /// existing code moves. The interpreter's record value
+    /// lands in Phase 75 and the Z3 record encoding in
+    /// Phase 76 — until then the evaluation/encoding arms
+    /// are honest NotEvaluable/unencodable arms, named as
+    /// such at each site.
+    FieldAccess {
+        base: Box<IRNode>,
+        field: String,
+    },
+
+    /// Record construction: TypeName { field: value, ... }
+    /// (M1 feature 3, decision D3a — the IR half of the spec
+    /// level Expr::RecordLit). Appended at the END: kind 29.
+    /// Field order is the literal's written order; the
+    /// declared field order is a typechecker concern
+    /// (Phase 74).
+    RecordLit {
+        type_name: String,
+        fields: Vec<(String, IRNode)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -2864,6 +2891,15 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
         Expr::Comprehension { collection, body, .. } => {
             expr_mentions_var(collection, name) || expr_mentions_var(body, name)
         }
+        // M1 features (Phase 73): structural recursion over
+        // the new forms.
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_mentions_var(receiver, name)
+                || args.iter().any(|a| expr_mentions_var(a, name))
+        }
+        Expr::RecordLit { fields, .. } => {
+            fields.iter().any(|(_, v)| expr_mentions_var(v, name))
+        }
     }
 }
 
@@ -4868,6 +4904,18 @@ fn expr_calls_indexed(expr: &Expr, index: &SpecIndex) -> bool {
         Expr::Comprehension {
             collection, body, ..
         } => expr_calls_indexed(collection, index) && expr_calls_indexed(body, index),
+        // M1 features (Phase 73): a method call is not a spec
+        // call — its name resolves against the D1a builtin
+        // table (Phase 74), never the module index — so only
+        // the receiver and arguments are walked. A record
+        // literal walks its field values.
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_calls_indexed(receiver, index)
+                && args.iter().all(|a| expr_calls_indexed(a, index))
+        }
+        Expr::RecordLit { fields, .. } => {
+            fields.iter().all(|(_, v)| expr_calls_indexed(v, index))
+        }
     }
 }
 
@@ -4899,6 +4947,28 @@ fn expr_same(a: &Expr, b: &Expr) -> bool {
         }
         (Expr::UnaryOp(o1, x), Expr::UnaryOp(o2, y)) => o1 == o2 && expr_same(x, y),
         (Expr::Length(x), Expr::Length(y)) => expr_same(x, y),
+        // M1 features (Phase 73): structural equality is
+        // well-defined for both new forms (names, then
+        // subexpressions in order).
+        (
+            Expr::MethodCall { receiver: r1, name: n1, args: a1 },
+            Expr::MethodCall { receiver: r2, name: n2, args: a2 },
+        ) => {
+            n1 == n2
+                && expr_same(r1, r2)
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2.iter()).all(|(x, y)| expr_same(x, y))
+        }
+        (
+            Expr::RecordLit { type_name: t1, fields: f1 },
+            Expr::RecordLit { type_name: t2, fields: f2 },
+        ) => {
+            t1 == t2
+                && f1.len() == f2.len()
+                && f1.iter().zip(f2.iter()).all(|((n1, v1), (n2, v2))| {
+                    n1 == n2 && expr_same(v1, v2)
+                })
+        }
         _ => false,
     }
 }
@@ -5481,6 +5551,39 @@ pub(crate) fn expr_to_ir(expr: &Expr) -> IRNode {
             unaryop_to_ir(*op),
             Box::new(expr_to_ir(inner)),
         ),
+        // M1 features (Phase 73): Field and Index lower for
+        // real now — before this phase both fell into the Hole
+        // arm below, which is the direct cause of Phase 48's
+        // 24/24 seedless record-spec runs (audit section 2.1).
+        // IRNode::Index existed all along; only the lowering
+        // refused it. FieldAccess is the new kind 28 (D2a).
+        Expr::Field(base, field) => IRNode::FieldAccess {
+            base: Box::new(expr_to_ir(base)),
+            field: field.clone(),
+        },
+        Expr::Index(base, idx) => IRNode::Index(
+            Box::new(expr_to_ir(base)),
+            Box::new(expr_to_ir(idx)),
+        ),
+        // Record construction (D3a): the IR half of the spec
+        // literal, kind 29. Field values lower recursively.
+        Expr::RecordLit { type_name, fields } => IRNode::RecordLit {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(name, value)| (name.clone(), expr_to_ir(value)))
+                .collect(),
+        },
+        // MethodCall lowering is DEFERRED, deliberately: the
+        // IR kind table has no method-call kind (the audit's
+        // section 4 appends only FieldAccess/RecordLit), and
+        // method semantics land where the node is consumed —
+        // the typechecker's D1a builtin table (Phase 74) and
+        // the Z3 encoder's Result/Option forms (Phase 76),
+        // both of which work on the spec Expr directly. Until
+        // an IR consumer exists this arm is the Hole, pinned
+        // by expr_to_ir_method_call_lowers_to_hole_pending_74_76.
+        Expr::MethodCall { .. } => IRNode::Hole { id: 0, expected_type: None },
         _ => IRNode::Hole { id: 0, expected_type: None },
     }
 }
@@ -5618,6 +5721,11 @@ fn ast_depth(node: &IRNode) -> usize {
         IRNode::Break { value } => 1 + value.as_ref().map(|v| ast_depth(v)).unwrap_or(0),
         IRNode::StructDef { body, .. } => 1 + ast_depth(body),
         IRNode::TryPropagate(inner) => 1 + ast_depth(inner),
+        // M1 features (Phase 73).
+        IRNode::FieldAccess { base, .. } => 1 + ast_depth(base),
+        IRNode::RecordLit { fields, .. } => {
+            1 + fields.iter().map(|(_, v)| ast_depth(v)).max().unwrap_or(0)
+        }
     }
 }
 
@@ -5690,6 +5798,11 @@ fn ast_node_count(node: &IRNode) -> usize {
         IRNode::Break { value } => 1 + value.as_ref().map(|v| ast_node_count(v)).unwrap_or(0),
         IRNode::StructDef { body, .. } => 1 + ast_node_count(body),
         IRNode::TryPropagate(inner) => 1 + ast_node_count(inner),
+        // M1 features (Phase 73).
+        IRNode::FieldAccess { base, .. } => 1 + ast_node_count(base),
+        IRNode::RecordLit { fields, .. } => {
+            1 + fields.iter().map(|(_, v)| ast_node_count(v)).sum::<usize>()
+        }
     }
 }
 
@@ -11485,6 +11598,11 @@ spec exclaim {
             }
             IRNode::StructDef { body, .. } => assert_vars_in_scope(body, scope),
             IRNode::TryPropagate(e) => assert_vars_in_scope(e, scope),
+            // M1 features (Phase 73).
+            IRNode::FieldAccess { base, .. } => assert_vars_in_scope(base, scope),
+            IRNode::RecordLit { fields, .. } => {
+                fields.iter().for_each(|(_, v)| assert_vars_in_scope(v, scope))
+            }
             IRNode::Hole { .. } | IRNode::Literal(_) => {}
         }
     }
@@ -12440,6 +12558,105 @@ spec exclaim {
         assert!(
             legacy_shapes > 0,
             "legacy generator produced no type-blind shapes in 200 draws — the untyped path changed"
+        );
+    }
+
+    // ── expr_to_ir lowerings for the M1 features (Phase 73) ──
+    //
+    // Before Phase 73, `expr_to_ir` lowered Field and Index
+    // into the Hole arm — the direct cause of Phase 48's
+    // "no constraint seed reached any pool (24/24 seedless)"
+    // for the record specs (M1_FEATURES_AUDIT section 2.1).
+    // Under D2a/D3a the lowering is now real for Field (to
+    // IRNode::FieldAccess, kind 28), Index (to the existing
+    // IRNode::Index, kind 23 — the node existed; only the
+    // lowering refused it) and RecordLit (to IRNode::RecordLit,
+    // kind 29). MethodCall lowering stays a Hole this phase:
+    // the IR kind table has no method-call kind (audit section
+    // 4 appends only 28/29), and method semantics land in the
+    // typechecker (Phase 74) and the Z3 encoder (Phase 76),
+    // which both work on the spec Expr directly. The Hole is
+    // pinned here so the deferral is a recorded fact, not a
+    // silent drop.
+
+    #[test]
+    fn expr_to_ir_lowers_field_access() {
+        let expr = Expr::Field(Box::new(Expr::Var("state".into())), "pos".into());
+        let ir = expr_to_ir(&expr);
+        assert!(
+            matches!(&ir, IRNode::FieldAccess { base, field }
+                if field == "pos" && matches!(&**base, IRNode::Var(v) if v == "state")),
+            "state.pos must lower to FieldAccess, got {:?}",
+            ir
+        );
+    }
+
+    #[test]
+    fn expr_to_ir_lowers_index_over_field() {
+        // state.source[state.pos] — peek's indexing shape:
+        // Index over a FieldAccess over a Var, with a
+        // FieldAccess index.
+        let expr = Expr::Index(
+            Box::new(Expr::Field(Box::new(Expr::Var("state".into())), "source".into())),
+            Box::new(Expr::Field(Box::new(Expr::Var("state".into())), "pos".into())),
+        );
+        let ir = expr_to_ir(&expr);
+        assert!(
+            matches!(&ir, IRNode::Index(coll, idx)
+                if matches!(&**coll, IRNode::FieldAccess { field, .. } if field == "source")
+                    && matches!(&**idx, IRNode::FieldAccess { field, .. } if field == "pos")),
+            "state.source[state.pos] must lower to Index(FieldAccess, FieldAccess), got {:?}",
+            ir
+        );
+    }
+
+    #[test]
+    fn expr_to_ir_lowers_record_literal() {
+        let expr = Expr::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), Expr::IntLit(0)),
+                ("lexeme".into(), Expr::StringLit("spec".into())),
+            ],
+        };
+        let ir = expr_to_ir(&expr);
+        let IRNode::RecordLit { type_name, fields } = &ir else {
+            panic!("record literal must lower to IRNode::RecordLit, got {:?}", ir);
+        };
+        assert_eq!(type_name, "Token");
+        assert_eq!(fields.len(), 2);
+        assert!(
+            matches!(&fields[0].1, IRNode::Literal(IRLiteral::Int(0))),
+            "kind field must lower to an Int literal, got {:?}",
+            fields[0].1
+        );
+        assert!(
+            matches!(&fields[1].1, IRNode::Literal(IRLiteral::String(s)) if s == "spec"),
+            "lexeme field must lower to a String literal, got {:?}",
+            fields[1].1
+        );
+    }
+
+    #[test]
+    fn expr_to_ir_method_call_lowers_to_hole_pending_74_76() {
+        // DEFERRED, pinned: no IR kind exists for a method call
+        // (audit section 4). The typechecker resolves methods
+        // against the D1a table in Phase 74 and the Z3 encoder
+        // gains the Result/Option forms in Phase 76; both work
+        // on Expr::MethodCall directly. Until an IR consumer
+        // exists, the lowering is the Hole arm — recorded here
+        // so a future phase that adds the IR kind updates this
+        // test deliberately.
+        let expr = Expr::MethodCall {
+            receiver: Box::new(Expr::Var("output".into())),
+            name: "is_err".into(),
+            args: vec![],
+        };
+        let ir = expr_to_ir(&expr);
+        assert!(
+            matches!(ir, IRNode::Hole { .. }),
+            "method call lowering is deferred to Phases 74/76, got {:?}",
+            ir
         );
     }
 }

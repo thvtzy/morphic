@@ -605,6 +605,18 @@ mod xval_tok {
                 body: Box::new(f(body)?),
             },
             TryPropagate(inner) => TryPropagate(Box::new(f(inner)?)),
+            // M1 features (Phase 73): structural rebuild.
+            FieldAccess { base, field } => FieldAccess {
+                base: Box::new(f(base)?),
+                field: field.clone(),
+            },
+            RecordLit { type_name, fields } => RecordLit {
+                type_name: type_name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, v)| Ok((n.clone(), f(v)?)))
+                    .collect::<Result<Vec<_>, String>>()?,
+            },
         })
     }
 

@@ -296,6 +296,10 @@ fn child_nodes(node: &IRNode) -> Vec<&IRNode> {
             .unwrap_or_default(),
         IRNode::StructDef { body, .. } => vec![body.as_ref()],
         IRNode::TryPropagate(inner) => vec![inner.as_ref()],
+        // M1 features (Phase 73): the generic walkers see the
+        // new nodes' children structurally.
+        IRNode::FieldAccess { base, .. } => vec![base.as_ref()],
+        IRNode::RecordLit { fields, .. } => fields.iter().map(|(_, v)| v).collect(),
     }
 }
 

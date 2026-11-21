@@ -169,6 +169,13 @@ fn node_kind(node: &IRNode) -> i64 {
         Break { .. } => 25,
         StructDef { .. } => 26,
         TryPropagate(_) => 27,
+        // M1 features (Phase 73): appended at the end, never
+        // renumbered (audit section 4). The Codegen specs
+        // gain the 28/29 rows in Phase 78; until then the
+        // composed emitter's classifications are total over
+        // these codes by their standing default arms.
+        FieldAccess { .. } => 28,
+        RecordLit { .. } => 29,
     }
 }
 
@@ -644,6 +651,19 @@ fn rebuild_children(
             body: Box::new(f(body)?),
         },
         TryPropagate(inner) => TryPropagate(Box::new(f(inner)?)),
+        // M1 features (Phase 73): structural rebuild, like
+        // every other node with children.
+        FieldAccess { base, field } => FieldAccess {
+            base: Box::new(f(base)?),
+            field: field.clone(),
+        },
+        RecordLit { type_name, fields } => RecordLit {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(n, v)| Ok((n.clone(), f(v)?)))
+                .collect::<Result<Vec<_>, String>>()?,
+        },
     })
 }
 
@@ -1096,6 +1116,15 @@ impl<'a> Composed<'a> {
                     SpecExpr::UnaryOp(..) => 9,
                     SpecExpr::Length(_) => 11,
                     SpecExpr::Comprehension { .. } => 12,
+                    // M1 features (Phase 73): kinds appended
+                    // at the end of the SpecExpr table (audit
+                    // section 4). The Codegen specs gain the
+                    // 13/14 rows in Phase 78; until then these
+                    // route through the fixed-text table's
+                    // standing default, exactly as the native
+                    // expr_to_rust's wildcard renders them.
+                    SpecExpr::MethodCall { .. } => 13,
+                    SpecExpr::RecordLit { .. } => 14,
                     _ => unreachable!(),
                 };
                 self.text1("rust_expr_fixed_text", v_int(kind))?
@@ -1425,6 +1454,18 @@ impl<'a> Composed<'a> {
             IRNode::Hole { .. } => self.text1("rust_hole_text", v_int(0))?,
             IRNode::Alloc { .. } => {
                 self.text1("rust_unsupported_text", v_text("Alloc"))?
+            }
+            // M1 features (Phase 73): the composed emitter
+            // renders the new kinds with the unsupported text,
+            // exactly the Alloc treatment — their rendering
+            // specs (kind rows 28/29) land in Phase 78. No
+            // node of either kind could be produced before
+            // this phase, so no existing output changes.
+            IRNode::FieldAccess { .. } => {
+                self.text1("rust_unsupported_text", v_text("FieldAccess"))?
+            }
+            IRNode::RecordLit { .. } => {
+                self.text1("rust_unsupported_text", v_text("RecordLit"))?
             }
             IRNode::Typed { node, ty } => self.expr_typed_text(node, Some(ty))?,
         })

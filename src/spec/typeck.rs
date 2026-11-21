@@ -293,6 +293,40 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
             Ok(TypeRef::Function(args, Box::new(ret)))
         }
         Expr::Length(_) => Ok(TypeRef::Int),
+        Expr::MethodCall { receiver, name, args } => {
+            // Phase 73 arm: subexpressions are checked, but
+            // method resolution — the receiver-typed lookup
+            // against the D1a closed builtin table
+            // (Result::{is_ok, is_err, unwrap}, List::len) —
+            // is Phase 74. There is no sound coarse result
+            // type to defer to (is_ok returns Bool over a
+            // Result receiver), so until Phase 74 a method
+            // call is a check error naming the phase, never a
+            // guessed type.
+            check_expr(receiver, env)?;
+            for arg in args {
+                check_expr(arg, env)?;
+            }
+            Err(TypeError {
+                message: format!(
+                    "Method calls are not yet resolved by the typechecker (Phase 74): '.{}'",
+                    name
+                ),
+                function: None,
+                span: None,
+            })
+        }
+        Expr::RecordLit { type_name, fields } => {
+            // Phase 73 arm: the literal is self-describing —
+            // its type is the named record type. Field values
+            // are checked; the field-SET validation against
+            // the declared record (exact set, per-field types)
+            // is Phase 74.
+            for (_, value) in fields {
+                check_expr(value, env)?;
+            }
+            Ok(TypeRef::Named(type_name.clone()))
+        }
         Expr::Comprehension { binder, collection, body } => {
             let _coll_ty = check_expr(collection, env)?;
             let mut local = env.clone();

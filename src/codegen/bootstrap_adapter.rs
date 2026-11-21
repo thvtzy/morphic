@@ -135,6 +135,13 @@ fn node_kind(node: &IRNode) -> i64 {
         Break { .. } => 25,
         StructDef { .. } => 26,
         TryPropagate(_) => 27,
+        // M1 features (Phase 73): appended at the end, never
+        // renumbered (audit section 4). The Codegen specs
+        // gain the 28/29 rows in Phase 78; until then the
+        // composed emitter's classifications are total over
+        // these codes by their standing default arms.
+        FieldAccess { .. } => 28,
+        RecordLit { .. } => 29,
     }
 }
 
@@ -479,6 +486,15 @@ impl Adapter {
                     SpecExpr::UnaryOp(..) => 9,
                     SpecExpr::Length(_) => 11,
                     SpecExpr::Comprehension { .. } => 12,
+                    // M1 features (Phase 73): kinds appended
+                    // at the end of the SpecExpr table (audit
+                    // section 4). The Codegen specs gain the
+                    // 13/14 rows in Phase 78; until then these
+                    // route through the fixed-text table's
+                    // standing default, exactly as the native
+                    // expr_to_rust's wildcard renders them.
+                    SpecExpr::MethodCall { .. } => 13,
+                    SpecExpr::RecordLit { .. } => 14,
                     _ => unreachable!(),
                 };
                 syn::rust_expr_fixed_text::rust_expr_fixed_text(kind)
@@ -757,6 +773,18 @@ impl Adapter {
             IRNode::Hole { .. } => syn::rust_hole_text::rust_hole_text(0),
             IRNode::Alloc { .. } => {
                 syn::rust_unsupported_text::rust_unsupported_text("Alloc".to_string())
+            }
+            // M1 features (Phase 73): the composed emitter
+            // renders the new kinds with the unsupported text,
+            // exactly the Alloc treatment — their rendering
+            // specs (kind rows 28/29) land in Phase 78. No
+            // node of either kind could be produced before
+            // this phase, so no existing output changes.
+            IRNode::FieldAccess { .. } => {
+                syn::rust_unsupported_text::rust_unsupported_text("FieldAccess".to_string())
+            }
+            IRNode::RecordLit { .. } => {
+                syn::rust_unsupported_text::rust_unsupported_text("RecordLit".to_string())
             }
             IRNode::Typed { node, ty } => self.expr_typed_text(node, Some(ty))?,
         })
