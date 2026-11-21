@@ -1423,6 +1423,17 @@ impl std::error::Error for CodegenError {}
 
 // ── Tests ─────────────────────────────────────────────────
 
+/// The M3 gate harness (Phase 42): composes the Codegen
+/// module's 112 synthesized winners through the assembly
+/// structure of tests/m3_proof.rs and byte-compares the
+/// composed codegen against this module's original emitter
+/// functions over an adversarial corpus. Test-only; it lives
+/// inside codegen so the harness can call the emitter's
+/// private functions — the original side of the comparison
+/// is the real thing, not a copy.
+#[cfg(test)]
+mod m3_gate;
+
 #[cfg(test)]
 mod tests {
     use super::*;
