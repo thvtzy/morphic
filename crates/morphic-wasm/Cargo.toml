@@ -1,0 +1,21 @@
+[package]
+name = "morphic-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Morphic in the browser — wasm-bindgen shell over the morphic library (v0.6)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The browser profile of the SAME compiler (v0.6 D1/D3):
+# no z3-support (no formal verifier — verdicts are labelled
+# Inconclusive/unavailable, D2), no compiled-runner (no
+# process spawning exists in a browser), no llm-client, no
+# interactive TUI. Seeded, bounded, LLM-free.
+morphic = { path = "../..", default-features = false, features = ["wasm-playground"] }
+wasm-bindgen = "0.2"
+serde_json = "1"
+console_error_panic_hook = "0.1"

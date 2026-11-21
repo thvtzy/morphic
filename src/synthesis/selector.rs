@@ -1781,6 +1781,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn synthesized_verified_spec_winner_is_verified() {
         // (iv) Integration, mirroring the probe pipeline
         // (synthesize → verify_all → select_best) for

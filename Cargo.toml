@@ -6,16 +6,43 @@ description = "Self-Synthesizing Programming Language — write specs, not imple
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/thvtzy/morphic"
 
+# v0.6 (Phase 66): the browser shell lives in
+# crates/morphic-wasm. default-members keeps every root-level
+# cargo command aimed at the compiler package, exactly as
+# before the workspace existed.
+[workspace]
+members = [".", "crates/morphic-wasm"]
+default-members = ["."]
+
 [[bin]]
 name = "morphic"
 path = "src/main.rs"
 
 [features]
-default = ["z3-support"]
+default = ["z3-support", "compiled-runner", "interactive", "llm-client"]
 bootstrap-codegen = []
-llm-remote = ["tokio"]
+# Phase 66 seams (v0.6 W1). Each is default-on so the native
+# build is exactly the pre-W1 compiler; the browser profile
+# (`--no-default-features --features wasm-playground`) turns
+# them all off:
+#   compiled-runner — the G1 compiled-runner scoring stage
+#     (src/synthesis/runner.rs, spawns rustc). Off: the stage
+#     is its documented degradation — the pool passes through
+#     unchanged (see synthesis::runner's stub).
+#   interactive — the `morphic synthesize` TUI furniture.
+#   llm-client — the `llm` module (bin target only) and its
+#     HTTP client; also pulled in by llm-remote, whose engine
+#     path calls reqwest directly.
+compiled-runner = []
+interactive = []
+llm-client = ["dep:reqwest"]
+llm-remote = ["tokio", "llm-client"]
 llm-local = ["llama-cpp-2"]
 z3-support = ["z3", "z3/gh-release"]
+# The browser build profile marker (v0.6 D1/D3): no Z3, no
+# compiled runner, no LLM — a seeded, bounded, LLM-free
+# configuration of the same codebase, never a fork.
+wasm-playground = []
 
 [dependencies]
 # CLI & error handling
@@ -33,8 +60,11 @@ serde_json = "1"
 rayon = "1.10"
 rand = "0.8"
 
-# HTTP client (Ollama + optional remote LLM)
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+# HTTP client (Ollama + optional remote LLM). Optional since
+# Phase 66: only the `llm-client` feature (native default)
+# and `llm-remote` need it; the browser graph must not
+# contain it.
+reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
 
 # Formal verification (v0.2: bundled Z3 via z3 crate FFI)
 z3 = { version = "0.20", optional = true, features = ["gh-release"] }
@@ -42,6 +72,15 @@ z3 = { version = "0.20", optional = true, features = ["gh-release"] }
 # LLM backends (optional — enable via features)
 llama-cpp-2 = { version = "0.1", optional = true }
 tokio = { version = "1", features = ["rt", "macros"], optional = true }
+
+# Browser builds (v0.6): rand's getrandom backend has no
+# wasm32 entropy source by default; the `js` backend reads
+# Web Crypto. The playground path always seeds the engine
+# RNG explicitly (D3) — this only keeps the entropy-seeded
+# default constructible on wasm32. Native targets never
+# resolve this dependency.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
 
 [profile.dev]
 opt-level = 0

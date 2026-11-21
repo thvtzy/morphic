@@ -544,13 +544,25 @@ pub struct TestRun {
 /// the compiled-runner final scoring in synthesis::runner
 /// (Phase 58), which exists for exactly that residue.
 pub fn bindable_test_count(spec: &FunctionSpec) -> usize {
+    test_bindability(spec).iter().filter(|b| **b).count()
+}
+
+/// Per-test bindability, in `spec.tests` order: test `i`
+/// binds iff its input binds against the spec's parameters
+/// AND its expected output maps to an evaluator value. This
+/// is an INVENTORY of what the interpreter could judge a
+/// candidate against — it executes nothing (running a test
+/// needs a candidate body; see `run_spec_tests`). The
+/// playground's test panel reports exactly this (Phase 66,
+/// v0.6 W1/W2 surface).
+pub fn test_bindability(spec: &FunctionSpec) -> Vec<bool> {
     spec.tests
         .iter()
-        .filter(|t| {
+        .map(|t| {
             bind_test_env(&spec.params, &t.input).is_some()
                 && value_of_expr(&t.expected_output).is_some()
         })
-        .count()
+        .collect()
 }
 
 /// Execute `body` against every mappable test in `spec.tests`.
