@@ -663,10 +663,29 @@ impl SynthesisEngine {
     ///   (`rust_keyword(name)==true || output == name`) become
     ///   one match over that guard expression, with the call
     ///   resolved before admission like an equation's. The
-    ///   guarded-identity shape generalized: it claims only
-    ///   shapes the earlier families cannot state (a call
-    ///   guard, or a compound pin), so the families never
-    ///   produce two seeds for one spec.
+    ///   guarded-identity shape generalized: it claims a call
+    ///   guard or a compound pin outright, and — Phase 34's
+    ///   precedence — a plain-variable guard with only
+    ///   literal/bare-variable pins exactly when neither the
+    ///   guard table nor guarded identity admits the spec,
+    ///   so the families never produce two seeds for one
+    ///   spec.
+    /// - **multi-guard truth table**: rows guarded by a SET
+    ///   of shared Bool-valued expressions — Bool parameters
+    ///   or calls to indexed Bool specs — each row's leaves
+    ///   constraining any subset of them and pinning the
+    ///   output to an arbitrary expression over the
+    ///   parameters (`has_string_pat==false||bare==true||
+    ///   output==1`) become nested matches over the guard
+    ///   expressions, the pinned cells of the joint
+    ///   {false, true}^n table recovered by joint
+    ///   falsify-every-leaf over the rows. The
+    ///   composition-guard shape with the one-guard
+    ///   requirement lifted: it requires at least two
+    ///   distinct guard expressions (one is the composition
+    ///   family's) and at most MAX_MULTI_GUARD_EXPRESSIONS,
+    ///   so the families never produce two seeds for one
+    ///   spec.
     /// - **expression-pin guard table**: a set of rows guarded
     ///   on ONE Int parameter (the key) whose output pins are
     ///   arbitrary expressions over the parameters
@@ -724,6 +743,9 @@ impl SynthesisEngine {
         }
         if let Some(body) = composition_guard_seed_body(spec, &self.spec_index) {
             admit("composition_guard", body);
+        }
+        if let Some(body) = multi_guard_seed_body(spec, &self.spec_index) {
+            admit("multi_guard", body);
         }
         if let Some(body) = expr_pin_guard_seed_body(spec, &self.spec_index) {
             admit("expr_pin_guard", body);
@@ -2938,14 +2960,29 @@ fn guarded_identity_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<
 /// guarded-identity rule); non-row postconditions are
 /// skipped as in the guard-table builder.
 ///
-/// Territory: the earlier families keep their shapes. A
-/// Bool-parameter guard whose pins are all literals or bare
-/// variables is a guard table or a guarded identity and is
-/// NOT claimed here — this builder fires only where they
-/// cannot state the spec at all: the guard is a call, or
-/// some pin is a compound expression. (That is also what
-/// keeps the families from ever producing two seeds for one
-/// spec.)
+/// Territory: the earlier families keep their shapes WHEN
+/// THEY CAN STATE THEM. This builder's original rule fired
+/// only where they cannot state the spec at all — the guard
+/// is a call, or some pin is a compound expression — and
+/// refused every plain-variable guard with literal /
+/// bare-variable pins outright. Phase 34 restates that
+/// refusal as a PRECEDENCE for the plain-guard case: the
+/// shape is claimed here exactly when NEITHER earlier
+/// family admits the spec (the guard table refuses it —
+/// its arity is one, its pins must be literals; guarded
+/// identity refuses it — its arity is two, a literal row
+/// deviates, the pin must be the remaining parameter),
+/// with one guard of its own: a bare-variable pin must
+/// name a parameter of the return type, the only way the
+/// pin can BE the output (guarded identity's own condition
+/// on its identity parameter). The measured shape is
+/// `rust_concat_left_text`: bare-variable pins under a
+/// plain Bool parameter at arity three, seedless BETWEEN
+/// the families — guarded identity's arity cap on one
+/// side, the guard table's literal pin test on the other.
+/// The precedence is the disjointness proof, not a hope:
+/// whenever an earlier family admits the spec this builder
+/// still refuses, so no spec ever gains a second seed.
 ///
 /// The emitted body is one match over the guard expression
 /// — a call guard is evaluated once, as the scrutinee — with
@@ -2985,7 +3022,13 @@ fn composition_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNo
     let scrutinee = composition_scrutinee(spec, &guard_expr, index)?;
     // Territory (see the doc comment): a plain-variable
     // guard with only literal/bare-variable pins belongs to
-    // the earlier families.
+    // the earlier families WHEN THEY ADMIT IT — the guard
+    // table (literal pins) or guarded identity (the one
+    // bare variable). The Phase 34 precedence: where
+    // neither admits the spec, this builder claims the
+    // shape instead of leaving it seedless between the
+    // families, provided every bare-variable pin names a
+    // parameter of the return type.
     let guard_is_call = matches!(guard_expr, Expr::Call(..));
     let any_compound_pin = rows.iter().any(|(_, _, side)| {
         !matches!(
@@ -2998,7 +3041,20 @@ fn composition_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNo
         )
     });
     if !guard_is_call && !any_compound_pin {
-        return None;
+        let earlier_family_claims =
+            guard_table_body(spec).is_some() || guarded_identity_body(spec).is_some();
+        let var_pins_return_typed = rows.iter().all(|(_, _, side)| match side {
+            Expr::Var(v) => spec
+                .params
+                .iter()
+                .find(|p| &p.name == v)
+                .map(|p| p.ty == spec.return_type)
+                .unwrap_or(false),
+            _ => true,
+        });
+        if earlier_family_claims || !var_pins_return_typed {
+            return None;
+        }
     }
     let mut cases: Vec<(IRPattern, IRNode)> = rows
         .into_iter()
@@ -3022,6 +3078,232 @@ fn composition_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNo
 /// resolved body in the module context.
 fn composition_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
     let raw = composition_guard_body(spec, index)?;
+    let body = index.inline_calls(&raw)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+/// The most distinct guard expressions a multi-guard
+/// truth table may range over. The joint table doubles
+/// per guard — 2^n cells to falsify against, and a nested
+/// match whose size follows — so the cap keeps the family
+/// at shapes a spec author would actually write as a
+/// truth table. The measured shape needs two.
+const MAX_MULTI_GUARD_EXPRESSIONS: usize = 4;
+
+/// The multi-guard truth-table body: the composition-guard
+/// shape with the one-shared-guard requirement lifted —
+/// the generalization the Phase 31 measurement specified
+/// for `rust_match_scrutinee_form`, whose rows guard on
+/// TWO different Bool expressions and were seedless solely
+/// because `composition_guard_row` requires one shared
+/// guard.
+///
+/// Rows are recognized exactly as the guard family's rows
+/// are (see `guard_row_parts`): an Or of guard leaves plus
+/// one output pin, the pin admitted the way the
+/// composition family admits pins (`composition_pin`). The
+/// leaves of a row may compare ANY subset of the guard
+/// expressions against BoolLit constants
+/// (`guard_leaf_on_expr`); grouped per expression, each
+/// group pins a single value by falsify-every-leaf
+/// (`pin_bool_value`), and the row then pins every cell of
+/// the joint {false, true}^n table extending that partial
+/// assignment. The guard set is the distinct expressions
+/// across all rows, in first-appearance order (postcondition
+/// order, leaf order within a row). Every guard expression
+/// must be a valid composition scrutinee — a Bool
+/// parameter, or a call to an indexed spec returning Bool
+/// (`composition_scrutinee`). A row-shaped postcondition
+/// deviating on any of this — a pin mentioning `output`,
+/// an unindexed call in a pin or a guard, a leaf comparing
+/// no BoolLit, a guard group pinning no single value, a
+/// non-Bool guard — yields no seed at all (all rows or
+/// none, the guarded-identity rule); non-row postconditions
+/// are skipped as in the guard-table builder.
+///
+/// The pinned cells are recovered by JOINT
+/// falsify-every-leaf over the whole table — the
+/// pair-keyed family's joint falsification on the Bool
+/// domain: a cell is pinned exactly where every row firing
+/// there agrees on the value. Two rows pinning one cell to
+/// different values are jointly inconsistent — not a
+/// truth table, no seed. Cells NO row decides stay
+/// unpinned and fall to the wildcard: a partial table is
+/// admitted, never forced.
+///
+/// Territory: the family requires at least TWO distinct
+/// guard expressions — one is the composition family's
+/// shape, and its bodies stay exactly what they were (the
+/// golden fixture proves it) — and at most
+/// MAX_MULTI_GUARD_EXPRESSIONS. The Int families cannot
+/// state these rows (their leaves parse parameter-vs-Int
+/// comparisons only), and neither can the earlier Bool
+/// families (the guard table's arity is one, guarded
+/// identity's guard is a lone parameter, composition's is
+/// a lone expression), so no spec ever gains a second
+/// seed.
+///
+/// The emitted body is nested matches over the guard
+/// expressions, outermost-first in guard order: along any
+/// single execution path each guard is evaluated at most
+/// once, as one match's scrutinee (a call scrutinee may
+/// repeat textually across sibling subtrees, but specs are
+/// pure, so the repetition is value-identical). A subtree
+/// whose cells' effective values — the pin where pinned,
+/// the typed-literal default where not — all agree renders
+/// that value directly, with no match at all. Every match
+/// ends in the wildcard carrying the typed-literal default:
+/// the composition stance (the Bool domain is total, so
+/// with both literal arms present the wildcard is the
+/// verifier-required unconditional last arm, reached only
+/// where a subtree was not compressed). The raw builder
+/// stops at constructing the matches; admission is the
+/// seed builder's step.
+fn multi_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    // Pass one: parse the rows into partial assignments
+    // over guard EXPRESSIONS (first-appearance order is
+    // fixed in pass two).
+    let mut parsed: Vec<(Vec<(Expr, bool)>, IRNode)> = Vec::new();
+    for c in &spec.postconditions {
+        if guard_row_parts(c).is_none() {
+            continue; // not a row: skipped, as in guard_table_body
+        }
+        // Row-shaped: it must be a multi-guard row, or the
+        // spec states a row this body would not honor — a
+        // deviation, so no seed.
+        parsed.push(multi_guard_row(c, index)?);
+    }
+    if parsed.is_empty() {
+        return None;
+    }
+    // Pass two: the distinct guard expressions, in
+    // first-appearance order, each validated as a
+    // composition scrutinee.
+    let mut guards: Vec<Expr> = Vec::new();
+    let mut scrutinees: Vec<IRNode> = Vec::new();
+    for (partial, _) in &parsed {
+        for (target, _) in partial {
+            if !guards.iter().any(|g| expr_same(g, target)) {
+                scrutinees.push(composition_scrutinee(spec, target, index)?);
+                guards.push(target.clone());
+            }
+        }
+    }
+    let n = guards.len();
+    if n < 2 || n > MAX_MULTI_GUARD_EXPRESSIONS {
+        return None; // one guard is composition's; past the cap the table doubles per guard
+    }
+    // Joint falsify-every-leaf over the joint table: cell
+    // index bit (n - 1 - g) is guard g's value in the cell.
+    let mut table: Vec<Option<IRNode>> = vec![None; 1 << n];
+    for (partial, pin) in &parsed {
+        let indexed: Vec<(usize, bool)> = partial
+            .iter()
+            .map(|(target, value)| {
+                let g = guards
+                    .iter()
+                    .position(|e| expr_same(e, target))
+                    .expect("every row guard was collected in pass two");
+                (g, *value)
+            })
+            .collect();
+        for (idx, cell) in table.iter_mut().enumerate() {
+            let fires = indexed
+                .iter()
+                .all(|(g, v)| ((idx >> (n - 1 - g)) & 1 == 1) == *v);
+            if fires {
+                match cell {
+                    None => *cell = Some(pin.clone()),
+                    Some(p) if literal_pin_eq(p, pin) => {}
+                    Some(_) => return None, // conflicting pins: not a truth table
+                }
+            }
+        }
+    }
+    if table.iter().all(|c| c.is_none()) {
+        return None;
+    }
+    let default = typed_literal_fillings(&spec.return_type)?
+        .into_iter()
+        .next()?;
+    Some(multi_guard_match(&scrutinees, 0, &table, &default))
+}
+
+/// One level of the multi-guard body: `table` is the
+/// contiguous slice of the joint table under the prefix of
+/// guard values already matched — its first half has the
+/// next guard false, its second half true. A slice whose
+/// effective values (the pin where pinned, the default
+/// where not) all agree renders that value directly.
+fn multi_guard_match(
+    scrutinees: &[IRNode],
+    depth: usize,
+    table: &[Option<IRNode>],
+    default: &IRNode,
+) -> IRNode {
+    let effective = |cell: &Option<IRNode>| cell.clone().unwrap_or_else(|| default.clone());
+    let first = effective(&table[0]);
+    if table.iter().all(|c| literal_pin_eq(&effective(c), &first)) {
+        return first;
+    }
+    let half = table.len() / 2;
+    let (false_half, true_half) = table.split_at(half);
+    IRNode::Match {
+        scrutinee: Box::new(scrutinees[depth].clone()),
+        cases: vec![
+            (
+                IRPattern::Literal(IRLiteral::Bool(false)),
+                multi_guard_match(scrutinees, depth + 1, false_half, default),
+            ),
+            (
+                IRPattern::Literal(IRLiteral::Bool(true)),
+                multi_guard_match(scrutinees, depth + 1, true_half, default),
+            ),
+            (IRPattern::Wildcard, default.clone()),
+        ],
+    }
+}
+
+/// One multi-guard row: row-shaped (see `guard_row_parts`),
+/// its guard leaves comparing BoolLit constants against
+/// any subset of the guard expressions — each expression's
+/// leaves pinning a single value of the {false, true}
+/// domain by falsify-every-leaf — and its output pin an
+/// admissible expression (see `composition_pin`). Returns
+/// the partial assignment (guard expression, pinned value)
+/// and the pin as IR. Any deviation is None; the builder
+/// treats a row-shaped postcondition failing here as a
+/// shape deviation, not a skippable non-row.
+fn multi_guard_row(c: &Constraint, index: &SpecIndex) -> Option<(Vec<(Expr, bool)>, IRNode)> {
+    let (pin_side, guard_leaves) = guard_row_parts(c)?;
+    let pin = composition_pin(pin_side, index)?;
+    let mut groups: Vec<(Expr, Vec<(BinOp, bool, bool)>)> = Vec::new();
+    for leaf in guard_leaves {
+        let (target, normalized) = guard_leaf_on_expr(leaf)?;
+        match groups.iter_mut().find(|(t, _)| expr_same(t, &target)) {
+            Some((_, gs)) => gs.push(normalized),
+            None => groups.push((target, vec![normalized])),
+        }
+    }
+    let mut partial = Vec::new();
+    for (target, gs) in groups {
+        partial.push((target, pin_bool_value(&gs)?));
+    }
+    Some((partial, pin))
+}
+
+/// The multi-guard seed's body: the nested truth-table
+/// match with any spec-to-spec calls resolved against the
+/// module (the composition seed's admission precedent — a
+/// raw call body could not be executed by the interpreter
+/// or emitted standalone), admitted when the verifier can
+/// encode the resolved body in the module context.
+fn multi_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = multi_guard_body(spec, index)?;
     let body = index.inline_calls(&raw)?;
     if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
         Some(body)
@@ -3202,10 +3484,13 @@ struct PairGuardRow {
     pin: IRNode,
 }
 
-/// Literal-pin equality, by Debug rendering — the golden
+/// Pin equality, by Debug rendering — the golden
 /// fixture's byte-identity standard (IRNode derives no
-/// PartialEq). Only ever applied to pins, which the pair
-/// builder's pin test has already restricted to literals.
+/// PartialEq). Applied to literal pins by the pair builder
+/// (its pin test restricts them to literals) and to
+/// arbitrary pin expressions by the multi-guard builder's
+/// conflict test; Debug rendering is shape-agnostic, so
+/// the standard is the same.
 fn literal_pin_eq(a: &IRNode, b: &IRNode) -> bool {
     format!("{:?}", a) == format!("{:?}", b)
 }
@@ -3661,7 +3946,11 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 8;
 /// whose rows pin the output to a parameter, the
 /// composition-guard match for a spec whose rows are
 /// guarded by a shared Bool expression (a call, or a Bool
-/// parameter with expression pins), or the expression-pin
+/// parameter with expression pins — or, by the Phase 34
+/// precedence, with literal/bare-variable pins no earlier
+/// family admits), the multi-guard truth-table match for a
+/// spec whose rows range over several shared Bool
+/// expressions, or the expression-pin
 /// guard-table match for a spec whose rows pin expressions
 /// under one Int key — produced by
 /// the same builders the seed family uses, minus the
@@ -3697,8 +3986,9 @@ impl SpecIndex {
     /// equation body, its guard-table body when it has no
     /// equation, its guarded-identity body when it has
     /// neither, its composition-guard body when it has none
-    /// of those, its expression-pin guard-table body when it
-    /// has none of those either, or its pair-keyed
+    /// of those, its multi-guard truth-table body when it
+    /// has none of those either, its expression-pin
+    /// guard-table body when it has none of those, or its pair-keyed
     /// guard-table body when it has none of those. The body
     /// is NOT call-resolved — it may itself contain calls;
     /// resolving those is the consumer's step, under the
@@ -3709,6 +3999,7 @@ impl SpecIndex {
             .or_else(|| guard_table_body(spec))
             .or_else(|| guarded_identity_body(spec))
             .or_else(|| composition_guard_body(spec, self))
+            .or_else(|| multi_guard_body(spec, self))
             .or_else(|| expr_pin_guard_body(spec, self))
             .or_else(|| pair_guard_table_body(spec))
     }
@@ -5682,7 +5973,12 @@ spec exclaim {
 
         // Bool table whose pin is not a literal (output == the
         // parameter itself): not a table row, and a single
-        // param cannot be a guarded identity.
+        // param cannot be a guarded identity. Phase 34: the
+        // composition precedence does not claim it either —
+        // the bare-variable pin names the Bool guard
+        // parameter, whose type is not the return type, so
+        // the pin cannot BE the output (the precedence
+        // branch's return-type condition).
         cases.push(guard_spec(
             "bool_pin_not_literal",
             vec![("value", TypeRef::Bool)],
@@ -5706,39 +6002,10 @@ spec exclaim {
             ])],
         ));
 
-        // Guarded identity with a second row pinning a LITERAL:
-        // the spec states a row the identity body would not
-        // honor, so the shape deviates and no seed is built.
-        cases.push(guard_spec(
-            "identity_mixed_literal_row",
-            vec![("name", TypeRef::String), ("has_subs", TypeRef::Bool)],
-            TypeRef::String,
-            vec![
-                or_row(vec![
-                    eq_expr(var_expr("has_subs"), Expr::BoolLit(true)),
-                    eq_expr(var_expr("output"), var_expr("name")),
-                ]),
-                or_row(vec![
-                    eq_expr(var_expr("has_subs"), Expr::BoolLit(false)),
-                    eq_expr(var_expr("output"), Expr::StringLit("bare".into())),
-                ]),
-            ],
-        ));
-
-        // The output pin is the GUARD parameter itself, not
-        // the remaining one.
-        cases.push(guard_spec(
-            "identity_pin_is_guard_param",
-            vec![("flag", TypeRef::Bool), ("name", TypeRef::String)],
-            TypeRef::Bool,
-            vec![or_row(vec![
-                eq_expr(var_expr("flag"), Expr::BoolLit(true)),
-                eq_expr(var_expr("output"), var_expr("flag")),
-            ])],
-        ));
-
-        // The output pin is a compound expression (a call), not
-        // exactly the remaining parameter.
+        // The output pin is a compound expression (a call to
+        // a spec the index does not hold), not exactly the
+        // remaining parameter: no family's pin admission
+        // takes an unindexed call.
         cases.push(guard_spec(
             "identity_pin_compound",
             vec![("name", TypeRef::String), ("has_subs", TypeRef::Bool)],
@@ -5764,21 +6031,22 @@ spec exclaim {
             ])],
         ));
 
-        // Three parameters: more than one non-identity
-        // parameter would have to be pinned — not admitted.
-        cases.push(guard_spec(
-            "identity_two_extra_params",
-            vec![
-                ("a", TypeRef::String),
-                ("b", TypeRef::String),
-                ("flag", TypeRef::Bool),
-            ],
-            TypeRef::String,
-            vec![or_row(vec![
-                eq_expr(var_expr("flag"), Expr::BoolLit(true)),
-                eq_expr(var_expr("output"), var_expr("a")),
-            ])],
-        ));
+        // Phase 34 reclassification: three shapes stood here
+        // until this phase — a guarded-identity spec with a
+        // second row pinning a LITERAL, a spec whose pin is
+        // the GUARD parameter itself, and a three-parameter
+        // bare-variable pin. Each was recorded against
+        // GUARDED IDENTITY's predicate, and guarded identity
+        // still refuses all three on that predicate. What
+        // changed is the composition family's territory rule:
+        // restated as a precedence (right of first refusal),
+        // it claims exactly the plain-guard, literal /
+        // bare-variable-pin shapes the earlier families
+        // refuse — see
+        // constraint_composition_precedence_both_directions,
+        // where the three shapes are asserted as
+        // composition-guard seeds whose bodies honor their
+        // rows.
 
         for spec in &cases {
             assert!(
@@ -5813,7 +6081,15 @@ spec exclaim {
     /// are a pair table as written (see the Phase 33 builder
     /// tests) — so its body joins the fixture too: 35
     /// Codegen bodies, 49 total, the 48 prior bodies
-    /// asserted byte-identical below, unchanged.
+    /// asserted byte-identical below, unchanged. Phase 34
+    /// extends it with the multi-guard truth-table body
+    /// (rust_match_scrutinee_form) and the composition
+    /// precedence body (rust_concat_left_text): 37 Codegen
+    /// bodies, 51 total — the 49 prior bodies are asserted
+    /// byte-identical below, unchanged, which is also the
+    /// proof that the multi-guard generalization reduces to
+    /// nothing at one guard (it requires two) and that the
+    /// precedence amendment moved no earlier family's body.
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -5826,7 +6102,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 49, "35 Codegen + 14 M2 golden bodies");
+        assert_eq!(expected.len(), 51, "37 Codegen + 14 M2 golden bodies");
         for file in ["validator", "printer", "codegen"] {
             let module = load_m2_module(file);
             let index = SpecIndex::from_specs(&module);
@@ -6161,7 +6437,14 @@ spec exclaim {
         ));
 
         // Two rows guarded by DIFFERENT expressions (two Bool
-        // params): a spec has one guard expression or none.
+        // params). Until Phase 34 the recorded rationale was
+        // composition's one-shared-guard requirement; the
+        // shape is now the multi-guard family's territory,
+        // and THIS instance stays seedless on that family's
+        // own predicate: the rows jointly pin the
+        // (flag, other) == (true, true) cell to two different
+        // values (`a ++ "!"` by the first row, `a ++ "?"` by
+        // the second) — a conflict, not a truth table.
         cases.push((
             plain(),
             guard_spec(
@@ -7440,6 +7723,634 @@ spec exclaim {
                 spec.name
             );
         }
+    }
+
+    // ── Phase 34: multi-guard truth tables + the ────────
+    // composition precedence amendment ──────────────────
+    //
+    // The last two seedless Codegen specs, on their Phase
+    // 31 predicates:
+    //
+    // (ii) rust_match_scrutinee_form's rows guard on TWO
+    // different Bool expressions (has_string_pat, bare),
+    // where composition_guard_row requires ONE shared
+    // guard. The multi-guard family lifts exactly that
+    // requirement: rows may constrain any subset of a SET
+    // of shared Bool expressions, and the pinned cell of
+    // the joint {false, true}^n table is recovered by
+    // falsify-every-leaf over the rows — the pair-keyed
+    // family's joint falsification on the Bool domain.
+    // Territory by construction: fewer than two distinct
+    // guard expressions is the composition family's shape
+    // (its bodies stay byte-identical), more than
+    // MAX_MULTI_GUARD_EXPRESSIONS is refused — the table
+    // doubles per guard.
+    //
+    // (iii) rust_concat_left_text's rows pin bare variables
+    // under a plain Bool-parameter guard at arity three:
+    // composition_guard_body's territory rule refused the
+    // shape (bare-variable pins are guarded identity's),
+    // but guarded_identity_body caps at arity two and the
+    // guard table at literal pins, so the shape sat
+    // seedless BETWEEN the families. The amendment restates
+    // the refusal as a PRECEDENCE: the composition builder
+    // claims a plain-variable guard with all literal /
+    // bare-variable pins exactly when NEITHER earlier
+    // family admits the spec — right of first refusal, so
+    // disjointness holds by construction — and a
+    // bare-variable pin names a parameter of the return
+    // type (guarded identity's own condition on its
+    // identity parameter: the only way the pin can BE the
+    // output).
+
+    /// Multi-guard truth tables (i): rust_match_scrutinee_
+    /// form's rows pin output 1 exactly at (has_string_pat,
+    /// bare) == (true, false) and 0 on the other three
+    /// cells, guarding on the two Bool parameters jointly —
+    /// row one constrains both, rows two and three one
+    /// each. The seed must exist (kind `multi_guard`) as
+    /// the spec's only constraint seed, be the nested match
+    /// over the two guards in first-appearance order,
+    /// execute the whole Bool x Bool domain, be Verified in
+    /// module context, and win module-aware synthesis
+    /// deterministically.
+    #[test]
+    fn constraint_multi_guard_seed_for_scrutinee_form() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_match_scrutinee_form");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the multi-guard seed");
+        let seed = constraint_seed(&engine, &spec, "multi_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        // The (false, *) column is constant 0 and renders
+        // directly; the (true, *) column splits on bare.
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("has_string_pat".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Bool(false)),
+                    IRNode::Literal(IRLiteral::Int(0)),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Bool(true)),
+                    IRNode::Match {
+                        scrutinee: Box::new(IRNode::Var("bare".into())),
+                        cases: vec![
+                            (
+                                IRPattern::Literal(IRLiteral::Bool(false)),
+                                IRNode::Literal(IRLiteral::Int(1)),
+                            ),
+                            (
+                                IRPattern::Literal(IRLiteral::Bool(true)),
+                                IRNode::Literal(IRLiteral::Int(0)),
+                            ),
+                            (
+                                IRPattern::Wildcard,
+                                IRNode::Literal(IRLiteral::Int(0)),
+                            ),
+                        ],
+                    },
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Int(0)),
+                ),
+            ],
+        };
+        assert_eq!(
+            format!("{:?}", seed.body),
+            format!("{:?}", expected),
+            "the seed must be the nested truth-table match"
+        );
+        // No call to resolve: the resolver-visible body is
+        // the same nested match.
+        let index = SpecIndex::from_specs(&module);
+        let raw = index
+            .callee_body("rust_match_scrutinee_form")
+            .expect("the multi-guard body must be resolver-visible");
+        assert_eq!(format!("{:?}", raw), format!("{:?}", expected));
+
+        // Executed over the complete Bool x Bool domain —
+        // the cross-validation sweep's four pinned cases.
+        for (hsp, bare, want) in [
+            (false, false, 0),
+            (false, true, 0),
+            (true, false, 1),
+            (true, true, 0),
+        ] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("has_string_pat", crate::synthesis::eval::Value::Bool(hsp)),
+                    ("bare", crate::synthesis::eval::Value::Bool(bare)),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want),
+                "({hsp}, {bare}) must follow the spec's truth table"
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the multi-guard seed must win verified");
+            // No tpr assertion: the spec has no in-spec
+            // tests, so the win rides on the verdict (the
+            // generics_text precedent).
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the multi-guard seed in every draw"
+            );
+        }
+    }
+
+    /// Multi-guard truth tables (ii): a guard set may mix a
+    /// CALL guard with a Bool parameter — each guard is
+    /// validated the way the composition family validates
+    /// its scrutinee, the raw body matches over the call
+    /// itself, and the admitted seed has the call resolved
+    /// (the composition seed's admission precedent).
+    #[test]
+    fn constraint_multi_guard_seed_with_call_guard() {
+        let is_high = guard_spec(
+            "is_high",
+            vec![("n", TypeRef::Int)],
+            TypeRef::Bool,
+            vec![Constraint::Eq(
+                var_expr("output"),
+                Expr::BinOp(
+                    BinOp::Gt,
+                    Box::new(var_expr("n")),
+                    Box::new(Expr::IntLit(10)),
+                ),
+            )],
+        );
+        // (call, flag): 1 exactly at (true, false), else 0 —
+        // row one constrains both guards, the other rows one
+        // each, as in rust_match_scrutinee_form.
+        let caller = guard_spec(
+            "multi_call_guard",
+            vec![("n", TypeRef::Int), ("flag", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![
+                or_row(vec![
+                    eq_expr(
+                        Expr::Call("is_high".into(), vec![var_expr("n")]),
+                        Expr::BoolLit(false),
+                    ),
+                    eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), Expr::IntLit(1)),
+                ]),
+                or_row(vec![
+                    eq_expr(
+                        Expr::Call("is_high".into(), vec![var_expr("n")]),
+                        Expr::BoolLit(true),
+                    ),
+                    eq_expr(var_expr("output"), Expr::IntLit(0)),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), Expr::IntLit(0)),
+                ]),
+            ],
+        );
+        let module = vec![is_high, caller.clone()];
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&caller);
+        assert_eq!(seeds.len(), 1, "exactly the multi-guard seed");
+        let seed = constraint_seed(&engine, &caller, "multi_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        // The resolver-visible body matches over the call
+        // itself; the admitted seed's scrutinee is the
+        // resolved callee body, so the interpreter can
+        // execute it.
+        let index = SpecIndex::from_specs(&module);
+        let raw = index
+            .callee_body("multi_call_guard")
+            .expect("the multi-guard body must be resolver-visible");
+        let IRNode::Match { scrutinee, .. } = &raw else {
+            panic!("raw body must be a match: {:?}", raw);
+        };
+        assert!(
+            matches!(**scrutinee, IRNode::Call { .. }),
+            "raw scrutinee must be the call itself: {:?}",
+            scrutinee
+        );
+        let IRNode::Match { scrutinee, .. } = &seed.body else {
+            panic!("seed body must be a match: {:?}", seed.body);
+        };
+        assert!(
+            !matches!(**scrutinee, IRNode::Call { .. }),
+            "seed scrutinee must be resolved, not a call: {:?}",
+            scrutinee
+        );
+
+        for (n, flag, want) in [(20, false, 1), (20, true, 0), (5, false, 0), (5, true, 0)] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("n", crate::synthesis::eval::Value::Int(n)),
+                    ("flag", crate::synthesis::eval::Value::Bool(flag)),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want),
+                "(n={n}, flag={flag}) must follow the truth table"
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &caller);
+        assert_eq!(result.status, VerificationStatus::Verified);
+    }
+
+    /// Multi-guard truth tables (negatives): near-miss
+    /// shapes still get NO constraint seed. Each case
+    /// deviates in exactly one way.
+    #[test]
+    fn constraint_multi_guard_near_misses_get_no_seed() {
+        let plain = || SynthesisEngine::new(SynthesisConfig::default());
+        let mut cases: Vec<FunctionSpec> = Vec::new();
+
+        // Five distinct guard expressions: past the cap —
+        // the truth table doubles per guard.
+        cases.push(guard_spec(
+            "multi_over_cap",
+            vec![
+                ("f1", TypeRef::Bool),
+                ("f2", TypeRef::Bool),
+                ("f3", TypeRef::Bool),
+                ("f4", TypeRef::Bool),
+                ("f5", TypeRef::Bool),
+            ],
+            TypeRef::Int,
+            vec![or_row(vec![
+                eq_expr(var_expr("f1"), Expr::BoolLit(false)),
+                eq_expr(var_expr("f2"), Expr::BoolLit(false)),
+                eq_expr(var_expr("f3"), Expr::BoolLit(false)),
+                eq_expr(var_expr("f4"), Expr::BoolLit(false)),
+                eq_expr(var_expr("f5"), Expr::BoolLit(false)),
+                eq_expr(var_expr("output"), Expr::IntLit(1)),
+            ])],
+        ));
+
+        // Two rows jointly pin the (true, true) cell to
+        // different values: not a truth table.
+        cases.push(guard_spec(
+            "multi_conflicting_cell",
+            vec![("f", TypeRef::Bool), ("g", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("f"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), Expr::IntLit(1)),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("g"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), Expr::IntLit(2)),
+                ]),
+            ],
+        ));
+
+        // A pin mentioning `output` itself.
+        cases.push(guard_spec(
+            "multi_pin_mentions_output",
+            vec![("f", TypeRef::Bool), ("g", TypeRef::Bool)],
+            TypeRef::String,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("f"), Expr::BoolLit(false)),
+                    eq_expr(
+                        var_expr("output"),
+                        Expr::BinOp(
+                            BinOp::Concat,
+                            Box::new(var_expr("output")),
+                            Box::new(Expr::StringLit("!".into())),
+                        ),
+                    ),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("g"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), Expr::StringLit("x".into())),
+                ]),
+            ],
+        ));
+
+        // A pin converting through a Hole (a Length has no
+        // IR form): not an admissible pin.
+        cases.push(guard_spec(
+            "multi_hole_pin",
+            vec![
+                ("f", TypeRef::Bool),
+                ("g", TypeRef::Bool),
+                ("a", TypeRef::String),
+            ],
+            TypeRef::Int,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("f"), Expr::BoolLit(false)),
+                    eq_expr(
+                        var_expr("output"),
+                        Expr::Length(Box::new(var_expr("a"))),
+                    ),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("g"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), Expr::IntLit(0)),
+                ]),
+            ],
+        ));
+
+        // A pin calling a spec the index does not hold.
+        cases.push(guard_spec(
+            "multi_pin_calls_unindexed",
+            vec![
+                ("f", TypeRef::Bool),
+                ("g", TypeRef::Bool),
+                ("a", TypeRef::String),
+            ],
+            TypeRef::String,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("f"), Expr::BoolLit(false)),
+                    eq_expr(
+                        var_expr("output"),
+                        Expr::Call("ghost".into(), vec![var_expr("a")]),
+                    ),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("g"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), var_expr("a")),
+                ]),
+            ],
+        ));
+
+        // A row guarded by an Int comparison among the Bool
+        // rows: the Int leaves stay with the Int families —
+        // a mixed row set is no family's shape.
+        cases.push(guard_spec(
+            "multi_mixed_int_row",
+            vec![
+                ("f", TypeRef::Bool),
+                ("g", TypeRef::Bool),
+                ("code", TypeRef::Int),
+            ],
+            TypeRef::Int,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("f"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("g"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), Expr::IntLit(1)),
+                ]),
+                or_row(vec![
+                    Expr::BinOp(
+                        BinOp::Lt,
+                        Box::new(var_expr("code")),
+                        Box::new(Expr::IntLit(0)),
+                    ),
+                    eq_expr(var_expr("output"), Expr::IntLit(0)),
+                ]),
+            ],
+        ));
+
+        for spec in &cases {
+            assert!(
+                plain().seed_from_constraints(spec).is_empty(),
+                "{}: near-miss shape must get no constraint seed",
+                spec.name
+            );
+        }
+    }
+
+    /// The precedence amendment (i): rust_concat_left_
+    /// text's rows pin the two String parameters under the
+    /// Bool parameter `owned` — owned_text when owned,
+    /// rendered when not. Guarded identity cannot state it
+    /// (arity three), the guard table cannot state it
+    /// (bare-variable pins), and the composition builder's
+    /// old territory rule refused it for exactly that
+    /// combination. Under the precedence it is the
+    /// composition family's: the seed must exist (kind
+    /// `composition_guard`) as the spec's only constraint
+    /// seed, be the match over `owned`, execute the pinned
+    /// domain exactly, be Verified in module context, and
+    /// win module-aware synthesis deterministically.
+    #[test]
+    fn constraint_composition_precedence_seed_for_left_text() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_concat_left_text");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the composition-guard seed");
+        let seed = constraint_seed(&engine, &spec, "composition_guard");
+        assert_eq!(count_holes(&seed.body), 0);
+
+        let expected = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("owned".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Bool(true)),
+                    IRNode::Var("owned_text".into()),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::Bool(false)),
+                    IRNode::Var("rendered".into()),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::String(String::new())),
+                ),
+            ],
+        };
+        assert_eq!(
+            format!("{:?}", seed.body),
+            format!("{:?}", expected),
+            "the seed must be the match over `owned`"
+        );
+
+        // The cross-validation battery's four pinned cases.
+        for (owned, rendered, owned_text, want) in [
+            (true, "x", "\"a\"", "\"a\""),
+            (true, "(a + b)", "\"q\"", "\"q\""),
+            (false, "x", "\"a\"", "x"),
+            (false, "\"lit\"", "ignored", "\"lit\""),
+        ] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("owned", crate::synthesis::eval::Value::Bool(owned)),
+                    ("rendered", crate::synthesis::eval::Value::Str(rendered.into())),
+                    (
+                        "owned_text",
+                        crate::synthesis::eval::Value::Str(owned_text.into()),
+                    ),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(want.into()),
+                "owned={owned} rendered={rendered:?} owned_text={owned_text:?}"
+            );
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the precedence seed must win verified");
+            // No tpr assertion: the spec has no in-spec
+            // tests, so the win rides on the verdict (the
+            // generics_text precedent).
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the composition-guard seed in every draw"
+            );
+        }
+    }
+
+    /// The precedence amendment (ii): both directions on
+    /// synthetic shapes.
+    ///
+    /// Direction one — an arity-two guarded-identity shape
+    /// still yields ONLY the guarded-identity seed: the
+    /// earlier family claims first and the composition
+    /// builder still refuses (also pinned on the real spec
+    /// by constraint_guarded_identity_seed_for_ctor_name,
+    /// which asserts exactly one seed).
+    ///
+    /// Direction two — the shapes the precedence newly
+    /// claims, each refused by both earlier families on its
+    /// own predicate. Three of them stood in
+    /// constraint_seed_near_misses_get_no_seed until this
+    /// phase, recorded there against GUARDED IDENTITY's
+    /// predicate (a literal row deviates; the pin is the
+    /// guard parameter, not the remaining one; three
+    /// parameters exceed its arity). Those refusals stand —
+    /// guarded identity still admits none of them. What
+    /// changes is only that the composition family, gated
+    /// by the earlier families' refusal, can state them,
+    /// and each body below honors its rows exactly.
+    #[test]
+    fn constraint_composition_precedence_both_directions() {
+        let plain = || SynthesisEngine::new(SynthesisConfig::default());
+
+        // Direction two, case A: a literal row beside an
+        // identity row (guarded identity deviates on the
+        // literal row; the guard table's arity is one).
+        let mixed = guard_spec(
+            "precedence_mixed_literal_row",
+            vec![("name", TypeRef::String), ("has_subs", TypeRef::Bool)],
+            TypeRef::String,
+            vec![
+                or_row(vec![
+                    eq_expr(var_expr("has_subs"), Expr::BoolLit(true)),
+                    eq_expr(var_expr("output"), var_expr("name")),
+                ]),
+                or_row(vec![
+                    eq_expr(var_expr("has_subs"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("output"), Expr::StringLit("bare".into())),
+                ]),
+            ],
+        );
+        let seeds = plain().seed_from_constraints(&mixed);
+        assert_eq!(seeds.len(), 1, "exactly the composition-guard seed");
+        let seed = constraint_seed(&plain(), &mixed, "composition_guard");
+        for (has_subs, want) in [(false, "ctor"), (true, "bare")] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("name", crate::synthesis::eval::Value::Str("ctor".into())),
+                    ("has_subs", crate::synthesis::eval::Value::Bool(has_subs)),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Str(want.into()),
+                "has_subs={has_subs} must follow the rows"
+            );
+        }
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &mixed);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        // Direction two, case B: the pin is the guard
+        // parameter itself (guarded identity requires the
+        // REMAINING parameter; here the pin's type is the
+        // return type, so the pin can be the output).
+        let self_pin = guard_spec(
+            "precedence_pin_is_guard_param",
+            vec![("flag", TypeRef::Bool), ("name", TypeRef::String)],
+            TypeRef::Bool,
+            vec![or_row(vec![
+                eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                eq_expr(var_expr("output"), var_expr("flag")),
+            ])],
+        );
+        let seeds = plain().seed_from_constraints(&self_pin);
+        assert_eq!(seeds.len(), 1, "exactly the composition-guard seed");
+        let seed = constraint_seed(&plain(), &self_pin, "composition_guard");
+        let v = eval_seed_body(
+            &seed.body,
+            &[
+                ("flag", crate::synthesis::eval::Value::Bool(false)),
+                ("name", crate::synthesis::eval::Value::Str("n".into())),
+            ],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Bool(false));
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &self_pin);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        // Direction two, case C: rust_concat_left_text's
+        // shape in miniature — a bare-variable pin at arity
+        // three (guarded identity's arity cap is the only
+        // earlier refusal left standing).
+        let extra = guard_spec(
+            "precedence_two_extra_params",
+            vec![
+                ("a", TypeRef::String),
+                ("b", TypeRef::String),
+                ("flag", TypeRef::Bool),
+            ],
+            TypeRef::String,
+            vec![or_row(vec![
+                eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                eq_expr(var_expr("output"), var_expr("a")),
+            ])],
+        );
+        let seeds = plain().seed_from_constraints(&extra);
+        assert_eq!(seeds.len(), 1, "exactly the composition-guard seed");
+        let seed = constraint_seed(&plain(), &extra, "composition_guard");
+        let v = eval_seed_body(
+            &seed.body,
+            &[
+                ("a", crate::synthesis::eval::Value::Str("A".into())),
+                ("b", crate::synthesis::eval::Value::Str("B".into())),
+                ("flag", crate::synthesis::eval::Value::Bool(false)),
+            ],
+        );
+        assert_eq!(v, crate::synthesis::eval::Value::Str("A".into()));
+        let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &extra);
+        assert_eq!(result.status, VerificationStatus::Verified);
     }
 
     /// replace_hole must actually substitute the hole wherever
