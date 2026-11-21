@@ -3372,6 +3372,22 @@ mod xval3 {
         // down to rust_ident_empty alone: its String-equality
         // leaf family stays unrecognized BY DESIGN (String
         // guards are a separate, unadmitted family).
+        //
+        // Phase 35 scoping (the Phase 30 precedent): slice 5
+        // added 27 specs to the module (106 total) — the
+        // statement walker's classifications and templates.
+        // Which of their shapes the builders recognize (the
+        // `++` equations over pre-rendered parts, the total
+        // Int guard tables, the Bool-guarded While rows, the
+        // call-composed collection assembly) is the next
+        // phase's measurement question, not something to
+        // assert ahead of the evidence. The recognition
+        // assertions below therefore keep iterating the same
+        // 66 names; only the module count assertion moves,
+        // to 106. The sweep harness above (ALL_SPECS /
+        // PINNED_TOTALS) likewise still covers slices 1–4;
+        // extending the sweeps to slice 5 belongs to the
+        // measurement phase.
         const RECOGNIZED: [&str; 66] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
@@ -3407,7 +3423,7 @@ mod xval3 {
             "rust_match_scrutinee_form", "rust_concat_left_text",
         ];
         let functions = load_codegen_module();
-        assert_eq!(functions.len(), 79, "module spec count");
+        assert_eq!(functions.len(), 106, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
             if !RECOGNIZED.contains(&func.name.as_str()) {
