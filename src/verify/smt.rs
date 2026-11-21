@@ -6,30 +6,11 @@
 
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
-pub enum SmtResult {
-    Sat(HashMap<String, SmtValue>),
-    Unsat,
-    Unknown,
-    Timeout,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum SmtValue {
-    Int(i64),
-    Bool(bool),
-    Uninterpreted(String),
-}
-
-impl std::fmt::Display for SmtValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SmtValue::Int(n) => write!(f, "{}", n),
-            SmtValue::Bool(b) => write!(f, "{}", b),
-            SmtValue::Uninterpreted(s) => write!(f, "{}", s),
-        }
-    }
-}
+// The solver's result VALUES are pure data and live in
+// super::verdict (Phase 66) — only the session below needs
+// Z3. Re-exported so `verify::smt::{SmtResult, SmtValue}`
+// keeps resolving for existing callers.
+pub use super::verdict::{SmtResult, SmtValue};
 
 // ── Z3 Session (v0.20 thread-local API) ───────────────────
 

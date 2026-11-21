@@ -8,38 +8,22 @@ use crate::synthesis::engine::{
     CandidateImplementation, IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp,
     ScoreBreakdown, SpecIndex, composite_score, MAX_INLINE_DEPTH,
 };
+#[cfg(feature = "z3-support")]
 use super::smt::{Z3Session, SmtResult, SmtValue, z3_add, z3_sub, z3_mul, z3_and};
 use std::collections::HashMap;
+#[cfg(feature = "z3-support")]
 use std::str::FromStr;
-use std::time::Instant;
 
 // ── Public Types ───────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct VerificationResult {
-    pub candidate_id: u64,
-    pub status: VerificationStatus,
-    pub constraint_results: Vec<ConstraintResult>,
-    pub counterexample: Option<Counterexample>,
-    pub verification_time_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VerificationStatus { Verified, VerificationFailed, Inconclusive, Malformed }
-
-#[derive(Debug, Clone)]
-pub struct ConstraintResult {
-    pub constraint: String,
-    pub holds: bool,
-    pub solver_time_ms: u64,
-    pub model: Option<HashMap<String, SmtValue>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Counterexample {
-    pub description: String,
-    pub inputs: HashMap<String, SmtValue>,
-}
+//
+// The verdict vocabulary lives in super::verdict (pure data,
+// Phase 66) and is re-exported here so every existing
+// `verify::verifier::{VerificationStatus, ...}` path keeps
+// resolving in both build configurations.
+pub use super::verdict::{
+    ConstraintResult, Counterexample, VerificationError, VerificationResult,
+    VerificationStatus,
+};
 
 // ── Verifier ───────────────────────────────────────────────
 
@@ -105,12 +89,13 @@ impl Verifier {
         Ok(verified)
     }
 
+    #[cfg(feature = "z3-support")]
     pub fn verify_one(
         &self,
         candidate: &CandidateImplementation,
         spec: &FunctionSpec,
     ) -> VerificationResult {
-        let start = Instant::now();
+        let start = crate::timeutil::now();
         let mut constraint_results = Vec::new();
         let mut counterexample = None;
 
@@ -118,7 +103,7 @@ impl Verifier {
             return VerificationResult {
                 candidate_id: candidate.id, status: VerificationStatus::Malformed,
                 constraint_results: vec![], counterexample: None,
-                verification_time_ms: start.elapsed().as_millis() as u64,
+                verification_time_ms: start.elapsed_ms(),
             };
         }
 
@@ -172,10 +157,58 @@ impl Verifier {
                 VerificationStatus::Verified
             },
             constraint_results, counterexample,
-            verification_time_ms: start.elapsed().as_millis() as u64,
+            verification_time_ms: start.elapsed_ms(),
         }
     }
 
+    /// No-Z3 backend (Phase 66): formal verification is
+    /// unavailable in this build (v0.6 D2 — the verdict is
+    /// labelled, never simulated). A holed body is Malformed:
+    /// that judgment is pure and stays. Every other candidate
+    /// is Inconclusive, with one non-holding result per
+    /// postcondition — exactly what the Z3 backend reports
+    /// for a body it cannot encode, so `verify_all`'s
+    /// bookkeeping (constraint_score = 0/total, the
+    /// unencodable body's number) is the same here, and no
+    /// constraint is ever silently treated as true.
+    #[cfg(not(feature = "z3-support"))]
+    pub fn verify_one(
+        &self,
+        candidate: &CandidateImplementation,
+        spec: &FunctionSpec,
+    ) -> VerificationResult {
+        let start = crate::timeutil::now();
+
+        if !is_well_formed(&candidate.body) {
+            return VerificationResult {
+                candidate_id: candidate.id, status: VerificationStatus::Malformed,
+                constraint_results: vec![], counterexample: None,
+                verification_time_ms: start.elapsed_ms(),
+            };
+        }
+
+        let constraint_results = spec
+            .postconditions
+            .iter()
+            .enumerate()
+            .map(|(i, _)| ConstraintResult {
+                constraint: format!("post[{}]", i),
+                holds: false,
+                solver_time_ms: 0,
+                model: None,
+            })
+            .collect();
+
+        VerificationResult {
+            candidate_id: candidate.id,
+            status: VerificationStatus::Inconclusive,
+            constraint_results,
+            counterexample: None,
+            verification_time_ms: start.elapsed_ms(),
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
     fn verify_constraint(
         &self,
         constraint: &Constraint,
@@ -184,13 +217,13 @@ impl Verifier {
         param_env: &SymEnv,
         output: &Option<Sym>,
     ) -> (ConstraintResult, Tri) {
-        let start = Instant::now();
+        let start = crate::timeutil::now();
         let done = |holds: bool, model: Option<HashMap<String, SmtValue>>, tri: Tri| {
             (
                 ConstraintResult {
                     constraint: label.into(),
                     holds,
-                    solver_time_ms: start.elapsed().as_millis() as u64,
+                    solver_time_ms: start.elapsed_ms(),
                     model,
                 },
                 tri,
@@ -239,6 +272,7 @@ impl Verifier {
 /// candidate. `ConstraintResult::holds` records only `Proven`;
 /// the distinction between Refuted and Unknown drives the
 /// candidate's overall status (Failed vs Inconclusive).
+#[cfg(feature = "z3-support")]
 enum Tri {
     Proven,
     Refuted,
@@ -271,6 +305,7 @@ enum Tri {
 // a concrete sort makes the body unencodable.
 
 #[derive(Debug, Clone)]
+#[cfg(feature = "z3-support")]
 enum Sym {
     Int(z3::ast::Int),
     Bool(z3::ast::Bool),
@@ -279,6 +314,7 @@ enum Sym {
     Opaque,
 }
 
+#[cfg(feature = "z3-support")]
 type SymEnv = HashMap<String, Sym>;
 
 /// Resolution context for spec-to-spec calls, threaded
@@ -290,12 +326,14 @@ type SymEnv = HashMap<String, Sym>;
 /// `MAX_INLINE_DEPTH`, is unencodable — the honest outcome is
 /// Inconclusive, never a guessed value or an unbounded
 /// expansion.
+#[cfg(feature = "z3-support")]
 struct EvalCtx<'a> {
     index: &'a SpecIndex,
     visiting: Vec<String>,
     depth: usize,
 }
 
+#[cfg(feature = "z3-support")]
 impl<'a> EvalCtx<'a> {
     fn root(index: &'a SpecIndex) -> Self {
         Self {
@@ -330,6 +368,7 @@ impl<'a> EvalCtx<'a> {
 /// side (`encode_expr`, spec-expression calls), so a call
 /// denotes the same thing in a candidate and in the
 /// postcondition it is judged against.
+#[cfg(feature = "z3-support")]
 fn sym_invoke(ctx: &EvalCtx, name: &str, args: Vec<Sym>) -> Option<Sym> {
     if !ctx.can_inline(name) {
         return None;
@@ -350,11 +389,13 @@ fn sym_invoke(ctx: &EvalCtx, name: &str, args: Vec<Sym>) -> Option<Sym> {
 
 /// Internal control flow, mirroring the interpreter: `Return`
 /// unwinds to the top of the candidate body.
+#[cfg(feature = "z3-support")]
 enum SymFlow {
     Normal(Sym),
     Returned(Sym),
 }
 
+#[cfg(feature = "z3-support")]
 impl SymFlow {
     fn into_value(self) -> Sym {
         match self {
@@ -366,6 +407,7 @@ impl SymFlow {
 /// The initial symbolic environment: one free constant per
 /// spec parameter, of the parameter's sort. Parameters whose
 /// type has no representable sort are Opaque.
+#[cfg(feature = "z3-support")]
 fn param_env(spec: &FunctionSpec) -> SymEnv {
     let mut env = SymEnv::new();
     for p in &spec.params {
@@ -388,10 +430,12 @@ fn param_env(spec: &FunctionSpec) -> SymEnv {
     env
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_eval(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<Sym> {
     Some(sym_eval_flow(node, env, ctx)?.into_value())
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_eval_flow(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<SymFlow> {
     match node {
         IRNode::Literal(lit) => Some(SymFlow::Normal(sym_literal(lit)?)),
@@ -499,6 +543,7 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<SymFl
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_literal(lit: &IRLiteral) -> Option<Sym> {
     match lit {
         IRLiteral::Int(n) => Some(Sym::Int(z3::ast::Int::from_i64(*n))),
@@ -520,6 +565,7 @@ fn sym_literal(lit: &IRLiteral) -> Option<Sym> {
 /// must be unconditional (wildcard/variable) — otherwise some
 /// scrutinee values match nothing and the body has no defined
 /// output, which is unencodable rather than a guess.
+#[cfg(feature = "z3-support")]
 fn sym_match(
     scrutinee: &IRNode,
     cases: &[(IRPattern, IRNode)],
@@ -568,6 +614,7 @@ fn sym_match(
     Some(acc)
 }
 
+#[cfg(feature = "z3-support")]
 enum PatternCond {
     Eq(z3::ast::Bool),
     Never,
@@ -579,6 +626,7 @@ enum PatternCond {
 /// plus Int/Float numeric promotion. Provably disjoint sorts
 /// never match; anything involving an unrepresentable value
 /// is undecidable.
+#[cfg(feature = "z3-support")]
 fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
     match (scrut, lit) {
         (Sym::Int(a), IRLiteral::Int(n)) => {
@@ -611,6 +659,7 @@ fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv, ctx: &EvalCtx) -> Option<Sym> {
     match function {
         // `List[...]` is the spec language's list literal; the
@@ -638,6 +687,7 @@ fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv, ctx: &EvalCtx) ->
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_len(v: Sym) -> Option<Sym> {
     match v {
         Sym::List(items) => Some(Sym::Int(z3::ast::Int::from_i64(items.len() as i64))),
@@ -646,6 +696,7 @@ fn sym_len(v: Sym) -> Option<Sym> {
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_index(coll: Sym, idx: Sym) -> Option<Sym> {
     match (coll, idx) {
         (Sym::List(items), Sym::Int(i)) => {
@@ -677,6 +728,7 @@ fn sym_index(coll: Sym, idx: Sym) -> Option<Sym> {
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
     match (a, b) {
         (Sym::Int(x), Sym::Int(y)) => Some(Sym::Int(cond.ite(&x, &y))),
@@ -690,6 +742,7 @@ fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
 // ── Shared symbolic operators ──────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "z3-support")]
 enum BinKind {
     Add,
     Sub,
@@ -716,6 +769,7 @@ enum BinKind {
 /// Z3 totalizes Div/Mod where the interpreter fails (division
 /// by zero, overflow): proofs about bodies using them are
 /// proofs about Z3's totalized semantics — see ROAD notes.
+#[cfg(feature = "z3-support")]
 fn sym_binop(kind: BinKind, l: Sym, r: Sym) -> Option<Sym> {
     use BinKind::*;
     match (kind, l, r) {
@@ -762,6 +816,7 @@ fn sym_binop(kind: BinKind, l: Sym, r: Sym) -> Option<Sym> {
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_binop_ir(op: IRBinOp, l: Sym, r: Sym) -> Option<Sym> {
     let kind = match op {
         IRBinOp::Add => BinKind::Add,
@@ -787,6 +842,7 @@ fn sym_binop_ir(op: IRBinOp, l: Sym, r: Sym) -> Option<Sym> {
     sym_binop(kind, l, r)
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_neg(v: Sym) -> Option<Sym> {
     match v {
         Sym::Int(a) => Some(Sym::Int(z3_sub(&z3::ast::Int::from_i64(0), &a))),
@@ -794,6 +850,7 @@ fn sym_neg(v: Sym) -> Option<Sym> {
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_not(v: Sym) -> Option<Sym> {
     match v {
         Sym::Bool(a) => Some(Sym::Bool(a.not())),
@@ -801,6 +858,7 @@ fn sym_not(v: Sym) -> Option<Sym> {
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_abs(v: Sym) -> Option<Sym> {
     match v {
         Sym::Int(a) => {
@@ -812,6 +870,7 @@ fn sym_abs(v: Sym) -> Option<Sym> {
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn sym_unary_ir(op: IRUnaryOp, v: Sym) -> Option<Sym> {
     match op {
         IRUnaryOp::Neg => sym_neg(v),
@@ -835,6 +894,7 @@ fn sym_unary_ir(op: IRUnaryOp, v: Sym) -> Option<Sym> {
 // to int 0 and any Or-rooted formula to `true`, which made
 // the verdict a function of constraint syntax alone).
 
+#[cfg(feature = "z3-support")]
 fn encode_constraint(c: &Constraint, env: &SymEnv, ctx: &EvalCtx) -> Option<z3::ast::Bool> {
     match c {
         Constraint::True => Some(z3::ast::Bool::from_bool(true)),
@@ -888,6 +948,7 @@ fn encode_constraint(c: &Constraint, env: &SymEnv, ctx: &EvalCtx) -> Option<z3::
     }
 }
 
+#[cfg(feature = "z3-support")]
 fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
     match expr {
         Expr::Var(name) => env.get(name).cloned(),
@@ -979,6 +1040,7 @@ pub fn body_is_encodable(spec: &FunctionSpec, body: &IRNode) -> bool {
 /// calls in the body resolve against `index` while judging
 /// encodability, so a body whose calls resolve to encodable
 /// callee bodies is itself encodable.
+#[cfg(feature = "z3-support")]
 pub fn body_is_encodable_with(
     spec: &FunctionSpec,
     body: &IRNode,
@@ -988,30 +1050,27 @@ pub fn body_is_encodable_with(
     sym_eval(body, &mut env, &EvalCtx::root(index)).is_some()
 }
 
+/// No-Z3 build (Phase 66): the same question answered by
+/// the pure abstract walk in super::encodable — it tracks
+/// per subexpression exactly the facts this predicate's
+/// answer depends on (sorts, numeral/literal known-ness),
+/// and a cross-check test in that module pins the two
+/// implementations to agreement on a harvested corpus.
+#[cfg(not(feature = "z3-support"))]
+pub fn body_is_encodable_with(
+    spec: &FunctionSpec,
+    body: &IRNode,
+    index: &SpecIndex,
+) -> bool {
+    super::encodable::body_is_encodable_pure(spec, body, index)
+}
+
 pub fn verify_all(
     candidates: Vec<CandidateImplementation>,
     spec: &FunctionSpec,
 ) -> Result<Vec<CandidateImplementation>, VerificationError> {
     Verifier::new().verify_all(candidates, spec)
 }
-
-#[derive(Debug)]
-pub enum VerificationError {
-    SolverError(String),
-    Timeout,
-    InternalError(String),
-}
-
-impl std::fmt::Display for VerificationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VerificationError::SolverError(m) => write!(f, "Solver error: {}", m),
-            VerificationError::Timeout => write!(f, "Verification timeout"),
-            VerificationError::InternalError(m) => write!(f, "Internal: {}", m),
-        }
-    }
-}
-impl std::error::Error for VerificationError {}
 
 // ── Tests ──────────────────────────────────────────────────
 
@@ -1144,6 +1203,7 @@ mod tests {
     /// false fails at kind 4): the first refutation this spec
     /// can produce.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn composition_wrong_candidate_is_refuted_with_module() {
         let module = load_module("validator");
         let spec = module_spec(&module, "validate_kind_tag");
@@ -1166,6 +1226,7 @@ mod tests {
     /// body side and constraint side resolve the same callee
     /// body and meet.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn composition_call_body_is_verified_with_module() {
         let module = load_module("validator");
         let spec = module_spec(&module, "validate_kind_tag");
@@ -1189,6 +1250,7 @@ mod tests {
     /// kind 5, so the candidate is refuted, not merely
     /// unjudged.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn composition_call_to_wrong_callee_is_refuted() {
         let module = load_module("validator");
         let spec = module_spec(&module, "validate_kind_tag");
@@ -1208,6 +1270,7 @@ mod tests {
     /// tested kinds, wrong on the untested Literal row — is
     /// refuted; the full lookup verifies.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn composition_guard_table_callee_is_judgable() {
         let module = load_module("printer");
         let spec = module_spec(&module, "print_node_kind");
@@ -1303,6 +1366,7 @@ mod tests {
     /// and stays Inconclusive rather than expanding without
     /// bound.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn spec_call_chains_inline_transitively_under_a_depth_cap() {
         let range = SpecExpr::BinOp(
             SpecBinOp::And,
@@ -1363,6 +1427,7 @@ mod tests {
     /// every kind violates the kind==3 row (arity 1), so it must
     /// be refuted, not verified.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn wrong_candidate_for_guard_style_spec_is_refuted() {
         let spec = load_spec("validator", "node_arity");
         assert_eq!(
@@ -1374,6 +1439,7 @@ mod tests {
     /// The matching correct candidate for the same guard-style
     /// spec must verify: verdicts are candidate-dependent.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn correct_candidate_for_guard_style_spec_is_verified() {
         let spec = load_spec("validator", "node_arity");
         let body = match_on(
@@ -1396,6 +1462,7 @@ mod tests {
     /// verified — `output` was a free int variable compared
     /// against 0. The correct seed completion must verify now.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn correct_completion_for_equation_spec_is_verified() {
         let spec = load_spec("validator", "is_literal_kind");
         assert_eq!(
@@ -1413,6 +1480,7 @@ mod tests {
     /// Same spec, semantically wrong candidate (always true):
     /// refuted, with a counterexample.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn wrong_candidate_for_equation_spec_is_refuted() {
         let spec = load_spec("validator", "is_literal_kind");
         let result = Verifier::new().verify_one(
@@ -1430,6 +1498,7 @@ mod tests {
     /// verify_one on the same body — one source of truth for
     /// the verdict, computed once, in the verifier.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn verify_all_records_status_on_candidates() {
         let spec = load_spec("validator", "node_arity");
         let correct = match_on(
@@ -1536,6 +1605,7 @@ mod tests {
     /// string must be refuted. (Before candidate encoding, both
     /// "verified" — the verdict was pure constraint syntax.)
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn string_lookup_spec_verdicts_follow_the_candidate() {
         let spec = load_spec("printer", "node_kind_name");
         let names = [
@@ -1573,6 +1643,7 @@ mod tests {
     /// but falls into the false wildcard). This is the honest
     /// tests-vs-proof gap, pinned.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn range_spec_distinguishes_proof_from_test_coverage() {
         let spec = load_spec("validator", "is_known_type_tag");
         let exact = binop(
@@ -1601,6 +1672,7 @@ mod tests {
     /// Multi-param spec (needs_parens): the constraint's exact
     /// boolean expression as a body must verify.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn multi_param_equation_spec_verifies_exact_body() {
         let spec = load_spec("printer", "needs_parens");
         let body = binop(
@@ -1630,6 +1702,7 @@ mod tests {
     /// candidate verified, and the constraint score must be the
     /// fraction of postconditions proven FOR THAT CANDIDATE.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn verify_all_marks_only_the_correct_candidate() {
         let spec = load_spec("validator", "is_literal_kind");
         let wrong = candidate(&spec, 1, boolean(true));

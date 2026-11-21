@@ -1,0 +1,77 @@
+name: Pages
+
+# v0.6 W5 (Phase 70): deploy the WASM playground to GitHub
+# Pages. Builds the playground from the same sources the
+# Playground workflow (playground.yml) verifies — via
+# playground/build.sh — and publishes the playground/
+# directory (with the generated pkg/) as the Pages site
+# root. Pages must be enabled for this repo with
+# build_type=workflow (repo Settings → Pages, or the Pages
+# API); deploy-pages fails until it is.
+#
+# The site is fully static and client-side: no server, no
+# API keys, no source text leaves the visitor's device
+# (Phase 69's no-egress audit covers exactly this build).
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'playground/**'
+      - 'crates/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; never cancel an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  deploy:
+    name: Build + deploy playground to GitHub Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Same pinned wasm-bindgen CLI as playground.yml
+      # (must match the crate's bindgen version).
+      - name: Install pinned wasm-bindgen CLI
+        run: |
+          VERSION=0.2.123
+          TARBALL="wasm-bindgen-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -sL --fail -o "/tmp/${TARBALL}" \
+            "https://github.com/rustwasm/wasm-bindgen/releases/download/${VERSION}/${TARBALL}"
+          tar -xzf "/tmp/${TARBALL}" -C /tmp
+          echo "WASM_BINDGEN=/tmp/wasm-bindgen-${VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" >> "$GITHUB_ENV"
+
+      - name: Build the playground package
+        run: ./playground/build.sh
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: playground
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

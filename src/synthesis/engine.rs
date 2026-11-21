@@ -13,11 +13,14 @@
 // │                                 └────────────┘           │
 // └──────────────────────────────────────────────────────────┘
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use crate::spec::ast::*;
 use crate::verify::verifier::VerificationStatus;
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, RngCore, SeedableRng};
 
 // ── Global synthesis statistics ──────────────────────────
 
@@ -26,6 +29,58 @@ static ELAPSED_MS: AtomicU64 = AtomicU64::new(0);
 
 pub fn candidate_count() -> u64 { CANDIDATE_COUNT.load(Ordering::Relaxed) }
 pub fn elapsed_ms() -> u64 { ELAPSED_MS.load(Ordering::Relaxed) }
+
+// ── Engine RNG (Phase 66, v0.6 D3) ─────────────────────────
+//
+// Every random draw in the engine goes through ONE
+// thread-local stream, replacing the `engine_rng()`
+// handles the code used before (same distribution role,
+// same call sites). By default the stream is seeded from
+// OS entropy — the native CLI's behaviour is unchanged:
+// its runs were never reproducible and still are not. The
+// playground profile seeds the stream explicitly through
+// `seed_engine_rng`, after which a run is a pure function
+// of (spec, seed): reproducible bug reports and pinnable
+// gate cases. Handles are clones of one Rc, so a draw
+// through any handle advances the single stream, exactly
+// like the thread_rng handles this replaces.
+
+thread_local! {
+    static ENGINE_RNG: Rc<RefCell<StdRng>> =
+        Rc::new(RefCell::new(StdRng::from_entropy()));
+}
+
+/// Seed the engine's RNG stream. Call before a synthesis
+/// run to make it reproducible (the playground/D3 path);
+/// the native CLI never calls this.
+pub fn seed_engine_rng(seed: u64) {
+    ENGINE_RNG.with(|r| *r.borrow_mut() = StdRng::seed_from_u64(seed));
+}
+
+/// A handle on the thread's engine RNG stream.
+#[derive(Clone)]
+pub(crate) struct SharedRng(Rc<RefCell<StdRng>>);
+
+impl RngCore for SharedRng {
+    fn next_u32(&mut self) -> u32 {
+        self.0.borrow_mut().next_u32()
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.0.borrow_mut().next_u64()
+    }
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        self.0.borrow_mut().fill_bytes(dest)
+    }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        self.0.borrow_mut().try_fill_bytes(dest)
+    }
+}
+
+/// The engine's RNG handle — the one replacement for every
+/// `engine_rng()` call site in this module.
+pub(crate) fn engine_rng() -> SharedRng {
+    ENGINE_RNG.with(|r| SharedRng(r.clone()))
+}
 
 // ── Candidate Representation ──────────────────────────────
 
@@ -486,7 +541,7 @@ impl SynthesisEngine {
     }
 
     pub fn run(&mut self, spec: &FunctionSpec) -> Result<Vec<CandidateImplementation>, SynthesisError> {
-        let start = std::time::Instant::now();
+        let start = crate::timeutil::now();
 
         // Phase 1: Seed the population
         let mut population = self.seed_population(spec)?;
@@ -536,7 +591,7 @@ impl SynthesisEngine {
 
         // Update stats
         CANDIDATE_COUNT.store(self.candidates.len() as u64, Ordering::Relaxed);
-        ELAPSED_MS.store(start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        ELAPSED_MS.store(start.elapsed_ms(), Ordering::Relaxed);
 
         Ok(passing)
     }
@@ -813,7 +868,7 @@ impl SynthesisEngine {
     /// order. The Phase 60 firing inventory reads the
     /// family census directly instead of inferring it
     /// from synthesis pools.
-    pub(crate) fn constraint_seed_kinds(&self, spec: &FunctionSpec) -> Vec<String> {
+    pub fn constraint_seed_kinds(&self, spec: &FunctionSpec) -> Vec<String> {
         self.seed_from_constraints(spec)
             .iter()
             .map(|c| match &c.provenance {
@@ -905,7 +960,7 @@ impl SynthesisEngine {
         // one body only: selection always descends from tree[0],
         // so no other member's completions are ever harvested.
         let root_body =
-            population[rand::thread_rng().gen_range(0..population.len())].body.clone();
+            population[engine_rng().gen_range(0..population.len())].body.clone();
         let harvested = self.mcts_harvest_tree(&root_body, spec, "mcts_harvest");
         population.extend(harvested);
 
@@ -990,7 +1045,7 @@ impl SynthesisEngine {
             let selected_child = if tree[idx].children.is_empty() {
                 idx
             } else {
-                let child_idx = rand::thread_rng().gen_range(0..tree[idx].children.len());
+                let child_idx = engine_rng().gen_range(0..tree[idx].children.len());
                 tree[idx].children[child_idx]
             };
 
@@ -1152,7 +1207,7 @@ impl SynthesisEngine {
             .into_iter()
             .map(|c| CandidateImplementation { id: self.new_id(), ..c })
             .collect();
-        let mut rng = rand::thread_rng();
+        let mut rng = engine_rng();
 
         for _gen in 0..10 { // Genetic generations
             // Evaluate all
@@ -1223,7 +1278,7 @@ impl SynthesisEngine {
 
     fn mutate(&self, parent: &CandidateImplementation) -> CandidateImplementation {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = engine_rng();
         let mut body = parent.body.clone();
 
         let kind = match rng.gen_range(0u32..6) {
@@ -1489,7 +1544,7 @@ pub fn composite_score(scores: &ScoreBreakdown) -> f64 {
         + 0.05 * scores.quality_score
 }
 
-pub(crate) fn count_holes(node: &IRNode) -> usize {
+pub fn count_holes(node: &IRNode) -> usize {
     match node {
         IRNode::Hole { .. } => 1,
         IRNode::Block(stmts) => stmts.iter().map(count_holes).sum(),
@@ -2162,7 +2217,7 @@ fn random_scoped_leaf(scope: &[String]) -> IRNode {
     if scope.is_empty() {
         IRNode::Literal(IRLiteral::Int(0))
     } else {
-        let idx = rand::thread_rng().gen_range(0..scope.len());
+        let idx = engine_rng().gen_range(0..scope.len());
         IRNode::Var(scope[idx].clone())
     }
 }
@@ -2175,11 +2230,11 @@ fn random_filling(hole: &HoleRef, scope: &[String]) -> IRNode {
     // (the legacy arms below, kept exactly for untyped holes).
     if let Some(ty) = &hole.expected_type {
         if let Some(fillings) = typed_literal_fillings(ty) {
-            let idx = rand::thread_rng().gen_range(0..fillings.len());
+            let idx = engine_rng().gen_range(0..fillings.len());
             return fillings.into_iter().nth(idx).unwrap();
         }
     }
-    match rand::thread_rng().gen_range(0u32..5) {
+    match engine_rng().gen_range(0u32..5) {
         0 => IRNode::Literal(IRLiteral::Int(0)),
         1 => IRNode::Literal(IRLiteral::Bool(true)),
         2 => random_scoped_leaf(scope),
@@ -2206,7 +2261,7 @@ fn random_ir_tree_scoped(
         return IRNode::Hole { id: engine.new_id(), expected_type: None };
     }
     use rand::Rng;
-    match rand::thread_rng().gen_range(0u32..8) {
+    match engine_rng().gen_range(0u32..8) {
         0 => IRNode::Block(vec![
             random_ir_tree_scoped(spec, depth - 1, engine, scope),
             // The trailing value used to be a hardcoded
@@ -2332,7 +2387,7 @@ fn gen_typed_expr(
     scope: &TypedScope,
 ) -> IRNode {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = engine_rng();
 
     // Applicable shapes, as option codes. Composite shapes are
     // depth-gated; leaves are always available.
@@ -2452,13 +2507,13 @@ fn gen_typed_binop(
     scope: &TypedScope,
 ) -> IRNode {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = engine_rng();
     let bin = |op: IRBinOp, l: IRNode, r: IRNode| {
         IRNode::BinOp(op, Box::new(l), Box::new(r))
     };
     // A divisor that cannot be a compile-time zero: a nonzero
     // literal, or a variable (its value is not a constant).
-    let divisor = |rng: &mut rand::rngs::ThreadRng, scope: &TypedScope| -> IRNode {
+    let divisor = |rng: &mut SharedRng, scope: &TypedScope| -> IRNode {
         let int_vars: Vec<&str> = scope
             .iter()
             .filter(|(_, vty)| super::selector::int_family(vty))
@@ -2538,7 +2593,7 @@ fn gen_typed_tail(
     scope: &TypedScope,
 ) -> IRNode {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = engine_rng();
     if depth == 0 {
         return gen_typed_expr(ty, 0, engine, scope);
     }
@@ -2635,7 +2690,7 @@ fn gen_typed_tail(
 /// terminated expression statement.
 fn gen_typed_expr_stmt(depth: u32, engine: &SynthesisEngine, scope: &TypedScope) -> IRNode {
     use rand::Rng;
-    let ty = if rand::thread_rng().gen_bool(0.5) {
+    let ty = if engine_rng().gen_bool(0.5) {
         TypeRef::Int
     } else {
         TypeRef::Bool
@@ -2650,7 +2705,7 @@ fn gen_typed_expr_stmt(depth: u32, engine: &SynthesisEngine, scope: &TypedScope)
 /// as statements inside a Block — never as a whole body.
 fn gen_typed_stmt(depth: u32, engine: &SynthesisEngine, scope: &TypedScope) -> IRNode {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = engine_rng();
     if depth == 0 {
         return gen_typed_expr_stmt(depth, engine, scope);
     }
@@ -6103,6 +6158,7 @@ mod tests {
     /// survive to the final pool under seed protection, and
     /// must win selection once the gates can see it.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_equation_seed_is_verified_and_wins() {
         let spec = load_m2_spec("validator", "is_known_type_tag");
         let engine = SynthesisEngine::new(SynthesisConfig::default());
@@ -6182,6 +6238,7 @@ mod tests {
     /// wrap_vec's byte assertion is unchanged (its variable
     /// sits on the right, borrowed).
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn concat_equation_seed_is_verified_and_wins() {
         let src = r#"
 ConcatFixture {
@@ -6364,6 +6421,7 @@ spec exclaim {
     /// pinned output on EVERY row — evaluated here through the
     /// IR interpreter — and be Verified.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_seed_covers_every_row() {
         let spec = load_m2_spec("printer", "type_tag_name");
         let engine = SynthesisEngine::new(SynthesisConfig::default());
@@ -6404,6 +6462,7 @@ spec exclaim {
     /// PROVEN of the seed (every row value and the Int default
     /// satisfy the floor), so the seed is Verified whole.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_seed_for_node_arity() {
         let spec = load_m2_spec("validator", "node_arity");
         let engine = SynthesisEngine::new(SynthesisConfig::default());
@@ -6438,6 +6497,7 @@ spec exclaim {
     /// equation seed must exist, be Verified, and reach the
     /// final pool under protection.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_equation_seeds_give_testless_specs_verified_candidates() {
         for (file, name) in [("validator", "tags_compatible"), ("printer", "needs_parens")] {
             let spec = load_m2_spec(file, name);
@@ -6539,6 +6599,7 @@ spec exclaim {
     /// constraint_seeds_absent_where_constraints_fit_neither_pattern,
     /// which runs registry-less and is unchanged.)
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn composition_equation_seed_is_verified_and_wins() {
         let module = load_m2_module("validator");
         let spec = module_spec(&module, "validate_kind_tag");
@@ -6596,6 +6657,7 @@ spec exclaim {
     /// is the name lookup itself. Verified by the module-aware
     /// verifier, and wins module-aware synthesis at tpr 1.000.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn composition_seed_for_print_node_kind_is_verified_and_wins() {
         let module = load_m2_module("printer");
         let spec = module_spec(&module, "print_node_kind");
@@ -6714,6 +6776,7 @@ spec exclaim {
     /// body: the same shape its Phase 23 pool winner took, now
     /// structural instead of drawn.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_seed_for_bool_param() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_literal_bool");
@@ -6816,6 +6879,7 @@ spec exclaim {
     /// the wildcard — the typed-literal default decides it,
     /// exactly as an Int table's unpinned inputs are decided.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_seed_for_partial_bool_table() {
         // `value==true||output=="false"` pins value == false.
         let spec = guard_spec(
@@ -6868,6 +6932,7 @@ spec exclaim {
     /// run, with the silent branch returning "" or the name by
     /// luck; the seed fixes it to the wildcard "".
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guarded_identity_seed_for_ctor_name() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_pattern_ctor_name");
@@ -6937,6 +7002,7 @@ spec exclaim {
     /// pinning an Int guard parameter by comparisons and the
     /// output to the remaining parameter.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guarded_identity_seed_with_int_guard() {
         // `kind<0||kind>0||output==name` pins kind == 0.
         let spec = guard_spec(
@@ -8154,6 +8220,7 @@ spec exclaim {
     /// the 51 keywords suffixed, non-keywords identical), and
     /// win module-aware synthesis deterministically.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_composition_guard_seed_for_ident_suffix() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_ident_suffix");
@@ -8291,6 +8358,7 @@ spec exclaim {
     /// spec has no in-spec tests, so the win rides on the
     /// verdict, as the guarded-identity seed's did).
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_composition_guard_seed_for_generics_text() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_generics_text");
@@ -8616,6 +8684,7 @@ spec exclaim {
     /// code, be Verified in module context, and win
     /// module-aware synthesis deterministically.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_expr_pin_guard_seed_for_unary_text() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_unary_text");
@@ -8719,6 +8788,7 @@ spec exclaim {
     /// (see the synthetic test below): the Var rows are just
     /// pins that happen to be variables.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_expr_pin_guard_seed_for_mixed_pin_specs() {
         let module = load_codegen_module();
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
@@ -9140,6 +9210,7 @@ spec exclaim {
     /// context, and win module-aware synthesis
     /// deterministically.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_pair_guard_table_seed_for_left_owned() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_concat_left_owned");
@@ -9217,6 +9288,7 @@ spec exclaim {
     /// pinned cells all follow the rows, and it is Verified
     /// — the constraints never mention kind 22's output.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_pair_guard_table_seed_for_scrutinee_bare() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_match_scrutinee_bare");
@@ -9285,6 +9357,7 @@ spec exclaim {
     /// Verified, executing to the mirror's rule over the
     /// whole grid, and winning synthesis.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_pair_guard_table_seed_for_right_form() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_concat_right_form");
@@ -9428,6 +9501,7 @@ spec exclaim {
     /// harness sweeps (all 1089 cases pinned — the spec is
     /// total), and wins synthesis.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_pair_guard_table_seed_for_string_ownership() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_string_ownership");
@@ -9807,6 +9881,7 @@ spec exclaim {
     /// be Verified in module context, and win module-aware
     /// synthesis deterministically.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_mixed_pair_guard_table_seed_for_seq_form() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_stmt_seq_form");
@@ -10237,6 +10312,7 @@ spec exclaim {
     /// module context, and win module-aware synthesis
     /// deterministically.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_multi_guard_seed_for_scrutinee_form() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_match_scrutinee_form");
@@ -10345,6 +10421,7 @@ spec exclaim {
     /// itself, and the admitted seed has the call resolved
     /// (the composition seed's admission precedent).
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_multi_guard_seed_with_call_guard() {
         let is_high = guard_spec(
             "is_high",
@@ -10612,6 +10689,7 @@ spec exclaim {
     /// domain exactly, be Verified in module context, and
     /// win module-aware synthesis deterministically.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_composition_precedence_seed_for_left_text() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_concat_left_text");
@@ -10714,6 +10792,7 @@ spec exclaim {
     /// by the earlier families' refusal, can state them,
     /// and each body below honors its rows exactly.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_composition_precedence_both_directions() {
         let plain = || SynthesisEngine::new(SynthesisConfig::default());
 
@@ -11760,6 +11839,7 @@ spec exclaim {
     /// {7} → 2. Before the fix the seed was {7 → 2, _ → 0} —
     /// sites 5 and 6 contradicted — and Z3 refuted it.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_seed_for_expectation_source() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_expectation_source");
@@ -11821,6 +11901,7 @@ spec exclaim {
     /// in-spec loop-fallback test, kind 24 → 17, failed:
     /// tpr 0.833, refuted every run).
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_seed_for_stmt_form() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_stmt_form");
@@ -11893,6 +11974,7 @@ spec exclaim {
     /// armed; the {2..=5} band fell to the default 0 and Z3
     /// refuted the seed (tpr 0.667).
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_seed_for_stmt_child_indent() {
         let module = load_codegen_module();
         let spec = module_spec(&module, "rust_stmt_child_indent");
@@ -11942,6 +12024,7 @@ spec exclaim {
     /// the wildcard's own value and materialize no arm, and
     /// the single-value rows arm in row order as always.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_catch_all_at_default_unchanged() {
         let module = load_codegen_module();
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
@@ -11990,6 +12073,7 @@ spec exclaim {
     /// both tails, so the wildcard carries ITS value (9);
     /// the band's cells pin 5 and materialize as arms.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_bands_and_catch_all_recovered() {
         let spec = guard_spec(
             "banded_catch_all",
@@ -12162,6 +12246,7 @@ spec exclaim {
     /// `output >= 0` floor is the measured case; here a band
     /// row carries the same floor beside it.
     #[test]
+    #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_band_row_with_non_row_postcondition() {
         let spec = guard_spec(
             "band_with_floor",

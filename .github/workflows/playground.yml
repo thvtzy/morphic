@@ -1,0 +1,88 @@
+name: Playground
+
+# v0.6 W4 (Phase 69): build the WASM playground, enforce the
+# bundle budget (playground/budget.txt), and run the pinned
+# corpus agreement runners (native CLI vs the exact pkg/ the
+# page loads). Authored and YAML-validated locally at Phase
+# 69; its first real run happens on the next push/PR that
+# touches these paths (the branch is local until then).
+#
+# Note: no wasm-opt pass runs here — the budget is enforced
+# on exactly what playground/build.sh produces, so the CI
+# number and the locally measured number are the same
+# artifact. (wasm-opt/Binaryen could shrink the bundle as a
+# future CI-side step; adopting it would re-baseline the
+# budget in its own phase.)
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'playground/**'
+      - 'crates/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/playground.yml'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'playground/**'
+      - 'crates/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/playground.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  playground:
+    name: Playground build + budget + corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The pinned wasm-bindgen CLI (must match the crate's
+      # bindgen version; playground/build.sh resolves it via
+      # $WASM_BINDGEN first).
+      - name: Install pinned wasm-bindgen CLI
+        run: |
+          VERSION=0.2.123
+          TARBALL="wasm-bindgen-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -sL --fail -o "/tmp/${TARBALL}" \
+            "https://github.com/rustwasm/wasm-bindgen/releases/download/${VERSION}/${TARBALL}"
+          tar -xzf "/tmp/${TARBALL}" -C /tmp
+          echo "WASM_BINDGEN=/tmp/wasm-bindgen-${VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" >> "$GITHUB_ENV"
+
+      # The corpus runner drives the native CLI.
+      - name: Build native CLI
+        run: cargo build --bin morphic
+
+      - name: Build the playground package
+        run: ./playground/build.sh
+
+      - name: Enforce the bundle budget
+        run: |
+          BUDGET="$(head -n 1 playground/budget.txt | tr -d '[:space:]')"
+          SIZE="$(stat -c%s playground/pkg/morphic_wasm_bg.wasm)"
+          echo "morphic_wasm_bg.wasm: ${SIZE} bytes (budget: ${BUDGET})"
+          if [ "${SIZE}" -gt "${BUDGET}" ]; then
+            echo "::error::bundle ${SIZE} B exceeds the W4 budget ${BUDGET} B (playground/budget.txt)"
+            exit 1
+          fi
+
+      - name: Pinned corpus agreement (native CLI vs WASM)
+        run: node playground/corpus/run-agreement.mjs

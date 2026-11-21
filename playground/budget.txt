@@ -1,0 +1,20 @@
+673792
+# Morphic playground bundle budget (v0.6 W4, Phase 69).
+#
+# The number on the first line is the maximum permitted size,
+# in bytes, of playground/pkg/morphic_wasm_bg.wasm (the
+# post-bindgen release WASM — the dominant artifact; the
+# generated JS glue is pinned by the wasm-bindgen version).
+#
+# Set from the W4 measurement: 611,728 B (the W3 feature set
+# after the W4 dependency diet, which changed the graph but
+# not the bytes) plus 10% headroom, rounded up to a whole
+# KiB: ceil(611,728 * 1.10 / 1024) * 1024 = 673,792.
+# History: W1 baseline 546,229 B; W2 547,342 B (+0.20%);
+# W3 611,728 B (+11.8%, synthesis renders); W4 611,728 B.
+#
+# Enforced by .github/workflows/playground.yml on every
+# push/PR that touches the playground path. Re-baselining
+# is a deliberate act: change this number only in a phase
+# that records the new measurement and the reason (the
+# W2/W3 notes in ROAD_TO_SELF_HOSTING.md are the precedent).

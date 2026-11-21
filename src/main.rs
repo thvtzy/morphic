@@ -1,13 +1,22 @@
 // ┌────────────────────────────────────────────────────────────┐
 // │  MORPHIC — Self-Synthesizing Programming Language         │
-// │  "Write specs. The compiler writes the implementation."    │
+// │  "Write specs. The compiler writes the implementation."   │
+// │                                                            │
+// │  CLI shell (Phase 66, v0.6 W1): the compiler core lives   │
+// │  in the library (src/lib.rs); this binary is argument     │
+// │  parsing, the filesystem contract, and presentation       │
+// │  over it. The core modules are re-exported at this root   │
+// │  so the test/measurement modules declared below keep      │
+// │  their `crate::…` paths unchanged. The `llm` module       │
+// │  stays in this target: nothing in the pipeline imports    │
+// │  it, and its HTTP client must never enter the library's   │
+// │  (hence the browser's) dependency graph.                  │
 // └────────────────────────────────────────────────────────────┘
 
-mod spec;
+pub use morphic::{codegen, spec, synthesis, verify};
+
+#[cfg(feature = "llm-client")]
 mod llm;
-mod synthesis;
-mod verify;
-mod codegen;
 mod m2_synthesis_probe;
 mod m2_cross_validation;
 mod m3_synthesis_probe;
@@ -15,10 +24,19 @@ mod m3_cross_validation;
 mod tokenizer_synthesis_probe;
 mod tokenizer_cross_validation;
 mod phase53_measurement;
+// The Phase 58–62 measurement instruments measure the
+// compiled-runner stage; without that stage (browser
+// profile) they have nothing to measure and are not
+// compiled.
+#[cfg(feature = "compiled-runner")]
 mod phase58_measurement;
+#[cfg(feature = "compiled-runner")]
 mod phase59_measurement;
+#[cfg(feature = "compiled-runner")]
 mod phase60_measurement;
+#[cfg(feature = "compiled-runner")]
 mod phase61_measurement;
+#[cfg(feature = "compiled-runner")]
 mod phase62_measurement;
 
 
@@ -183,13 +201,27 @@ fn main() -> anyhow::Result<()> {
         Command::Synthesize { input, iterations } => {
             println!("{} Synthesizing interactively ({} max iterations)...",
                 "🔍".bold(), iterations);
-            // Interactive mode: stream candidates in real time
-            let source = std::fs::read_to_string(&input)?;
-            let parsed = spec::parser::parse(&source)?;
-            let type_checked = spec::typeck::check(parsed)?;
-            let func_spec = type_checked.spec.functions.first()
-                .ok_or_else(|| anyhow::anyhow!("No spec functions found"))?;
-            synthesis::interactive::run(func_spec, iterations)?;
+            // Interactive mode: stream candidates in real time.
+            // The TUI is native-only furniture (the
+            // `interactive` feature); a build without it
+            // reports the fact rather than failing to compile.
+            #[cfg(feature = "interactive")]
+            {
+                let source = std::fs::read_to_string(&input)?;
+                let parsed = spec::parser::parse(&source)?;
+                let type_checked = spec::typeck::check(parsed)?;
+                let func_spec = type_checked.spec.functions.first()
+                    .ok_or_else(|| anyhow::anyhow!("No spec functions found"))?;
+                synthesis::interactive::run(func_spec, iterations)?;
+            }
+            #[cfg(not(feature = "interactive"))]
+            {
+                let _ = (input, iterations);
+                anyhow::bail!(
+                    "interactive synthesis is not available in this build \
+                     (feature `interactive` is off)"
+                );
+            }
         }
 
         Command::Lsp => {
