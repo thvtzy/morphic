@@ -1832,4 +1832,124 @@ spec rust_tail_block_text {
     optimize: time < O(n)
 }
 
+// -- Slice 6: the driver (generate + generate_rust) ----------
+//
+//  generate (src/codegen/mod.rs:12-22) dispatches on the
+//  target name; generate_rust (src/codegen/mod.rs:66-155)
+//  assembles the whole file for ONE candidate: doc header,
+//  precondition block, signature, tail-rendered body, test
+//  module. Slice 3 specced the driver's TEXT pieces
+//  (rust_doc_line, rust_param_text, rust_generics_text,
+//  rust_signature, rust_precondition_assert,
+//  rust_precondition_block, rust_test_name_form,
+//  rust_test_case, rust_test_module, rust_file_fixed_text);
+//  this slice specs the DECISIONS and the ASSEMBLY that
+//  consume them -- the dispatch table, the result form,
+//  the section-presence rule, the header assembly, the
+//  whole-file equation. What remains mirror-only: every
+//  iteration (the doc-line split, the generics / params /
+//  asserts / tests joins and loops -- the F5 family), the
+//  Int -> decimal conversion in default test names (F2),
+//  and debug_ir_string's internals behind the "ir" route
+//  (its Hole arm needs F2 for the id, its Literal arm is
+//  Rust Debug formatting, its fallback arm is a
+//  discriminant's Debug text -- none of it statable).
+//  One candidate is one file holding exactly ONE function:
+//  the driver has no multi-function assembly, and no
+//  import is ever generated at file level.
+
+// -- Dispatch (generate) ---------------------------------------
+
+spec rust_target_route {
+    doc: "generate's dispatch on the target name (src/codegen/mod.rs:12-22): 0 = the Rust driver (generate_rust -- this module's assembly), 1 = the C generator, 2 = the Wasm generator, 3 = the Python generator, 4 = the JavaScript generator (TWO names route here: 'javascript' and 'js'), 5 = the IR debug dump (debug_ir_string over the candidate body, seeded at indent 0), 6 = unsupported -- generate returns Err(CodegenError::UnsupportedTarget) carrying the name verbatim (rust_target_result_form, rust_unsupported_target_text). Matching is exact and case-sensitive (a match on the &str): 'Rust', 'JS', 'rs' and '' are all route 6. Routes 1-4 name the other targets' generators, whose internals sit outside this module under the ROAD's one-target rule; only their routing is pinned here. The rows are String-equality guards -- the rust_ident_empty shape: fully statable in the spec, and (like it) outside every admitted seed family, whose guards key on Int/Bool only."
+    input: target: String
+    output: Int
+
+    constraint: target!="rust"||output==0
+    constraint: target!="c"||output==1
+    constraint: target!="wasm"||output==2
+    constraint: target!="python"||output==3
+    constraint: target!="javascript"||output==4
+    constraint: target!="js"||output==4
+    constraint: target!="ir"||output==5
+    constraint: target=="rust"||target=="c"||target=="wasm"||target=="python"||target=="javascript"||target=="js"||target=="ir"||output==6
+
+    optimize: time < O(n)
+
+    test "rust-route" { input: "rust" expect: 0 }
+    test "c-route" { input: "c" expect: 1 }
+    test "wasm-route" { input: "wasm" expect: 2 }
+    test "python-route" { input: "python" expect: 3 }
+    test "javascript-route" { input: "javascript" expect: 4 }
+    test "js-route" { input: "js" expect: 4 }
+    test "ir-route" { input: "ir" expect: 5 }
+    test "unknown-route" { input: "java" expect: 6 }
+    test "case-route" { input: "Rust" expect: 6 }
+    test "empty-route" { input: "" expect: 6 }
+}
+
+spec rust_target_result_form {
+    doc: "Whether generate returns Ok or Err for a rust_target_route route (src/codegen/mod.rs:12-22): 0 = Ok -- routes 0-5, every named target produces text (generate_rust in particular has no error path at all: no fallible call inside, it ends in Ok unconditionally), 1 = Err -- route 6 only, CodegenError::UnsupportedTarget carrying the target name. Total over the seven routes; route codes outside 0..=6 never occur and are unpinned."
+    input: route: Int
+    output: Int
+
+    constraint: route<0||route>5||output==0
+    constraint: route<6||route>6||output==1
+
+    optimize: time < O(n)
+
+    test "rust-ok" { input: 0 expect: 0 }
+    test "ir-ok" { input: 5 expect: 0 }
+    test "unsupported-err" { input: 6 expect: 1 }
+}
+
+spec rust_unsupported_target_text {
+    doc: "The Display text of CodegenError::UnsupportedTarget (src/codegen/mod.rs:1415): 'Unsupported target language: ' + the target name, verbatim -- the error generate's route 6 returns. The name is carried through unmodified: no rust_ident sanitization, no case folding, no trimming."
+    input: target: String
+    output: String
+
+    constraint: output == "Unsupported target language: " ++ target
+
+    optimize: time < O(n)
+
+    test "error-text" { input: "java" expect: "Unsupported target language: java" }
+    test "error-empty" { input: "" expect: "Unsupported target language: " }
+}
+
+// -- Assembly (generate_rust) ----------------------------------
+
+spec rust_doc_header_text {
+    doc: "generate_rust's module doc header, assembled (src/codegen/mod.rs:70-76): the doc's lines -- split by str::lines and each rendered by rust_doc_line, concatenated (the split and the concatenation are iteration, mirror-only) -- followed by ONE blank line, rust_file_fixed_text piece 1, emitted inside the doc branch: a doc of Some(\"\") has zero lines and still yields exactly the blank line. Whether the header appears at all is the driver's branch (the spec's doc is Some rather than None); rust_driver_section_text states that rule, with this text as its present-arm input."
+    input: lines: String
+    output: String
+
+    constraint: output == lines ++ "\n"
+
+    optimize: time < O(n)
+
+    test "header-one-line" { input: "//! Sorts a list\n" expect: "//! Sorts a list\n\n" }
+    test "header-no-lines" { input: "" expect: "\n" }
+}
+
+spec rust_driver_section_text {
+    doc: "generate_rust's conditional-section rule, shared by its three optional sections (src/codegen/mod.rs:70-76, 96-104, 131-152): a section whose presence flag holds contributes its assembled text; otherwise it contributes the empty string -- no placeholder, comment or partial frame is emitted for an absent section. The three call sites differ only in what presence MEANS: the doc header's flag is the spec's doc being Some (a present-but-empty doc still emits its blank line -- rust_doc_header_text), while the precondition block's and the test module's flags are their lists being non-empty. One spec serves all three sites, as rust_block_text serves two sites in slices 4-5. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: present: Bool, text: String
+    output: String
+
+    constraint: present==false||output==text
+    constraint: present==true||output==""
+
+    optimize: time < O(n)
+}
+
+spec rust_file_text {
+    doc: "generate_rust's whole-file assembly (src/codegen/mod.rs:66-155) over pre-rendered sections, in emission order: the doc header (rust_doc_header_text, via rust_driver_section_text), the precondition block (rust_precondition_block, via rust_driver_section_text -- emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters: slice 3 recorded the placement surprise, this equation is where it lands in the file), the signature (rust_signature), the body, the function's closing brace (the text of rust_file_fixed_text piece 0), and the test module (rust_test_module, via rust_driver_section_text). Absent sections arrive as the empty string (rust_driver_section_text's absent arm), so the equation is unconditional. The body arrives rendered by ir_to_rust_tail at indent 1, with the function's return type as both fn_ret and the Some expectation -- the driver's own seed, the one expectation site outside rust_expectation_source's table (that table's doc names this site as the driver's); statement-shaped bodies fall through the tail renderer to the statement walker unchanged, bare-expression bodies keep their value as the function's return. Exactly one function per file, and NO import is ever generated at file level -- the only use statement in the output is the test module's inner 'use super::*;', inside rust_test_module. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: header: String, pre_block: String, signature: String, body: String, test_module: String
+    output: String
+
+    constraint: output == header ++ pre_block ++ signature ++ body ++ "}\n" ++ test_module
+
+    optimize: time < O(n)
+}
+
 }
