@@ -1073,10 +1073,13 @@ fn rust_binop_concat_text(owned: &str, borrowed: &str) -> String {
 }
 
 /// Mirror of the Concat left-operand leaf check
-/// (concat_owned_operand, src/codegen/mod.rs:622-628):
-/// owned exactly for a direct String literal node.
+/// (concat_owned_operand, src/codegen/mod.rs):
+/// owned exactly for a direct String literal node
+/// (Phase 29) or a direct Var node (Phase 39 — a bare
+/// variable in left position moves, E0382, so it takes
+/// the owned-copy treatment).
 fn rust_concat_left_owned(kind: i64, lit: i64) -> bool {
-    kind == 9 && lit == 3
+    kind == 10 || (kind == 9 && lit == 3)
 }
 
 /// Mirror of the Concat left operand's final text: the
@@ -1757,13 +1760,15 @@ fn expr_kind(e: &Expr) -> i64 {
 }
 
 /// Assembly of `concat_owned_operand`
-/// (src/codegen/mod.rs:622-628): a direct String literal
+/// (src/codegen/mod.rs): a direct String literal
 /// takes the owned template (the decision
-/// rust_concat_left_owned pins); every other node renders
-/// as usual.
+/// rust_concat_left_owned pins); a direct Var takes
+/// the clone text (Phase 39: a bare variable in left
+/// position moves); every other node renders as usual.
 fn concat_owned_mirror(e: &Expr) -> String {
     match e {
         Expr::Lit(Lit::Str(s)) => rust_string_literal_owned_text(s),
+        Expr::Var(name) => format!("{}.clone()", rust_ident_verbatim(name)),
         _ => ir_expr_assembled(e),
     }
 }
@@ -3255,12 +3260,13 @@ mod golden_tests {
 
     #[test]
     fn concat_left_owned_grid() {
-        // Owned exactly at (Literal kind, String literal kind)
+        // Owned exactly at (Literal kind, String literal
+        // kind) and at every Var-kind cell (Phase 39)
         for kind in 0..=27 {
             for lit in 0..=5 {
                 assert_eq!(
                     rust_concat_left_owned(kind, lit),
-                    kind == 9 && lit == 3,
+                    kind == 10 || (kind == 9 && lit == 3),
                     "kind {} lit {}",
                     kind,
                     lit
@@ -3496,7 +3502,7 @@ mod golden_tests {
         );
         assert_eq!(
             ir_expr_assembled(&e),
-            "(s + &(if c { \"y\" } else { \"n\" }))"
+            "(s.clone() + &(if c { \"y\" } else { \"n\" }))"
         );
         // The owned literal is escaped before .to_string()
         let e = Expr::BinOp(

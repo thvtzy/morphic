@@ -1056,19 +1056,20 @@ spec rust_binop_concat_text {
 }
 
 spec rust_concat_left_owned {
-    doc: "Whether the LEFT operand of a Concat renders owned (concat_owned_operand, src/codegen/mod.rs:622-628; Phase 29 defect 1): exactly when the operand node is directly a String literal -- node kind Literal (9) with literal kind String (3). A bare literal in left position is a &str, and &str + &str has no Add impl (E0369); it takes the same .to_string() ownership ir_to_rust_expr_typed applies in expectation positions. Every other operand shape already evaluates to a String and renders as usual. The match is on the DIRECT node only: a Typed node wrapping a string literal is not this rule -- the Typed arm delegates to the typed emitter, whose own ownership rule (slice 3) decides. 'kind' is an IRNodeKindCode, 'lit' an IRLiteralKindCode (meaningful only when kind is 9). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    doc: "Whether the LEFT operand of a Concat takes the ownership treatment (concat_owned_operand, src/codegen/mod.rs; Phase 29 defect 1, extended by Phase 39): exactly when the operand node is directly a String literal -- node kind Literal (9) with literal kind String (3) -- or directly a variable -- node kind Var (10). A bare literal in left position is a &str, and &str + &str has no Add impl (E0369); it takes the same .to_string() ownership ir_to_rust_expr_typed applies in expectation positions. A bare variable in left position MOVES (Phase 39, E0382): Rust's + consumes its left operand, so a variable used again later on the execution path fails with borrow of moved value; it takes the owned-copy treatment, .clone() -- the literal treatment's analogue (no borrow form exists: &String + &str has no Add impl). Every other operand shape evaluates to a fresh String value and renders as usual. The match is on the DIRECT node only: a Typed node wrapping a string literal (or a variable) is not this rule -- the Typed arm delegates to the typed emitter, whose own ownership rule (slice 3) decides. 'kind' is an IRNodeKindCode, 'lit' an IRLiteralKindCode (meaningful only when kind is 9). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
     input: kind: Int, lit: Int
     output: Bool
 
     constraint: kind<9||kind>9||lit<3||lit>3||output==true
-    constraint: kind==9||output==false
-    constraint: lit==3||output==false
+    constraint: kind<10||kind>10||output==true
+    constraint: kind==9||kind==10||output==false
+    constraint: lit==3||kind==10||output==false
 
     optimize: time < O(n)
 }
 
 spec rust_concat_left_text {
-    doc: "The left Concat operand's final text (concat_owned_operand, src/codegen/mod.rs:622-628): when rust_concat_left_owned fires, the owned literal template (rust_string_literal_owned_text, arriving pre-rendered as 'owned_text'); otherwise the operand's own rendering, unchanged. Both parts arrive pre-rendered; which applies is the leaf check's Bool. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    doc: "The left Concat operand's final text (concat_owned_operand, src/codegen/mod.rs): when rust_concat_left_owned fires, the operand's OWNED FORM, arriving pre-rendered as 'owned_text' -- formed per shape: for a String literal, the owned literal template (rust_string_literal_owned_text, the quoted text under .to_string()); for a variable, the clone text (the variable's rendered name under .clone() -- the same text slice 4's rust_unary_text pins for the Clone operator, op 9; Phase 39). Otherwise the operand's own rendering, unchanged. Both parts arrive pre-rendered; which applies is the leaf check's Bool. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
     input: owned: Bool, rendered: String, owned_text: String
     output: String
 

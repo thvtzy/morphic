@@ -2485,14 +2485,18 @@ mod tests {
         ));
         assert_eq!(pair, "(\"a\".to_string() + \"b\")");
         // Variable-first (the Phase 25 exclaim shape): the Var
-        // already yields a String; the literal RHS stays bare,
-        // so this rendering is byte-identical to pre-fix.
+        // yields a String, but a bare rendering would MOVE it
+        // (Phase 39, E0382) — in left position it takes the
+        // owned-copy treatment, `.clone()`; the literal RHS
+        // stays bare. (Phase 29 recorded this rendering as
+        // byte-identical to pre-fix at `(inner + "!")`; the
+        // Phase 39 inventory's C-1 re-pins it.)
         let var_first = ir_to_rust_expr(&IRNode::BinOp(
             IRBinOp::Concat,
             Box::new(IRNode::Var("inner".into())),
             Box::new(IRNode::Literal(IRLiteral::String("!".into()))),
         ));
-        assert_eq!(var_first, "(inner + \"!\")");
+        assert_eq!(var_first, "(inner.clone() + \"!\")");
     }
 
     /// Discover a reachable rustc (PATH first, then the cargo
@@ -2583,7 +2587,7 @@ mod tests {
         );
         assert_eq!(
             ir_to_rust_expr(&body),
-            "((name + \": \") + &ty)"
+            "((name.clone() + \": \") + &ty)"
         );
         let cand = candidate_with(
             "param_text",

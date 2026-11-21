@@ -928,8 +928,11 @@ mod xval3 {
         // Total (the proof mirror is a plain bool function,
         // and the spec's rows decide every pair the same
         // way): owned exactly at (Literal kind 9, String
-        // lit kind 3).
-        Mirror::Bool(kind == 9 && lit == 3)
+        // lit kind 3) — and at every Var-kind (10) cell
+        // since Phase 39 (a bare variable in Concat left
+        // position moves, E0382; it takes the owned-copy
+        // treatment).
+        Mirror::Bool(kind == 10 || (kind == 9 && lit == 3))
     }
 
     fn rust_concat_left_text(owned: bool, rendered: &str, owned_text: &str) -> Mirror {
@@ -2672,12 +2675,15 @@ mod xval3 {
             // The proof file asserts the full 0..=27 x 0..=5
             // grid; the golden points are its decisive cells:
             // the one true point, a same-kind false, a
-            // same-lit false, a far corner.
+            // same-lit false, a far corner — plus, since
+            // Phase 39, a Var-kind cell (the owned set's
+            // second row).
             "rust_concat_left_owned" => vec![
                 In::IntPair(9, 3),
                 In::IntPair(9, 0),
                 In::IntPair(0, 3),
                 In::IntPair(27, 5),
+                In::IntPair(10, 0),
             ],
             // The proof assembly's Concat chain exercises
             // both branches (the owned literal; a plain

@@ -5592,6 +5592,16 @@ mod tests {
     /// `(("Vec<".to_string() + &inner) + ">")` and BOTH specs
     /// carry a compile leg below; exclaim's rendering is
     /// unchanged (a literal right operand stays a bare &str).
+    ///
+    /// Phase 39 update (re-pin E-1 of the second unfreeze
+    /// inventory): a variable in Concat left position now
+    /// takes the owned-copy treatment (`.clone()`), because
+    /// a bare rendering MOVES the variable (E0382 when it is
+    /// used again). exclaim's generated code is therefore
+    /// `(inner.clone() + "!")`; its compile leg below is
+    /// unchanged (the clone is value-transparent), and
+    /// wrap_vec's byte assertion is unchanged (its variable
+    /// sits on the right, borrowed).
     #[test]
     fn concat_equation_seed_is_verified_and_wins() {
         let src = r#"
@@ -7551,13 +7561,18 @@ spec exclaim {
         or_row(leaves)
     }
 
-    /// The nested-match body both Bool pair tables take:
-    /// `match kind { 9 => match lit { 3 => true, _ => false },
-    /// _ => false }` — the (9, 3) cell armed, its column's
-    /// remaining pinned cells on the inner wildcard, and
-    /// every other column on the outer wildcard, whose value
-    /// is the pinned fall-through value (false), NOT the
-    /// typed-literal default (Bool's menu starts at true).
+    /// The nested-match body the PARTIAL Bool pair table
+    /// (rust_match_scrutinee_bare) takes: `match kind { 9 =>
+    /// match lit { 3 => true, _ => false }, _ => false }` —
+    /// the (9, 3) cell armed, its column's remaining pinned
+    /// cells on the inner wildcard, and every other column
+    /// on the outer wildcard, whose value is the pinned
+    /// fall-through value (false), NOT the typed-literal
+    /// default (Bool's menu starts at true).
+    /// rust_concat_left_owned's body shared this shape
+    /// until Phase 39, when its spec gained the Var row:
+    /// its body carries one more arm (kind 10 → true)
+    /// before the wildcard, built inline in its test.
     fn pair_bool_table_body() -> IRNode {
         IRNode::Match {
             scrutinee: Box::new(IRNode::Var("kind".into())),
@@ -7587,13 +7602,17 @@ spec exclaim {
     }
 
     /// Pair-keyed guard table (i): rust_concat_left_owned's
-    /// rows pin true exactly at (kind 9, lit 3) and false
-    /// everywhere else — a total (kind, lit) table. The seed
-    /// must exist (kind `pair_guard_table`) as the spec's
-    /// only constraint seed, be the nested match, execute to
-    /// the spec's rule over the whole cross-validation grid,
-    /// be Verified in module context, and win module-aware
-    /// synthesis deterministically.
+    /// rows pin true exactly at (kind 9, lit 3) and at every
+    /// kind-10 (Var) cell — Phase 39 added the Var row when
+    /// the emitter's left-operand treatment grew the clone
+    /// arm — and false everywhere else: a total (kind, lit)
+    /// table. The seed must exist (kind `pair_guard_table`)
+    /// as the spec's only constraint seed, be the nested
+    /// match (the pair_bool_table_body shape plus the
+    /// kind-10 arm), execute to the spec's rule over the
+    /// whole cross-validation grid, be Verified in module
+    /// context, and win module-aware synthesis
+    /// deterministically.
     #[test]
     fn constraint_pair_guard_table_seed_for_left_owned() {
         let module = load_codegen_module();
@@ -7603,9 +7622,20 @@ spec exclaim {
         assert_eq!(seeds.len(), 1, "exactly the pair-keyed seed");
         let seed = constraint_seed(&engine, &spec, "pair_guard_table");
         assert_eq!(count_holes(&seed.body), 0);
+        // The shared pair-table shape plus the Phase 39
+        // Var arm (kind 10 → true) before the wildcard.
+        let mut expected = pair_bool_table_body();
+        if let IRNode::Match { cases, .. } = &mut expected {
+            let wildcard = cases.pop().expect("wildcard arm");
+            cases.push((
+                IRPattern::Literal(IRLiteral::Int(10)),
+                IRNode::Literal(IRLiteral::Bool(true)),
+            ));
+            cases.push(wildcard);
+        }
         assert_eq!(
             format!("{:?}", seed.body),
-            format!("{:?}", pair_bool_table_body()),
+            format!("{:?}", expected),
             "the seed must be the nested pair table"
         );
 
@@ -7622,7 +7652,9 @@ spec exclaim {
                 );
                 assert_eq!(
                     v,
-                    crate::synthesis::eval::Value::Bool(kind == 9 && lit == 3),
+                    crate::synthesis::eval::Value::Bool(
+                        kind == 10 || (kind == 9 && lit == 3)
+                    ),
                     "({kind}, {lit}) must follow the spec's table"
                 );
             }
