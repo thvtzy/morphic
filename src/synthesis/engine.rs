@@ -708,6 +708,20 @@ impl SynthesisEngine {
     ///   state — the guard table admits one parameter, the
     ///   expression-pin family requires a compound pin — so
     ///   the families never produce two seeds for one spec.
+    /// - **mixed pair-keyed guard table**: a set of rows
+    ///   guarded jointly on ONE Int parameter and ONE Bool
+    ///   parameter (the keys) whose output pins are literals
+    ///   (`position<1||position>1||last==false||output==1`)
+    ///   becomes one nested match over the keys, the pinned
+    ///   cells recovered by joint falsify-every-leaf over
+    ///   the Int span crossed with the Bool domain — cells
+    ///   no row decides stay unpinned and fall to the
+    ///   wildcard. It claims only the (Int, Bool) key
+    ///   signature no earlier family states — the guard
+    ///   table admits one parameter, the pair-keyed table
+    ///   two Int keys, the composition families Bool-domain
+    ///   leaves only — so the families never produce two
+    ///   seeds for one spec.
     ///
     /// A spec whose constraints fit neither shape gets no
     /// constraint seed and behaves exactly as before. Equations
@@ -752,6 +766,9 @@ impl SynthesisEngine {
         }
         if let Some(body) = pair_guard_table_seed_body(spec, &self.spec_index) {
             admit("pair_guard_table", body);
+        }
+        if let Some(body) = mixed_pair_guard_table_seed_body(spec, &self.spec_index) {
+            admit("mixed_pair_guard_table", body);
         }
         seeds
     }
@@ -3960,6 +3977,269 @@ fn pair_guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<
     }
 }
 
+/// One mixed pair-keyed guard row: row-shaped (see
+/// `guard_row_parts`), its guard leaves split between the
+/// Int key (parsed via `guard_leaf`) and the Bool key
+/// (parsed via `guard_leaf_bool`), and its output pin
+/// converted to an IR literal.
+struct MixedGuardRow {
+    int_leaves: Vec<(BinOp, bool, i64)>,
+    bool_leaves: Vec<(BinOp, bool, bool)>,
+    pin: IRNode,
+}
+
+/// The mixed pair-keyed guard-table body: the pair-keyed
+/// family's shape with one key of each domain — one
+/// Int-family parameter and one Bool parameter — the
+/// family the Phase 36 measurement specified for
+/// `rust_stmt_seq_form`, whose rows guard jointly on
+/// (position: Int, last: Bool) and which every earlier
+/// family refused on a stated predicate (guard_table:
+/// arity; pair_guard_table: both keys Int-family;
+/// composition/multi-guard: Bool-domain leaves only, and
+/// seq_form's rows carry Lt/Gt leaves on the Int key;
+/// expression-pin guard table: one Int key, and its
+/// territory requires a compound pin where these pins are
+/// literal).
+///
+/// Rows are recognized exactly as the guard family's rows
+/// are (see `guard_row_parts`): an Or of guard leaves plus
+/// one output pin. Every leaf must parse via `guard_leaf`
+/// against the Int key or via `guard_leaf_bool` against
+/// the Bool key, and the leaves must jointly range over
+/// BOTH keys (a one-key row set is an earlier family's
+/// shape, refused here on the two-key requirement). Every
+/// pin must convert to an `IRNode::Literal` — the pin
+/// test that keeps this family disjoint from the
+/// expression-pin guard table (it requires a compound
+/// pin) and from guarded identity (a bare-variable pin).
+/// A row-shaped postcondition deviating on any of this
+/// yields no seed at all (all rows or none); non-row
+/// postconditions are skipped as in the other guard
+/// builders.
+///
+/// The pinned cells are recovered by JOINT
+/// falsify-every-leaf over the mixed grid — the pair
+/// family's recovery with the second axis the Bool
+/// family's finite domain: the Int candidate span is the
+/// leaf constants' range widened by two on each side
+/// (outside the outermost constants every Int leaf's
+/// truth is stable, so the span endpoints double as the
+/// two unbounded tail classes), crossed with {false,
+/// true}. Rows contribute REGIONS, not single points — a
+/// band row on the Int key pins its whole band across the
+/// Bool split wherever its Bool leaves also fail. A cell
+/// is pinned exactly where every row firing there agrees
+/// on the value; rows pinning one cell to two different
+/// values are jointly inconsistent — not a table, no
+/// seed. Cells no row decides stay unpinned and fall to
+/// the wildcard: a partial table is admitted, never
+/// forced.
+///
+/// The emitted body is one nested match in the pair
+/// family's column discipline: over the Int key first
+/// (literal patterns, span order), then over the Bool key
+/// inside any column whose pinned cells disagree. A
+/// column whose pinned cells all agree renders that
+/// literal directly, and a column whose pinned cells all
+/// equal the fall-through value needs no arm at all. The
+/// wildcards carry the pinned fall-through value when the
+/// cells falling through to them are value-uniform — the
+/// outer wildcard over the tail columns and unpinned
+/// columns, the inner over the Bool cell it does not arm —
+/// else the typed-literal default. The raw builder stops
+/// at constructing the match; admission is the seed
+/// builder's step.
+fn mixed_pair_guard_table_body(spec: &FunctionSpec) -> Option<IRNode> {
+    if spec.params.len() != 2 {
+        return None;
+    }
+    // The key signature: exactly one Int-family key and
+    // exactly one Bool key, in either signature order.
+    let (int_key, bool_key) = match (
+        is_int_family(&spec.params[0].ty),
+        matches!(spec.params[0].ty, TypeRef::Bool),
+        is_int_family(&spec.params[1].ty),
+        matches!(spec.params[1].ty, TypeRef::Bool),
+    ) {
+        (true, false, false, true) => (&spec.params[0], &spec.params[1]),
+        (false, true, true, false) => (&spec.params[1], &spec.params[0]),
+        _ => return None,
+    };
+    let mut rows: Vec<MixedGuardRow> = Vec::new();
+    let mut constants: Vec<i64> = Vec::new();
+    for c in &spec.postconditions {
+        let Some((pin_side, guard_leaves)) = guard_row_parts(c) else {
+            continue; // not a row: skipped, as in the other guard builders
+        };
+        // Row-shaped: it must be a mixed pair row, or the
+        // spec states a row this body would not honor — a
+        // deviation, so no seed.
+        let pin = expr_to_ir(pin_side);
+        if !matches!(pin, IRNode::Literal(_)) {
+            return None; // the pin test: literal pins only
+        }
+        let mut int_leaves: Vec<(BinOp, bool, i64)> = Vec::new();
+        let mut bool_leaves: Vec<(BinOp, bool, bool)> = Vec::new();
+        for leaf in guard_leaves {
+            if let Some((op, on_left, constant)) = guard_leaf(leaf, &int_key.name) {
+                int_leaves.push((op, on_left, constant));
+                constants.push(constant);
+            } else if let Some((op, on_left, constant)) = guard_leaf_bool(leaf, &bool_key.name) {
+                bool_leaves.push((op, on_left, constant));
+            } else {
+                return None; // a guard leaf on neither key
+            }
+        }
+        rows.push(MixedGuardRow {
+            int_leaves,
+            bool_leaves,
+            pin,
+        });
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    // The leaves must range over both keys.
+    let uses_int = rows.iter().any(|r| !r.int_leaves.is_empty());
+    let uses_bool = rows.iter().any(|r| !r.bool_leaves.is_empty());
+    if !uses_int || !uses_bool {
+        return None;
+    }
+    // The Int candidate span (see the doc comment): the
+    // leaf constants' range widened by two on each side.
+    // Constants at the i64 extremes leave no room for the
+    // widening — refused rather than scanned wrongly.
+    let lo = constants.iter().min().copied()?.checked_sub(2)?;
+    let hi = constants.iter().max().copied()?.checked_add(2)?;
+    if (hi as i128 - lo as i128 + 1) * 2 > 100_000 {
+        return None; // a span too wide for the joint scan to state
+    }
+    // Joint falsify-every-leaf over the mixed grid (see
+    // the doc comment): a cell is pinned where every row
+    // whose guard leaves all fail there agrees on the
+    // value.
+    let mut pinned: HashMap<(i64, bool), IRNode> = HashMap::new();
+    for a in lo..=hi {
+        for b in [false, true] {
+            let mut cell: Option<&IRNode> = None;
+            for row in &rows {
+                let falsified = row
+                    .int_leaves
+                    .iter()
+                    .all(|g| !guard_leaf_holds(g, a))
+                    && row
+                        .bool_leaves
+                        .iter()
+                        .all(|g| !guard_leaf_bool_holds(g, b));
+                if falsified {
+                    match cell {
+                        None => cell = Some(&row.pin),
+                        Some(p) if literal_pin_eq(p, &row.pin) => {}
+                        Some(_) => return None, // conflicting pins: not a table
+                    }
+                }
+            }
+            if let Some(pin) = cell {
+                pinned.insert((a, b), pin.clone());
+            }
+        }
+    }
+    if pinned.is_empty() {
+        return None;
+    }
+    let default = typed_literal_fillings(&spec.return_type)?
+        .into_iter()
+        .next()?;
+    let column = |a: i64| -> Vec<(bool, &IRNode)> {
+        [false, true]
+            .into_iter()
+            .filter_map(|b| pinned.get(&(a, b)).map(|p| (b, p)))
+            .collect()
+    };
+    // The outer wildcard's value: the pinned cells that
+    // fall through to it — the tail columns and the
+    // columns no row pins — must agree on it.
+    let mut fall: Vec<&IRNode> = Vec::new();
+    for a in lo..=hi {
+        let col = column(a);
+        if a == lo || a == hi || col.is_empty() {
+            for (_, p) in col {
+                if !fall.iter().any(|q| literal_pin_eq(q, p)) {
+                    fall.push(p);
+                }
+            }
+        }
+    }
+    if fall.len() > 1 {
+        return None; // disagreeing fall-through pins: not this body's shape
+    }
+    let outer_default = fall
+        .first()
+        .map(|p| (*p).clone())
+        .unwrap_or_else(|| default.clone());
+    let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+    for a in lo..=hi {
+        if a == lo || a == hi {
+            continue; // the tail columns fall through to the wildcard
+        }
+        let col = column(a);
+        if col.is_empty() || col.iter().all(|(_, p)| literal_pin_eq(p, &outer_default)) {
+            continue; // unpinned, or the fall-through already yields its value
+        }
+        let first = col[0].1.clone();
+        let body = if col.iter().all(|(_, p)| literal_pin_eq(p, &first)) {
+            first // a constant column needs no inner match
+        } else {
+            // The column's pinned cells disagree — with a
+            // two-value Bool axis that means both cells are
+            // pinned to different values. The inner
+            // wildcard carries the false cell's pin (the
+            // fall-through value of the cell it does not
+            // arm); the true cell is armed against it.
+            let inner_default = col
+                .iter()
+                .find(|(b, _)| !*b)
+                .map(|(_, p)| (*p).clone())
+                .unwrap_or_else(|| default.clone());
+            let mut inner: Vec<(IRPattern, IRNode)> = col
+                .iter()
+                .filter(|(_, p)| !literal_pin_eq(p, &inner_default))
+                .map(|(b, p)| (IRPattern::Literal(IRLiteral::Bool(*b)), (*p).clone()))
+                .collect();
+            inner.push((IRPattern::Wildcard, inner_default));
+            IRNode::Match {
+                scrutinee: Box::new(IRNode::Var(bool_key.name.clone())),
+                cases: inner,
+            }
+        };
+        cases.push((IRPattern::Literal(IRLiteral::Int(a)), body));
+    }
+    if cases.is_empty() {
+        return None; // every pinned cell rides the wildcard: a constant, not a table
+    }
+    cases.push((IRPattern::Wildcard, outer_default));
+    Some(IRNode::Match {
+        scrutinee: Box::new(IRNode::Var(int_key.name.clone())),
+        cases,
+    })
+}
+
+/// The mixed pair-keyed guard-table seed's body: the
+/// nested match, admitted when the verifier can encode it
+/// in the module context. No call resolution step (the
+/// pair-keyed seed's admission precedent): the pins are
+/// literals, so the body contains no spec calls to
+/// resolve.
+fn mixed_pair_guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let body = mixed_pair_guard_table_body(spec)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
 /// One composition-guard row: row-shaped (see
 /// `guard_row_parts`), its guard leaves all comparing ONE
 /// guard expression against BoolLit constants and pinning a
@@ -4208,8 +4488,9 @@ impl SpecIndex {
     /// neither, its composition-guard body when it has none
     /// of those, its multi-guard truth-table body when it
     /// has none of those either, its expression-pin
-    /// guard-table body when it has none of those, or its pair-keyed
-    /// guard-table body when it has none of those. The body
+    /// guard-table body when it has none of those, its pair-keyed
+    /// guard-table body when it has none of those, or its mixed
+    /// pair-keyed guard-table body when it has none of those. The body
     /// is NOT call-resolved — it may itself contain calls;
     /// resolving those is the consumer's step, under the
     /// consumer's cycle/depth guard.
@@ -4222,6 +4503,7 @@ impl SpecIndex {
             .or_else(|| multi_guard_body(spec, self))
             .or_else(|| expr_pin_guard_body(spec, self))
             .or_else(|| pair_guard_table_body(spec))
+            .or_else(|| mixed_pair_guard_table_body(spec))
     }
 
     /// IR-level inlining: replace every call to an indexed
@@ -6262,7 +6544,14 @@ spec exclaim {
     /// unchanged — the recovery materializes arms only for
     /// cells the old builder dropped, and the survey diff
     /// over every spec's resolver-visible body shows exactly
-    /// the three corrections and nothing else.
+    /// the three corrections and nothing else. Phase 38
+    /// extends it with the mixed pair-keyed guard-table
+    /// body (rust_stmt_seq_form): 41 Codegen bodies, 55
+    /// total — the 54 prior bodies are asserted
+    /// byte-identical below, unchanged, which is also the
+    /// proof that the eighth family claims only the
+    /// (Int, Bool) key signature and moves no earlier
+    /// family's body.
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -6275,7 +6564,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 54, "40 Codegen + 14 M2 golden bodies");
+        assert_eq!(expected.len(), 55, "41 Codegen + 14 M2 golden bodies");
         for file in ["validator", "printer", "codegen"] {
             let module = load_m2_module(file);
             let index = SpecIndex::from_specs(&module);
@@ -7893,6 +8182,448 @@ spec exclaim {
             assert!(
                 plain().seed_from_constraints(spec).is_empty(),
                 "{}: near-miss shape must get no constraint seed",
+                spec.name
+            );
+        }
+    }
+
+    // ── Phase 38: mixed pair-keyed guard tables ─────────
+    //
+    // The Phase 36 measurement's item (d): rust_stmt_seq_
+    // form's rows range jointly over an Int key and a Bool
+    // key — a mixed two-key table every admitted family
+    // refused on a stated predicate (guard_table: arity;
+    // pair_guard_table: both keys Int-family; composition
+    // and multi-guard: Bool-domain leaves only, and the
+    // rows carry Lt/Gt leaves on the Int key; expression-
+    // pin guard table: one Int key, and its territory
+    // requires a compound pin where these pins are
+    // literal). Its pools held zero Verified candidates in
+    // 60 draws; the winners were Inconclusive lotteries
+    // missing single cells. The eighth family states the
+    // shape directly: joint falsify-every-leaf over the
+    // Int span crossed with the Bool domain, rows
+    // contributing regions, literal pins only.
+
+    /// The nested-match body rust_stmt_seq_form's table
+    /// takes: `match position { 1 => match last { true =>
+    /// 1, _ => 0 }, _ => 0 }` — the (1, true) cell armed
+    /// through the inner match, every other cell on the
+    /// wildcards, which carry the pinned fall-through
+    /// value 0.
+    fn mixed_seq_form_body() -> IRNode {
+        IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("position".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(1)),
+                    IRNode::Match {
+                        scrutinee: Box::new(IRNode::Var("last".into())),
+                        cases: vec![
+                            (
+                                IRPattern::Literal(IRLiteral::Bool(true)),
+                                IRNode::Literal(IRLiteral::Int(1)),
+                            ),
+                            (
+                                IRPattern::Wildcard,
+                                IRNode::Literal(IRLiteral::Int(0)),
+                            ),
+                        ],
+                    },
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Int(0)),
+                ),
+            ],
+        }
+    }
+
+    /// Mixed pair-keyed guard table (i): rust_stmt_seq_
+    /// form's rows pin 1 exactly at (position 1, last
+    /// true) and 0 everywhere else — a total (Int, Bool)
+    /// table. The seed must exist (kind
+    /// `mixed_pair_guard_table`) as the spec's only
+    /// constraint seed, be the nested match, execute to
+    /// the spec's rule over the cross-validation sweep,
+    /// be Verified in module context, and win module-aware
+    /// synthesis deterministically.
+    #[test]
+    fn constraint_mixed_pair_guard_table_seed_for_seq_form() {
+        let module = load_codegen_module();
+        let spec = module_spec(&module, "rust_stmt_seq_form");
+        let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the mixed pair-keyed seed");
+        let seed = constraint_seed(&engine, &spec, "mixed_pair_guard_table");
+        assert_eq!(count_holes(&seed.body), 0);
+        assert_eq!(
+            format!("{:?}", seed.body),
+            format!("{:?}", mixed_seq_form_body()),
+            "the seed must be the nested mixed table"
+        );
+
+        // Executed over the whole sweep the
+        // cross-validation harness uses: positions -2..=3
+        // crossed with the full Bool domain (12 cases).
+        for position in -2..=3 {
+            for last in [false, true] {
+                let v = eval_seed_body(
+                    &seed.body,
+                    &[
+                        ("position", crate::synthesis::eval::Value::Int(position)),
+                        ("last", crate::synthesis::eval::Value::Bool(last)),
+                    ],
+                );
+                assert_eq!(
+                    v,
+                    crate::synthesis::eval::Value::Int(if position == 1 && last {
+                        1
+                    } else {
+                        0
+                    }),
+                    "({position}, {last}) must follow the spec's table"
+                );
+            }
+        }
+
+        let verifier = crate::verify::verifier::Verifier::with_specs(&module);
+        let result = verifier.verify_one(&seed, &spec);
+        assert_eq!(result.status, VerificationStatus::Verified);
+
+        // Deterministic across draws: the same winning
+        // body in three independent synthesis runs.
+        for _ in 0..3 {
+            let pool = synthesize_with_module(&spec, 1, &module)
+                .expect("opt-1 synthesis must succeed");
+            let verified = verifier.verify_all(pool, &spec).expect("verify_all");
+            let winner =
+                crate::synthesis::selector::select_best(verified, &spec).expect("select_best");
+            assert!(winner.verified, "the mixed pair-keyed seed must win verified");
+            assert_eq!(
+                format!("{:?}", winner.body),
+                format!("{:?}", seed.body),
+                "the winning body must be the mixed pair-keyed seed in every draw"
+            );
+        }
+    }
+
+    /// Mixed pair-keyed guard table (ii): synthetic
+    /// shapes — a BAND row on the Int key pinning its
+    /// whole band across the Bool split (region recovery
+    /// working through the mixed grid), and a PARTIAL
+    /// table: no row decides the position <= 0 columns, so
+    /// they fall to the wildcard, which carries the
+    /// pinned fall-through value (the band's 7, from the
+    /// tail column) rather than the typed default.
+    #[test]
+    fn constraint_mixed_pair_guard_table_seed_synthetic_shapes() {
+        // (n >= 2, *) -> 7 by the band row; (1, true) -> 5
+        // and (1, false) -> 3 by the two mixed cell rows;
+        // (n <= 0, *) undecided — the wildcard's guess.
+        let spec = guard_spec(
+            "mixed_band_partial",
+            vec![("n", TypeRef::Int), ("flag", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![
+                pair_row(vec![cmp_leaf("n", BinOp::Lt, 2)], Expr::IntLit(7)),
+                pair_row(
+                    vec![
+                        cmp_leaf("n", BinOp::Lt, 1),
+                        cmp_leaf("n", BinOp::Gt, 1),
+                        eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                    ],
+                    Expr::IntLit(5),
+                ),
+                pair_row(
+                    vec![
+                        cmp_leaf("n", BinOp::Lt, 1),
+                        cmp_leaf("n", BinOp::Gt, 1),
+                        eq_expr(var_expr("flag"), Expr::BoolLit(true)),
+                    ],
+                    Expr::IntLit(3),
+                ),
+            ],
+        );
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the mixed pair-keyed seed");
+        let seed = constraint_seed(&engine, &spec, "mixed_pair_guard_table");
+        for (n, flag, want) in [
+            (3, true, 7),
+            (2, false, 7),
+            (9, true, 7),
+            (1, true, 5),
+            (1, false, 3),
+            (0, true, 7), // unpinned: the wildcard's documented guess
+            (0, false, 7),
+            (-4, false, 7),
+        ] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("n", crate::synthesis::eval::Value::Int(n)),
+                    ("flag", crate::synthesis::eval::Value::Bool(flag)),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want),
+                "({n}, {flag}) must follow the table (band + cells; <= 0 unpinned)"
+            );
+        }
+
+        // The key signature is by TYPE, not position: the
+        // same table with the Bool parameter first still
+        // takes the nested match over the Int key.
+        let spec = guard_spec(
+            "mixed_reversed_signature",
+            vec![("flag", TypeRef::Bool), ("n", TypeRef::Int)],
+            TypeRef::Int,
+            vec![
+                pair_row(
+                    vec![
+                        cmp_leaf("n", BinOp::Lt, 1),
+                        cmp_leaf("n", BinOp::Gt, 1),
+                        eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                    ],
+                    Expr::IntLit(1),
+                ),
+                pair_row(
+                    vec![eq_expr(var_expr("n"), Expr::IntLit(1))],
+                    Expr::IntLit(0),
+                ),
+                pair_row(
+                    vec![eq_expr(var_expr("flag"), Expr::BoolLit(true))],
+                    Expr::IntLit(0),
+                ),
+            ],
+        );
+        let seeds = engine.seed_from_constraints(&spec);
+        assert_eq!(seeds.len(), 1, "exactly the mixed pair-keyed seed");
+        let seed = constraint_seed(&engine, &spec, "mixed_pair_guard_table");
+        match &seed.body {
+            IRNode::Match { scrutinee, .. } => {
+                assert_eq!(
+                    format!("{:?}", scrutinee),
+                    format!("{:?}", IRNode::Var("n".into())),
+                    "the outer match is over the Int key regardless of signature order"
+                );
+            }
+            other => panic!("the seed must be a match, got {other:?}"),
+        }
+        for (n, flag, want) in [(1, true, 1), (1, false, 0), (0, true, 0), (5, false, 0)] {
+            let v = eval_seed_body(
+                &seed.body,
+                &[
+                    ("flag", crate::synthesis::eval::Value::Bool(flag)),
+                    ("n", crate::synthesis::eval::Value::Int(n)),
+                ],
+            );
+            assert_eq!(
+                v,
+                crate::synthesis::eval::Value::Int(want),
+                "({n}, {flag}) must follow the table"
+            );
+        }
+    }
+
+    /// Mixed pair-keyed guard table (iii): near misses.
+    /// Each shape is refused on a stated predicate — the
+    /// key signature (two Int keys are the pair family's,
+    /// two Bool keys the multi-guard family's), the
+    /// two-key requirement (one-key row sets belong to the
+    /// earlier families), the pin test (a compound pin is
+    /// the expression-pin family's shape, spanning one
+    /// key only; a pin converting through a Hole is not a
+    /// literal), joint consistency, and arity (a third
+    /// parameter, or a leaf on a parameter that is not a
+    /// key, is outside the family).
+    #[test]
+    fn constraint_mixed_pair_guard_table_near_misses() {
+        let plain = || SynthesisEngine::new(SynthesisConfig::default());
+
+        // Shapes NO family states: the whole seed set is
+        // empty.
+        let mut empty_cases: Vec<FunctionSpec> = Vec::new();
+
+        // Rows over the Int key only, at (Int, Bool)
+        // arity: the guard table's arity is one and this
+        // family requires both keys.
+        empty_cases.push(guard_spec(
+            "mixed_int_key_only",
+            vec![("n", TypeRef::Int), ("flag", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![
+                int_key_row("n", 0, Expr::IntLit(1)),
+                int_key_row("n", 1, Expr::IntLit(2)),
+            ],
+        ));
+
+        // Mixed rows with a compound pin: the
+        // expression-pin family's pin shape, but its key
+        // discipline is one key — no family states this.
+        empty_cases.push(guard_spec(
+            "mixed_compound_pin",
+            vec![("n", TypeRef::Int), ("flag", TypeRef::Bool)],
+            TypeRef::String,
+            vec![pair_row(
+                vec![
+                    cmp_leaf("n", BinOp::Lt, 1),
+                    cmp_leaf("n", BinOp::Gt, 1),
+                    eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                ],
+                concat_pin(var_expr("n"), "!"),
+            )],
+        ));
+
+        // Two rows pinning one cell to different values:
+        // (1, true) is 5 by the cell row and 6 by the
+        // flag-only row — jointly inconsistent, not a
+        // table.
+        empty_cases.push(guard_spec(
+            "mixed_conflict",
+            vec![("n", TypeRef::Int), ("flag", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![
+                pair_row(
+                    vec![
+                        cmp_leaf("n", BinOp::Lt, 1),
+                        cmp_leaf("n", BinOp::Gt, 1),
+                        eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                    ],
+                    Expr::IntLit(5),
+                ),
+                pair_row(
+                    vec![eq_expr(var_expr("flag"), Expr::BoolLit(false))],
+                    Expr::IntLit(6),
+                ),
+            ],
+        ));
+
+        // A pin converting through a Hole (a Length has
+        // no literal IR form): not a literal pin.
+        empty_cases.push(guard_spec(
+            "mixed_hole_pin",
+            vec![("n", TypeRef::Int), ("flag", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![pair_row(
+                vec![
+                    cmp_leaf("n", BinOp::Lt, 1),
+                    cmp_leaf("n", BinOp::Gt, 1),
+                    eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                ],
+                Expr::Length(Box::new(var_expr("n"))),
+            )],
+        ));
+
+        for spec in &empty_cases {
+            assert!(
+                plain().seed_from_constraints(spec).is_empty(),
+                "{}: near-miss shape must get no constraint seed",
+                spec.name
+            );
+            assert!(
+                mixed_pair_guard_table_body(spec).is_none(),
+                "{}: the mixed builder itself must refuse it",
+                spec.name
+            );
+        }
+
+        // Shapes another family rightfully claims, or
+        // that fall outside the signature: the MIXED
+        // builder refuses them (its own predicate), which
+        // is the disjointness statement.
+        let mut refused_cases: Vec<FunctionSpec> = Vec::new();
+
+        // Two Int keys: the pair family's signature.
+        refused_cases.push(guard_spec(
+            "mixed_two_int_keys",
+            vec![("a", TypeRef::Int), ("b", TypeRef::Int)],
+            TypeRef::Int,
+            vec![pair_row(
+                vec![
+                    cmp_leaf("a", BinOp::Lt, 1),
+                    cmp_leaf("b", BinOp::Lt, 2),
+                ],
+                Expr::IntLit(1),
+            )],
+        ));
+
+        // Two Bool keys: the multi-guard family's
+        // signature.
+        refused_cases.push(guard_spec(
+            "mixed_two_bool_keys",
+            vec![("f", TypeRef::Bool), ("g", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![pair_row(
+                vec![
+                    eq_expr(var_expr("f"), Expr::BoolLit(false)),
+                    eq_expr(var_expr("g"), Expr::BoolLit(true)),
+                ],
+                Expr::IntLit(1),
+            )],
+        ));
+
+        // Rows over the Bool key only: an earlier
+        // family's shape (the composition family's
+        // precedence territory), refused here on the
+        // two-key requirement.
+        refused_cases.push(guard_spec(
+            "mixed_bool_key_only",
+            vec![("n", TypeRef::Int), ("flag", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![
+                pair_row(
+                    vec![eq_expr(var_expr("flag"), Expr::BoolLit(false))],
+                    Expr::IntLit(1),
+                ),
+                pair_row(
+                    vec![eq_expr(var_expr("flag"), Expr::BoolLit(true))],
+                    Expr::IntLit(0),
+                ),
+            ],
+        ));
+
+        // Three parameters: beyond the pair, whatever
+        // the rows range over.
+        refused_cases.push(guard_spec(
+            "mixed_three_params",
+            vec![
+                ("n", TypeRef::Int),
+                ("flag", TypeRef::Bool),
+                ("m", TypeRef::Int),
+            ],
+            TypeRef::Int,
+            vec![pair_row(
+                vec![
+                    cmp_leaf("n", BinOp::Lt, 1),
+                    eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                ],
+                Expr::IntLit(1),
+            )],
+        ));
+
+        // A guard leaf on a variable that is not a key:
+        // a deviation, not a skippable leaf.
+        refused_cases.push(guard_spec(
+            "mixed_leaf_on_third_var",
+            vec![("n", TypeRef::Int), ("flag", TypeRef::Bool)],
+            TypeRef::Int,
+            vec![pair_row(
+                vec![
+                    cmp_leaf("n", BinOp::Lt, 1),
+                    cmp_leaf("other", BinOp::Lt, 2),
+                    eq_expr(var_expr("flag"), Expr::BoolLit(false)),
+                ],
+                Expr::IntLit(1),
+            )],
+        ));
+
+        for spec in &refused_cases {
+            assert!(
+                mixed_pair_guard_table_body(spec).is_none(),
+                "{}: the mixed builder must refuse this key discipline",
                 spec.name
             );
         }
@@ -9817,3 +10548,4 @@ spec exclaim {
         );
     }
 }
+
