@@ -1,19 +1,20 @@
 // ─────────────────────────────────────────────────────────────
-//  M3 CROSS-VALIDATION HARNESS (test-only) — slices 1–5
-//  (Phase 40 scoping: the module now declares 112 specs —
-//  slice 6's 6 driver specs are specced + mirrored in
-//  tests/m3_proof.rs but NOT yet swept here; extending the
-//  sweeps to slice 6 belongs to its measurement phase.
-//  The seed-shape diagnostic below already counts 112.)
+//  M3 CROSS-VALIDATION HARNESS (test-only) — slices 1–6
+//  (Phase 41: the sweeps now cover all 112 specs — slice
+//  6's 6 driver specs extended here from their mirrors in
+//  tests/m3_proof.rs, on the Phase 31/36 pattern. The
+//  seed-shape diagnostic below counts 112 since Phase 40.)
 //
 //  Generalizes the M2 cross-validation harness
 //  (src/m2_cross_validation.rs) to the Codegen module. For
-//  every one of the 106 specs in
+//  every one of the 112 specs in
 //  examples/self_host/codegen.morph (slice 1: 8 leaf mappings;
 //  slice 2: 20 small template families; slice 3: 16 name/text
 //  assembly specs; slice 4: 35 expression-walker specs;
 //  slice 5: 27 statement-walker specs — 7 classifications
-//  and 20 templates) this
+//  and 20 templates; slice 6: 6 driver specs — the dispatch
+//  table, the result form, the error text, the doc-header
+//  assembly, the section rule, the whole-file equation) this
 //  harness runs the
 //  real pipeline at opt level 1 — parse → typecheck →
 //  synthesize_with_module → Z3 verify_all (module-aware) →
@@ -76,7 +77,19 @@
 //         comment); and the 20 templates over batteries of
 //         pad strings and pre-rendered statement/part texts
 //         (the proof file's stmt_templates assertions ride
-//         the batteries as golden cases).
+//         the batteries as golden cases). For slice 6:
+//         rust_target_route over a 23-name battery (the
+//         seven pinned names plus off-table names — case
+//         and whitespace variants, near names, the empty
+//         name, other languages — every one pinned by the
+//         catch-all row); rust_target_result_form over the
+//         same Int band (routes 0..=6 pinned, the rest of
+//         the band silent); and the error text, doc header,
+//         section rule and whole-file equation over
+//         batteries of names, pre-joined doc-line blocks,
+//         (flag, text) pairs and pre-rendered section
+//         tuples (the equations are total, so every battery
+//         case is pinned).
 //
 //  Pinned vs spec-silent is defined by the SPEC's constraints
 //  (the Phase 23 rule, generalizing slice 1's partial-table
@@ -163,6 +176,30 @@
 //  partial tables (the two affixes, expectation_source,
 //  child_indent) pin exactly their stated rows and are
 //  spec-silent elsewhere in the band, as in slices 1–2.
+//
+//  Slice 6 adds two bookkeeping shapes. (i)
+//  rust_target_route is TOTAL, and its totality is the
+//  catch-all kind: the seven equality rows pin the named
+//  targets, and the eighth row (the disjunction of the
+//  seven names, negated) pins 6 for EVERY other string —
+//  so under the pinned-by-constraint rule the whole
+//  23-name battery is pinned, off-table names included.
+//  The proof mirror is total the same way (a plain match
+//  with a `_ => 6` fallback), so — unlike the slice-4/5
+//  stated-domain extensions — the two mirror sets do not
+//  diverge even in stated domain. rust_target_result_form
+//  is the partial counterpart: routes 0..=6 pinned, the
+//  rest of the band spec-silent (the proof mirror's None
+//  rows). (ii) The assembly specs are judged per spec
+//  over pre-rendered section batteries, as in slices
+//  3–5: rust_file_text's battery includes whole-file-
+//  shaped section tuples (a doc header + signature +
+//  body file; a precondition block + test module file) —
+//  the harness-level form of the proof assembly's
+//  end-to-end golden. Composing the six WINNERS into a
+//  codegen and byte-comparing its output is the gate
+//  phase's work; this harness's machinery executes one
+//  spec's winner at a time and does not compose them.
 //
 //  The assembly mirrors of tests/m3_proof.rs
 //  (composed behavior: nested types, joined patterns,
@@ -1406,6 +1443,85 @@ mod xval3 {
         Mirror::Owned(format!("{}{}", rest, last))
     }
 
+    // ── Slice-6 mirrors (same copying rule) ───────────────
+    //
+    //  Divergence audit against tests/m3_proof.rs:
+    //  rust_target_route's proof mirror is TOTAL (a plain
+    //  i64 with the `_ => 6` fallback) and the spec is
+    //  total the same way — its catch-all row pins 6 for
+    //  every name outside the seven — so this copy states
+    //  every swept string as pinned; there is no silent
+    //  region to book. rust_target_result_form's proof
+    //  Option::None rows (route codes outside 0..=6) become
+    //  Mirror::Unpinned, as documented in the module
+    //  header. The two assembly mirrors compose the local
+    //  rust_file_fixed_text mirror exactly as the proof
+    //  composes its counterpart (pieces 0 and 1 are
+    //  Mirror::Text there and here, so the composition
+    //  never abstains).
+
+    fn rust_target_route(target: &str) -> Mirror {
+        Mirror::Int(match target {
+            "rust" => 0,
+            "c" => 1,
+            "wasm" => 2,
+            "python" => 3,
+            "javascript" | "js" => 4,
+            "ir" => 5,
+            _ => 6,
+        })
+    }
+
+    fn rust_target_result_form(route: i64) -> Mirror {
+        match route {
+            0..=5 => Mirror::Int(0),
+            6 => Mirror::Int(1),
+            _ => Mirror::Unpinned,
+        }
+    }
+
+    fn rust_unsupported_target_text(target: &str) -> Mirror {
+        Mirror::Owned(format!("Unsupported target language: {}", target))
+    }
+
+    fn rust_doc_header_text(lines: &str) -> Mirror {
+        // The blank line is rust_file_fixed_text piece 1,
+        // composed here exactly as the proof composes it.
+        match rust_file_fixed_text(1) {
+            Mirror::Text(blank) => {
+                Mirror::Owned(format!("{}{}", lines, blank))
+            }
+            _ => unreachable!("piece 1 is a fixed text"),
+        }
+    }
+
+    fn rust_driver_section_text(present: bool, text: &str) -> Mirror {
+        Mirror::Owned(if present {
+            text.to_string()
+        } else {
+            String::new()
+        })
+    }
+
+    fn rust_file_text(
+        header: &str,
+        pre_block: &str,
+        signature: &str,
+        body: &str,
+        test_module: &str,
+    ) -> Mirror {
+        // The closing brace is rust_file_fixed_text
+        // piece 0, composed here exactly as the proof
+        // composes it.
+        match rust_file_fixed_text(0) {
+            Mirror::Text(brace) => Mirror::Owned(format!(
+                "{}{}{}{}{}{}",
+                header, pre_block, signature, body, brace, test_module
+            )),
+            _ => unreachable!("piece 0 is a fixed text"),
+        }
+    }
+
     fn mirror(spec: &str, input: &In) -> Mirror {
         match (spec, input) {
             ("rust_type_name", In::Int(a)) => rust_type_name(*a),
@@ -1582,6 +1698,21 @@ mod xval3 {
             ("rust_tail_block_text", In::StrPair(r, l)) => {
                 rust_tail_block_text(r, l)
             }
+            // ── slice 6 ──
+            ("rust_target_route", In::Text(s)) => rust_target_route(s),
+            ("rust_target_result_form", In::Int(a)) => {
+                rust_target_result_form(*a)
+            }
+            ("rust_unsupported_target_text", In::Text(s)) => {
+                rust_unsupported_target_text(s)
+            }
+            ("rust_doc_header_text", In::Text(s)) => rust_doc_header_text(s),
+            ("rust_driver_section_text", In::BoolStr(p, t)) => {
+                rust_driver_section_text(*p, t)
+            }
+            ("rust_file_text", In::Str5(h, p, s, b, t)) => {
+                rust_file_text(h, p, s, b, t)
+            }
             _ => panic!("no mirror for spec {} with input {:?}", spec, input),
         }
     }
@@ -1636,7 +1767,7 @@ mod xval3 {
     /// whole module and the grand totals below are module
     /// totals. Phase 36: slice 5's 27 statement-walker specs
     /// join — 106 in total.)
-    const ALL_SPECS: [&str; 106] = [
+    const ALL_SPECS: [&str; 112] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -1745,13 +1876,20 @@ mod xval3 {
         "rust_stmt_expr_text",
         "rust_tail_expr_text",
         "rust_tail_block_text",
+        // ── slice 6 ──
+        "rust_target_route",
+        "rust_target_result_form",
+        "rust_unsupported_target_text",
+        "rust_doc_header_text",
+        "rust_driver_section_text",
+        "rust_file_text",
     ];
 
     /// The Int-code specs swept over the full -2..=30 band
     /// (every spec whose single input is an Int code: 7 from
     /// slice 1, 18 from slice 2, 2 from slice 3, 4 from
-    /// slice 4, 6 from slice 5).
-    const INT_BAND_SPECS: [&str; 37] = [
+    /// slice 4, 6 from slice 5, 1 from slice 6).
+    const INT_BAND_SPECS: [&str; 38] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -1791,6 +1929,8 @@ mod xval3 {
         "rust_stmt_collection_suffix",
         "rust_expectation_source",
         "rust_stmt_child_indent",
+        // ── slice 6 ──
+        "rust_target_result_form",
     ];
 
     /// Constructor names for the rust_pattern_ctor_name grid:
@@ -2249,6 +2389,92 @@ mod xval3 {
             .collect()
     }
 
+    // ── Slice-6 sweep batteries ────────────────────────────
+
+    /// Target names for rust_target_route: the seven
+    /// pinned names, then off-table names — case variants,
+    /// whitespace variants, near names, the empty name,
+    /// other languages. The spec's catch-all row pins 6
+    /// for EVERY off-table name, so all 23 cases are
+    /// pinned (see the module header's slice-6 note).
+    const TARGET_NAMES: [&str; 23] = [
+        "rust",
+        "c",
+        "wasm",
+        "python",
+        "javascript",
+        "js",
+        "ir",
+        "java",
+        "Rust",
+        "JS",
+        "rs",
+        "",
+        "rust ",
+        " rust",
+        "c++",
+        "j",
+        "C",
+        "WASM",
+        "Python",
+        "JavaScript",
+        "IR",
+        "rust2",
+        "go",
+    ];
+
+    /// Target names for rust_unsupported_target_text (the
+    /// equation is total: every case pinned). The first
+    /// three are the proof file's golden assertions.
+    const ERROR_TEXT_INPUTS: [&str; 6] =
+        ["java", "", "my lang!", "rust", "JS", "some target"];
+
+    /// Pre-joined doc-line blocks for rust_doc_header_text
+    /// (the equation is total: every case pinned): the
+    /// empty block (a Some("") doc's header), one line,
+    /// two lines, one empty doc line.
+    const HEADER_INPUTS: [&str; 4] =
+        ["", "//! Sorts a list\n", "//! One\n//! Two\n", "//! \n"];
+
+    /// (present, text) cases for rust_driver_section_text:
+    /// the proof file's four assertions — the complete
+    /// flag x {empty, non-empty} shape (both rows decide
+    /// every pair: the spec is total).
+    const SECTION_CASES: [(bool, &str); 4] = [
+        (true, "X"),
+        (false, "X"),
+        (true, ""),
+        (false, ""),
+    ];
+
+    /// (header, pre_block, signature, body, test_module)
+    /// cases for rust_file_text (the equation is total:
+    /// every case pinned). The first two are the proof
+    /// file's marker assertions; the last two are
+    /// whole-file-shaped assemblies over realistic
+    /// pre-rendered sections — the harness-level form of
+    /// the proof assembly's end-to-end files (composing
+    /// WINNERS across specs is the gate phase's work, not
+    /// this harness's machinery; see the module header).
+    const FILE_CASES: [(&str, &str, &str, &str, &str); 4] = [
+        ("H", "P", "S", "B", "T"),
+        ("", "", "S", "B", ""),
+        (
+            "//! Doc\n\n",
+            "",
+            "pub fn f(x: i64) -> i64 {\n",
+            "    x\n",
+            "",
+        ),
+        (
+            "",
+            "#[cfg(debug_assertions)]\n{\n    debug_assert!(x > 0, \"Precondition violated\");\n}\n\n",
+            "pub fn g(x: i64) -> i64 {\n",
+            "    x\n",
+            "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n}\n",
+        ),
+    ];
+
     fn sweep(spec: &str) -> Vec<In> {
         match spec {
             "rust_keyword" => KEYWORD_POSITIVES
@@ -2492,6 +2718,24 @@ mod xval3 {
             "rust_tail_block_text" => TAIL_BLOCK_PAIRS
                 .iter()
                 .map(|(r, l)| In::StrPair(r, l))
+                .collect(),
+            // ── slice 6 ──
+            "rust_target_route" => {
+                TARGET_NAMES.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_unsupported_target_text" => {
+                ERROR_TEXT_INPUTS.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_doc_header_text" => {
+                HEADER_INPUTS.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_driver_section_text" => SECTION_CASES
+                .iter()
+                .map(|(p, t)| In::BoolStr(*p, t))
+                .collect(),
+            "rust_file_text" => FILE_CASES
+                .iter()
+                .map(|(h, p, s, b, t)| In::Str5(h, p, s, b, t))
                 .collect(),
             "rust_test_module" => MODULE_INPUTS.iter().map(|s| In::Text(s)).collect(),
             s if INT_BAND_SPECS.contains(&s) => (-2..=30).map(In::Int).collect(),
@@ -2864,6 +3108,47 @@ mod xval3 {
             }
             "rust_tail_expr_text" => vec![In::StrPair("    ", "x")],
             "rust_tail_block_text" => vec![In::StrPair("a;\n", "b\n")],
+            // ── slice 6 ──
+            // tests: rust-route, c-route, wasm-route,
+            // python-route, javascript-route, js-route,
+            // ir-route, unknown-route ("java"), case-route
+            // ("Rust"), empty-route ("")
+            "rust_target_route" => vec![
+                In::Text("rust"),
+                In::Text("c"),
+                In::Text("wasm"),
+                In::Text("python"),
+                In::Text("javascript"),
+                In::Text("js"),
+                In::Text("ir"),
+                In::Text("java"),
+                In::Text("Rust"),
+                In::Text(""),
+            ],
+            // tests: rust-ok 0, ir-ok 5, unsupported-err 6
+            "rust_target_result_form" => ints(&[0, 5, 6]),
+            // tests: error-text ("java"), error-empty ("");
+            // plus the proof file's verbatim assertion
+            // ("my lang!")
+            "rust_unsupported_target_text" => {
+                vec![In::Text("java"), In::Text(""), In::Text("my lang!")]
+            }
+            // tests: header-one-line, header-no-lines
+            "rust_doc_header_text" => {
+                vec![In::Text("//! Sorts a list\n"), In::Text("")]
+            }
+            // No in-spec tests (multi-input spec); the
+            // proof file's four assertions.
+            "rust_driver_section_text" => SECTION_CASES
+                .iter()
+                .map(|(p, t)| In::BoolStr(*p, t))
+                .collect(),
+            // No in-spec tests (multi-input spec); the
+            // proof file's two marker assertions.
+            "rust_file_text" => vec![
+                In::Str5("H", "P", "S", "B", "T"),
+                In::Str5("", "", "S", "B", ""),
+            ],
             _ => panic!("no golden cases defined for spec {}", spec),
         }
     }
@@ -3461,7 +3746,7 @@ mod xval3 {
     // ─────────────────────────────────────────────────────────
 
     #[test]
-    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 106 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
+    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 112 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
     fn m3_cross_validation() {
         let root = env!("CARGO_MANIFEST_DIR");
         let out_dir = format!("{}/target/m3-synthesis", root);
@@ -3474,9 +3759,9 @@ mod xval3 {
         let functions = checked.spec.functions.clone();
 
         let mut md = String::new();
-        let _ = writeln!(md, "# M3 cross-validation (slices 1–5): synthesized winners vs tests/m3_proof.rs mirrors");
+        let _ = writeln!(md, "# M3 cross-validation (slices 1–6): synthesized winners vs tests/m3_proof.rs mirrors");
         let _ = writeln!(md);
-        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the complete finite domain (Int codes -2..=30 for the 37 Int-code specs; rust_keyword: 51 positives + 24 near-miss negatives; rust_literal_bool and rust_test_name_form: the full Bool domain; rust_pattern_ctor_name: 7 names × has_subs; slice 3: rust_string_ownership over the full -2..=30 × -2..=30 cross product, the `++` equation templates over string batteries, rust_ident_suffix over its sanitized-string contract domain plus out-of-contract names reported separately; slice 4: the (kind, lit) code specs over the full 33 × 11 grid, rust_match_scrutinee_form over the full Bool × Bool domain, the walker templates over batteries of pre-rendered child texts incl. composed two-level inputs; slice 5: the six statement classifications over the same band, rust_stmt_seq_form over positions -2..=3 × the full Bool domain, the statement/tail templates over batteries of pad strings and pre-rendered statement parts). See src/m3_cross_validation.rs for sweep definitions and mirror semantics: a case is pinned exactly where the spec's constraints decide it.");
+        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware) → select_best → codegen (rust), then the winner is compiled with rustc and EXECUTED over the complete finite domain (Int codes -2..=30 for the 38 Int-code specs; rust_keyword: 51 positives + 24 near-miss negatives; rust_literal_bool and rust_test_name_form: the full Bool domain; rust_pattern_ctor_name: 7 names × has_subs; slice 3: rust_string_ownership over the full -2..=30 × -2..=30 cross product, the `++` equation templates over string batteries, rust_ident_suffix over its sanitized-string contract domain plus out-of-contract names reported separately; slice 4: the (kind, lit) code specs over the full 33 × 11 grid, rust_match_scrutinee_form over the full Bool × Bool domain, the walker templates over batteries of pre-rendered child texts incl. composed two-level inputs; slice 5: the six statement classifications over the same band, rust_stmt_seq_form over positions -2..=3 × the full Bool domain, the statement/tail templates over batteries of pad strings and pre-rendered statement parts; slice 6: rust_target_route over a 23-name battery (seven pinned names + off-table names, all pinned by the catch-all row), rust_target_result_form over the same band (routes 0..=6 pinned), the driver text/assembly specs over batteries of names, doc-line blocks, (flag, text) pairs and pre-rendered section tuples). See src/m3_cross_validation.rs for sweep definitions and mirror semantics: a case is pinned exactly where the spec's constraints decide it.");
         let _ = writeln!(md, "A winner that fails to compile/run counts as total disagreement for that run (exec FAIL) — except a rustc failure at the emitter's rendering layer (the families measured in Phases 25/27/28 and fixed in Phase 29: E0369 Concat-operand ownership; E0308 string-boundary rendering; parse-level unescaped-literal failures; plus the fourth family measured in Phase 36 and fixed in Phase 39: E0382, a String variable moved by Concat's rendered `+` when a template repeats it in one chain), which is recorded as COMPILE_EDGE: not executed, not a behavioral disagreement. Spec-silent (unpinned) cases are reported separately and never counted as disagreements; out-of-contract cases (rust_ident_suffix) are reported separately and counted in no bucket.");
         let _ = writeln!(md);
         let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 verified | Winner prov | Golden agree | Sweep pinned agree | Unpinned cases | Exec |");
@@ -3821,10 +4106,15 @@ mod xval3 {
     /// composed rust_stmt_collection_text pins exactly
     /// the affixes' kinds (5 of its 6 battery cases), and
     /// the remaining templates are total equations over
-    /// their batteries).
+    /// their batteries; slice 6: rust_target_route is
+    /// total over its 23-name battery (the catch-all row
+    /// pins every off-table name), rust_target_result_form
+    /// pins exactly routes 0..=6 (7 of its 33 band cases),
+    /// and the remaining four are total equations /
+    /// selections over their batteries).
     /// The harness's bookkeeping stands or falls with these
-    /// numbers, so they are pinned here, per spec, all 106.
-    const PINNED_TOTALS: [(&str, usize); 106] = [
+    /// numbers, so they are pinned here, per spec, all 112.
+    const PINNED_TOTALS: [(&str, usize); 112] = [
         ("rust_type_name", 14),
         ("rust_binop_symbol", 17),
         ("rust_unaryop_symbol", 2),
@@ -3933,6 +4223,13 @@ mod xval3 {
         ("rust_stmt_expr_text", 2),
         ("rust_tail_expr_text", 2),
         ("rust_tail_block_text", 3),
+        // ── slice 6 ──
+        ("rust_target_route", 23),
+        ("rust_target_result_form", 7),
+        ("rust_unsupported_target_text", 6),
+        ("rust_doc_header_text", 4),
+        ("rust_driver_section_text", 4),
+        ("rust_file_text", 4),
     ];
 
     #[test]
@@ -4109,8 +4406,36 @@ mod xval3 {
         assert_eq!(ct5.len(), 6);
         let (_, pinned, unpinned) = totals("rust_stmt_collection_text", &ct5);
         assert_eq!((pinned, unpinned), (5, 1));
-        // Grand totals across the module: 3807 cases per
-        // run, 2914 pinned, 886 spec-silent, 7 out of
+        // ── slice 6 ──
+        // rust_target_route: the 23-name battery, and the
+        // spec is TOTAL — its catch-all row pins 6 for
+        // every off-table name, so nothing is silent.
+        let tr = sweep("rust_target_route");
+        assert_eq!(tr.len(), 23);
+        let (_, pinned, unpinned) = totals("rust_target_route", &tr);
+        assert_eq!((pinned, unpinned), (23, 0));
+        // rust_target_result_form: the full band sweep;
+        // only routes 0..=6 are pinned, the rest of the
+        // band never occurs and is spec-silent.
+        let rf = sweep("rust_target_result_form");
+        assert_eq!(rf.len(), 33);
+        let (_, pinned, unpinned) = totals("rust_target_result_form", &rf);
+        assert_eq!((pinned, unpinned), (7, 26));
+        // The four remaining driver specs are total over
+        // their batteries.
+        for (name, n) in [
+            ("rust_unsupported_target_text", 6),
+            ("rust_doc_header_text", 4),
+            ("rust_driver_section_text", 4),
+            ("rust_file_text", 4),
+        ] {
+            let sw = sweep(name);
+            assert_eq!(sw.len(), n, "{}: battery size", name);
+            let (_, pinned, unpinned) = totals(name, &sw);
+            assert_eq!((pinned, unpinned), (n, 0), "{}", name);
+        }
+        // Grand totals across the module: 3881 cases per
+        // run, 2962 pinned, 912 spec-silent, 7 out of
         // contract. (Slices 1–3: 2196 cases, 1533 pinned,
         // 656 silent — Phase 29 moved the literal specs'
         // three special-contents cases each from pinned to
@@ -4120,11 +4445,16 @@ mod xval3 {
         // classifications contribute 198 cases / 93 pinned,
         // rust_stmt_seq_form 12 / 12, and the templates
         // 49 / 48 — the one silent template case is
-        // rust_stmt_collection_text's off-table kind.)
+        // rust_stmt_collection_text's off-table kind.
+        // Slice 6 adds 74 cases, 48 pinned, 26 silent:
+        // rust_target_route 23 / 23, the result form's
+        // band 33 / 7 (its 26 off-route codes are the
+        // slice's only silent cases), and the four total
+        // batteries 18 / 18.)
         let total_cases: usize = ALL_SPECS.iter().map(|n| sweep(n).len()).sum();
         let total_pinned: usize = PINNED_TOTALS.iter().map(|(_, t)| t).sum();
-        assert_eq!(total_cases, 3807);
-        assert_eq!(total_pinned, 2914);
+        assert_eq!(total_cases, 3881);
+        assert_eq!(total_pinned, 2962);
     }
 
     #[test]
@@ -4686,6 +5016,45 @@ mod xval3 {
         assert_eq!(ag.sweep_pinned_agree, 1);
         assert_eq!(ag.unpinned, 1);
         assert!(ag.disagreements.is_empty());
+
+        // ── slice 6 ──
+        // rust_target_route is total by its catch-all row:
+        // a wrong code on a named route AND a wrong code
+        // on an off-table name (pinned 6 by the catch-all)
+        // are both disagreements.
+        let inputs = vec![In::Text("js"), In::Text("java"), In::Text("rust")];
+        let outs = vec![Out::Int(3), Out::Int(0), Out::Int(0)];
+        let ag = compare("rust_target_route", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 3);
+        assert_eq!(ag.sweep_pinned_agree, 1);
+        assert_eq!(ag.disagreements.len(), 2);
+        assert_eq!(ag.disagreements[0].input, In::Text("js"));
+        assert_eq!(ag.disagreements[1].input, In::Text("java"));
+
+        // rust_target_result_form: routes 0..=6 pinned; an
+        // off-band code is spec-silent — any winner output
+        // there is recorded, never a disagreement.
+        let inputs = ints(&[6, 7]);
+        let outs = vec![Out::Int(1), Out::Int(9)];
+        let ag = compare("rust_target_result_form", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 1);
+        assert_eq!(ag.sweep_pinned_agree, 1);
+        assert_eq!(ag.unpinned, 1);
+        assert!(ag.disagreements.is_empty());
+
+        // rust_driver_section_text: the absent arm pins
+        // the empty string — a winner leaking the section
+        // text there IS a disagreement.
+        let inputs = vec![In::BoolStr(true, "X"), In::BoolStr(false, "X")];
+        let outs = vec![
+            Out::Text("X".to_string()),
+            Out::Text("X".to_string()),
+        ];
+        let ag = compare("rust_driver_section_text", &inputs, &outs);
+        assert_eq!(ag.sweep_pinned_total, 2);
+        assert_eq!(ag.sweep_pinned_agree, 1);
+        assert_eq!(ag.disagreements.len(), 1);
+        assert_eq!(ag.disagreements[0].input, In::BoolStr(false, "X"));
     }
 
     #[test]
