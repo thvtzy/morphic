@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/LLM-Ollama-purple?style=for-the-badge" alt="LLM: Ollama">
   <br>
   <a href="https://github.com/thvtzy/morphic/stargazers"><img src="https://img.shields.io/github/stars/thvtzy/morphic?style=for-the-badge&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-194%20passed-green?style=for-the-badge" alt="Tests: 194"></a>
+  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-364%20passed-green?style=for-the-badge" alt="Tests: 364"></a>
 </p>
 
 <p align="center">
@@ -208,7 +208,8 @@ morphic/
 ├── examples/
 │   ├── sort.morph                # Self-synthesizing sort
 │   ├── binary_search.morph       # Self-synthesizing binary search
-│   └── self_host/                # validator.morph + printer.morph (v0.5 self-hosting specs)
+│   ├── functional_tokenizer.morph # Tokenizer specs (M1/S4; re-authored 2026-11-21)
+│   └── self_host/                # validator.morph + printer.morph + codegen.morph (v0.5 self-hosting specs)
 ├── src/
 │   ├── main.rs                   # CLI entry point
 │   ├── spec/
@@ -233,12 +234,21 @@ morphic/
 │   │   ├── verifier.rs           # Z3-based formal verification
 │   │   └── smt.rs                # Z3 FFI layer (v0.20)
 │   ├── codegen/
-│   │   └── mod.rs                # Multi-target code generation
+│   │   ├── mod.rs                # Multi-target code generation
+│   │   ├── m3_gate.rs            # M3 gate harness: composed winners vs original emitter, byte-compared
+│   │   └── m4_harness.rs         # M4 composed-compiler harness + corpus gate (extract once, render twice)
 │   ├── m2_synthesis_probe.rs     # M2 synthesis measurement harness
-│   └── m2_cross_validation.rs    # Behavioral cross-validation vs tests/m2_proof.rs mirrors
+│   ├── m2_cross_validation.rs    # Behavioral cross-validation vs tests/m2_proof.rs mirrors
+│   ├── m3_synthesis_probe.rs     # M3 synthesis measurement harness (Codegen module)
+│   ├── m3_cross_validation.rs    # Behavioral cross-validation vs tests/m3_proof.rs mirrors
+│   ├── tokenizer_synthesis_probe.rs    # Tokenizer synthesis measurement harness (S4)
+│   └── tokenizer_cross_validation.rs   # Cross-validation vs tests/tokenizer_proof.rs mirrors
 └── tests/
     ├── (integration tests)
-    └── m2_proof.rs               # Hand-written mirrors of the self-hosting specs
+    ├── m2_proof.rs               # Hand-written mirrors of the validator/printer specs
+    ├── m3_proof.rs               # Hand-written mirrors + assemblies of the Codegen specs
+    ├── tokenizer_proof.rs        # Hand-written tokenizer + mirrors of the tokenizer specs
+    └── seed_body_golden.txt      # Byte-exact fixture of every constraint-seed body
 ```
 
 ---
@@ -250,16 +260,21 @@ morphic/
 | **[GUIDE.md](GUIDE.md)** | Beginner tutorial — from zero to first synthesized function |
 | **[LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md)** | Complete .morph language specification |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Full compiler pipeline + design decisions |
-| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 self-hosting roadmap — milestones M0–M5; M2 gate closed 2026-11-20 |
+| **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 self-hosting roadmap — milestones M0–M5; M2, M3 and M4 gates closed 2026-11-20/21 |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | How to contribute + good first issues |
 
 ---
 
-## 📍 Current Status — 2026-11-20
+## 📍 Current Status — 2026-11-21
 
-v0.5 self-hosting is underway. Milestones M0 (pre-flight) and M1 (tokenizer) are done, and the **M2 gate closed on 2026-11-20**: the pretty-printer and validator specs in `examples/self_host/` now synthesize through the same validation pipeline as M1 — real test execution inside candidate selection, Z3 verdicts that judge the candidate itself (including spec-to-spec calls), and behavioral cross-validation against the hand-written mirrors in `tests/m2_proof.rs`.
+v0.5 self-hosting: the **M2, M3 and M4 gates are all closed**, and the full stack (PRs #2–#5) is merged to master.
 
-Final M2 evidence: **194 tests passing**; winning candidates Z3-verified **42/42** across repeated synthesis runs with **0 refuted winners**; cross-validation agreement **64/64 golden cases + 539/539 pinned sweep inputs**. Next milestone: M3 (codegen in Morphic). Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
+- **M2 (validator + printer)** — closed 2026-11-20: Z3-verified winners **42/42**, 0 refuted, cross-validation **64/64 golden + 539/539 pinned**.
+- **M3 (codegen)** — closed 2026-11-21: all 112 Codegen specs specced and measured (110/112 constraint-seeded across nine seed families; verified winners 112/112; executed agreement **337/337 golden + 2962/2962 pinned**). The gate: winners composed through the proof assemblies produce **byte-identical output to the original emitter over a 2,527-case corpus**, and the synthesized 112-winner module compiles as a Rust library. Two scoped, owner-approved emitter unfreezes along the way (rendering trio; E0382 clone treatment); the spec language gained the `++` concat operator (F1) and char literals (F4).
+- **M4 (integration)** — closed 2026-11-21: the composed compiler (original pipeline + the M3 composed codegen) renders **every check-passing spec in the repo byte-identically** — 130/130 specs in two full runs, 138/138 after the tokenizer joined the corpus.
+- **Tokenizer (M1/S4)** — `functional_tokenizer.morph` re-authored into the accepted dialect (it passes `morphic check` for the first time) and measured: the three Char classifiers are **exact** (774/774 executed agreement via the `char_equation` seed family); the remaining specs are blocked on recorded structural gaps (no field access in the IR; method calls not yet in the spec language), so M1's formal gate stays open.
+
+**364 tests passing.** Next milestone: M5 (full bootstrap). Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
 
 ---
 
@@ -271,7 +286,7 @@ Final M2 evidence: **194 tests passing**; winning candidates Z3-verified **42/42
 | **0.2** | Z3 FFI: real formal verification (bundled binary) | ✅ Done |
 | **0.3** | LLM module: Ollama client + prompt + parser (local + remote) | ✅ Done |
 | **0.4** | Template library: 9 algorithmic patterns + spec shape detection | ✅ Done |
-| **0.5** | Self-hosting: Morphic compiler written in Morphic | 🔨 In progress — M0 ✅ · M1 ✅ · M2 gate closed · M3 next |
+| **0.5** | Self-hosting: Morphic compiler written in Morphic | 🔨 In progress — M0 ✅ · M2 ✅ · M3 ✅ · M4 ✅ gates closed · tokenizer measured · M5 next |
 | **0.6** | WASM playground: Morphic in the browser | 📅 Planned |
 | **1.0** | Production-ready — verified standard library | 🎯 Target |
 
