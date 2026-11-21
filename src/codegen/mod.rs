@@ -102,12 +102,18 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
         out.push('\n');
     }
 
-    // Function signature
+    // Function signature. Every declared generic parameter
+    // carries a `: Clone` bound (Phase 62, owner decision
+    // (i)): the bound-free signature provably admits no
+    // element-reading construction (Phase 61 probe: E0507 /
+    // E0599 / E0631 by construction). The per-parameter
+    // text is specced (rust_generic_param_text in
+    // examples/self_host/codegen.morph).
     let generics = if candidate.spec.generics.is_empty() {
         String::new()
     } else {
         let g = candidate.spec.generics.iter()
-            .map(|gp| rust_ident(&gp.name))
+            .map(|gp| format!("{}: Clone", rust_ident(&gp.name)))
             .collect::<Vec<_>>()
             .join(", ");
         format!("<{}>", g)

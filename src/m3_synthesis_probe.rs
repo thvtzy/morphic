@@ -7,7 +7,7 @@
 //  to the Codegen module: runs the real build pipeline (parse →
 //  typecheck → synthesize at opt level 1 → verify_all (Z3) →
 //  select_best → codegen) for every spec in
-//  examples/self_host/codegen.morph (all 116: the 8 slice-1 leaf
+//  examples/self_host/codegen.morph (all 117: the 8 slice-1 leaf
 //  mappings, the 24 slice-2 template families, the 16 slice-3
 //  name/text-assembly specs, the 35 slice-4 expression-
 //  walker specs, the 27 slice-5 statement-walker specs, and
@@ -35,11 +35,13 @@
 //  compiled; Phase 29 fixed that rendering family under the
 //  user's unfreeze, and its re-measurement recorded 44/44
 //  compiles per run over slices 1–3 — the probe now runs all
-//  116 specs and reports the rustc verdict per winner, never
+//  117 specs and reports the rustc verdict per winner, never
 //  a judgment. (Phase 55 added the 4 newest slice-2 specs:
 //  the Call dispatch classification — String-equality rows,
 //  the rust_target_route shape, predicted seedless by
-//  design — and the list / tuple / closure templates.)
+//  design — and the list / tuple / closure templates.
+//  Phase 62 adds rust_generic_param_text, the Clone-bound
+//  per-generic template.)
 //
 //  For the specs the phase records predict seedless the probe
 //  additionally dumps one CAND3 line per verified-pool

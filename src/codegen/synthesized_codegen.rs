@@ -2,7 +2,7 @@
 //  SYNTHESIZED CODEGEN — GENERATED FILE. DO NOT EDIT.
 //
 //  The bootstrap artifact of M5-S1 (Phase 51): the M3 Codegen
-//  module's 116 synthesized winners, compiled into this crate
+//  module's 117 synthesized winners, compiled into this crate
 //  and called directly by the bootstrap adapter
 //  (src/codegen/bootstrap_adapter.rs). Each winner is rendered
 //  through the ORIGINAL `codegen::generate` and wrapped in its
@@ -10,13 +10,14 @@
 //
 //  WINNER-SET PROVENANCE (fixed, run-independent — M3 gate,
 //  Phases 41–42; re-derived in Phase 56 after the Phase 55
-//  spec amendments): 113 constraint-derived seeds — equation
-//  57, guard_table 39, composition_guard 7, pair_guard_table
-//  4, expr_pin_guard 3, guarded_identity 1, multi_guard 1,
-//  mixed_pair_guard_table 1 — plus the 3 by-design seedless
-//  pool winners (rust_ident_empty, rust_target_route,
-//  rust_expr_call_form; Mutation provenance, deterministic
-//  across extraction passes).
+//  spec amendments; re-derived in Phase 62 after the
+//  Clone-bound amendment): 114 constraint-derived seeds —
+//  equation 58, guard_table 39, composition_guard 7,
+//  pair_guard_table 4, expr_pin_guard 3, guarded_identity 1,
+//  multi_guard 1, mixed_pair_guard_table 1 — plus the 3
+//  by-design seedless pool winners (rust_ident_empty,
+//  rust_target_route, rust_expr_call_form; Mutation
+//  provenance, deterministic across extraction passes).
 //
 //  REGENERATION (always from the ORIGINAL pipeline — the
 //  generated compiler never generates a compiler):
@@ -27,9 +28,9 @@
 //
 //  Two mechanical adaptations separate this file from the M3
 //  gate's raw render (target/m3-gate/synthesized_codegen.rs,
-//  131,216 B); winner function bodies are byte-identical:
+//  133,963 B); winner function bodies are byte-identical:
 //  (1) each winner's generated `#[cfg(test)] mod tests` block
-//      is stripped (58 of 116 winners carry one): verbatim
+//      is stripped (59 of 117 winners carry one): verbatim
 //      inclusion breaks `cargo test` compilation — the
 //      generated tests pass &str literals to String parameters
 //      (E0308, the Phase 20 record) — and the M3 gate compiles
@@ -1131,8 +1132,17 @@ pub fn rust_param_text(name: String, ty: String) -> String {
 }
 }
 
+pub(crate) mod rust_generic_param_text {
+//! One generic parameter of the generated signature, as it appears inside rust_generics_text's bracket (src/codegen/mod.rs:80-88): the rust_ident-rendered name + ': Clone'. Phase 62 (2026-11-21, owner decision (i)): generated Rust signatures carry a Clone bound on EVERY declared generic parameter -- the Phase 61 probe proved no element-reading construction compiles under the bound-free signature (plain index reads E0507, clone-mediated reads E0599, the Sort node E0631), while the shipped scan-form sort construction compiles and passes 6/6 under 'T: Clone'. The name arrives already rendered by rust_ident (slice 3 owns sanitization); the ', ' join over the parameter list is iteration and lives in the driver/mirror, exactly as rust_param_text's join does.
+
+pub fn rust_generic_param_text(name: String) -> String {
+    (name.clone() + ": Clone")
+}
+
+}
+
 pub(crate) mod rust_generics_text {
-//! The generics bracket of the generated signature (src/codegen/mod.rs:80-88): no generics renders the empty string; otherwise '<' + the ', '-joined rust_ident-rendered generic names + '>'. The joined text arrives pre-rendered -- the join is iteration, mirror-only. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
+//! The generics bracket of the generated signature (src/codegen/mod.rs:80-88): no generics renders the empty string; otherwise '<' + the ', '-joined generic parameter texts + '>'. The joined text arrives pre-rendered -- the join is iteration, mirror-only -- and since Phase 62 (2026-11-21) each element of the join is a rust_generic_param_text rendering (the rust_ident-rendered name + ': Clone', owner decision (i)); through Phase 61 the elements were the bare rendered names. This spec's own rule -- the bracket over whatever joined text arrives -- is unchanged by that amendment. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
 
 pub fn rust_generics_text(joined: String, present: bool) -> String {
     match present {

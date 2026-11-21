@@ -22,9 +22,13 @@
 //    the Phase 55 spec amendments the module holds 116 specs
 //    and the fixed set is 113 constraint seeds + the 3
 //    by-design pool winners (rust_ident_empty,
-//    rust_target_route, rust_expr_call_form).
+//    rust_target_route, rust_expr_call_form). Phase 62
+//    re-record (2026-11-21): the Clone-bound amendment adds
+//    rust_generic_param_text — the module holds 117 specs
+//    and the fixed set is 114 constraint seeds + the same 3
+//    by-design pool winners.
 //
-//  * The synthesized-codegen ARTIFACT is the 116 winners
+//  * The synthesized-codegen ARTIFACT is the 117 winners
 //    rendered through the ORIGINAL `generate` into one Rust
 //    module (each winner file wrapped in its own `mod`, so
 //    the per-file `mod tests` cannot collide), compiled with
@@ -92,7 +96,7 @@
 //          output, and the harness asserts the ORIGINAL side
 //          reproduces it, so a transcription slip stops the
 //          gate loudly instead of manufacturing a mismatch;
-//          (ii)  every M3 winner body (116) and every M2 winner
+//          (ii)  every M3 winner body (117) and every M2 winner
 //          body (14), plus every unique subtree of those
 //          bodies, each rendered three ways (expression,
 //          statement, tail) by both emitters;
@@ -1751,13 +1755,24 @@ impl<'a> Composed<'a> {
                 .call_text("rust_driver_section_text", &[v_bool(false), v_text("")])?,
         };
 
-        // Signature parts.
-        let generic_names: Vec<String> =
-            spec.generics.iter().map(|g| rust_ident(&g.name)).collect();
+        // Signature parts. Each generic parameter's text
+        // is the rust_generic_param_text winner over the
+        // ident-rendered name (Phase 62: the name + its
+        // Clone bound); the join is assembly glue.
+        let generic_names: Result<Vec<String>, String> = spec
+            .generics
+            .iter()
+            .map(|g| {
+                self.text1(
+                    "rust_generic_param_text",
+                    v_text(&rust_ident(&g.name)),
+                )
+            })
+            .collect();
         let generics = self.w.call_text(
             "rust_generics_text",
             &[
-                v_text(&generic_names.join(", ")),
+                v_text(&generic_names?.join(", ")),
                 v_bool(!spec.generics.is_empty()),
             ],
         )?;
@@ -3075,7 +3090,7 @@ pub(super) fn driver_corpus() -> Vec<Case> {
             "//! Sorts things.\n",
             "//! Does it well.\n",
             "\n",
-            "pub fn clamp_value<T>(x: i64, limit: i64) -> i64 {\n",
+            "pub fn clamp_value<T: Clone>(x: i64, limit: i64) -> i64 {\n",
             "#[cfg(debug_assertions)]\n",
             "{\n",
             "    debug_assert!(x == 3, \"Precondition violated\");\n",
@@ -3261,7 +3276,7 @@ pub(super) fn driver_corpus() -> Vec<Case> {
     push(
         "generic-annotation",
         concat!(
-            "pub fn sort<T>(list: Vec<T>, cmp: fn(T, T) -> bool) -> Vec<T> {\n",
+            "pub fn sort<T: Clone>(list: Vec<T>, cmp: fn(T, T) -> bool) -> Vec<T> {\n",
             "    list\n",
             "}\n",
             "\n#[cfg(test)]\n",
@@ -3566,7 +3581,7 @@ fn run_corpus(
 // ── The gate ──────────────────────────────────────────────
 
 #[test]
-#[ignore = "M3 gate: 2 randomized synthesis passes x 116 specs + corpus execution; run explicitly with --ignored --nocapture"]
+#[ignore = "M3 gate: 2 randomized synthesis passes x 117 specs + corpus execution; run explicitly with --ignored --nocapture"]
 fn m3_gate() {
     let root = env!("CARGO_MANIFEST_DIR");
     let out_dir = format!("{}/target/m3-gate", root);
@@ -3580,7 +3595,7 @@ fn m3_gate() {
 
     // ── 1. Winner extraction, twice (reproducibility) ──
     let functions3 = load_module("codegen.morph");
-    assert_eq!(functions3.len(), 116, "Codegen module spec count");
+    assert_eq!(functions3.len(), 117, "Codegen module spec count");
     let pass1 = extract_winners(&functions3);
     let pass2 = extract_winners(&functions3);
     for name in &pass1.order {
@@ -3613,7 +3628,7 @@ fn m3_gate() {
         "GATE3|winners|seeds={}|pool={:?}",
         seed_count, pool
     ));
-    assert_eq!(seed_count, 113, "Phase 55 measured 113 constraint seeds");
+    assert_eq!(seed_count, 114, "Phase 62 measured 114 constraint seeds (Phase 55: 113; + rust_generic_param_text, equation)");
     assert_eq!(
         pool,
         vec!["rust_expr_call_form", "rust_ident_empty", "rust_target_route"],
@@ -3694,7 +3709,7 @@ fn m3_gate() {
             name, out, spec.return_type
         );
     }
-    writelnr("GATE3|executor-smoke|116/116 winners execute on canonical inputs");
+    writelnr("GATE3|executor-smoke|117/117 winners execute on canonical inputs");
 
     // ── 2. M2 winners (corpus sources) ──
     let mut m2_sets: Vec<(&str, WinnerSet)> = Vec::new();
@@ -3720,7 +3735,7 @@ fn m3_gate() {
     // ── 3. The synthesized-codegen artifact ──
     let mut module_text = String::new();
     module_text.push_str(
-        "// The synthesized codegen: the Codegen module's 116 winners,\n\
+        "// The synthesized codegen: the Codegen module's 117 winners,\n\
          // each rendered by the original `generate` and wrapped in its\n\
          // own module (so the per-file `mod tests` cannot collide).\n\
          // Judged by the M3 gate harness (src/codegen/m3_gate.rs).\n\n",

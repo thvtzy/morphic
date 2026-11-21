@@ -436,6 +436,25 @@ fn main() {
                         (5, 5),
                         "the adjacent-scan body must pass 5/5 under the compiled vehicle"
                     );
+                } else if name == "sort" {
+                    // Phase 62 re-record (2026-11-21): the
+                    // wall this assertion recorded — the scan
+                    // template judged 0/6 because its body
+                    // did not compile under the bound-free
+                    // signature (E0599) — was removed by the
+                    // owner's Clone-bound decision (option
+                    // (i)). The runner now measures the
+                    // template CORRECT: verdict (6, 6). The
+                    // Phase 59 record stands in the ROAD
+                    // note; this expectation is the new
+                    // reality, not a rewritten past.
+                    assert_eq!(
+                        template_verdict,
+                        (6, total),
+                        "sort: since Phase 62 the template body must be judged {}/{} by the runner (the Clone bound removed the E0599 wall)",
+                        total,
+                        total
+                    );
                 } else {
                     assert_eq!(
                         template_verdict,

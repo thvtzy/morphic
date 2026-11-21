@@ -298,7 +298,10 @@ fn main() {
             vec!["count_matching".to_string()],
             "forall_fold may fire ONLY for count_matching"
         );
-        assert_eq!(total_specs, 142, "the corpus is 142 specs");
+        // Phase 62 re-record: the corpus grew to 143
+        // (rust_generic_param_text joined codegen.morph);
+        // the firing set is unchanged.
+        assert_eq!(total_specs, 143, "the corpus is 143 specs");
 
         // The seed body itself, for the record.
         let cm_functions = load_functions("examples/self_host/count_matching.morph");

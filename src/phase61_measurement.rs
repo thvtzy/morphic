@@ -21,6 +21,15 @@
 //    with the signature patched, PROBE-ONLY, to
 //    `sort<T: Clone>` — what the recorded owner-class
 //    signature decision would buy, measured, not shipped.
+//    PHASE 62 RE-RECORD (2026-11-21): the owner TOOK the
+//    priced unlock (decision (i)) — generated signatures
+//    now carry the Clone bound natively, so this probe's
+//    world changed underneath it: construction B compiles
+//    AS SHIPPED (its B' prediction, now the standing
+//    assertion), the signature patch is a no-op, and the
+//    Part B template verdict is (6, 6), not the recorded
+//    (0, 6) wall. The Phase 61 measurements stand in the
+//    ROAD note; the assertions below state the new reality.
 //  - Part B (draws): 5 draws of sort through the full
 //    pipeline (synthesize → verify_all → G1 runner stage →
 //    select_best), recording the template seed's presence,
@@ -536,10 +545,16 @@ fn main() {
                 ));
             }
             // The recorded walls, asserted so the instrument
-            // stays a standing record of them.
+            // stays a standing record of them. Phase 62
+            // re-record: B's wall (E0599 under the bound-free
+            // signature) is GONE — the owner adopted the
+            // Clone bound, so B compiles as shipped; A and C
+            // still die E0507 (Clone does not imply Copy) and
+            // D still dies E0631 (the bound does not touch
+            // the Sort node's comparator shape).
             match name.chars().next().unwrap() {
                 'A' => assert!(codes.contains(&"E0507".to_string()), "A must die E0507: {:?}", codes),
-                'B' => assert!(codes.contains(&"E0599".to_string()), "B must die E0599 under the current signature: {:?}", codes),
+                'B' => assert!(compiles, "B must compile as shipped since Phase 62 (the Clone bound is native): {:?}", codes),
                 'C' => assert!(codes.contains(&"E0507".to_string()), "C must die E0507: {:?}", codes),
                 'D' => assert!(codes.contains(&"E0631".to_string()), "D must die E0631: {:?}", codes),
                 _ => unreachable!(),
@@ -548,17 +563,24 @@ fn main() {
             assert_ne!(verdict, TypeVerdict::Mismatched, "{} must not be selector-Mismatched", name);
         }
 
-        // The priced unlock (PROBE-ONLY signature patch on
-        // the generated text — nothing shipped): what a
-        // `Clone` bound on the generated generic would buy.
-        let patched_b = b_fn_text.replace("pub fn sort<T>(", "pub fn sort<T: Clone>(");
-        assert_ne!(patched_b, b_fn_text, "the signature patch must apply");
+        // The priced unlock — Phase 62 re-record: ADOPTED
+        // (owner decision (i)). The generated signature
+        // carries the bound natively, so the probe-only
+        // patch is now the identity on B's text; what Phase
+        // 61 measured as the hypothetical B' (compiles +
+        // 6/6) is asserted here of the SHIPPED text.
+        assert!(
+            b_fn_text.contains("pub fn sort<T: Clone>("),
+            "the shipped signature must carry the Clone bound natively: {}",
+            b_fn_text.lines().find(|l| l.contains("pub fn sort")).unwrap_or("")
+        );
+        let patched_b = b_fn_text.clone();
         let (b_prime_compiles, b_prime_codes) = rustc_lib(&dir, "probe_B_prime", &patched_b);
         report.push_str(&format!(
-            "- B' (B under a hypothetical `T: Clone` signature, probe-only): compiles {}, error codes {:?}\n",
+            "- B' (B as shipped — the bound Phase 61 priced as hypothetical is native since Phase 62): compiles {}, error codes {:?}\n",
             b_prime_compiles, b_prime_codes
         ));
-        assert!(b_prime_compiles, "B must compile under the priced unlock: {:?}", b_prime_codes);
+        assert!(b_prime_compiles, "B must compile under the (now native) bound: {:?}", b_prime_codes);
         let b_prime_cand = candidate(&sort_spec, bubble(&sort_spec, true));
         let run_rs = format!("{}/probe_B_prime_run.rs", dir);
         std::fs::write(&run_rs, format!("{}{}", patched_b, SORT_MAIN)).unwrap();
@@ -574,17 +596,20 @@ fn main() {
             })
         });
         report.push_str(&format!("- B' compiled-vehicle verdict: {:?}\n", b_prime_verdict));
-        assert_eq!(b_prime_verdict, Some((6, 6)), "B under the unlock must sort 6/6");
+        assert_eq!(b_prime_verdict, Some((6, 6)), "B under the bound must sort 6/6");
         let _ = b_prime_cand;
 
-        // A under the same patch: Clone does not imply Copy,
-        // so plain reads still move — the unlock prices
-        // construction B specifically.
+        // A under the same (now native) bound: Clone does
+        // not imply Copy, so plain reads still move — the
+        // bound prices construction B specifically. Phase 62
+        // re-record: A's generated text already carries the
+        // bound; no patch is applied or needed.
         let a_generated = codegen::generate(&candidate(&sort_spec, bubble(&sort_spec, false)), "rust").unwrap();
-        let patched_a = function_part(&a_generated).replace("pub fn sort<T>(", "pub fn sort<T: Clone>(");
+        let patched_a = function_part(&a_generated);
+        assert!(patched_a.contains("pub fn sort<T: Clone>("), "A's text carries the native bound too");
         let (a_prime_compiles, a_prime_codes) = rustc_lib(&dir, "probe_A_prime", &patched_a);
         report.push_str(&format!(
-            "- A' (A under the same hypothetical bound): compiles {}, error codes {:?}\n",
+            "- A' (A as shipped, under the same native bound): compiles {}, error codes {:?}\n",
             a_prime_compiles, a_prime_codes
         ));
         assert!(!a_prime_compiles && a_prime_codes.contains(&"E0507".to_string()));
@@ -615,8 +640,8 @@ fn main() {
             let template_verdict = runner_verdict_of(&template, &func);
             assert_eq!(
                 template_verdict,
-                (0, 6),
-                "sort draw {}: the scan template's runner verdict is the recorded wall (0/6)",
+                (6, 6),
+                "sort draw {}: the scan template's runner verdict since Phase 62 (the Clone bound removed the E0599 wall; Phase 61 recorded (0, 6))",
                 draw
             );
             // Finalist status in the draw's own stage run.

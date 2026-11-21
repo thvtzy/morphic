@@ -662,6 +662,14 @@ fn rust_param_text(name: &str, ty: &str) -> String {
     format!("{}: {}", name, ty)
 }
 
+/// Mirror of one generic parameter's text inside the
+/// generics bracket (Phase 62, owner decision (i)):
+/// rendered name + ": Clone" — every declared generic
+/// parameter of a generated signature carries the bound.
+fn rust_generic_param_text(name: &str) -> String {
+    format!("{}: Clone", name)
+}
+
 /// Mirror of the signature's generics bracket
 /// (src/codegen/mod.rs:80-88) over the pre-joined rendered
 /// generic names.
@@ -2496,8 +2504,11 @@ fn generate_rust_from_spec_assembled(spec: &DriverSpec) -> String {
     // pairs joined ", " (the joins are the mirror-only
     // iteration).
     let generics = {
-        let rendered: Vec<String> =
-            spec.generics.iter().map(|g| rust_ident_verbatim(g)).collect();
+        let rendered: Vec<String> = spec
+            .generics
+            .iter()
+            .map(|g| rust_generic_param_text(&rust_ident_verbatim(g)))
+            .collect();
         rust_generics_text(&rendered.join(", "), !spec.generics.is_empty())
     };
     let params: Vec<String> = spec
@@ -3554,6 +3565,10 @@ mod golden_tests {
         // Parameters: rendered name, ": ", rendered type
         assert_eq!(rust_param_text("a", "i64"), "a: i64");
         assert_eq!(rust_param_text("list", "Vec<String>"), "list: Vec<String>");
+        // Generic parameters (Phase 62): rendered name +
+        // the Clone bound every declared generic carries
+        assert_eq!(rust_generic_param_text("T"), "T: Clone");
+        assert_eq!(rust_generic_param_text("Elem"), "Elem: Clone");
         // Generics: absent is empty, present is bracketed
         assert_eq!(rust_generics_text("", false), "");
         assert_eq!(rust_generics_text("T", true), "<T>");
@@ -4722,7 +4737,7 @@ mod golden_tests {
                 "//! Sorts things.\n",
                 "//! Does it well.\n",
                 "\n",
-                "pub fn clamp_value<T>(x: i64, limit: i64) -> i64 {\n",
+                "pub fn clamp_value<T: Clone>(x: i64, limit: i64) -> i64 {\n",
                 "#[cfg(debug_assertions)]\n",
                 "{\n",
                 "    debug_assert!(x == 3, \"Precondition violated\");\n",
@@ -4891,7 +4906,7 @@ mod golden_tests {
         assert_eq!(
             generate_rust_from_spec_assembled(&spec),
             concat!(
-                "pub fn sort<T>(list: Vec<T>, cmp: fn(T, T) -> bool) -> Vec<T> {\n",
+                "pub fn sort<T: Clone>(list: Vec<T>, cmp: fn(T, T) -> bool) -> Vec<T> {\n",
                 "    list\n",
                 "}\n",
                 "\n#[cfg(test)]\n",
@@ -5067,11 +5082,11 @@ spec bad {
         // plus the 24 slice-2 specs (20 + the 4 Phase 55 specs)
         // plus the 16 slice-3 specs plus
         // the 35 slice-4 specs plus the 27 slice-5 specs plus the
-        // 6 slice-6 specs.
+        // 6 slice-6 specs, plus rust_generic_param_text (Phase 62).
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 116, "codegen.morph should declare 116 specs");
+        assert_eq!(spec_decls, 117, "codegen.morph should declare 117 specs");
         assert!(src.matches("test \"").count() >= 174, "codegen.morph should carry in-spec tests");
     }
 }

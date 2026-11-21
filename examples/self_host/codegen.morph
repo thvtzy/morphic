@@ -925,8 +925,21 @@ spec rust_param_text {
     optimize: time < O(n)
 }
 
+spec rust_generic_param_text {
+    doc: "One generic parameter of the generated signature, as it appears inside rust_generics_text's bracket (src/codegen/mod.rs:80-88): the rust_ident-rendered name + ': Clone'. Phase 62 (2026-11-21, owner decision (i)): generated Rust signatures carry a Clone bound on EVERY declared generic parameter -- the Phase 61 probe proved no element-reading construction compiles under the bound-free signature (plain index reads E0507, clone-mediated reads E0599, the Sort node E0631), while the shipped scan-form sort construction compiles and passes 6/6 under 'T: Clone'. The name arrives already rendered by rust_ident (slice 3 owns sanitization); the ', ' join over the parameter list is iteration and lives in the driver/mirror, exactly as rust_param_text's join does."
+    input: name: String
+    output: String
+
+    constraint: output == name ++ ": Clone"
+
+    optimize: time < O(n)
+
+    test "generic-clone" { input: "T" expect: "T: Clone" }
+    test "generic-named" { input: "Elem" expect: "Elem: Clone" }
+}
+
 spec rust_generics_text {
-    doc: "The generics bracket of the generated signature (src/codegen/mod.rs:80-88): no generics renders the empty string; otherwise '<' + the ', '-joined rust_ident-rendered generic names + '>'. The joined text arrives pre-rendered -- the join is iteration, mirror-only. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    doc: "The generics bracket of the generated signature (src/codegen/mod.rs:80-88): no generics renders the empty string; otherwise '<' + the ', '-joined generic parameter texts + '>'. The joined text arrives pre-rendered -- the join is iteration, mirror-only -- and since Phase 62 (2026-11-21) each element of the join is a rust_generic_param_text rendering (the rust_ident-rendered name + ': Clone', owner decision (i)); through Phase 61 the elements were the bare rendered names. This spec's own rule -- the bracket over whatever joined text arrives -- is unchanged by that amendment. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
     input: joined: String, present: Bool
     output: String
 

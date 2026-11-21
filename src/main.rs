@@ -19,6 +19,7 @@ mod phase58_measurement;
 mod phase59_measurement;
 mod phase60_measurement;
 mod phase61_measurement;
+mod phase62_measurement;
 
 
 use clap::{Parser, Subcommand};

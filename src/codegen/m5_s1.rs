@@ -23,7 +23,7 @@
 //     `pub(crate) mod` (the gate render is a standalone crate
 //     root; the adapter calls the winners through their
 //     wrappers — M5 audit item B); each winner's generated
-//     `#[cfg(test)] mod tests` block is stripped (58 of 116
+//     `#[cfg(test)] mod tests` block is stripped (59 of 117
 //     winners carry one — verbatim inclusion breaks
 //     `cargo test` compilation, E0308 on &str → String in the
 //     generated tests, the Phase 20 record; and the gate
@@ -32,11 +32,11 @@
 //
 //  2. THE COMPILED ADAPTER ≡ THE ORIGINAL EMITTER, over both
 //     corpora (m5_s1_adapter_equivalence):
-//       A. the M3 gate corpus (2,566 cases, built by the
+//       A. the M3 gate corpus (2,573 cases, built by the
 //          gate's own corpus builders): adapter vs original
 //          vs the interpreter composition (mode B) — three
 //          ways, byte-compared per case, tallied per class;
-//       B. the M4 whole-file corpus (142 specs, the harness's
+//       B. the M4 whole-file corpus (143 specs, the harness's
 //          own enumeration): one pipeline extraction per spec,
 //          that single winner rendered by the original
 //          `generate`, the interpreter composition's driver,
@@ -67,7 +67,7 @@ use std::fmt::Write as _;
 
 /// The M3 gate's module header, byte for byte (m3_gate.rs,
 /// the artifact production in `m3_gate`).
-const GATE_HEADER: &str = "// The synthesized codegen: the Codegen module's 116 winners,\n// each rendered by the original `generate` and wrapped in its\n// own module (so the per-file `mod tests` cannot collide).\n// Judged by the M3 gate harness (src/codegen/m3_gate.rs).\n\n";
+const GATE_HEADER: &str = "// The synthesized codegen: the Codegen module's 117 winners,\n// each rendered by the original `generate` and wrapped in its\n// own module (so the per-file `mod tests` cannot collide).\n// Judged by the M3 gate harness (src/codegen/m3_gate.rs).\n\n";
 
 /// The shipped artifact's header: the provenance, the
 /// regeneration command, and the two adaptations — carried
@@ -76,7 +76,7 @@ const SHIPPED_HEADER: &str = r##"// ──────────────�
 //  SYNTHESIZED CODEGEN — GENERATED FILE. DO NOT EDIT.
 //
 //  The bootstrap artifact of M5-S1 (Phase 51): the M3 Codegen
-//  module's 116 synthesized winners, compiled into this crate
+//  module's 117 synthesized winners, compiled into this crate
 //  and called directly by the bootstrap adapter
 //  (src/codegen/bootstrap_adapter.rs). Each winner is rendered
 //  through the ORIGINAL `codegen::generate` and wrapped in its
@@ -84,13 +84,14 @@ const SHIPPED_HEADER: &str = r##"// ──────────────�
 //
 //  WINNER-SET PROVENANCE (fixed, run-independent — M3 gate,
 //  Phases 41–42; re-derived in Phase 56 after the Phase 55
-//  spec amendments): 113 constraint-derived seeds — equation
-//  57, guard_table 39, composition_guard 7, pair_guard_table
-//  4, expr_pin_guard 3, guarded_identity 1, multi_guard 1,
-//  mixed_pair_guard_table 1 — plus the 3 by-design seedless
-//  pool winners (rust_ident_empty, rust_target_route,
-//  rust_expr_call_form; Mutation provenance, deterministic
-//  across extraction passes).
+//  spec amendments; re-derived in Phase 62 after the
+//  Clone-bound amendment): 114 constraint-derived seeds —
+//  equation 58, guard_table 39, composition_guard 7,
+//  pair_guard_table 4, expr_pin_guard 3, guarded_identity 1,
+//  multi_guard 1, mixed_pair_guard_table 1 — plus the 3
+//  by-design seedless pool winners (rust_ident_empty,
+//  rust_target_route, rust_expr_call_form; Mutation
+//  provenance, deterministic across extraction passes).
 //
 //  REGENERATION (always from the ORIGINAL pipeline — the
 //  generated compiler never generates a compiler):
@@ -101,9 +102,9 @@ const SHIPPED_HEADER: &str = r##"// ──────────────�
 //
 //  Two mechanical adaptations separate this file from the M3
 //  gate's raw render (target/m3-gate/synthesized_codegen.rs,
-//  131,216 B); winner function bodies are byte-identical:
+//  133,963 B); winner function bodies are byte-identical:
 //  (1) each winner's generated `#[cfg(test)] mod tests` block
-//      is stripped (58 of 116 winners carry one): verbatim
+//      is stripped (59 of 117 winners carry one): verbatim
 //      inclusion breaks `cargo test` compilation — the
 //      generated tests pass &str literals to String parameters
 //      (E0308, the Phase 20 record) — and the M3 gate compiles
@@ -124,7 +125,7 @@ const SHIPPED_HEADER: &str = r##"// ──────────────�
 "##;
 
 /// The gate's artifact production, verbatim (m3_gate.rs):
-/// the 116 winners rendered through the ORIGINAL `generate`,
+/// the 117 winners rendered through the ORIGINAL `generate`,
 /// each wrapped in its own `mod`, in module order.
 fn gate_module_text(winners: &WinnerSet, order: &[String]) -> String {
     let mut module_text = String::new();
@@ -163,11 +164,11 @@ fn shipped_artifact_text(gate_text: &str) -> String {
             && (idx == 0 || lines[idx - 1].trim().is_empty())
     };
     let mut starts: Vec<usize> = (0..lines.len()).filter(|&i| is_winner_start(i)).collect();
-    assert_eq!(starts.len(), 116, "winner block count in the gate render");
+    assert_eq!(starts.len(), 117, "winner block count in the gate render");
     starts.push(lines.len());
     let mut out = String::from(SHIPPED_HEADER);
     let mut stripped = 0usize;
-    for b in 0..116 {
+    for b in 0..117 {
         let block = &lines[starts[b]..starts[b + 1]];
         let close_idx = block
             .iter()
@@ -212,7 +213,7 @@ fn shipped_artifact_text(gate_text: &str) -> String {
             }
         }
     }
-    assert_eq!(stripped, 58, "test-module strip count");
+    assert_eq!(stripped, 59, "test-module strip count");
     out
 }
 
@@ -221,7 +222,7 @@ fn shipped_artifact_text(gate_text: &str) -> String {
 /// the first pass and the module order.
 fn extract_codegen_winners_twice() -> (WinnerSet, Vec<String>) {
     let functions = m3_gate::load_module("codegen.morph");
-    assert_eq!(functions.len(), 116, "Codegen module spec count");
+    assert_eq!(functions.len(), 117, "Codegen module spec count");
     let order: Vec<String> = functions.iter().map(|f| f.name.clone()).collect();
     let pass1 = m3_gate::extract_winners(&functions);
     let pass2 = m3_gate::extract_winners(&functions);
@@ -242,7 +243,7 @@ fn extract_codegen_winners_twice() -> (WinnerSet, Vec<String>) {
 }
 
 #[test]
-#[ignore = "M5-S1 artifact identity: 2 synthesis passes x 116 specs; run explicitly with --ignored --nocapture m5_s1_artifact_byte_identity"]
+#[ignore = "M5-S1 artifact identity: 2 synthesis passes x 117 specs; run explicitly with --ignored --nocapture m5_s1_artifact_byte_identity"]
 fn m5_s1_artifact_byte_identity() {
     let (winners, order) = extract_codegen_winners_twice();
     let produced = shipped_artifact_text(&gate_module_text(&winners, &order));
@@ -334,7 +335,7 @@ struct ClassTally {
 }
 
 #[test]
-#[ignore = "M5-S1 equivalence: M3 corpus (2,566 cases) + M4 corpus (142 whole files, 142 pipeline runs); run explicitly with --ignored --nocapture m5_s1_adapter_equivalence"]
+#[ignore = "M5-S1 equivalence: M3 corpus (2,573 cases) + M4 corpus (143 whole files, 143 pipeline runs); run explicitly with --ignored --nocapture m5_s1_adapter_equivalence"]
 fn m5_s1_adapter_equivalence() {
     let root = env!("CARGO_MANIFEST_DIR");
     let out_dir = format!("{}/target/m5-s1", root);
@@ -349,7 +350,7 @@ fn m5_s1_adapter_equivalence() {
     // ── Part A: the M3 gate corpus, three ways ──
     let functions3 = m3_gate::load_module("codegen.morph");
     let winners = m3_gate::extract_winners(&functions3);
-    assert_eq!(winners.spec_count(), 116, "Codegen winner set");
+    assert_eq!(winners.spec_count(), 117, "Codegen winner set");
     let mut m2_sets: Vec<(&str, WinnerSet)> = Vec::new();
     for file in ["validator.morph", "printer.morph"] {
         let functions = m3_gate::load_module(file);
@@ -373,7 +374,7 @@ fn m5_s1_adapter_equivalence() {
         sets.push((file, set));
     }
     cases.extend(m3_gate::winner_corpus(&sets));
-    assert_eq!(cases.len(), 2566, "the M3 gate corpus size (Phase 61 re-derivation: Phase 56's 2,559 + 6 — the amended rust_test_case winner's larger concat tree contributes 2 new unique subtrees x the corpus's 3 case kinds — + 1 driver-corpus transcription of the Phase 61 annotated whole-file case)");
+    assert_eq!(cases.len(), 2573, "the M3 gate corpus size (Phase 62 re-derivation: Phase 61's 2,566 + 7 — the new rust_generic_param_text winner's whole file + 2 new unique subtrees of its concat tree x the corpus's 3 case kinds)");
 
     let composed_b = Composed {
         w: &winners,
@@ -605,10 +606,10 @@ fn m5_s1_adapter_equivalence() {
         a_both, a_total,
         "the compiled adapter differs from the interpreter composition it transcribes"
     );
-    assert_eq!(b_total, 142, "the M4 corpus size");
+    assert_eq!(b_total, 143, "the M4 corpus size");
     assert_eq!(
         cache.pipeline_runs(),
-        142,
+        143,
         "the pipeline must run exactly once per corpus spec"
     );
     assert_eq!(

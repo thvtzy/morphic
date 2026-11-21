@@ -11,14 +11,15 @@
 //
 //  Generalizes the M2 cross-validation harness
 //  (src/m2_cross_validation.rs) to the Codegen module. For
-//  every one of the 116 specs in
+//  every one of the 117 specs in
 //  examples/self_host/codegen.morph (slice 1: 8 leaf mappings;
 //  slice 2: 24 small template families; slice 3: 16 name/text
 //  assembly specs; slice 4: 35 expression-walker specs;
 //  slice 5: 27 statement-walker specs — 7 classifications
 //  and 20 templates; slice 6: 6 driver specs — the dispatch
 //  table, the result form, the error text, the doc-header
-//  assembly, the section rule, the whole-file equation) this
+//  assembly, the section rule, the whole-file equation; plus
+//  rust_generic_param_text, Phase 62) this
 //  harness runs the
 //  real pipeline at opt level 1 — parse → typecheck →
 //  synthesize_with_module → Z3 verify_all (module-aware) →
@@ -874,6 +875,10 @@ mod xval3 {
         Mirror::Owned(format!("{}: {}", name, ty))
     }
 
+    fn rust_generic_param_text(name: &str) -> Mirror {
+        Mirror::Owned(format!("{}: Clone", name))
+    }
+
     fn rust_generics_text(joined: &str, present: bool) -> Mirror {
         Mirror::Owned(if present {
             format!("<{}>", joined)
@@ -1601,6 +1606,9 @@ mod xval3 {
             }
             ("rust_doc_line", In::Text(s)) => rust_doc_line(s),
             ("rust_param_text", In::StrPair(n, t)) => rust_param_text(n, t),
+            ("rust_generic_param_text", In::Text(s)) => {
+                rust_generic_param_text(s)
+            }
             ("rust_generics_text", In::StrBool(j, p)) => rust_generics_text(j, *p),
             ("rust_signature", In::Str4(n, g, p, r)) => rust_signature(n, g, p, r),
             ("rust_precondition_assert", In::Text(s)) => rust_precondition_assert(s),
@@ -1797,8 +1805,9 @@ mod xval3 {
     /// total — so this list and PINNED_TOTALS cover the
     /// whole module and the grand totals below are module
     /// totals. Phase 36: slice 5's 27 statement-walker specs
-    /// join — 106 in total.)
-    const ALL_SPECS: [&str; 116] = [
+    /// join — 106 in total. Phase 62: rust_generic_param_text
+    /// joins — 117 in total.)
+    const ALL_SPECS: [&str; 117] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -1839,6 +1848,7 @@ mod xval3 {
         "rust_string_literal_owned_text",
         "rust_doc_line",
         "rust_param_text",
+        "rust_generic_param_text",
         "rust_generics_text",
         "rust_signature",
         "rust_precondition_assert",
@@ -2084,6 +2094,12 @@ mod xval3 {
         ("", ""),
         ("name", "()"),
     ];
+
+    /// Generic parameter names for rust_generic_param_text
+    /// (total: the equation pins every input, the empty
+    /// name included — it arrives post-rust_ident in the
+    /// driver, but the spec itself is total over String).
+    const GENERIC_PARAM_NAMES: [&str; 5] = ["T", "U", "Elem", "K", ""];
 
     /// (joined, present) cases for rust_generics_text (total:
     /// both Bool branches are decided by the constraints).
@@ -2597,6 +2613,10 @@ mod xval3 {
                 .iter()
                 .map(|(n, t)| In::StrPair(n, t))
                 .collect(),
+            "rust_generic_param_text" => GENERIC_PARAM_NAMES
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
             "rust_generics_text" => GENERICS_CASES
                 .iter()
                 .map(|(j, p)| In::StrBool(j, *p))
@@ -3002,6 +3022,11 @@ mod xval3 {
                 In::StrPair("a", "i64"),
                 In::StrPair("list", "Vec<String>"),
             ],
+            // tests: generic-clone (T), generic-named (Elem)
+            "rust_generic_param_text" => ["T", "Elem"]
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
             // No in-spec tests; proof assertions: absent,
             // single, joined pair
             "rust_generics_text" => vec![
@@ -3876,7 +3901,7 @@ mod xval3 {
     // ─────────────────────────────────────────────────────────
 
     #[test]
-    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 116 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
+    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 117 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
     fn m3_cross_validation() {
         let root = env!("CARGO_MANIFEST_DIR");
         let out_dir = format!("{}/target/m3-synthesis", root);
@@ -4251,7 +4276,7 @@ mod xval3 {
     /// rust_test_case's battery grows 2 → 4 with the
     /// generics-text argument's annotated cases; the spec
     /// is a total equation, so all four pin.)
-    const PINNED_TOTALS: [(&str, usize); 116] = [
+    const PINNED_TOTALS: [(&str, usize); 117] = [
         ("rust_type_name", 14),
         ("rust_binop_symbol", 17),
         ("rust_unaryop_symbol", 2),
@@ -4292,6 +4317,7 @@ mod xval3 {
         ("rust_string_literal_owned_text", 6),
         ("rust_doc_line", 4),
         ("rust_param_text", 5),
+        ("rust_generic_param_text", 5),
         ("rust_generics_text", 6),
         ("rust_signature", 3),
         ("rust_precondition_assert", 4),
@@ -4575,8 +4601,8 @@ mod xval3 {
             let (_, pinned, unpinned) = totals(name, &sw);
             assert_eq!((pinned, unpinned), (n, 0), "{}", name);
         }
-        // Grand totals across the module: 3912 cases per
-        // run, 2992 pinned, 913 spec-silent, 7 out of
+        // Grand totals across the module: 3917 cases per
+        // run, 2997 pinned, 913 spec-silent, 7 out of
         // contract. (Slices 1–3: 2196 cases, 1533 pinned,
         // 656 silent — Phase 29 moved the literal specs'
         // three special-contents cases each from pinned to
@@ -4598,11 +4624,14 @@ mod xval3 {
         // case, unpinned since Lambda left its table.
         // Phase 61 adds 2 cases, both pinned:
         // rust_test_case's battery grows with the
-        // generics-text argument's annotated cases.)
+        // generics-text argument's annotated cases.
+        // Phase 62 adds 5 cases, all pinned:
+        // rust_generic_param_text's battery — the spec is
+        // total, its equation pins every name.)
         let total_cases: usize = ALL_SPECS.iter().map(|n| sweep(n).len()).sum();
         let total_pinned: usize = PINNED_TOTALS.iter().map(|(_, t)| t).sum();
-        assert_eq!(total_cases, 3912);
-        assert_eq!(total_pinned, 2992);
+        assert_eq!(total_cases, 3917);
+        assert_eq!(total_pinned, 2997);
     }
 
     #[test]
@@ -4922,7 +4951,7 @@ mod xval3 {
             "rust_expr_lambda_text",
         ];
         let functions = load_codegen_module();
-        assert_eq!(functions.len(), 116, "module spec count");
+        assert_eq!(functions.len(), 117, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
             if !RECOGNIZED.contains(&func.name.as_str()) {

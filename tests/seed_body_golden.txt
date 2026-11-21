@@ -60,3 +60,4 @@ codegen::rust_expr_lambda_text	BinOp(Concat, BinOp(Concat, BinOp(Concat, Literal
 codegen::rust_expr_list_text	BinOp(Concat, BinOp(Concat, Literal(String("vec![")), Var("args")), Literal(String("]")))
 codegen::rust_expr_tuple_text	BinOp(Concat, BinOp(Concat, Literal(String("(")), Var("args")), Literal(String(")")))
 codegen::rust_file_text	BinOp(Concat, BinOp(Concat, BinOp(Concat, BinOp(Concat, BinOp(Concat, Var("header"), Var("signature")), Var("pre_block")), Var("body")), Literal(String("}\n"))), Var("test_module"))
+codegen::rust_generic_param_text	BinOp(Concat, Var("name"), Literal(String(": Clone")))

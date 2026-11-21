@@ -8074,6 +8074,16 @@ spec exclaim {
     /// has no seed body — String-equality guards are the
     /// recorded unadmitted family, like rust_target_route
     /// and rust_ident_empty, which are likewise absent.)
+    ///
+    /// Phase 62 extension (2026-11-21): ONE append —
+    /// rust_generic_param_text, the Clone-bound amendment's
+    /// new per-generic template spec, whose equation seed
+    /// body joins the fixture by the Phase 55 append
+    /// precedent for new equation specs: 46 Codegen bodies,
+    /// 63 total. The other 62 bodies are asserted
+    /// byte-identical below, unchanged (rust_generics_text's
+    /// own body did not change — only its doc and its
+    /// driver's join elements did).
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -8086,7 +8096,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 62, "45 Codegen + 14 M2 + 3 tokenizer golden bodies");
+        assert_eq!(expected.len(), 63, "46 Codegen + 14 M2 + 3 tokenizer golden bodies");
         let mut modules: Vec<(String, Vec<FunctionSpec>)> = ["validator", "printer", "codegen"]
             .iter()
             .map(|f| (f.to_string(), load_m2_module(f)))

@@ -1043,9 +1043,18 @@ impl Adapter {
             }
         };
 
-        // Signature parts.
-        let generic_names: Vec<String> =
-            spec.generics.iter().map(|g| rust_ident(&g.name)).collect();
+        // Signature parts. Each generic parameter's text
+        // is the artifact's rust_generic_param_text winner
+        // (Phase 62: the name + its Clone bound).
+        let generic_names: Vec<String> = spec
+            .generics
+            .iter()
+            .map(|g| {
+                syn::rust_generic_param_text::rust_generic_param_text(
+                    rust_ident(&g.name),
+                )
+            })
+            .collect();
         let generics = syn::rust_generics_text::rust_generics_text(
             generic_names.join(", "),
             !spec.generics.is_empty(),
