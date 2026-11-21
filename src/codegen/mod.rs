@@ -716,7 +716,11 @@ fn ir_to_rust_tail(
         | IRNode::Lambda { .. } | IRNode::Closure { .. } | IRNode::Collection { .. }
         | IRNode::Call { .. } | IRNode::Map { .. } | IRNode::Filter { .. }
         | IRNode::Fold { .. } | IRNode::Sort { .. } | IRNode::Index(..)
-        | IRNode::TryPropagate(..) => {
+        | IRNode::TryPropagate(..)
+        // Phase 77: the new expression kinds are value-
+        // shaped like Index — a tail-position projection
+        // or record literal yields its value.
+        | IRNode::FieldAccess { .. } | IRNode::RecordLit { .. } => {
             format!("{}{}\n", pad, ir_to_rust_expr_typed(node, expected))
         }
         _ => ir_to_rust(node, indent, fn_ret),
@@ -1171,14 +1175,46 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
         // value of its own, so there is no honest expression
         // form — the loud fallback applies.
         IRNode::Alloc { .. } => unsupported_expr("Alloc"),
-        // M1 features (Phase 73): the nodes exist, but their
-        // rendering in this emitter is Phase 77's scoped
-        // unfreeze (new arms only, no existing byte moves).
-        // Until then the loud fallback applies — no node of
-        // either kind could be produced before this phase, so
-        // no existing winner's bytes change.
-        IRNode::FieldAccess { .. } => unsupported_expr("FieldAccess"),
-        IRNode::RecordLit { .. } => unsupported_expr("RecordLit"),
+        // M1 features (Phase 77, decisions D2a/D3a — the
+        // scoped unfreeze: these two arms replace the
+        // Phase 73 loud fallback; no existing arm moves).
+        // Field projection is Rust's own `.field`; the
+        // base renders through the condition-position
+        // discipline (block-like bases parenthesized),
+        // and a record-literal base is parenthesized too
+        // — a bare struct literal cannot head a projection
+        // in the scrutinee/condition positions this
+        // emitter feeds.
+        IRNode::FieldAccess { base, field } => {
+            let base_text = match base.as_ref() {
+                IRNode::RecordLit { .. } => format!("({})", ir_to_rust_expr(base)),
+                _ => expr_in_condition_position(base),
+            };
+            format!("{}.{}", base_text, rust_ident(field))
+        }
+        // Record construction: the Rust struct literal,
+        // fields in written order, in the StructDef arm's
+        // spacing convention. A bare string-literal field
+        // value takes the owned form — the field's
+        // declared type is the spec's (String maps to
+        // String), the defect-4d rule at the position
+        // this arm controls, exactly as the spec-Expr
+        // RecordLit arm.
+        IRNode::RecordLit { type_name, fields } => {
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|(n, v)| {
+                    let value_text = match v {
+                        IRNode::Literal(IRLiteral::String(s)) => {
+                            format!("\"{}\".to_string()", escape_rust_str(s))
+                        }
+                        _ => ir_to_rust_expr(v),
+                    };
+                    format!("{}: {}", rust_ident(n), value_text)
+                })
+                .collect();
+            format!("{} {{ {} }}", rust_ident(type_name), fields_str.join(", "))
+        }
         IRNode::Typed { node, ty } => ir_to_rust_expr_typed(node, Some(ty)),
     }
 }
@@ -1274,6 +1310,22 @@ fn ir_to_c_expr(node: &IRNode) -> String {
             };
             format!("({} {} {})", ir_to_c_expr(lhs), c_op, ir_to_c_expr(rhs))
         }
+        // M1 features (Phase 77): C's record concept is
+        // the struct — generate_c carries the record
+        // typedef rendering — so projection is member
+        // access and construction is a C99 compound
+        // literal with designated initializers, fields
+        // in written order.
+        IRNode::FieldAccess { base, field } => {
+            format!("{}.{}", ir_to_c_expr(base), field)
+        }
+        IRNode::RecordLit { type_name, fields } => {
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|(n, v)| format!(".{} = {}", n, ir_to_c_expr(v)))
+                .collect();
+            format!("({}){{ {} }}", type_name, fields_str.join(", "))
+        }
         _ => "0".into(),
     }
 }
@@ -1291,6 +1343,14 @@ fn ir_to_wasm(node: &IRNode) -> String {
         IRNode::Return(expr) => {
             out.push_str(&format!("    {}\n", ir_to_wasm_expr(expr)));
             out.push_str("    return\n");
+        }
+        // M1 features (Phase 77): no aggregate concept
+        // exists in the emitted WAT (see ir_to_wasm_expr),
+        // so both nodes keep the standing statement
+        // fallback — an explicit arm, byte-identical to
+        // the catch-all, recording the choice at the site.
+        IRNode::FieldAccess { .. } | IRNode::RecordLit { .. } => {
+            out.push_str(&format!("    ;; {}\n", "node"));
         }
         _ => {
             out.push_str(&format!("    ;; {}\n", "node"));
@@ -1321,6 +1381,13 @@ fn ir_to_wasm_expr(node: &IRNode) -> String {
             )
         }
         IRNode::Var(name) => format!("local.get ${}", name),
+        // M1 features (Phase 77): the emitted WAT is a
+        // scalar model — params/results are i32/f64, no
+        // memory or struct types are ever declared — so
+        // neither new node has a target concept; both
+        // keep the standing expression fallback, as an
+        // explicit arm byte-identical to the catch-all.
+        IRNode::FieldAccess { .. } | IRNode::RecordLit { .. } => "i32.const 0".into(),
         _ => "i32.const 0".into(),
     }
 }
@@ -1381,6 +1448,23 @@ fn ir_to_python_expr(node: &IRNode) -> String {
                 _ => "?",
             };
             format!("({} {} {})", ir_to_python_expr(lhs), py_op, ir_to_python_expr(rhs))
+        }
+        // M1 features (Phase 77): this emitter generates
+        // no class or dataclass definitions for record
+        // types (ty_to_python maps a named type to Any),
+        // so the declaration-free record value is a dict
+        // and projection is its subscript — the
+        // self-consistent pair. The literal's type name
+        // has no runtime form in this model.
+        IRNode::FieldAccess { base, field } => {
+            format!("{}[\"{}\"]", ir_to_python_expr(base), field)
+        }
+        IRNode::RecordLit { fields, .. } => {
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|(n, v)| format!("\"{}\": {}", n, ir_to_python_expr(v)))
+                .collect();
+            format!("{{{}}}", fields_str.join(", "))
         }
         _ => "None".into(),
     }
@@ -1446,6 +1530,20 @@ fn ir_to_js_expr(node: &IRNode) -> String {
                 _ => "?",
             };
             format!("({} {} {})", ir_to_js_expr(lhs), js_op, ir_to_js_expr(rhs))
+        }
+        // M1 features (Phase 77): object literals and
+        // property access are native and
+        // declaration-free — the exact record model. The
+        // literal's type name has no runtime form in it.
+        IRNode::FieldAccess { base, field } => {
+            format!("{}.{}", ir_to_js_expr(base), field)
+        }
+        IRNode::RecordLit { fields, .. } => {
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|(n, v)| format!("{}: {}", n, ir_to_js_expr(v)))
+                .collect();
+            format!("{{ {} }}", fields_str.join(", "))
         }
         _ => "undefined".into(),
     }
@@ -1591,6 +1689,49 @@ fn expr_to_rust(expr: &Expr) -> String {
                 .map(|(name, _)| rust_ident(name))
                 .collect();
             format!("|{}| {}", names.join(", "), expr_to_rust(body))
+        }
+        // Method calls (Phase 77, decision D1a — scoped
+        // unfreeze, new arm only): the four closed-table
+        // builtins render as the identical Rust method
+        // syntax on the rendered receiver. Anything else
+        // — a name outside the table, or a table name
+        // carrying arguments (the builtins are
+        // zero-argument; both shapes are Phase 74 type
+        // errors, so a checked module never reaches this)
+        // — renders the standing catch-all, never a guess.
+        Expr::MethodCall { receiver, name, args } => {
+            match name.as_str() {
+                "is_ok" | "is_err" | "unwrap" | "len" if args.is_empty() => {
+                    format!("{}.{}()", expr_to_rust(receiver), name)
+                }
+                _ => "??".into(),
+            }
+        }
+        // Record literals (Phase 77, decision D3a — new
+        // arm only): the Rust struct-literal form, fields
+        // in written order, in the StructDef arm's spacing
+        // convention. One expectation the arm itself
+        // knows: a record field's declared type comes
+        // from the spec (ty_to_rust maps String to
+        // String), so a bare string-literal field value
+        // takes the owned form — the defect-4d rule
+        // (Phase 29) applied at the one position this
+        // arm controls; deeper expressions keep the
+        // standing rendering, as everywhere else here.
+        Expr::RecordLit { type_name, fields } => {
+            let fields_str: Vec<String> = fields
+                .iter()
+                .map(|(n, v)| {
+                    let value_text = match v {
+                        Expr::StringLit(s) => {
+                            format!("\"{}\".to_string()", escape_rust_str(s))
+                        }
+                        _ => expr_to_rust(v),
+                    };
+                    format!("{}: {}", rust_ident(n), value_text)
+                })
+                .collect();
+            format!("{} {{ {} }}", rust_ident(type_name), fields_str.join(", "))
         }
         _ => "??".into(),
     }
@@ -2392,6 +2533,17 @@ mod tests {
                 body: leaf(),
             },
             IRNode::TryPropagate(Box::new(IRNode::Var("kind".into()))),
+            // Phase 77: the two M1-feature kinds render
+            // for real (they were the loud unsupported
+            // fallback through Phase 76).
+            IRNode::FieldAccess {
+                base: Box::new(IRNode::Var("kind".into())),
+                field: "x".into(),
+            },
+            IRNode::RecordLit {
+                type_name: "Point".into(),
+                fields: vec![("x".into(), IRNode::Literal(IRLiteral::Int(1)))],
+            },
         ];
         for node in &variants {
             assert_expr_renders(node);
@@ -3597,4 +3749,623 @@ mod tests {
             code
         );
     }
+
+    // ── Phase 77: native emitters for the new nodes ─────
+    //
+    // The scoped unfreeze (owner-ratified in the Phase 72
+    // plan, the Phase 29/39/55/62 form): the Rust emitter
+    // gains NEW ARMS ONLY for the Phase 73 node shapes —
+    // Expr::MethodCall / Expr::RecordLit in expr_to_rust,
+    // IRNode::FieldAccess / IRNode::RecordLit in
+    // ir_to_rust_expr — and the C / WAT / Python /
+    // JavaScript IR emitters gain the two IR nodes under
+    // their own conventions. No existing arm's output
+    // moves; the M3/M4 gate re-runs are the proof.
+
+    #[test]
+    fn phase77_expr_to_rust_method_calls_render_verbatim() {
+        let var = |n: &str| Expr::Var(n.into());
+        let mc = |receiver: Expr, name: &str| Expr::MethodCall {
+            receiver: Box::new(receiver),
+            name: name.into(),
+            args: vec![],
+        };
+        // The four D1a builtins render as the identical
+        // Rust method syntax on the rendered receiver.
+        assert_eq!(expr_to_rust(&mc(var("output"), "is_ok")), "output.is_ok()");
+        assert_eq!(expr_to_rust(&mc(var("output"), "is_err")), "output.is_err()");
+        assert_eq!(expr_to_rust(&mc(var("output"), "unwrap")), "output.unwrap()");
+        assert_eq!(expr_to_rust(&mc(var("tokens"), "len")), "tokens.len()");
+        // Chaining composes — the restored tokenizer's own
+        // `output.unwrap().len()` shape.
+        assert_eq!(
+            expr_to_rust(&mc(mc(var("output"), "unwrap"), "len")),
+            "output.unwrap().len()"
+        );
+        // A method outside the closed table renders the
+        // function's standing catch-all — never a guessed
+        // rendering. (Unreachable for checked modules: the
+        // Phase 74 typechecker rejects unknown methods and
+        // arguments to a builtin alike.)
+        assert_eq!(expr_to_rust(&mc(var("output"), "tokens")), "??");
+        let with_arg = Expr::MethodCall {
+            receiver: Box::new(var("output")),
+            name: "is_ok".into(),
+            args: vec![Expr::IntLit(1)],
+        };
+        assert_eq!(expr_to_rust(&with_arg), "??");
+        // The Field boundary, pinned as standing:
+        // Expr::Field keeps its pre-existing catch-all
+        // rendering (the M3 corpus pins "field-fallback"
+        // byte-for-byte; the composed side gains the kind
+        // rows in Phase 78), so a method call on a field
+        // receiver inherits it. `state.tokens.len()` is
+        // Phase 78 territory — recorded, not smoothed.
+        let field_recv = Expr::Field(Box::new(var("state")), "tokens".into());
+        assert_eq!(expr_to_rust(&field_recv), "??");
+        assert_eq!(expr_to_rust(&mc(field_recv, "len")), "??.len()");
+    }
+
+    #[test]
+    fn phase77_expr_to_rust_record_literals_render_named() {
+        // The restored tokenizer module's own test shape
+        // (tokenize_one "keyword-spec"): a Token literal,
+        // fields in written order.
+        let token = Expr::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), Expr::IntLit(0)),
+                ("lexeme".into(), Expr::StringLit("spec".into())),
+                ("line".into(), Expr::IntLit(1)),
+                ("col".into(), Expr::IntLit(1)),
+            ],
+        };
+        assert_eq!(
+            expr_to_rust(&token),
+            "Token { kind: 0, lexeme: \"spec\".to_string(), line: 1, col: 1 }"
+        );
+        // Nested inside the List pseudo-call and an Ok(...)
+        // wrap — the tokenize_all "simple-spec" expected
+        // shape.
+        let wrapped = Expr::Call(
+            "Ok".into(),
+            vec![Expr::Call("List".into(), vec![token])],
+        );
+        assert_eq!(
+            expr_to_rust(&wrapped),
+            "Ok(vec![Token { kind: 0, lexeme: \"spec\".to_string(), line: 1, col: 1 }])"
+        );
+        // An empty record literal keeps the template's
+        // braces (the StructDef arm's spacing convention).
+        let empty = Expr::RecordLit {
+            type_name: "Unit2".into(),
+            fields: vec![],
+        };
+        assert_eq!(expr_to_rust(&empty), "Unit2 {  }");
+    }
+
+    #[test]
+    fn phase77_ir_to_rust_field_access_and_record_literals() {
+        let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+            base: Box::new(base),
+            field: field.into(),
+        };
+        let v = |n: &str| IRNode::Var(n.into());
+        let int = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+        // Projection on a variable base — the tokenizer's
+        // pervasive shape.
+        assert_eq!(ir_to_rust_expr(&fa(v("state"), "pos")), "state.pos");
+        // Chained projection composes bare.
+        assert_eq!(
+            ir_to_rust_expr(&fa(fa(v("a"), "b"), "c")),
+            "a.b.c"
+        );
+        // A record-literal base is parenthesized: a bare
+        // struct literal cannot head a projection in the
+        // scrutinee/condition positions this emitter feeds.
+        let lit_base = IRNode::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![("kind".into(), int(0))],
+        };
+        assert_eq!(
+            ir_to_rust_expr(&fa(lit_base, "kind")),
+            "(Token { kind: 0 }).kind"
+        );
+        // Record construction, fields in written order,
+        // values rendered by the same emitter.
+        let state_lit = IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), fa(v("state"), "source")),
+                (
+                    "pos".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(fa(v("state"), "pos")),
+                        Box::new(int(1)),
+                    ),
+                ),
+            ],
+        };
+        assert_eq!(
+            ir_to_rust_expr(&state_lit),
+            "TokenizerState { source: state.source, pos: (state.pos + 1) }"
+        );
+        // A bare string-literal field value takes the
+        // owned form (the defect-4d rule — the field's
+        // declared type is the spec's String).
+        let token_lit = IRNode::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), int(0)),
+                (
+                    "lexeme".into(),
+                    IRNode::Literal(IRLiteral::String("spec".into())),
+                ),
+            ],
+        };
+        assert_eq!(
+            ir_to_rust_expr(&token_lit),
+            "Token { kind: 0, lexeme: \"spec\".to_string() }"
+        );
+        // Tail position keeps the value (no trailing `;`):
+        // a body that is a bare projection or a bare record
+        // literal returns it.
+        let neutral = TypeRef::Unit;
+        assert_eq!(
+            ir_to_rust_tail(&fa(v("state"), "pos"), 0, &neutral, None),
+            "state.pos\n"
+        );
+        assert_eq!(
+            ir_to_rust_tail(&state_lit, 0, &neutral, None),
+            "TokenizerState { source: state.source, pos: (state.pos + 1) }\n"
+        );
+    }
+
+    #[test]
+    fn phase77_other_emitters_field_access_and_record_literals() {
+        let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+            base: Box::new(base),
+            field: field.into(),
+        };
+        let v = |n: &str| IRNode::Var(n.into());
+        let int = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+        let token_ir = IRNode::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), int(0)),
+                ("line".into(), int(1)),
+            ],
+        };
+        // C: structs are the target's record concept and
+        // generate_c carries the record-typedef rendering;
+        // projection is member access, construction is a
+        // C99 compound literal with designated
+        // initializers. (Field VALUES ride the C
+        // expression emitter's standing per-kind coverage
+        // — Int here; a String field value would take its
+        // standing fallback, a pre-existing C limitation
+        // outside this phase's two nodes.)
+        assert_eq!(ir_to_c_expr(&fa(v("state"), "pos")), "state.pos");
+        assert_eq!(
+            ir_to_c_expr(&token_ir),
+            "(Token){ .kind = 0, .line = 1 }"
+        );
+        // Python: the emitter generates no class or
+        // dataclass definitions for record types (ty_to_python
+        // maps a named type to Any), so the declaration-free
+        // record value is a dict and projection is its
+        // subscript — the self-consistent pair.
+        assert_eq!(
+            ir_to_python_expr(&fa(v("state"), "pos")),
+            "state[\"pos\"]"
+        );
+        let token_py = IRNode::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), int(0)),
+                ("lexeme".into(), IRNode::Literal(IRLiteral::String("spec".into()))),
+            ],
+        };
+        assert_eq!(
+            ir_to_python_expr(&token_py),
+            "{\"kind\": 0, \"lexeme\": \"spec\"}"
+        );
+        // JavaScript: object literals and property access
+        // are native and declaration-free — the exact
+        // record model.
+        assert_eq!(ir_to_js_expr(&fa(v("state"), "pos")), "state.pos");
+        assert_eq!(
+            ir_to_js_expr(&token_py),
+            "{ kind: 0, lexeme: 'spec' }"
+        );
+        // WAT: the emitted WAT has no aggregate concept at
+        // all (scalar params/results only, no memory or
+        // struct model), so both nodes keep the emitter's
+        // standing fallbacks — pinned here so the choice
+        // is a recorded decision, not an omission.
+        assert_eq!(ir_to_wasm_expr(&fa(v("state"), "pos")), "i32.const 0");
+        assert_eq!(ir_to_wasm_expr(&token_ir), "i32.const 0");
+        assert_eq!(ir_to_wasm(&fa(v("state"), "pos")), "    ;; node\n");
+    }
+
+    // The compile fixture: the restored tokenizer module
+    // of Phases 73–76 (verbatim copy of the eval.rs const —
+    // the current example file's types, the dropped
+    // tokenize_one / tokenize_all constraints restored,
+    // the 9 mirror tests in the D3a named form) plus ONE
+    // fixture-only spec, `step_ok`, marked inline: the
+    // module's own method-call constraints are
+    // postconditions (generate does not render those) and
+    // contain Field receivers (whose expr_to_rust
+    // rendering stays the standing catch-all until Phase
+    // 78), so the MethodCall arm's generated-code exercise
+    // rides a precondition — the one constraint position
+    // generate_rust DOES render (debug_assert) — on a
+    // Result-typed parameter, the D1a table's home ground.
+    // One measured subtlety, recorded rather than worked
+    // around silently: a parsed `require: a == b` lands
+    // in Constraint::Expr (parse_expr consumes `==` as a
+    // BinOp), which the native constraint_to_rust renders
+    // through its standing "true" catch-all — so the
+    // fixture hands generate step_ok's precondition in
+    // the engine-constructed Constraint::Eq form, the
+    // shape that renderer's Eq arm (and the M3 corpus's
+    // constraint cases) exists for. The spec text below
+    // keeps its `require:` line: it parses and typechecks
+    // as written; only the candidate's precondition VALUE
+    // is transcribed, exactly as the fixture bodies are
+    // transcriptions.
+    const PHASE77_TOKENIZER_MODULE: &str = r#"ScratchTokenizer {
+
+type TokenKind = Int;
+
+type Token = {
+    kind: TokenKind,
+    lexeme: String,
+    line: Int,
+    col: Int
 }
+
+type TokenizerState = {
+    source: String,
+    pos: Int,
+    line: Int,
+    col: Int,
+    tokens: List<Token>
+}
+
+type StepResult = Result<TokenizerState, String>;
+
+spec peek {
+    input: state: TokenizerState
+    output: Option<Char>
+
+    constraint: state.pos<len(state.source)||output==None()
+    constraint: state.pos>=len(state.source)||output==Some(state.source[state.pos])
+
+    test "non-empty" { input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] } expect: Some('h') }
+    test "at-end" { input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] } expect: None() }
+}
+
+spec next_char {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos==state.pos+1
+    constraint: peek(state)!=Some('\n')||output.line==state.line+1
+    constraint: peek(state)!=Some('\n')||output.col==1
+    constraint: peek(state)==Some('\n')||output.col==state.col+1
+
+    test "normal" {
+        input: TokenizerState { source: "ab", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "ab", pos: 1, line: 1, col: 2, tokens: [] }
+    }
+}
+
+spec skip_whitespace {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos>=state.pos
+    constraint: len(output.source)==len(state.source)
+
+    test "no-whitespace" {
+        input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
+    }
+
+    test "skip-spaces" {
+        input: TokenizerState { source: "  hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "  hi", pos: 2, line: 1, col: 3, tokens: [] }
+    }
+}
+
+spec tokenize_one {
+    input: state: TokenizerState
+    output: StepResult
+
+    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+    constraint: output.is_ok() || state.pos >= len(state.source)
+
+    test "keyword-spec" {
+        input: TokenizerState { source: "spec", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok(TokenizerState { source: "spec", pos: 4, line: 1, col: 5, tokens: [
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 }
+        ] })
+    }
+
+    test "end-of-input" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok(TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] })
+    }
+}
+
+spec tokenize_all {
+    input: state: TokenizerState
+    output: Result<List<Token>, String>
+
+    constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
+    optimize: time < O(n)
+
+    test "simple-spec" {
+        input: TokenizerState { source: "spec sort", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 },
+            Token { kind: 0, lexeme: "sort", line: 1, col: 6 }
+        ])
+    }
+
+    test "empty" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([])
+    }
+}
+
+spec step_ok {
+    input: result: StepResult
+    output: Bool
+
+    require: result.is_ok() == true
+
+    test "ok-state" { input: Ok(TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] }) expect: true }
+}
+
+}"#;
+
+    // The Phase 48 runner prelude's shapes (the standing
+    // harness-side supply): generate renders named types
+    // verbatim and carries no module type declarations —
+    // FunctionSpec::types() is empty by design — so the
+    // record declarations a generated tokenizer file
+    // needs ride the prelude, exactly as the Phase 48
+    // compiled runner supplied them. (Promoting the
+    // declarations into the emitter would need the
+    // module context Phase 76 built for the verifier's
+    // SpecIndex; generate's candidate API does not carry
+    // it. Recorded in the Phase 77 ROAD note.)
+    const PHASE77_PRELUDE: &str = r#"
+#[derive(Debug, Clone, PartialEq)]
+pub struct Token { pub kind: i64, pub lexeme: String, pub line: i64, pub col: i64 }
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenizerState { pub source: String, pub pos: i64, pub line: i64, pub col: i64, pub tokens: Vec<Token> }
+pub type StepResult = Result<TokenizerState, String>;
+"#;
+
+    fn phase77_candidate(spec: FunctionSpec, body: IRNode) -> CandidateImplementation {
+        CandidateImplementation {
+            id: 1,
+            body,
+            spec_name: spec.name.clone(),
+            spec,
+            score: 1.0,
+            scores: ScoreBreakdown {
+                test_pass_ratio: 1.0,
+                constraint_score: 1.0,
+                complexity_score: 1.0,
+                quality_score: 1.0,
+                synthesis_time_us: 0,
+            },
+            generation: 0,
+            provenance: Provenance::HumanGuided,
+            verified: true,
+            verification_status: None,
+        }
+    }
+
+    #[test]
+    fn phase77_tokenizer_generated_rust_compiles_and_runs() {
+        use std::io::Write;
+        let Some(rustc) = rustc_path() else {
+            eprintln!("rustc not reachable; skipping Phase 77 fixture");
+            return;
+        };
+        // The restored module checks whole (the Phase 74
+        // headline, re-measured on this phase's copy).
+        let parsed = crate::spec::parser::parse(PHASE77_TOKENIZER_MODULE)
+            .expect("fixture module must parse");
+        let checked = crate::spec::typeck::check(parsed)
+            .expect("fixture module must typecheck");
+        let specs = checked.spec.functions;
+        let spec = |name: &str| {
+            specs
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("spec {name} must exist"))
+                .clone()
+        };
+        let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+            base: Box::new(base),
+            field: field.into(),
+        };
+        let v = |n: &str| IRNode::Var(n.into());
+        let int = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+
+        // Fixture bodies. next_char's is a REDUCED
+        // transcription of the mirror body (the Phase 75
+        // eval.rs transcription minus its newline branch):
+        // the branch's condition indexes a String, and the
+        // IR Index arm's standing rendering has no String
+        // form in Rust — a pre-existing emitter limit
+        // outside this phase's two nodes (peek is excluded
+        // from the fixture for the same reason; Phases
+        // 75/76 proved both on the interpreter/Z3 routes).
+        // The reduced body still constructs the record
+        // from field projections — the shapes under test.
+        let next_char_body = IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), fa(v("state"), "source")),
+                (
+                    "pos".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(fa(v("state"), "pos")),
+                        Box::new(int(1)),
+                    ),
+                ),
+                ("line".into(), fa(v("state"), "line")),
+                (
+                    "col".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(fa(v("state"), "col")),
+                        Box::new(int(1)),
+                    ),
+                ),
+                ("tokens".into(), fa(v("state"), "tokens")),
+            ],
+        };
+        // The Phase 75/76 partial bodies: they compile and
+        // their generated tests judge them honestly —
+        // each passes the degenerate test and fails the
+        // token-producing one, as measured there.
+        let tokenize_one_body = IRNode::Call {
+            function: "Ok".into(),
+            args: vec![v("state")],
+        };
+        let tokenize_all_body = IRNode::Call {
+            function: "Ok".into(),
+            args: vec![fa(v("state"), "tokens")],
+        };
+        // step_ok's body: the manual transcription of
+        // is_ok as a match (method calls have no IR kind —
+        // the Phase 76 design fact).
+        let step_ok_body = IRNode::Match {
+            scrutinee: Box::new(v("result")),
+            cases: vec![
+                (
+                    IRPattern::Constructor("Ok".into(), vec![IRPattern::Wildcard]),
+                    IRNode::Literal(IRLiteral::Bool(true)),
+                ),
+                (
+                    IRPattern::Constructor("Err".into(), vec![IRPattern::Wildcard]),
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+            ],
+        };
+
+        // generate_rust directly (not the `generate`
+        // route): this phase's subject is the native
+        // emitter in both configurations; the compiled
+        // adapter behind bootstrap-codegen gains its arms
+        // in Phase 78.
+        let mut file = String::from(PHASE77_PRELUDE);
+        for (name, body) in [
+            ("next_char", next_char_body),
+            ("tokenize_one", tokenize_one_body),
+            ("tokenize_all", tokenize_all_body),
+            ("step_ok", step_ok_body),
+        ] {
+            let mut spec = spec(name);
+            if name == "step_ok" {
+                // The Eq-form transcription of the
+                // spec's parsed `require:` (see the
+                // module const's comment): the same
+                // precondition as the engine-constructed
+                // Constraint::Eq the native renderer's
+                // Eq arm serves.
+                spec.preconditions = vec![Constraint::Eq(
+                    Expr::MethodCall {
+                        receiver: Box::new(Expr::Var("result".into())),
+                        name: "is_ok".into(),
+                        args: vec![],
+                    },
+                    Expr::BoolLit(true),
+                )];
+            }
+            let cand = phase77_candidate(spec, body);
+            let generated = generate_rust(&cand).expect("generate fixture winner");
+            // The m3_gate wrap: one module per winner so
+            // the per-file `mod tests` cannot collide.
+            file.push_str(&format!("mod gen_{} {{\nuse super::*;\n", name));
+            file.push_str(&generated);
+            file.push_str("}\n\n");
+        }
+        // The method-call arm's rendering is IN the
+        // generated code (step_ok's precondition assert).
+        assert!(
+            file.contains("debug_assert!(result.is_ok() == true"),
+            "generated file must carry the rendered method call:\n{}",
+            file
+        );
+        // And the record literal + field projection
+        // renderings are in the generated test code / body.
+        assert!(
+            file.contains("Token { kind: 0, lexeme: \"spec\".to_string(), line: 1, col: 1 }"),
+            "generated file must carry the rendered record literal:\n{}",
+            file
+        );
+        assert!(
+            file.contains("state.tokens"),
+            "generated file must carry the rendered field access:\n{}",
+            file
+        );
+
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_phase77_fixture_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("tokenizer_fixture.rs");
+        let mut f = std::fs::File::create(&src).unwrap();
+        f.write_all(file.as_bytes()).unwrap();
+        drop(f);
+        let bin = dir.join("tokenizer_fixture_test");
+        let compile = std::process::Command::new(&rustc)
+            .args(["--edition", "2021", "--test"])
+            .arg(&src)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "Phase 77 fixture does not compile:\n{}\n--- file ---\n{}",
+            String::from_utf8_lossy(&compile.stderr),
+            file
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+        // Measured outcomes: next_char 1/1 and step_ok 1/1
+        // pass; the two partial bodies each pass their
+        // degenerate test and fail the token-producing
+        // one — 4 passed, 2 failed, the failures named.
+        assert!(
+            stdout.contains("4 passed; 2 failed"),
+            "fixture test outcomes differ from the measured expectation:\n{}",
+            stdout
+        );
+        assert!(
+            stdout.contains("keyword_spec") && stdout.contains("simple_spec"),
+            "the failing tests must be the two token-producing ones:\n{}",
+            stdout
+        );
+    }
+}
+
