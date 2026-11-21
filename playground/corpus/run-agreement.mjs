@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // ─────────────────────────────────────────────────────────
-//  W2 GATE RUNNER (Phase 67): pinned-corpus agreement.
+//  GATE RUNNER (Phase 67 W2 + Phase 68 W3): pinned-corpus
+//  agreement + synthesis pins + UI-copy audit.
 //
-//  Every case in cases.json is checked by BOTH:
+//  Every check case in cases.json is run through BOTH:
 //    * the native CLI  — `morphic check <file>`, accept iff
 //      exit code 0 (the CLI's own contract), and
 //    * the playground WASM module — the exact pkg/ build
@@ -18,6 +19,7 @@
 //  MORPHIC_BIN). Exit code 0 iff all cases pass.
 // ─────────────────────────────────────────────────────────
 import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -98,5 +100,86 @@ for (const c of corpus.cases) {
   for (const p of problems) console.log(`      ✗ ${p}`);
 }
 
-console.log(`\n${corpus.cases.length - failures}/${corpus.cases.length} cases agree`);
-process.exit(failures === 0 ? 0 : 1);
+// ── W3 synthesis gate (Phase 68) ────────────────────────
+// Every synthesis case was pinned from the NATIVE
+// interpreter first (the config-gated Rust harness
+// api::tests::w3_gate_fractions_match_native_interpreter,
+// run in this build's own no-Z3/no-runner configuration,
+// asserts body identity + run_spec_tests reproduction
+// there). Here the WASM build must reproduce every pin:
+// the exact fraction, the per-test outcome kinds, the
+// winner status, and the winner body's SHA-256 (body
+// identity across builds, via the native pins).
+let synthFailures = 0;
+for (const c of corpus.synthesisCases ?? []) {
+  const source = c.file
+    ? readFileSync(resolve(here, c.file), 'utf8')
+    : c.source;
+  const problems = [];
+  let report = null;
+  try {
+    report = JSON.parse(wasm.synthesize_seeded_spec(source, c.spec, c.seed));
+  } catch (e) {
+    problems.push(`WASM synthesis threw: ${e}`);
+  }
+  if (report && !report.winner) {
+    problems.push(`WASM synthesis failed at stage ${report.stage}: ${report.message}`);
+    report = null;
+  }
+  if (report) {
+    const w = report.winner;
+    const e = c.expect;
+    if (report.spec_name !== c.spec) problems.push(`spec ${report.spec_name} != ${c.spec}`);
+    if (w.tests_passed !== e.passed || w.tests_evaluable !== e.evaluable || w.tests_total !== e.total)
+      problems.push(`fraction ${w.tests_passed}/${w.tests_evaluable}/${w.tests_total} != pin ${e.passed}/${e.evaluable}/${e.total}`);
+    if (!(w.tests_passed <= w.tests_evaluable && w.tests_evaluable <= w.tests_total))
+      problems.push('fraction ordering violated (passed <= evaluable <= total)');
+    const kinds = w.test_outcomes.map((o) => o.outcome);
+    if (JSON.stringify(kinds) !== JSON.stringify(e.outcomes))
+      problems.push(`outcomes ${kinds.join(',')} != pin ${e.outcomes.join(',')}`);
+    if (w.verification_status !== e.status)
+      problems.push(`status ${w.verification_status} != pin ${e.status}`);
+    if (report.verification_available !== e.verificationAvailable)
+      problems.push(`verification_available ${report.verification_available} != pin ${e.verificationAvailable}`);
+    const hash = createHash('sha256').update(w.body_debug).digest('hex');
+    if (hash !== e.bodySha256)
+      problems.push(`winner body hash ${hash.slice(0, 12)}… != pin ${e.bodySha256.slice(0, 12)}… (body identity)`);
+    if (!Array.isArray(w.renders) || w.renders.length !== 6)
+      problems.push(`renders: expected 6 targets, got ${w.renders?.length}`);
+    if (e.unbindableReasonContains) {
+      const bad = w.test_outcomes.filter(
+        (o) => o.outcome === 'unbindable' && !(o.reason ?? '').includes(e.unbindableReasonContains));
+      if (bad.length) problems.push('an unbindable outcome does not name the expected reason class');
+    }
+  }
+  const status = problems.length === 0 ? 'PASS' : 'FAIL';
+  if (problems.length) synthFailures++;
+  console.log(`${status}  [synth] ${c.id.padEnd(28)} pin ${c.expect.passed}/${c.expect.evaluable}/${c.expect.total}`);
+  for (const p of problems) console.log(`      ✗ ${p}`);
+}
+
+// ── W3 UI-copy audit ────────────────────────────────────
+// The word "Verified" must not appear anywhere in the
+// built site's copy: this build produces no formally
+// verified result, and no wording may claim one. (The
+// mandated panel text is "Formal verification unavailable
+// in browser build" — lowercase, a statement about the
+// build, not a claim about a result.)
+{
+  const siteFiles = ['../index.html', '../src/main.js', '../styles.css'];
+  const offenders = siteFiles.filter((f) =>
+    readFileSync(resolve(here, f), 'utf8').includes('Verified'));
+  if (offenders.length) {
+    synthFailures++;
+    console.log(`FAIL  [copy] "Verified" appears in: ${offenders.join(', ')}`);
+  } else {
+    console.log('PASS  [copy] no "Verified" claim anywhere in the site copy');
+  }
+}
+
+console.log(`\n${corpus.cases.length - failures}/${corpus.cases.length} check cases agree`);
+if (corpus.synthesisCases) {
+  const total = corpus.synthesisCases.length + 1; // + the copy audit
+  console.log(`${total - synthFailures}/${total} synthesis gate checks pass (incl. UI-copy audit)`);
+}
+process.exit(failures === 0 && synthFailures === 0 ? 0 : 1);

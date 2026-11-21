@@ -1,13 +1,20 @@
-# Morphic Playground (v0.6 W2 — check MVP)
+# Morphic Playground (v0.6 W3 — check + synthesis)
 
 A static page that runs the Morphic compiler — compiled to WebAssembly
-from the same codebase as the CLI — in the browser. W2 scope is
-**check only**: parse + typecheck with positioned diagnostics, the
-module's spec list, and each spec's in-spec test inventory with
-per-test interpreter bindability. The test panel is an *inventory*:
-a check has no candidate implementation, so nothing is executed.
-Synthesis arrives in W3; formal verification (Z3) and the compiled
-runner are native-only and are labelled as such on the page.
+from the same codebase as the CLI — in the browser. W2 scope was
+**check only**; W3 adds **synthesis**: per spec, a Synthesize button runs
+the seeded playground profile (seed editable in the toolbar, default
+`api::PLAYGROUND_DEFAULT_SEED` = 42) and presents the crowned winner with
+its executed-test evidence as the exact fraction
+passed / evaluable / total, per-test outcomes with not-evaluable reasons,
+a verification panel stating that formal verification is unavailable in
+this build, and the winner rendered to Rust / C / WAT / Python /
+JavaScript / IR with copy + download (the WAT pane is a text preview —
+nothing is assembled or executed). Synthesis runs synchronously on the
+main thread in W3; the worker shell is W4's milestone. The check panel's
+test list remains an *inventory*: a check has no candidate, so nothing
+there has been run. Formal verification (Z3) and the compiled runner are
+native-only and are labelled as such on the page.
 
 ## Build
 
@@ -41,6 +48,20 @@ accept/reject must agree on every case:
 cargo build --bin morphic            # native CLI (or set MORPHIC_BIN)
 node playground/corpus/run-agreement.mjs
 ```
+
+## The pinned synthesis corpus (W3 gate)
+
+`corpus/cases.json` also carries `synthesisCases`: four seeded
+synthesis runs whose fractions, per-test outcome kinds, winner
+status, and winner-body SHA-256 were pinned from the **native
+interpreter first** — the config-gated Rust harness
+`api::tests::w3_gate_fractions_match_native_interpreter` (run it with
+`cargo test --no-default-features --features wasm-playground --lib api::`)
+asserts the API's winner body is the pipeline's crowned body and that
+`run_spec_tests` on that identical body reproduces the fraction. The
+Node runner then asserts the WASM build reproduces every pin, and
+audits the site copy: the word "Verified" must not appear in
+`index.html`, `src/main.js`, or `styles.css`.
 
 ## Bundled examples
 

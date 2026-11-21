@@ -42,6 +42,24 @@ pub fn synthesize_seeded(source: &str, seed: f64) -> String {
     }
 }
 
+/// One seeded playground-profile synthesis run over a
+/// NAMED spec of the module (W3); returns the
+/// SynthesisReport as JSON, or the StageError as JSON on
+/// failure. The report carries the winner's executed-test
+/// fraction (passed / evaluable / total), per-test
+/// outcomes, and renders to all six codegen targets.
+/// `seed` is a JS number; it is truncated to u64 (pass a
+/// non-negative integer below 2^53 for exactness).
+#[wasm_bindgen]
+pub fn synthesize_seeded_spec(source: &str, spec_name: &str, seed: f64) -> String {
+    match morphic::api::synthesize_seeded_spec(source, spec_name, seed as u64) {
+        Ok(report) => serde_json::to_string(&report)
+            .unwrap_or_else(|e| format!("{{\"stage\":\"internal\",\"message\":\"{}\"}}", e)),
+        Err(stage_error) => serde_json::to_string(&stage_error)
+            .unwrap_or_else(|e| format!("{{\"stage\":\"internal\",\"message\":\"{}\"}}", e)),
+    }
+}
+
 /// S6 probe (Phase 65 audit): does `std::time::Instant`
 /// work in this runtime, and does elapsed time advance?
 /// Returns JSON { instant_ok, elapsed_us, sink }. If

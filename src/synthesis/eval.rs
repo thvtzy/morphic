@@ -565,24 +565,82 @@ pub fn test_bindability(spec: &FunctionSpec) -> Vec<bool> {
         .collect()
 }
 
+/// Per-test outcome of executing one candidate body against
+/// a spec's tests — the fine-grained form of `TestRun`
+/// (Phase 68, v0.6 W3). `run_spec_tests` is a fold over
+/// these: a test counts as evaluable iff its outcome is not
+/// `Unbindable`, and as passed iff its outcome is `Passed`.
+/// The playground's synthesis panel reports outcomes per
+/// test so that a small passed count never hides WHY the
+/// rest did not pass — the denominator-honesty rule.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TestOutcome {
+    /// Bound, evaluated, and the value matched.
+    Passed,
+    /// Bound and evaluated, but the value differed.
+    Failed,
+    /// Bound, but the body is outside the interpreter's
+    /// evaluable subset on this test's environment (a loop
+    /// body, a hole, an unbound variable, …). The payload is
+    /// the evaluator's own reason. The test still counts as
+    /// evaluable — the interpreter COULD judge it; this body
+    /// gave it nothing to judge (see `valued_test_count`).
+    BodyNotEvaluable(String),
+    /// The test itself cannot be mapped to interpreter
+    /// values, so no candidate could ever be judged against
+    /// it. The payload is the reason CLASS: the expected
+    /// output is unmappable, the input is unmappable (it
+    /// carries a value with no interpreter representation,
+    /// e.g. a function/lambda for a fn-typed parameter), or
+    /// the input's shape does not match the parameter list.
+    Unbindable(String),
+}
+
+/// Execute `body` against every test in `spec.tests`,
+/// reporting the per-test outcome (in `spec.tests` order).
+pub fn test_outcomes(body: &IRNode, spec: &FunctionSpec) -> Vec<TestOutcome> {
+    spec.tests
+        .iter()
+        .map(|test| {
+            let Some(expected) = value_of_expr(&test.expected_output) else {
+                return TestOutcome::Unbindable(
+                    "expected output cannot be mapped to an interpreter value".into(),
+                );
+            };
+            let Some(env) = bind_test_env(&spec.params, &test.input) else {
+                return TestOutcome::Unbindable(if value_of_expr(&test.input).is_none() {
+                    "input cannot be mapped to an interpreter value \
+                     (it carries a value the interpreter cannot represent, \
+                     e.g. a function/lambda)"
+                        .into()
+                } else {
+                    "input does not match the spec's parameter list (shape/arity)".into()
+                });
+            };
+            match eval(body, &env) {
+                Ok(actual) if values_equal(&actual, &expected) => TestOutcome::Passed,
+                Ok(_) => TestOutcome::Failed,
+                Err(EvalError::NotEvaluable(reason)) => {
+                    TestOutcome::BodyNotEvaluable(reason)
+                }
+            }
+        })
+        .collect()
+}
+
 /// Execute `body` against every mappable test in `spec.tests`.
 pub fn run_spec_tests(body: &IRNode, spec: &FunctionSpec) -> TestRun {
-    let mut run = TestRun { evaluable: 0, passed: 0 };
-    for test in &spec.tests {
-        let (Some(env), Some(expected)) = (
-            bind_test_env(&spec.params, &test.input),
-            value_of_expr(&test.expected_output),
-        ) else {
-            continue;
-        };
-        run.evaluable += 1;
-        if let Ok(actual) = eval(body, &env) {
-            if values_equal(&actual, &expected) {
-                run.passed += 1;
-            }
-        }
+    let outcomes = test_outcomes(body, spec);
+    TestRun {
+        evaluable: outcomes
+            .iter()
+            .filter(|o| !matches!(o, TestOutcome::Unbindable(_)))
+            .count(),
+        passed: outcomes
+            .iter()
+            .filter(|o| matches!(o, TestOutcome::Passed))
+            .count(),
     }
-    run
 }
 
 /// How many of the spec's bindable tests produce a VALUE
@@ -999,6 +1057,107 @@ mod tests {
         let body = IRNode::Hole { id: 0, expected_type: None };
         let run = run_spec_tests(&body, &spec);
         assert_eq!(run, TestRun { evaluable: 3, passed: 0 });
+    }
+
+    // ── test_outcomes (Phase 68, W3) ──────────────────────
+
+    #[test]
+    fn test_outcomes_classify_pass_fail_and_body_coverage() {
+        let spec = is_literal_kind_spec();
+        // Correct body: every test Passed.
+        let correct = binop(IRBinOp::Eq, var("kind"), int(0));
+        assert_eq!(
+            test_outcomes(&correct, &spec),
+            vec![TestOutcome::Passed, TestOutcome::Passed, TestOutcome::Passed]
+        );
+        // Wrong body: evaluated, value differed → Failed.
+        let wrong = boolean(true);
+        assert_eq!(
+            test_outcomes(&wrong, &spec),
+            vec![TestOutcome::Passed, TestOutcome::Failed, TestOutcome::Failed]
+        );
+        // Loop body: bound tests, but the interpreter cannot
+        // execute the body — BodyNotEvaluable, and the tests
+        // still count as evaluable in the fold.
+        let loopy = IRNode::For {
+            var: "i".into(),
+            start: Box::new(int(0)),
+            end: Box::new(int(1)),
+            body: Box::new(boolean(true)),
+        };
+        let outcomes = test_outcomes(&loopy, &spec);
+        assert!(
+            outcomes.iter().all(|o| matches!(o, TestOutcome::BodyNotEvaluable(_))),
+            "loop body must be BodyNotEvaluable on every test: {outcomes:?}"
+        );
+        assert_eq!(
+            run_spec_tests(&loopy, &spec),
+            TestRun { evaluable: 3, passed: 0 },
+            "the fold over outcomes must reproduce run_spec_tests exactly"
+        );
+    }
+
+    #[test]
+    fn test_outcomes_classify_unbindable_reason_classes() {
+        use crate::spec::ast::TypeRef;
+        // A lambda input for a fn-typed parameter: the
+        // evaluator has no function values (the sort residue).
+        let mut spec = dummy_spec_with(
+            "apply_cmp",
+            vec![Param {
+                name: "cmp".into(),
+                ty: TypeRef::Function(vec![TypeRef::Int, TypeRef::Int], Box::new(TypeRef::Bool)),
+                annotations: Default::default(),
+            }],
+            TypeRef::Bool,
+        );
+        spec.tests = vec![Test {
+            name: Some("lambda-input".into()),
+            input: Expr::Lambda(
+                vec![("a".into(), TypeRef::Int), ("b".into(), TypeRef::Int)],
+                Box::new(Expr::BoolLit(true)),
+            ),
+            expected_output: Expr::BoolLit(true),
+            timeout_ms: None,
+            property: false,
+        }];
+        let outcomes = test_outcomes(&boolean(true), &spec);
+        match &outcomes[0] {
+            TestOutcome::Unbindable(reason) => {
+                assert!(reason.contains("function"), "reason class must name the cause: {reason}")
+            }
+            other => panic!("expected Unbindable, got {other:?}"),
+        }
+
+        // A scalar input for a two-parameter spec: the value
+        // maps fine; the SHAPE does not match the parameters.
+        let mut spec = dummy_spec_with(
+            "pair_sum",
+            vec![
+                Param { name: "a".into(), ty: TypeRef::Int, annotations: Default::default() },
+                Param { name: "b".into(), ty: TypeRef::Int, annotations: Default::default() },
+            ],
+            TypeRef::Int,
+        );
+        spec.tests = vec![Test {
+            name: Some("scalar-for-pair".into()),
+            input: Expr::IntLit(5),
+            expected_output: Expr::IntLit(5),
+            timeout_ms: None,
+            property: false,
+        }];
+        let outcomes = test_outcomes(&int(0), &spec);
+        match &outcomes[0] {
+            TestOutcome::Unbindable(reason) => {
+                assert!(reason.contains("parameter list"), "reason class: {reason}")
+            }
+            other => panic!("expected Unbindable, got {other:?}"),
+        }
+        // Neither unbindable test enters the evaluable count.
+        assert_eq!(
+            run_spec_tests(&int(0), &spec),
+            TestRun { evaluable: 0, passed: 0 }
+        );
     }
 
     /// Phase 60: `valued_test_count` separates "the body

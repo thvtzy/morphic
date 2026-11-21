@@ -114,3 +114,44 @@ button:hover { background: #14243d; }
 .chip-unbindable { color: #f0d9a8; border-color: var(--warn); }
 .empty { color: var(--muted); font-style: italic; }
 .site-footer { padding: 0 1.6rem 1.4rem; color: var(--muted); font-size: 0.85rem; }
+
+/* ── W3 synthesis surface ─────────────────────────── */
+input[type="number"] {
+  background: #0d1220; color: var(--text); border: 1px solid var(--card-border);
+  border-radius: 6px; padding: 0.4rem 0.6rem; font: inherit; font-size: 0.92rem;
+  width: 6.5rem;
+}
+.spec-row {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+}
+.synth-button { font-size: 0.85rem; padding: 0.25rem 0.6rem; white-space: nowrap; }
+.synth-button:disabled { opacity: 0.45; cursor: default; }
+.fraction-line { margin: 0.35rem 0 0.15rem; }
+.fraction { font: 15px var(--mono); color: var(--accent); }
+.verification-panel {
+  margin: 0.7rem 0; padding: 0.7rem 0.9rem; font-size: 0.9rem;
+  border: 1px solid var(--warn); border-radius: 8px; color: #f0d9a8;
+  background: rgba(217, 161, 59, 0.08);
+}
+.status-word { font-family: var(--mono); font-weight: 700; }
+.chip-passed { color: #bff0d2; border-color: var(--ok); }
+.chip-failed { color: #ffd2cb; border-color: var(--err); }
+.reason-row {
+  display: block; color: var(--muted); font-size: 0.82rem;
+  padding: 0 0 0.3rem; border-bottom: 1px dashed #232d47;
+}
+.render-tabs {
+  display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center;
+  margin: 0.5rem 0;
+}
+.render-tab { font-size: 0.85rem; padding: 0.25rem 0.6rem; }
+.render-tab.tab-active { background: #14243d; border-color: var(--accent); color: var(--accent); }
+.render-actions { margin-left: auto; display: inline-flex; gap: 0.4rem; }
+.render-actions button { font-size: 0.85rem; padding: 0.25rem 0.6rem; }
+.render-pane, .winner-body {
+  white-space: pre; overflow: auto; max-height: 380px; background: #0d1220;
+  border: 1px solid var(--card-border); border-radius: 6px;
+  padding: 0.6rem 0.8rem; font: 12.5px/1.5 var(--mono);
+}
+.winner-body { max-height: 180px; color: var(--muted); word-break: break-all; white-space: pre-wrap; }
+.render-error { color: #ffd2cb; border-left: 3px solid var(--err); }

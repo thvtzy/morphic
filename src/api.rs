@@ -203,6 +203,40 @@ pub struct SynthesisReport {
     pub winner: WinnerReport,
 }
 
+/// The playground's pinned default seed (D3): the value
+/// the playground UI pre-fills in its seed field, and the
+/// seed the W3 pinned corpus is measured with. A run is
+/// reproducible iff it names its seed; this is the seed a
+/// first-time visitor's runs use.
+pub const PLAYGROUND_DEFAULT_SEED: u64 = 42;
+
+/// One target rendering of the crowned winner, computed
+/// in-process from the actual winner candidate (never
+/// re-derived by a shell). Exactly one of `text` / `error`
+/// is set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderReport {
+    /// "rust" | "c" | "wasm" | "python" | "javascript" | "ir"
+    pub target: String,
+    pub text: Option<String>,
+    pub error: Option<String>,
+}
+
+/// One in-spec test's executed outcome against the crowned
+/// winner, as the IR interpreter measured it
+/// (`synthesis::eval::test_outcomes`). `outcome` is
+/// "passed" | "failed" | "body_not_evaluable" |
+/// "unbindable"; `reason` carries the evaluator's reason
+/// (body coverage) or the reason class (binding) for the
+/// two not-evaluable outcomes, and is None otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestOutcomeReport {
+    pub index: usize,
+    pub name: Option<String>,
+    pub outcome: String,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WinnerReport {
     /// The crowned body, in the IR's Debug rendering — the
@@ -216,6 +250,22 @@ pub struct WinnerReport {
     /// recorded on the winner is the pipeline's final one).
     pub test_pass_ratio: f64,
     pub constraint_score: f64,
+    /// Raw executed-test counts for the crowned body,
+    /// measured by the IR interpreter at report time
+    /// (`eval::run_spec_tests` on the winner — NOT the
+    /// hole-decayed pipeline ratio above): the winner passed
+    /// `tests_passed` of the `tests_evaluable` tests the
+    /// interpreter could bind, out of `tests_total` in-spec
+    /// tests. The playground displays these as the exact
+    /// fraction passed / evaluable / total (W3).
+    pub tests_passed: usize,
+    pub tests_evaluable: usize,
+    pub tests_total: usize,
+    /// Per-test executed outcomes, in spec order (W3).
+    pub test_outcomes: Vec<TestOutcomeReport>,
+    /// The winner rendered to every codegen target (W3).
+    /// The "wasm" entry is WAT text for preview/copy (D6).
+    pub renders: Vec<RenderReport>,
     /// "Verified" | "VerificationFailed" | "Inconclusive" |
     /// "Malformed" | "Unverified" (no verdict recorded).
     /// In a no-Z3 build this is "Inconclusive" for every
@@ -231,6 +281,20 @@ pub struct WinnerReport {
 /// crowns the same winner body. The native CLI never calls
 /// this — its runs stay entropy-seeded, as before.
 pub fn synthesize_seeded(source: &str, seed: u64) -> Result<SynthesisReport, StageError> {
+    let (functions, first) = parse_and_first(source)?;
+    synthesize_spec(&functions, &first, seed)
+}
+
+/// `synthesize_seeded` for a NAMED spec of the module (the
+/// playground's per-spec Synthesize control, W3). The
+/// module stays in scope for the run, exactly as in the
+/// first-spec form; an unknown name is a "synthesis"-stage
+/// error naming the module's specs.
+pub fn synthesize_seeded_spec(
+    source: &str,
+    spec_name: &str,
+    seed: u64,
+) -> Result<SynthesisReport, StageError> {
     let err = |stage: &str, e: &dyn std::fmt::Display| StageError {
         stage: stage.into(),
         message: e.to_string(),
@@ -244,8 +308,42 @@ pub fn synthesize_seeded(source: &str, seed: u64) -> Result<SynthesisReport, Sta
         column: Some(e.column),
     })?;
     let checked = crate::spec::typeck::check(parsed).map_err(|e| err("typecheck", &e))?;
-    let functions = &checked.spec.functions;
+    let functions = checked.spec.functions;
     let spec = functions
+        .iter()
+        .find(|f| f.name == spec_name)
+        .ok_or_else(|| StageError {
+            stage: "synthesis".into(),
+            message: format!(
+                "No spec named '{}' in this module (specs: {})",
+                spec_name,
+                functions.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            line: None,
+            column: None,
+        })?
+        .clone();
+    synthesize_spec(&functions, &spec, seed)
+}
+
+fn parse_and_first(
+    source: &str,
+) -> Result<(Vec<FunctionSpec>, FunctionSpec), StageError> {
+    let err = |stage: &str, e: &dyn std::fmt::Display| StageError {
+        stage: stage.into(),
+        message: e.to_string(),
+        line: None,
+        column: None,
+    };
+    let parsed = crate::spec::parser::parse(source).map_err(|e| StageError {
+        stage: "parse".into(),
+        message: e.to_string(),
+        line: Some(e.line),
+        column: Some(e.column),
+    })?;
+    let checked = crate::spec::typeck::check(parsed).map_err(|e| err("typecheck", &e))?;
+    let functions = checked.spec.functions;
+    let first = functions
         .first()
         .ok_or_else(|| StageError {
             stage: "synthesis".into(),
@@ -254,6 +352,25 @@ pub fn synthesize_seeded(source: &str, seed: u64) -> Result<SynthesisReport, Sta
             column: None,
         })?
         .clone();
+    Ok((functions, first))
+}
+
+/// The shared pipeline run behind both seeded entry points:
+/// synthesize → verify → runner stage → select over `spec`,
+/// with the module (`functions`) in scope and the engine
+/// RNG seeded from `seed`.
+fn synthesize_spec(
+    functions: &[FunctionSpec],
+    spec: &FunctionSpec,
+    seed: u64,
+) -> Result<SynthesisReport, StageError> {
+    let err = |stage: &str, e: &dyn std::fmt::Display| StageError {
+        stage: stage.into(),
+        message: e.to_string(),
+        line: None,
+        column: None,
+    };
+    let spec = spec.clone();
 
     engine::seed_engine_rng(seed);
     let mut engine = engine::SynthesisEngine::with_module(playground_config(), functions);
@@ -268,6 +385,21 @@ pub fn synthesize_seeded(source: &str, seed: u64) -> Result<SynthesisReport, Sta
     let candidates = pool.len();
     let winner = selector::select_best(pool, &spec).map_err(|e| err("selection", &e))?;
 
+    // Executed evidence for the crowned body, measured by
+    // the interpreter NOW (the raw counts behind the W3
+    // fraction; the pipeline's own test_pass_ratio on the
+    // winner may be hole-decayed or runner-rescored, and is
+    // reported separately, as itself).
+    let run = eval::run_spec_tests(&winner.body, &spec);
+    let outcomes = eval::test_outcomes(&winner.body, &spec);
+    let renders = ["rust", "c", "wasm", "python", "javascript", "ir"]
+        .iter()
+        .map(|target| match render(&winner, target) {
+            Ok(text) => RenderReport { target: target.to_string(), text: Some(text), error: None },
+            Err(e) => RenderReport { target: target.to_string(), text: None, error: Some(e) },
+        })
+        .collect();
+
     Ok(SynthesisReport {
         spec_name: spec.name.clone(),
         candidates,
@@ -277,6 +409,30 @@ pub fn synthesize_seeded(source: &str, seed: u64) -> Result<SynthesisReport, Sta
             score: winner.score,
             test_pass_ratio: winner.scores.test_pass_ratio,
             constraint_score: winner.scores.constraint_score,
+            tests_passed: run.passed,
+            tests_evaluable: run.evaluable,
+            tests_total: spec.tests.len(),
+            test_outcomes: outcomes
+                .iter()
+                .enumerate()
+                .map(|(i, o)| {
+                    let (outcome, reason) = match o {
+                        eval::TestOutcome::Passed => ("passed", None),
+                        eval::TestOutcome::Failed => ("failed", None),
+                        eval::TestOutcome::BodyNotEvaluable(r) => {
+                            ("body_not_evaluable", Some(r.clone()))
+                        }
+                        eval::TestOutcome::Unbindable(r) => ("unbindable", Some(r.clone())),
+                    };
+                    TestOutcomeReport {
+                        index: i,
+                        name: spec.tests[i].name.clone(),
+                        outcome: outcome.into(),
+                        reason,
+                    }
+                })
+                .collect(),
+            renders,
             verification_status: match &winner.verification_status {
                 Some(s) => format!("{:?}", s),
                 None => "Unverified".into(),
@@ -351,6 +507,123 @@ mod tests {
         // The parsed specs are still reported (readable
         // module, failed check) — W2 renders them.
         assert_eq!(report.specs.len(), 1);
+    }
+
+    /// W3 (Phase 68): the named-spec entry point crowns a
+    /// winner for the named spec, carries the raw executed
+    /// counts + per-test outcomes + all six renders, and
+    /// rejects an unknown name at the synthesis stage.
+    #[test]
+    fn seeded_spec_report_carries_counts_outcomes_and_renders() {
+        let report = synthesize_seeded_spec(VALID, "is_known_type_tag", PLAYGROUND_DEFAULT_SEED)
+            .expect("named-spec run");
+        assert_eq!(report.spec_name, "is_known_type_tag");
+        let w = &report.winner;
+        assert_eq!(w.tests_total, 5);
+        assert_eq!(w.test_outcomes.len(), w.tests_total);
+        assert!(w.tests_passed <= w.tests_evaluable && w.tests_evaluable <= w.tests_total);
+        // The counts are the fold of the per-test outcomes.
+        let passed = w.test_outcomes.iter().filter(|o| o.outcome == "passed").count();
+        let evaluable = w.test_outcomes.iter().filter(|o| o.outcome != "unbindable").count();
+        assert_eq!(w.tests_passed, passed);
+        assert_eq!(w.tests_evaluable, evaluable);
+        // All six codegen targets are rendered (or errored).
+        let targets: Vec<&str> = w.renders.iter().map(|r| r.target.as_str()).collect();
+        assert_eq!(targets, ["rust", "c", "wasm", "python", "javascript", "ir"]);
+        assert!(w.renders.iter().all(|r| r.text.is_some() != r.error.is_some()));
+
+        let err = synthesize_seeded_spec(VALID, "no_such_spec", PLAYGROUND_DEFAULT_SEED)
+            .expect_err("unknown spec name must fail");
+        assert_eq!(err.stage, "synthesis");
+        assert!(err.message.contains("no_such_spec"));
+    }
+
+    /// W3 GATE HARNESS (Phase 68) — compiled ONLY in the
+    /// browser configuration (no Z3, no compiled runner):
+    /// the configuration whose crowns the WASM build
+    /// produces. For every pinned case it (1) runs the API,
+    /// (2) re-runs the pipeline stages independently and
+    /// asserts the crowned body is IDENTICAL to the API's
+    /// (body identity — the seeded determinism makes the
+    /// body a pure function of source + seed + config), and
+    /// (3) asserts `eval::run_spec_tests` on that identical
+    /// body reproduces the API's reported fraction AND the
+    /// literal pin. The pins were measured from this harness
+    /// (the native interpreter) BEFORE any browser run;
+    /// playground/corpus/cases.json carries the same pins
+    /// for the WASM side of the gate.
+    #[cfg(all(not(feature = "z3-support"), not(feature = "compiled-runner")))]
+    #[test]
+    fn w3_gate_fractions_match_native_interpreter() {
+        use crate::synthesis::{engine, runner, selector};
+        use crate::verify::verifier::Verifier;
+
+        const SORT: &str = include_str!("../examples/sort.morph");
+        const IS_SORTED: &str = include_str!("../examples/self_host/is_sorted.morph");
+        const COUNT_MATCHING: &str =
+            include_str!("../examples/self_host/count_matching.morph");
+
+        // (label, source, spec, seed, passed, evaluable, total)
+        let cases: [(&str, &str, &str, u64, usize, usize, usize); 4] = [
+            ("validator-fully-evaluable", VALID, "is_known_type_tag", PLAYGROUND_DEFAULT_SEED, 5, 5, 5),
+            ("is-sorted-partial", IS_SORTED, "is_sorted", PLAYGROUND_DEFAULT_SEED, 4, 5, 5),
+            ("count-matching-partial", COUNT_MATCHING, "count_matching", PLAYGROUND_DEFAULT_SEED, 1, 3, 3),
+            ("sort-unbindable", SORT, "sort", PLAYGROUND_DEFAULT_SEED, 0, 0, 6),
+        ];
+
+        for (label, source, spec_name, seed, pin_passed, pin_evaluable, pin_total) in cases {
+            let report = synthesize_seeded_spec(source, spec_name, seed)
+                .unwrap_or_else(|e| panic!("{label}: API run failed: {e:?}"));
+            assert_eq!(report.spec_name, spec_name, "{label}");
+            assert!(!report.verification_available, "{label}: browser config has no verifier");
+            assert_eq!(report.winner.verification_status, "Inconclusive", "{label}");
+
+            // Independent pipeline re-run → body identity.
+            let parsed = crate::spec::parser::parse(source).expect("parse");
+            let checked = crate::spec::typeck::check(parsed).expect("typeck");
+            let functions = &checked.spec.functions;
+            let spec = functions.iter().find(|f| f.name == spec_name).expect("spec").clone();
+            engine::seed_engine_rng(seed);
+            let mut eng = engine::SynthesisEngine::with_module(playground_config(), functions);
+            let cands = eng.run(&spec).expect("engine run");
+            let verified = Verifier::with_specs(functions)
+                .verify_all(cands, &spec)
+                .expect("verify_all");
+            let pool = runner::rescore_finalists(verified, &spec);
+            let winner = selector::select_best(pool, &spec).expect("select_best");
+            assert_eq!(
+                format!("{:?}", winner.body),
+                report.winner.body_debug,
+                "{label}: API winner body must be the pipeline's crowned body"
+            );
+
+            // The interpreter's ratio for the identical body.
+            let run = eval::run_spec_tests(&winner.body, &spec);
+            assert_eq!(
+                (run.passed, run.evaluable, spec.tests.len()),
+                (report.winner.tests_passed, report.winner.tests_evaluable, report.winner.tests_total),
+                "{label}: API fraction must be the interpreter's measurement of the crowned body"
+            );
+            assert_eq!(
+                (run.passed, run.evaluable, spec.tests.len()),
+                (pin_passed, pin_evaluable, pin_total),
+                "{label}: measured fraction must equal the pin"
+            );
+            println!(
+                "W3PIN {label} passed={} evaluable={} total={} status={} outcomes={}",
+                run.passed,
+                run.evaluable,
+                spec.tests.len(),
+                report.winner.verification_status,
+                report
+                    .winner
+                    .test_outcomes
+                    .iter()
+                    .map(|o| o.outcome.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
     }
 
     /// D3's pin: same seed + same source → same crowned
