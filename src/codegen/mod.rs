@@ -11,13 +11,36 @@ use crate::synthesis::engine::{CandidateImplementation, IRNode, IRLiteral, IRBin
 /// Generate source code from a verified candidate implementation
 pub fn generate(candidate: &CandidateImplementation, target: &str) -> Result<String, CodegenError> {
     match target {
-        "rust" => generate_rust(candidate),
+        "rust" => generate_rust_route(candidate),
         "c" => generate_c(candidate),
         "wasm" => generate_wasm(candidate),
         "python" => generate_python(candidate),
         "javascript" | "js" => generate_javascript(candidate),
         "ir" => Ok(debug_ir_string(&candidate.body, 0)),
         other => Err(CodegenError::UnsupportedTarget(other.into())),
+    }
+}
+
+/// The "rust" route of `generate` — the M5-S2 switch
+/// (Phase 52). With the Cargo feature `bootstrap-codegen`
+/// (owner decision D4, accepted 2026-11-21), the compiled
+/// synthesized adapter renders: that build IS the bootstrap
+/// binary of the M5 audit's definition (the original compiler
+/// with the synthesized Codegen module seated in the Rust
+/// emitter's place). Without the feature, the original
+/// `generate_rust` renders — byte-for-byte the pre-M5
+/// compiler. Every other route of `generate` is untouched in
+/// both configurations, and the original emitter stays in the
+/// tree in both (the ROAD anti-pattern rule: keep both,
+/// switch by feature flag).
+fn generate_rust_route(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
+    #[cfg(feature = "bootstrap-codegen")]
+    {
+        bootstrap_adapter::render_rust_synthesized(candidate)
+    }
+    #[cfg(not(feature = "bootstrap-codegen"))]
+    {
+        generate_rust(candidate)
     }
 }
 
@@ -63,6 +86,10 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
+// Kept-but-unselected under `bootstrap-codegen` (the M5-S2
+// switch routes around it there — the ROAD's keep-both
+// rule); the allow fires only in that configuration.
+#[cfg_attr(feature = "bootstrap-codegen", allow(dead_code))]
 fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
     let mut out = String::new();
 
@@ -1428,20 +1455,24 @@ impl std::error::Error for CodegenError {}
 /// module's 112 synthesized winners, checked in as a versioned
 /// file and compiled into the crate — the compiled codegen the
 /// bootstrap adapter calls. GENERATED FILE (its own header
-/// carries the regeneration command and provenance); not
-/// called by any production path yet — the feature-flag switch
-/// is M5-S2.
+/// carries the regeneration command and provenance). Since
+/// M5-S2 (Phase 52) the adapter that calls it sits in
+/// `generate`'s "rust" route behind the `bootstrap-codegen`
+/// Cargo feature; with the feature off, no production path
+/// reaches this module.
 pub(crate) mod synthesized_codegen;
 
 /// The M5-S1 bootstrap adapter (Phase 51): the M3 gate's
 /// composed emitter transcribed from IR-interpreter calls to
 /// direct calls into `synthesized_codegen`'s compiled winner
 /// functions, plus the audit's 9-item shim inventory as
-/// ordinary Rust helpers. Production module, but NOT wired
-/// into `generate` yet — the feature-flag switch is M5-S2;
-/// the default binary's behavior is unchanged. (dead_code
-/// allowed until M5-S2 calls it from a production path; the
-/// M5-S1 tests exercise it under cfg(test).)
+/// ordinary Rust helpers. Since M5-S2 (Phase 52) it is wired
+/// into `generate`'s "rust" route behind the Cargo feature
+/// `bootstrap-codegen` (see `generate_rust_route`); with the
+/// feature off, the original emitter renders and this module
+/// is reached only from tests. (dead_code allowed: in a
+/// feature-off production build nothing calls it — the
+/// ROAD's keep-both rule.)
 #[allow(dead_code)]
 pub(crate) mod bootstrap_adapter;
 
@@ -1454,6 +1485,19 @@ pub(crate) mod bootstrap_adapter;
 /// machinery by reference.
 #[cfg(test)]
 mod m5_s1;
+
+/// M5-S2 (Phase 52): the feature-flag switch's routing,
+/// pinned in both configurations, and the M5 roundtrip in
+/// the Phase 50 audit's chosen form — (a) the extract-once
+/// byte comparison (one pipeline extraction per standalone
+/// file; that winner rendered by the original emitter and by
+/// the feature-on dispatch path, byte-compared) and (b) the
+/// process-level behavioral roundtrip (the binary built with
+/// and without `bootstrap-codegen`; each builds sort.morph
+/// repeatedly, every drawn winner function compiled and
+/// executed against sort's in-spec tests). Test-only.
+#[cfg(test)]
+mod m5_s2;
 
 /// The M3 gate harness (Phase 42): composes the Codegen
 /// module's 112 synthesized winners through the assembly

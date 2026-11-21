@@ -40,14 +40,17 @@
 //  The recursion itself — the tree walks below — is assembly
 //  glue by the M3 definition, not winner business.
 //
-//  STATUS. Nothing calls this module yet: `generate`'s "rust"
-//  route still dispatches to the original `generate_rust`.
-//  The feature-flag switch (Cargo feature `bootstrap-codegen`,
-//  declared in Cargo.toml) is M5-S2. This slice's claim is
-//  narrower and proven in src/codegen/m5_s1.rs: the compiled
+//  STATUS. Since M5-S2 (Phase 52) `generate`'s "rust" route
+//  dispatches here when the Cargo feature `bootstrap-codegen`
+//  is enabled (see `generate_rust_route` in super): the
+//  feature-on build is the bootstrap binary. With the feature
+//  off (the default), the original `generate_rust` renders and
+//  nothing in production calls this module. The equivalence
+//  claim is proven in src/codegen/m5_s1.rs: the compiled
 //  adapter is byte-identical to the original emitter — and to
 //  the interpreter composition it transcribes — over the M3
-//  gate corpus and the M4 whole-file corpus.
+//  gate corpus and the M4 whole-file corpus; the switch and
+//  the roundtrip are judged in src/codegen/m5_s2.rs.
 // ─────────────────────────────────────────────────────────────
 
 use super::{escape_rust_char, escape_rust_str, rust_ident, synthesized_codegen as syn, CodegenError};
