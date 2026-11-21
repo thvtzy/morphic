@@ -1620,4 +1620,215 @@ spec rust_stmt_seq_form {
     optimize: time < O(n)
 }
 
+// -- Statement templates (ir_to_rust arms) ---------------------
+
+spec rust_stmt_hole_text {
+    doc: "The Hole arm of ir_to_rust (src/codegen/mod.rs:316-319): TWO lines at the node's indent -- a TODO comment, then the loud panic terminated as a statement. The panic text is the same fixed text as the expression walker's Hole (slice 4's rust_hole_text), but the statement arm is its own format site: it adds the comment line, pads both lines, and terminates with ';'. Following the Hole convention the panic keeps the generated file parseable with the gap named."
+    input: pad: String
+    output: String
+
+    constraint: output == pad ++ "// TODO: synthesis incomplete\n" ++ pad ++ "panic!(\"Hole not filled\");\n"
+
+    optimize: time < O(n)
+
+    test "hole-at-zero" { input: "" expect: "// TODO: synthesis incomplete\npanic!(\"Hole not filled\");\n" }
+    test "hole-padded" { input: "    " expect: "    // TODO: synthesis incomplete\n    panic!(\"Hole not filled\");\n" }
+}
+
+spec rust_stmt_let_text {
+    doc: "The Let arm of ir_to_rust (src/codegen/mod.rs:328-337): pad + 'let ' + name + ' = ' + value + ';' + a newline, followed IMMEDIATELY by the body's tail rendering (the Let has no closing line of its own -- the body IS the Let's continuation at the same indent, rust_stmt_child_indent site 1). The name arrives rust_ident-rendered (slice 3); the value arrives rendered by ir_to_rust_expr UNTYPED (a String literal value stays bare -- the Let value position carries no expectation); the body arrives rendered by ir_to_rust_tail with expectation Some(fn_ret) (rust_expectation_source site 0), so a bare-expression body yields its value."
+    input: pad: String, name: String, value: String, body: String
+    output: String
+
+    constraint: output == pad ++ "let " ++ name ++ " = " ++ value ++ ";\n" ++ body
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_if_text {
+    doc: "The If arm of ir_to_rust (src/codegen/mod.rs:339-349): pad + 'if ' + condition + ' {' + newline + the then branch's tail rendering + '} else {' + newline + the else branch's tail rendering + '}' + newline. The condition arrives condition-position-rendered (slice 4's rust_condition_text); the branches arrive tail-rendered at indent + 1 with expectation Some(fn_ret) (rust_stmt_child_indent site 2, rust_expectation_source sites 1-2). QUIRK, pinned as-is: the two closing braces carry NO pad -- the format string interpolates no indent before them, unlike the While/For/Match arms, whose closings sit at pad. At indent 0 the difference is invisible; nested, an If's braces land at column 0."
+    input: pad: String, cond: String, then_text: String, else_text: String
+    output: String
+
+    constraint: output == pad ++ "if " ++ cond ++ " {\n" ++ then_text ++ "} else {\n" ++ else_text ++ "}\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_while_text {
+    doc: "The While arm of ir_to_rust (src/codegen/mod.rs:352-362): with an invariant, a comment line at pad ('// invariant: ' + the invariant text, which arrives RAW from the IR -- no walker renders it) precedes the loop; then pad + 'while ' + condition + ' {' + newline + the body's statement rendering at indent + 1 (rust_stmt_child_indent site 3 -- a STATEMENT rendering, not a tail: a while body yields nothing) + pad + '}' + newline. The condition arrives condition-position-rendered (slice 4's rust_condition_text). Unlike the If arm, the closing brace sits at pad."
+    input: has_inv: Bool, inv: String, pad: String, cond: String, body: String
+    output: String
+
+    constraint: has_inv==false||output==pad ++ "// invariant: " ++ inv ++ "\n" ++ pad ++ "while " ++ cond ++ " {\n" ++ body ++ pad ++ "}\n"
+    constraint: has_inv==true||output==pad ++ "while " ++ cond ++ " {\n" ++ body ++ pad ++ "}\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_for_text {
+    doc: "The For arm of ir_to_rust (src/codegen/mod.rs:364-373): pad + 'for ' + var + ' in ' + start + '..' + end + ' {' + newline + the body's statement rendering at indent + 1 (rust_stmt_child_indent site 4 -- statement, not tail, as with While) + pad + '}' + newline. The variable arrives rust_ident-rendered (slice 3); the bounds arrive rendered by ir_to_rust_expr, the range unparenthesized and exclusive, exactly as the original formats it."
+    input: pad: String, var: String, start: String, end: String, body: String
+    output: String
+
+    constraint: output == pad ++ "for " ++ var ++ " in " ++ start ++ ".." ++ end ++ " {\n" ++ body ++ pad ++ "}\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_match_head_text {
+    doc: "The head line of the Match arm of ir_to_rust (src/codegen/mod.rs:376): pad + 'match ' + scrutinee + ' {' + newline. The scrutinee arrives rendered by match_scrutinee_to_rust (slice 4's scrutinee trio over the condition-position base -- the same helper both Match arms consult). The arm lines and the closing line are rust_stmt_match_arm_text and rust_stmt_match_close_text; joining the arms is iteration (mirror-only)."
+    input: pad: String, scrutinee: String
+    output: String
+
+    constraint: output == pad ++ "match " ++ scrutinee ++ " {\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_match_arm_text {
+    doc: "One case line-group of the Match arm of ir_to_rust (src/codegen/mod.rs:378-384): pad_inner + pattern + ' => {' + newline + the body's tail rendering at indent + 2 + pad_inner + '},' + newline. pad_inner (the pad of indent + 1) frames the arm; the body sits one level deeper still (rust_stmt_child_indent sites 5 and 6). The pattern arrives rendered by ir_pattern_to_rust (slice 2); the body arrives tail-rendered with expectation Some(fn_ret) (rust_expectation_source site 3), so a bare-expression arm body yields its value inside the braces. Not slice 4's rust_match_arm_text: that is the EXPRESSION match's one-line 'pattern => body' arm; the statement match wraps each body in its own braces."
+    input: pad_inner: String, pat: String, body: String
+    output: String
+
+    constraint: output == pad_inner ++ pat ++ " => {\n" ++ body ++ pad_inner ++ "},\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_match_close_text {
+    doc: "The closing line of the Match arm of ir_to_rust (src/codegen/mod.rs:386): pad + '}' + newline -- at the Match's own indent, like the While/For closings (and unlike the If arm's unpadded braces)."
+    input: pad: String
+    output: String
+
+    constraint: output == pad ++ "}\n"
+
+    optimize: time < O(n)
+
+    test "close-at-zero" { input: "" expect: "}\n" }
+    test "close-padded" { input: "    " expect: "    }\n" }
+}
+
+spec rust_stmt_call_text {
+    doc: "The Call arm of ir_to_rust (src/codegen/mod.rs:389-398): pad + function + '(' + arguments + ');' + newline -- the expression call template (slice 4's rust_call_text) terminated as a statement, its value discarded. The function name arrives rust_ident-rendered (slice 3) and the arguments pre-joined with ', ' (the join is iteration, mirror-only); each argument is rendered by ir_to_rust_expr. In tail position the same call renders WITHOUT the ';' (rust_tail_form family 1) -- the pair is the recorded fix for the unterminated-statement syntax error."
+    input: pad: String, func: String, args: String
+    output: String
+
+    constraint: output == pad ++ func ++ "(" ++ args ++ ");\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_return_text {
+    doc: "The Return arm of ir_to_rust (src/codegen/mod.rs:400-402): pad + 'return ' + rendered + ';' + newline. The rendered expression arrives from ir_to_rust_expr_typed with expectation Some(fn_ret) (rust_expectation_source site 4) -- this arm is the statement walker's own typed call, the one through which a String literal in a String-returning function takes the owned form (slice 3's rust_string_ownership decides, rust_string_literal_owned_text renders). Not slice 4's rust_return_text: that is the expression walker's parenthesized '(return x)', whose operand is rendered UNTYPED."
+    input: pad: String, rendered: String
+    output: String
+
+    constraint: output == pad ++ "return " ++ rendered ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_alloc_text {
+    doc: "The Alloc arm of ir_to_rust (src/codegen/mod.rs:404-409): pad + 'let mut ' + name + ': ' + type + ' = ' + initial + ';' + newline. The name arrives rust_ident-rendered (slice 3), the type rendered by ty_to_rust (slices 1-2), and the initial value rendered by ir_to_rust_expr_typed with expectation Some(the Alloc's OWN declared type) (rust_expectation_source site 5) -- so a String-typed Alloc's String literal initial takes the owned form, where a Let's value would stay bare. In expression position an Alloc has no honest form at all (slice 4's rust_unsupported_text); statement position is its only rendering."
+    input: pad: String, name: String, ty: String, initial: String
+    output: String
+
+    constraint: output == pad ++ "let mut " ++ name ++ ": " ++ ty ++ " = " ++ initial ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_assign_text {
+    doc: "The Assign arm of ir_to_rust (src/codegen/mod.rs:411-416): pad + target + ' = ' + value + ';' + newline. Both children arrive rendered by ir_to_rust_expr. Not slice 4's rust_assign_text: the expression form is parenthesized ('(t = v)') because an assignment's boundary must survive embedding; the statement form is bare, as a statement needs no boundary."
+    input: pad: String, target: String, value: String
+    output: String
+
+    constraint: output == pad ++ target ++ " = " ++ value ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_collection_text {
+    doc: "The Collection arm of ir_to_rust (src/codegen/mod.rs:418-451) assembled: pad + the statement-position prefix + the elements + the statement-position suffix + ';' + newline, stated as a composition over rust_stmt_collection_prefix / rust_stmt_collection_suffix, the classifications the arm consults. The elements arrive pre-joined with ', ' (the join is iteration, mirror-only), each rendered by ir_to_rust_expr. The ';' is the recorded fix for the unterminated-collection syntax error; in tail position the same collection renders bare in its EXPRESSION form (fully qualified for Set/Map -- rust_tail_form family 1 over slice 4's affixes), never this collapsed one."
+    input: kind: Int, pad: String, elems: String
+    output: String
+
+    constraint: output == pad ++ rust_stmt_collection_prefix(kind) ++ elems ++ rust_stmt_collection_suffix(kind) ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_map_text {
+    doc: "The Map arm of ir_to_rust (src/codegen/mod.rs:453-460): pad + '(' + over + ').iter().map(' + function + ').collect();' + newline -- slice 4's rust_map_text template terminated as a statement, its collected value discarded. Both children arrive rendered by ir_to_rust_expr."
+    input: pad: String, over: String, func: String
+    output: String
+
+    constraint: output == pad ++ "(" ++ over ++ ").iter().map(" ++ func ++ ").collect();\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_filter_text {
+    doc: "The Filter arm of ir_to_rust (src/codegen/mod.rs:462-469): pad + '(' + over + ').iter().filter(' + predicate + ').collect();' + newline -- slice 4's rust_filter_text template terminated as a statement. Both children arrive rendered by ir_to_rust_expr (the predicate with the same reference-receiving property slice 4 recorded)."
+    input: pad: String, over: String, pred: String
+    output: String
+
+    constraint: output == pad ++ "(" ++ over ++ ").iter().filter(" ++ pred ++ ").collect();\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_fold_text {
+    doc: "The Fold arm of ir_to_rust (src/codegen/mod.rs:471-479): pad + '(' + over + ').iter().fold(' + initial + ', ' + operation + ');' + newline -- slice 4's rust_fold_text template terminated as a statement, with the same (initial, operation) text order against the IR's (operation, initial, over) field order. All three children arrive rendered by ir_to_rust_expr."
+    input: pad: String, over: String, initial: String, operation: String
+    output: String
+
+    constraint: output == pad ++ "(" ++ over ++ ").iter().fold(" ++ initial ++ ", " ++ operation ++ ");\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_sort_text {
+    doc: "The Sort arm of ir_to_rust (src/codegen/mod.rs:481-491): THREE lines -- pad + 'let mut sorted = ' + collection + ';' + newline, then 'sorted.sort_by(' + comparator + ');' + newline, then 'sorted;' + newline, the final value discarded by its own ';'. QUIRK, pinned as-is: only the first line carries the pad; the sort_by and sorted lines are interpolated with NO indent at any depth (the format string has no pad for them), unlike every other multi-line arm. Both children arrive rendered by ir_to_rust_expr. In tail position a Sort instead takes slice 4's rust_sort_text block-expression form, which KEEPS the value -- the statement/tail pair is the sharpest instance of the position deciding the rendering."
+    input: pad: String, coll: String, cmp: String
+    output: String
+
+    constraint: output == pad ++ "let mut sorted = " ++ coll ++ ";\n" ++ "sorted.sort_by(" ++ cmp ++ ");\n" ++ "sorted;\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_expr_text {
+    doc: "The fallback arm of ir_to_rust (src/codegen/mod.rs:496): pad + the node's ir_to_rust_expr rendering + ';' + newline. This arm serves exactly rust_stmt_form family 17 -- the expression shapes in statement position (Literal, Var, BinOp, UnaryOp, Lambda, Closure, Index, Loop, Break, StructDef, TryPropagate): each keeps its expression rendering whole (a statement Loop keeps the 'loop {...}' block form; a statement StructDef keeps its block-wrapped definition) and is merely terminated. The ';' after a block-form rendering ('};') is part of the pinned text."
+    input: pad: String, rendered: String
+    output: String
+
+    constraint: output == pad ++ rendered ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+// -- Tail templates (ir_to_rust_tail arms) ----------------------
+
+spec rust_tail_expr_text {
+    doc: "The bare-expression arm of ir_to_rust_tail (src/codegen/mod.rs:529-538): pad + the typed rendering + a newline -- NO semicolon, so the value becomes the enclosing block's value (a ';' here would discard it to () and fail the function's return type, E0308 -- the defect this walker exists to fix). Serves rust_tail_form family 1 (Literal, Var, BinOp, UnaryOp, Lambda, Closure, Collection, Call, Map, Filter, Fold, Sort, Index, TryPropagate). The rendering arrives from ir_to_rust_expr_typed under the position's expectation (rust_expectation_source: fn_ret at the Let's/If's/Match's value positions, the Typed node's own annotation inside one, the inherited expectation through a tail Block's last statement) -- slice 3's rust_string_ownership is the one rewrite that expectation drives."
+    input: pad: String, rendered: String
+    output: String
+
+    constraint: output == pad ++ rendered ++ "\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_tail_block_text {
+    doc: "The Block arm of ir_to_rust_tail (src/codegen/mod.rs:514-524) assembled: the non-last statements' renderings (each by ir_to_rust, rust_stmt_seq_form position 1) concatenated with the last statement's tail rendering -- a plain concatenation with no separator and no wrap, the two parts arriving pre-rendered. The split itself (all but last vs last) and the iteration are mirror-only; an EMPTY Block renders the empty string (no last statement exists, and the arm emits nothing). The same assembly serves a statement-position Block, whose every statement takes the statement renderer (rust_stmt_seq_form position 0): the parts differ, the concatenation is this one."
+    input: rest: String, last: String
+    output: String
+
+    constraint: output == rest ++ last
+
+    optimize: time < O(n)
+}
+
 }
