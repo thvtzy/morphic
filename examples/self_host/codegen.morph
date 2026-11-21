@@ -1,7 +1,7 @@
 // =================================================================
-//  M3: Codegen -- IR to Rust (slices 1-4: leaf mappings +
+//  M3: Codegen -- IR to Rust (slices 1-5: leaf mappings +
 //  small template families + name/text assembly + the
-//  expression walker)
+//  expression walker + the statement walker)
 //  Self-host spec for the Rust emitter in src/codegen/mod.rs.
 //
 //  The codegen is the biggest self-host component and is being
@@ -1414,6 +1414,210 @@ spec rust_unsupported_text {
     optimize: time < O(n)
 
     test "alloc-text" { input: "Alloc" expect: "panic!(\"unsupported IR in expression position: Alloc\")" }
+}
+
+// -- Slice 5: the statement walker (ir_to_rust + ir_to_rust_tail) --
+//
+//  ir_to_rust (src/codegen/mod.rs:310-498) renders a node in
+//  STATEMENT position: every rendering is a sequence of complete
+//  lines at a given indent, each self-terminating in "\n".
+//  ir_to_rust_tail (src/codegen/mod.rs:507-541) renders a node
+//  in TAIL position (a function body, a match arm body, an
+//  If/Let value position): its value is the enclosing block's
+//  value, so expression nodes render bare where the statement
+//  walker would discard them with ";". The two walkers are
+//  mutually recursive (statement arms route value positions
+//  through the tail walker; the tail walker's statement-shaped
+//  kinds fall back to the statement walker), and both thread
+//  fn_ret, the enclosing function's return type, for the
+//  expectation positions (slice 3's rust_string_ownership is
+//  the leaf rule those expectations feed).
+//
+//  The slice's three representation questions, resolved on
+//  the established pre-rendered-children rule:
+//  (a) SEQUENCES: a Block's rendering is the plain
+//      concatenation of its statements' renderings -- no
+//      separator, no braces of its own (the braces in the
+//      output belong to the If/While/For/Match arms). There
+//      is no sequence template to pin: the iteration is
+//      mirror-only (F5 family, like the ", " joins), and
+//      what the specs pin is the per-statement DECISION --
+//      which renderer renders each statement
+//      (rust_stmt_seq_form) and how the tail walker treats
+//      each kind (rust_tail_form). The assembly mirror in
+//      tests/m3_proof.rs performs the concatenation.
+//  (b) INDENTATION: pad is "    " repeated indent times --
+//      repetition by a count is iteration, mirror-only. The
+//      specs therefore take pad (and pad_inner, the next
+//      level's pad, where an arm uses both) as pre-rendered
+//      String inputs, and pin the indent ARITHMETIC instead:
+//      rust_stmt_child_indent is the total table of the
+//      relative indent at which each part of a statement
+//      rendering is placed. Two arms place lines WITHOUT the
+//      pad their neighbours use -- the If arm's closing
+//      braces and the Sort arm's second/third lines; those
+//      are fixed-text facts of their templates, pinned
+//      there, not indent decisions.
+//  (c) TAIL CLASSIFICATION: rust_tail_form is the tail
+//      walker's dispatch as a total table over the 28 node
+//      kinds (statement fallthrough / bare expression /
+//      block split / typed re-entry), and rust_stmt_form is
+//      the statement walker's own dispatch, likewise total.
+//      Which expectation each recursive site passes is
+//      rust_expectation_source. One arm needs no new spec:
+//      Typed in statement position is a transparent
+//      recursion (its annotation is dropped -- the typed
+//      dispatch is slice 3's, and only the TAIL Typed arm
+//      consults the annotation, via rust_tail_form family
+//      3). The Block arm likewise has no template of its
+//      own (pure concatenation, see (a)).
+
+// -- Classifications ------------------------------------------
+
+spec rust_stmt_form {
+    doc: "Dispatch family of ir_to_rust (src/codegen/mod.rs:310-498), the statement walker: which arm renders a node in statement position. 0 = Hole (the two-line TODO + panic), 1 = Block (concatenation of the statements, no template of its own), 2 = Let, 3 = If, 4 = While, 5 = For, 6 = Match, 7 = Call (terminated), 8 = Return, 9 = Alloc, 10 = Assign, 11 = Collection (statement form, rust_stmt_collection_text), 12 = Map, 13 = Filter, 14 = Fold, 15 = Sort (three-line statement form), 16 = Typed (transparent recursion -- the annotation is dropped in statement position), 17 = the fallback: the node's ir_to_rust_expr rendering terminated with ';' (Literal, Var, BinOp, UnaryOp, Lambda, Closure, Index, Loop, Break, StructDef, TryPropagate -- expression shapes in statement position, Loop and StructDef included: they keep their expression renderings). Arm codes are in the original's source order. Total over all 28 IRNode kinds; a kind outside the 28 falls to the fallback arm exactly as the original's '_' arm catches it."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<3||kind>3||output==3
+    constraint: kind<4||kind>4||output==4
+    constraint: kind<5||kind>5||output==5
+    constraint: kind<6||kind>6||output==6
+    constraint: kind<7||kind>7||output==7
+    constraint: kind<8||kind>8||output==8
+    constraint: kind<15||kind>15||output==11
+    constraint: kind<16||kind>16||output==12
+    constraint: kind<17||kind>17||output==13
+    constraint: kind<18||kind>18||output==14
+    constraint: kind<19||kind>19||output==15
+    constraint: kind<20||kind>20||output==9
+    constraint: kind<21||kind>21||output==10
+    constraint: kind<22||kind>22||output==16
+    constraint: kind==0||kind==1||kind==2||kind==3||kind==4||kind==5||kind==6||kind==7||kind==8||kind==15||kind==16||kind==17||kind==18||kind==19||kind==20||kind==21||kind==22||output==17
+
+    optimize: time < O(n)
+
+    test "hole-arm" { input: 0 expect: 0 }
+    test "match-arm" { input: 6 expect: 6 }
+    test "collection-arm" { input: 15 expect: 11 }
+    test "alloc-arm" { input: 20 expect: 9 }
+    test "typed-arm" { input: 22 expect: 16 }
+    test "loop-fallback" { input: 24 expect: 17 }
+}
+
+spec rust_tail_form {
+    doc: "Dispatch family of ir_to_rust_tail (src/codegen/mod.rs:507-541), the tail-position walker: 0 = statement fallthrough (the node keeps its ir_to_rust statement rendering, which is already tail-shaped where it needs to be: Hole, Let, If, While, For, Match, Return, Alloc, Assign, Loop, Break, StructDef), 1 = bare expression (pad + the typed rendering + a newline, NO semicolon -- the value survives as the enclosing block's value: Literal, Var, BinOp, UnaryOp, Lambda, Closure, Collection, Call, Map, Filter, Fold, Sort, Index, TryPropagate), 2 = Block split (every statement but the last renders as a statement; the last renders as a tail -- rust_stmt_seq_form position 1), 3 = Typed re-entry (the node's own annotation replaces the inherited expectation). Total over all 28 IRNode kinds; a kind outside the 28 takes the statement fallthrough, as the original's '_' arm routes it to ir_to_rust."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<1||kind>1||output==2
+    constraint: kind<22||kind>22||output==3
+    constraint: kind<7||kind>7||output==1
+    constraint: kind<9||kind>9||output==1
+    constraint: kind<10||kind>10||output==1
+    constraint: kind<11||kind>11||output==1
+    constraint: kind<12||kind>12||output==1
+    constraint: kind<13||kind>13||output==1
+    constraint: kind<14||kind>14||output==1
+    constraint: kind<15||kind>15||output==1
+    constraint: kind<16||kind>16||output==1
+    constraint: kind<17||kind>17||output==1
+    constraint: kind<18||kind>18||output==1
+    constraint: kind<19||kind>19||output==1
+    constraint: kind<23||kind>23||output==1
+    constraint: kind<27||kind>27||output==1
+    constraint: kind==1||kind==7||kind==9||kind==10||kind==11||kind==12||kind==13||kind==14||kind==15||kind==16||kind==17||kind==18||kind==19||kind==22||kind==23||kind==27||output==0
+
+    optimize: time < O(n)
+
+    test "block-split" { input: 1 expect: 2 }
+    test "call-bare" { input: 7 expect: 1 }
+    test "let-fallthrough" { input: 2 expect: 0 }
+    test "typed-reentry" { input: 22 expect: 3 }
+}
+
+spec rust_stmt_collection_prefix {
+    doc: "Fixed opening text of a collection literal in STATEMENT position (the Collection arm of ir_to_rust, src/codegen/mod.rs:418-451), keyed by CollectionKind code: List 'vec![', Set 'vec![', Map 'vec![', Array '[', Tuple '('. Set and Map COLLAPSE to the List form here -- the fully qualified HashSet/HashMap forms of expression position (slice 4's rust_collection_prefix) appear only where the collection's value is used; as a statement the value is discarded, and the original renders all three sequence kinds identically. Pairs with rust_stmt_collection_suffix."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="vec!["
+    constraint: kind<1||kind>1||output=="vec!["
+    constraint: kind<2||kind>2||output=="vec!["
+    constraint: kind<3||kind>3||output=="["
+    constraint: kind<4||kind>4||output=="("
+
+    optimize: time < O(n)
+
+    test "list-prefix" { input: 0 expect: "vec![" }
+    test "set-collapses" { input: 1 expect: "vec![" }
+    test "array-prefix" { input: 3 expect: "[" }
+    test "tuple-prefix" { input: 4 expect: "(" }
+}
+
+spec rust_stmt_collection_suffix {
+    doc: "Fixed closing text of a collection literal in statement position (src/codegen/mod.rs:418-451), keyed by CollectionKind code: List ']', Set ']', Map ']', Array ']', Tuple ')'. The collapse is complete: Set and Map also lose expression position's '])' ending (slice 4's rust_collection_suffix), because the whole rendering is the List form. Pairs with rust_stmt_collection_prefix; the terminating ';' belongs to rust_stmt_collection_text."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="]"
+    constraint: kind<1||kind>1||output=="]"
+    constraint: kind<2||kind>2||output=="]"
+    constraint: kind<3||kind>3||output=="]"
+    constraint: kind<4||kind>4||output==")"
+
+    optimize: time < O(n)
+
+    test "set-collapses" { input: 1 expect: "]" }
+    test "tuple-suffix" { input: 4 expect: ")" }
+}
+
+spec rust_expectation_source {
+    doc: "Which expectation each expectation-carrying recursive site of the two statement walkers passes to the typed emitter (ir_to_rust_expr_typed -- slice 3's rust_typed_form dispatch and rust_string_ownership leaf rule consume it). Sources: 0 = Some(fn_ret), the enclosing function's return type; 1 = Some(the node's own declared type); 2 = the inherited expectation, passed through unchanged. Sites: 0 = a Let's body (tail), 1 = an If's then branch (tail), 2 = an If's else branch (tail), 3 = a Match arm's body (tail), 4 = a Return's expression (the statement walker's typed call), 5 = an Alloc's initial value (the Alloc's declared type), 6 = a tail-position Typed node (its annotation overrides the inherited expectation), 7 = a tail Block's last statement (the expectation is inherited unchanged -- the Block itself sets none). Sites outside these two functions are not this table's: generate_rust seeds a function body with Some(return type) (the driver, slice 6), and expr_block_stmt's inner tail passes None (the expression walker's Block arm, slice 4)."
+    input: site: Int
+    output: Int
+
+    constraint: site<0||site>4||output==0
+    constraint: site<5||site>6||output==1
+    constraint: site<7||site>7||output==2
+
+    optimize: time < O(n)
+
+    test "let-tail-fn-ret" { input: 0 expect: 0 }
+    test "alloc-own-type" { input: 5 expect: 1 }
+    test "block-last-inherits" { input: 7 expect: 2 }
+}
+
+spec rust_stmt_child_indent {
+    doc: "The relative indent (in levels of four spaces) at which each part of a statement rendering is placed, over the placement sites of ir_to_rust and ir_to_rust_tail (src/codegen/mod.rs:310-541). The pad STRING is '    ' repeated (indent + delta) times -- the repetition is iteration and mirror-only; this table pins the arithmetic. Sites: 0 = a Block's statement (statement position), 1 = a Let's tail body, 2 = an If branch body (tail), 3 = a While body, 4 = a For body, 5 = a Match arm's header line (the pattern line and the arm's closing '},' -- the pad_inner lines), 6 = a Match arm's body (tail), 7 = a tail Block's non-last statement, 8 = a tail Block's last statement (tail). Everything else in a rendering sits at the node's own indent (delta 0 by the templates' use of pad): the header lines, and the While/For/Match closing braces. Two placements take NO pad at all -- the If arm's closing braces and the Sort arm's continuation lines; those are fixed-text facts of rust_stmt_if_text and rust_stmt_sort_text, not rows of this table. expr_block_stmt renders its inner statement at absolute indent 0 in a neutral Unit context -- the expression walker's site (slice 4), not a row here."
+    input: site: Int
+    output: Int
+
+    constraint: site<0||site>1||output==0
+    constraint: site<7||site>8||output==0
+    constraint: site<2||site>5||output==1
+    constraint: site<6||site>6||output==2
+
+    optimize: time < O(n)
+
+    test "block-same" { input: 0 expect: 0 }
+    test "if-branch-in" { input: 2 expect: 1 }
+    test "match-arm-body-in2" { input: 6 expect: 2 }
+}
+
+spec rust_stmt_seq_form {
+    doc: "Which renderer renders one statement of a Block, by the Block's position and the statement's place in it: 0 = the statement walker (ir_to_rust), 1 = the tail walker (ir_to_rust_tail). Positions: 0 = statement position (ir_to_rust's Block arm -- EVERY statement renders as a statement, last included: the Block's own value is discarded with the enclosing statement's), 1 = tail position (ir_to_rust_tail's Block arm -- every statement but the last renders as a statement; the last renders as a tail, so its value becomes the block's). A position code other than 1 takes the statement renderer, as every non-tail context does. The concatenation of the chosen renderings is the Block's rendering (mirror-only iteration; see the slice-5 notes)."
+    input: position: Int, last: Bool
+    output: Int
+
+    constraint: position<1||position>1||last==false||output==1
+    constraint: position==1||output==0
+    constraint: last==true||output==0
+
+    optimize: time < O(n)
 }
 
 }
