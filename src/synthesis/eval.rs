@@ -534,6 +534,25 @@ pub struct TestRun {
     pub passed: usize,
 }
 
+/// How many of the spec's tests can be bound at all — input
+/// AND expected output mappable to evaluator values. Binding
+/// never looks at a candidate body, so this is a property of
+/// the spec's test encodings alone: it equals `evaluable` for
+/// every candidate. A spec whose count falls short of its
+/// test count has tests the interpreter cannot judge (the
+/// lambda-carrying tuple residue) — the trigger signal for
+/// the compiled-runner final scoring in synthesis::runner
+/// (Phase 58), which exists for exactly that residue.
+pub fn bindable_test_count(spec: &FunctionSpec) -> usize {
+    spec.tests
+        .iter()
+        .filter(|t| {
+            bind_test_env(&spec.params, &t.input).is_some()
+                && value_of_expr(&t.expected_output).is_some()
+        })
+        .count()
+}
+
 /// Execute `body` against every mappable test in `spec.tests`.
 pub fn run_spec_tests(body: &IRNode, spec: &FunctionSpec) -> TestRun {
     let mut run = TestRun { evaluable: 0, passed: 0 };
