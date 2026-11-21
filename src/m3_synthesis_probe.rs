@@ -56,6 +56,19 @@
 //  (bare-variable pins under a plain Bool-parameter guard,
 //  at an arity neither earlier family admits).
 //
+//  Phase 34 closes the watch list's last two shapes:
+//  rust_match_scrutinee_form seeds via the multi-guard
+//  truth table (rows over a SET of shared Bool expressions,
+//  the joint {false, true}^n table recovered by
+//  falsify-every-leaf), and rust_concat_left_text via the
+//  composition precedence (the territory refusal restated
+//  as a right of first refusal for the earlier families).
+//  With Phase 33's pair-keyed closure of
+//  rust_string_ownership, every Codegen spec now has a
+//  constraint seed; the watch list stays as the historical
+//  record of the shapes that were once open, and its CAND3
+//  dumps now document the pools the seeds win against.
+//
 //  The probe never asserts on synthesis *quality* — the engine
 //  is randomized — only on pipeline invariants: parse/typecheck
 //  succeed and synthesize returns Ok with at least one

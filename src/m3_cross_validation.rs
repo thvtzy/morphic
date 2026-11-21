@@ -3354,7 +3354,25 @@ mod xval3 {
         // String-equality leaves, the Bool x Bool two-guard
         // rows of rust_match_scrutinee_form, and
         // rust_concat_left_text's territory hole.
-        const RECOGNIZED: [&str; 64] = [
+        //
+        // Phase 34 flip: the last two close. The multi-guard
+        // truth table (rows ranging over a SET of shared Bool
+        // expressions — each row constraining any subset —
+        // with the joint {false, true}^n table recovered by
+        // falsify-every-leaf; two to four guard expressions,
+        // nested matches in first-appearance order)
+        // recognizes rust_match_scrutinee_form, and the
+        // composition precedence (a plain-variable guard with
+        // literal/bare-variable pins is claimed exactly when
+        // neither the guard table nor guarded identity
+        // admits the spec, a bare-variable pin naming a
+        // return-typed parameter) recognizes
+        // rust_concat_left_text. The iterated set grows to
+        // 66, and the asserted-unrecognized list below is
+        // down to rust_ident_empty alone: its String-equality
+        // leaf family stays unrecognized BY DESIGN (String
+        // guards are a separate, unadmitted family).
+        const RECOGNIZED: [&str; 66] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -3384,6 +3402,9 @@ mod xval3 {
             // ── Phase 33: pair-keyed guard table ──
             "rust_concat_left_owned", "rust_concat_right_form",
             "rust_match_scrutinee_bare", "rust_string_ownership",
+            // ── Phase 34: multi-guard truth table + the
+            // composition precedence ──
+            "rust_match_scrutinee_form", "rust_concat_left_text",
         ];
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 79, "module spec count");
@@ -3403,9 +3424,8 @@ mod xval3 {
         }
         for name in [
             "rust_ident_empty",
-            // ── slice 4: still unrecognized ──
-            "rust_match_scrutinee_form",
-            "rust_concat_left_text",
+            // ── Phase 34: the module's only remaining
+            // unrecognized shape, by design ──
         ] {
             assert!(
                 index.callee_body(name).is_none(),
