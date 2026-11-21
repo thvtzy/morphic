@@ -257,9 +257,27 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
                 span: None,
             })
         }
-        Expr::BinOp(_op, lhs, rhs) => {
-            let _lty = check_expr(lhs, env)?;
-            let _rty = check_expr(rhs, env)?;
+        Expr::BinOp(op, lhs, rhs) => {
+            let lty = check_expr(lhs, env)?;
+            let rty = check_expr(rhs, env)?;
+            // `++` (Concat) is the one operator this checker
+            // types precisely, because the layers below are
+            // sort-strict about it: the IR interpreter evaluates
+            // Concat only on two Strings or two Lists, and the
+            // Z3 verifier encodes only those cases. A spec the
+            // backends would reject must therefore fail HERE, at
+            // check time. Every other operator keeps the coarse
+            // rule below, unchanged.
+            if *op == BinOp::Concat {
+                return concat_result_type(&lty, &rty).ok_or_else(|| TypeError {
+                    message: format!(
+                        "`++` (concat) requires two String or two List operands, got {:?} and {:?}",
+                        lty, rty
+                    ),
+                    function: None,
+                    span: None,
+                });
+            }
             // Coarse typing: result type is the join of both operand types
             Ok(TypeRef::Int) // Simplified
         }
@@ -281,6 +299,63 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
             let body_ty = check_expr(body, &local)?;
             Ok(TypeRef::List(Box::new(body_ty)))
         }
+    }
+}
+
+/// Result type of `l ++ r` for already-checked operand types,
+/// or None if the pair is not a concat. This mirrors, at this
+/// checker's coarse precision, the rule the synthesis selector
+/// applies to IR bodies (`selector`'s Concat verdict, via its
+/// `provably_different`): String ++ String is String;
+/// List<A> ++ List<B> is List<A> unless the element types are
+/// provably different; anything else is not a concat. An
+/// operand whose type is the checker's unknown marker
+/// (`Named("_")`, e.g. an index expression) proves nothing
+/// either way and defers to the other operand, as elsewhere
+/// in this checker.
+fn concat_result_type(l: &TypeRef, r: &TypeRef) -> Option<TypeRef> {
+    match (l, r) {
+        (TypeRef::String, TypeRef::String) => Some(TypeRef::String),
+        (TypeRef::List(a), TypeRef::List(b)) => {
+            if types_provably_differ(a, b) {
+                None
+            } else {
+                Some(TypeRef::List(a.clone()))
+            }
+        }
+        (TypeRef::Named(n), other) | (other, TypeRef::Named(n)) if n == "_" => {
+            Some(other.clone())
+        }
+        _ => None,
+    }
+}
+
+/// Coarse provably-different test between two types,
+/// mirroring `selector::provably_different` at this checker's
+/// precision: equal types, anything involving a generic
+/// parameter, and anything involving the `_` unknown marker
+/// prove nothing; unary containers recurse; two types with
+/// different head constructors (or different concrete
+/// primitives) differ.
+fn types_provably_differ(a: &TypeRef, b: &TypeRef) -> bool {
+    if a == b {
+        return false;
+    }
+    if matches!(a, TypeRef::Generic(_)) || matches!(b, TypeRef::Generic(_)) {
+        return false;
+    }
+    if matches!(a, TypeRef::Named(n) if n == "_")
+        || matches!(b, TypeRef::Named(n) if n == "_")
+    {
+        return false;
+    }
+    match (a, b) {
+        (TypeRef::List(x), TypeRef::List(y))
+        | (TypeRef::Set(x), TypeRef::Set(y))
+        | (TypeRef::Option(x), TypeRef::Option(y))
+        | (TypeRef::Ref(x), TypeRef::Ref(y))
+        | (TypeRef::Stream(x), TypeRef::Stream(y)) => types_provably_differ(x, y),
+        _ => true,
     }
 }
 
@@ -426,5 +501,129 @@ mod tests {
 
         let spec = parse(src).unwrap();
         assert!(check(spec).is_err(), "unknown function was accepted");
+    }
+
+    // ── Concat `++` typing (Phase 25, finding F1) ────────────
+    //
+    // The layers below the checker are sort-strict about
+    // Concat: the IR interpreter evaluates it only on two
+    // Strings or two Lists, and the Z3 verifier encodes only
+    // those cases. So `++` is the one operator this checker
+    // types precisely — a spec the backends would reject must
+    // fail here, at `morphic check` time.
+
+    #[test]
+    fn concat_of_strings_typechecks() {
+        // The M3 wrap-one template: a String assembled around a
+        // String parameter, compared against a String output.
+        let src = r#"
+        T {
+        spec wrap {
+            input: inner: String
+            output: String
+
+            constraint: output == "Vec<" ++ inner ++ ">"
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "String ++ String must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn concat_rejects_int_operands() {
+        let src = r#"
+        T {
+        spec f {
+            input: a: Int
+            output: Int
+
+            constraint: output == a ++ 2
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(result.is_err(), "Int ++ Int must be a type error");
+        let err = result.err().unwrap();
+        assert!(
+            err.message.contains("++"),
+            "error should name the operator: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn concat_rejects_mixed_operands() {
+        let src = r#"
+        T {
+        spec f {
+            input: name: String
+            output: String
+
+            constraint: output == name ++ 1
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert!(
+            check(spec).is_err(),
+            "String ++ Int must be a type error"
+        );
+    }
+
+    #[test]
+    fn concat_of_compatible_lists_typechecks() {
+        // The interpreter's second Concat case: List ++ List.
+        let src = r#"
+        T {
+        spec f {
+            input: xs: List<Int>, ys: List<Int>
+            output: List<Int>
+
+            constraint: output == xs ++ ys
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        let result = check(spec);
+        assert!(
+            result.is_ok(),
+            "List<Int> ++ List<Int> must typecheck, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn concat_rejects_mismatched_lists() {
+        // Element types provably different (Int vs String):
+        // the selector's IR verdict calls this untypable, the
+        // interpreter would fail on the values, so check must
+        // reject it too.
+        let src = r#"
+        T {
+        spec f {
+            input: xs: List<Int>, ys: List<String>
+            output: List<Int>
+
+            constraint: output == xs ++ ys
+        }
+        }
+        "#;
+
+        let spec = parse(src).unwrap();
+        assert!(
+            check(spec).is_err(),
+            "List<Int> ++ List<String> must be a type error"
+        );
     }
 }

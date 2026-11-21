@@ -559,6 +559,23 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_expr_mul()?;
         loop {
             self.skip_whitespace_and_comments();
+            // `++` (BinOp::Concat) shares the additive level and
+            // must be probed BEFORE `+`: it is the two-character
+            // operator at this level, and a single-`+` probe
+            // would consume its first character as Add and leave
+            // the second as a parse error. Concat is the
+            // additive operation on the operands the layers
+            // below define it for (Strings, Lists — see the
+            // interpreter and verifier), so it groups with
+            // `+`/`-`: left-associative, operands at the
+            // multiplicative level, binding tighter than the
+            // comparisons handled by the caller.
+            if self.peek_n(2) == "++" {
+                self.eat_str("++")?;
+                let right = self.parse_expr_mul()?;
+                left = Expr::BinOp(BinOp::Concat, Box::new(left), Box::new(right));
+                continue;
+            }
             match self.peek() {
                 Some('+') => {
                     self.advance();
@@ -1633,5 +1650,190 @@ mod tests {
         let src = format!("{} garbage", "─".repeat(10));
         let result = parse(&src);
         assert!(result.is_err(), "expected a parse error");
+    }
+
+    // ── String concatenation `++` (Phase 25, finding F1) ─────
+    //
+    // BinOp::Concat has existed in the AST, the IR interpreter
+    // and the Z3 verifier all along, but the parser never
+    // produced it: `+` mapped to BinOp::Add and a second `+`
+    // was a parse error, so no spec could state a string
+    // assembly. These tests pin the surface syntax: `++` at
+    // the additive level, left-associative.
+
+    /// Every binary operator occurring in an expression tree.
+    fn expr_ops(expr: &Expr, ops: &mut Vec<BinOp>) {
+        match expr {
+            Expr::BinOp(op, l, r) => {
+                ops.push(*op);
+                expr_ops(l, ops);
+                expr_ops(r, ops);
+            }
+            Expr::UnaryOp(_, inner) => expr_ops(inner, ops),
+            Expr::Call(_, args) => {
+                for a in args {
+                    expr_ops(a, ops);
+                }
+            }
+            Expr::Field(base, _) => expr_ops(base, ops),
+            Expr::Index(base, idx) => {
+                expr_ops(base, ops);
+                expr_ops(idx, ops);
+            }
+            _ => {}
+        }
+    }
+
+    fn constraint_ops(c: &Constraint, ops: &mut Vec<BinOp>) {
+        match c {
+            Constraint::Eq(l, r) | Constraint::Order(_, l, r) => {
+                expr_ops(l, ops);
+                expr_ops(r, ops);
+            }
+            Constraint::Expr(e) => expr_ops(e, ops),
+            Constraint::And(parts) | Constraint::Or(parts) => {
+                for p in parts {
+                    constraint_ops(p, ops);
+                }
+            }
+            Constraint::Not(inner) => constraint_ops(inner, ops),
+            Constraint::Implies(l, r) => {
+                constraint_ops(l, ops);
+                constraint_ops(r, ops);
+            }
+            Constraint::Predicate(_, args) => {
+                for a in args {
+                    expr_ops(a, ops);
+                }
+            }
+            Constraint::Forall { body, .. } | Constraint::Exists { body, .. } => {
+                constraint_ops(body, ops)
+            }
+            Constraint::True => {}
+        }
+    }
+
+    /// The right-hand side of a spec's first postcondition
+    /// (`output == <rhs>`), whichever constraint shape the
+    /// parser produced for it.
+    fn postcondition_rhs(spec: &Spec, func: usize) -> &Expr {
+        match &spec.functions[func].postconditions[0] {
+            Constraint::Eq(_, r) => r,
+            Constraint::Expr(Expr::BinOp(BinOp::Eq, _, r)) => r,
+            other => panic!("postcondition is not an output equation: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_concat_produces_concat_not_add() {
+        // The wrap-one template shape from M3: the postcondition
+        // assembles a string around a variable part. `++` must
+        // lower to BinOp::Concat — the operator the layers below
+        // implement — never to BinOp::Add (rejected on strings
+        // by the interpreter, unencodable for the verifier).
+        let src = r#"
+        T {
+        spec wrap {
+            input: inner: String
+            output: String
+            constraint: output == "Vec<" ++ inner ++ ">"
+            constraint: len("x" ++ inner) > 0
+        }
+        }
+        "#;
+        let spec = parse(src).expect("concat constraints must parse");
+        let func = &spec.functions[0];
+        assert_eq!(func.postconditions.len(), 2);
+        for post in &func.postconditions {
+            let mut ops = Vec::new();
+            constraint_ops(post, &mut ops);
+            assert!(
+                ops.contains(&BinOp::Concat),
+                "no Concat in {:?}",
+                post
+            );
+            assert!(
+                !ops.contains(&BinOp::Add),
+                "concat lowered to Add: {:?}",
+                post
+            );
+        }
+    }
+
+    #[test]
+    fn parse_concat_is_left_associative() {
+        // `"a" ++ b ++ "c"` groups as `("a" ++ b) ++ "c"`: the
+        // top-level Concat's LEFT child is itself a Concat.
+        let src = r#"
+        T {
+        spec f {
+            input: b: String
+            output: String
+            constraint: output == "a" ++ b ++ "c"
+        }
+        }
+        "#;
+        let spec = parse(src).unwrap();
+        match postcondition_rhs(&spec, 0) {
+            Expr::BinOp(BinOp::Concat, left, _) => {
+                assert!(
+                    matches!(**left, Expr::BinOp(BinOp::Concat, ..)),
+                    "concat is not left-associative: {:?}",
+                    left
+                );
+            }
+            other => panic!("rhs is not a Concat: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_concat_shares_the_additive_level() {
+        // `++` sits alongside `+`/`-`, not above or below them:
+        // in `x + y ++ z` the operators group strictly
+        // left-to-right, ((x + y) ++ z), exactly as `x + y - z`
+        // groups today. And concat binds tighter than `==`:
+        // the equation's RHS is the whole assembly (asserted by
+        // postcondition_rhs extracting it).
+        let src = r#"
+        T {
+        spec g {
+            input: x: String, y: String, z: String
+            output: String
+            constraint: output == x + y ++ z
+        }
+        }
+        "#;
+        let spec = parse(src).unwrap();
+        match postcondition_rhs(&spec, 0) {
+            Expr::BinOp(BinOp::Concat, left, _) => {
+                assert!(
+                    matches!(**left, Expr::BinOp(BinOp::Add, ..)),
+                    "expected ((x + y) ++ z), got left = {:?}",
+                    left
+                );
+            }
+            other => panic!("rhs is not a Concat over an Add: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_plus_still_produces_add() {
+        // `+` is unchanged: a single plus is BinOp::Add, and no
+        // Concat appears. (Before `++` existed, `1 + 2` was the
+        // only reading; it must stay the only reading.)
+        let src = r#"
+        T {
+        spec h {
+            input: a: Int, b: Int
+            output: Int
+            constraint: output == a + b
+        }
+        }
+        "#;
+        let spec = parse(src).unwrap();
+        let mut ops = Vec::new();
+        constraint_ops(&spec.functions[0].postconditions[0], &mut ops);
+        assert!(ops.contains(&BinOp::Add), "no Add in {:?}", ops);
+        assert!(!ops.contains(&BinOp::Concat), "unexpected Concat in {:?}", ops);
     }
 }

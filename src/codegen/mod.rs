@@ -373,7 +373,7 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
         }
 
         IRNode::Match { scrutinee, cases } => {
-            let mut out = format!("{}match {} {{\n", pad, expr_in_condition_position(scrutinee));
+            let mut out = format!("{}match {} {{\n", pad, match_scrutinee_to_rust(scrutinee, cases));
             for (pattern, body) in cases {
                 let pat = ir_pattern_to_rust(pattern);
                 out.push_str(&format!("{}{} => {{\n{}{}}},\n",
@@ -550,7 +550,7 @@ fn ir_to_rust_expr_typed(node: &IRNode, expected: Option<&TypeRef>) -> String {
     match node {
         IRNode::Typed { node, ty } => ir_to_rust_expr_typed(node, Some(ty)),
         IRNode::Literal(IRLiteral::String(s)) if expected == Some(&TypeRef::String) => {
-            format!("\"{}\".to_string()", s)
+            format!("\"{}\".to_string()", escape_rust_str(s))
         }
         _ => ir_to_rust_expr(node),
     }
@@ -566,6 +566,179 @@ fn ir_to_rust_expr_typed(node: &IRNode, expected: Option<&TypeRef>) -> String {
 /// loss is the String-ownership rewrite in return/tail positions
 /// nested inside the block, which the untyped expression emitter
 /// already forgoes elsewhere (If branches, Lambda bodies).
+/// Escape a string's contents for emission inside a Rust
+/// string literal (Phase 29, defect 3). `"` and `\` take a
+/// backslash; `\n`, `\r` and `\t` use their short forms;
+/// every other control character uses `\u{...}`. All other
+/// characters — including non-ASCII text — are emitted
+/// as-is, so a literal without special characters renders
+/// byte-identically to the pre-fix emitter. The rule is a
+/// per-character transformation: in the self-hosted specs
+/// it is mirror-pinned (finding F5), and the spec equation
+/// for the literal template pins the wrap on the
+/// no-special-characters subdomain.
+fn escape_rust_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{{{:x}}}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escape one character for emission inside a Rust char
+/// literal (Phase 29, defect 3, the adjacent arm of the
+/// string rule).
+fn escape_rust_char(c: char) -> String {
+    match c {
+        '\'' => "\\'".to_string(),
+        '\\' => "\\\\".to_string(),
+        '\n' => "\\n".to_string(),
+        '\r' => "\\r".to_string(),
+        '\t' => "\\t".to_string(),
+        c if c.is_control() => format!("\\u{{{:x}}}", c as u32),
+        c => c.to_string(),
+    }
+}
+
+/// Left operand of an IR Concat in `ir_to_rust_expr`
+/// (Phase 29, defect 1). Rust's `Add` for text is
+/// `String + &str`: the left operand must be an owned
+/// String. A string literal renders as a &str, so in left
+/// position it takes the same `.to_string()` ownership the
+/// typed emitter applies in expectation positions; every
+/// other operand shape (Call, nested Concat, …) already
+/// evaluates to a fresh String value and renders as usual.
+///
+/// Phase 39 (E0382, Concat-operand move — the second
+/// scoped unfreeze, user-approved 2026-11-21): a VARIABLE
+/// is not a fresh value — rendering it bare MOVES it, so
+/// a template that uses one String parameter two or more
+/// times on an execution path (the statement templates'
+/// `pad` / `pad_inner`, repeated in a single `++` chain)
+/// failed E0382, borrow of moved value. The borrow-based
+/// alternative does not exist (`&String + &str` has no
+/// `Add` impl — string concatenation requires an owned
+/// String on the left, verified empirically), so the Var
+/// takes the literal treatment's own analogue: an owned
+/// copy, `.clone()` (the emitter's Clone-op rendering).
+/// The clone is value-transparent — the IR is pure — so
+/// every previously compiling rendering keeps its
+/// behavior; only its bytes move (single-use Var-left
+/// renderings included: whether a bare move is legal
+/// depends on uses anywhere later on the path, which an
+/// operand renderer cannot see — see the Phase 39
+/// inventory in ROAD_TO_SELF_HOSTING.md). The match is on
+/// the DIRECT node only, as with the literal arm: a
+/// Typed-wrapped variable delegates through the typed
+/// walker and is outside this treatment (no measured
+/// winner has that shape).
+fn concat_owned_operand(node: &IRNode) -> String {
+    match node {
+        IRNode::Literal(IRLiteral::String(s)) => {
+            format!("\"{}\".to_string()", escape_rust_str(s))
+        }
+        IRNode::Var(name) => {
+            format!("{}.clone()", rust_ident(name))
+        }
+        _ => ir_to_rust_expr(node),
+    }
+}
+
+/// Right operand of an IR Concat in `ir_to_rust_expr`
+/// (Phase 29, defect 2a). `String + String` is E0308 —
+/// the right operand must be borrowed. A string literal
+/// is already a &str and stays bare (borrowing it would
+/// produce a `&&str`, which has no `Add` impl); a nested
+/// Concat is borrowed as a unit (its rendering is already
+/// parenthesized); a block-like operand is parenthesized
+/// first, the same set `expr_in_condition_position`
+/// wraps.
+fn concat_borrowed_operand(node: &IRNode) -> String {
+    match node {
+        IRNode::Literal(IRLiteral::String(_)) => ir_to_rust_expr(node),
+        _ if is_block_like_expr(node) => {
+            format!("&({})", ir_to_rust_expr(node))
+        }
+        _ => format!("&{}", ir_to_rust_expr(node)),
+    }
+}
+
+/// The block-like node kinds whose renderings need
+/// parentheses when an operator or a borrow is prefixed
+/// (the set `expr_in_condition_position` wraps).
+fn is_block_like_expr(node: &IRNode) -> bool {
+    matches!(
+        node,
+        IRNode::Match { .. }
+            | IRNode::If { .. }
+            | IRNode::Loop { .. }
+            | IRNode::While { .. }
+            | IRNode::For { .. }
+            | IRNode::Let { .. }
+            | IRNode::Block(_)
+            | IRNode::StructDef { .. }
+            | IRNode::Lambda { .. }
+            | IRNode::Closure { .. }
+    )
+}
+
+/// Scrutinee rendering for both Match arms (Phase 29,
+/// defect 2b). When any case pattern is — or contains —
+/// a string literal, the patterns are `&str`, so a
+/// String-valued scrutinee must be viewed through
+/// `.as_str()`; without it the patterns mismatch the
+/// scrutinee (E0308). The emitter has no type
+/// information, so the rule is syntactic: it fires on
+/// every scrutinee shape except one that is itself a
+/// string literal — a literal scrutinee is already a
+/// &str, its patterns already match, and `&str` has no
+/// stable `as_str()` (E0658). A scrutinee variable
+/// let-bound to a bare literal is the known blind spot
+/// of the syntactic rule, the same class of limitation
+/// as the expectation-driven ownership treatment.
+fn match_scrutinee_to_rust(
+    scrutinee: &IRNode,
+    cases: &[(IRPattern, IRNode)],
+) -> String {
+    let rendered = expr_in_condition_position(scrutinee);
+    if cases.iter().any(|(pat, _)| pattern_has_string_literal(pat))
+        && !is_bare_string_literal(scrutinee)
+    {
+        format!("{}.as_str()", rendered)
+    } else {
+        rendered
+    }
+}
+
+fn pattern_has_string_literal(pat: &IRPattern) -> bool {
+    match pat {
+        IRPattern::Literal(IRLiteral::String(_)) => true,
+        IRPattern::Constructor(_, subs) => {
+            subs.iter().any(pattern_has_string_literal)
+        }
+        IRPattern::Guard(inner, _) => pattern_has_string_literal(inner),
+        _ => false,
+    }
+}
+
+fn is_bare_string_literal(node: &IRNode) -> bool {
+    match node {
+        IRNode::Literal(IRLiteral::String(_)) => true,
+        IRNode::Typed { node, .. } => is_bare_string_literal(node),
+        _ => false,
+    }
+}
+
 fn expr_block_stmt(node: &IRNode) -> String {
     let neutral = TypeRef::Unit;
     format!("{{ {} }}", ir_to_rust(node, 0, &neutral).trim_end())
@@ -585,18 +758,10 @@ fn unsupported_expr(shape: &str) -> String {
 /// Wrap those in parens; everything else renders exactly as
 /// before, so existing winners' bytes are unchanged.
 fn expr_in_condition_position(node: &IRNode) -> String {
-    match node {
-        IRNode::Match { .. }
-        | IRNode::If { .. }
-        | IRNode::Loop { .. }
-        | IRNode::While { .. }
-        | IRNode::For { .. }
-        | IRNode::Let { .. }
-        | IRNode::Block(_)
-        | IRNode::StructDef { .. }
-        | IRNode::Lambda { .. }
-        | IRNode::Closure { .. } => format!("({})", ir_to_rust_expr(node)),
-        _ => ir_to_rust_expr(node),
+    if is_block_like_expr(node) {
+        format!("({})", ir_to_rust_expr(node))
+    } else {
+        ir_to_rust_expr(node)
     }
 }
 
@@ -606,8 +771,8 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
             IRLiteral::Int(n) => n.to_string(),
             IRLiteral::Float(f) => f.to_string(),
             IRLiteral::Bool(b) => b.to_string(),
-            IRLiteral::String(s) => format!("\"{}\"", s),
-            IRLiteral::Char(c) => format!("'{}'", c),
+            IRLiteral::String(s) => format!("\"{}\"", escape_rust_str(s)),
+            IRLiteral::Char(c) => format!("'{}'", escape_rust_char(*c)),
             IRLiteral::Unit => "()".into(),
         },
         IRNode::Var(name) => rust_ident(name),
@@ -630,6 +795,19 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 format!("{}.push({})", ir_to_rust_expr(lhs), ir_to_rust_expr(rhs))
             } else if *op == IRBinOp::Merge {
                 format!("{}.extend({})", ir_to_rust_expr(lhs), ir_to_rust_expr(rhs))
+            } else if *op == IRBinOp::Concat {
+                // Phase 29, defects 1+2a (E0369/E0308,
+                // user-approved unfreeze): `+` needs an owned
+                // left operand and a borrowed right one. The
+                // left operand goes through the ownership
+                // treatment (see concat_owned_operand), the
+                // right through the borrow treatment (see
+                // concat_borrowed_operand).
+                format!(
+                    "({} + {})",
+                    concat_owned_operand(lhs),
+                    concat_borrowed_operand(rhs)
+                )
             } else {
                 format!("({} {} {})", ir_to_rust_expr(lhs), rust_op, ir_to_rust_expr(rhs))
             }
@@ -734,7 +912,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 .collect();
             format!(
                 "match {} {{ {} }}",
-                expr_in_condition_position(scrutinee),
+                match_scrutinee_to_rust(scrutinee, cases),
                 arms.join(", ")
             )
         }
@@ -817,7 +995,7 @@ fn ir_pattern_to_rust(pattern: &IRPattern) -> String {
         IRPattern::Literal(lit) => match lit {
             IRLiteral::Int(n) => n.to_string(),
             IRLiteral::Bool(b) => b.to_string(),
-            IRLiteral::String(s) => format!("\"{}\"", s),
+            IRLiteral::String(s) => format!("\"{}\"", escape_rust_str(s)),
             _ => "_".into(),
         },
         IRPattern::Constructor(name, sub_patterns) => {
@@ -1178,7 +1356,7 @@ fn expr_to_rust(expr: &Expr) -> String {
     match expr {
         Expr::IntLit(n) => n.to_string(),
         Expr::BoolLit(b) => b.to_string(),
-        Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::StringLit(s) => format!("\"{}\"", escape_rust_str(s)),
         Expr::Var(name) => rust_ident(name),
         Expr::Call(name, args) => {
             let args_str: Vec<String> = args.iter().map(expr_to_rust).collect();
@@ -1244,6 +1422,17 @@ impl std::fmt::Display for CodegenError {
 impl std::error::Error for CodegenError {}
 
 // ── Tests ─────────────────────────────────────────────────
+
+/// The M3 gate harness (Phase 42): composes the Codegen
+/// module's 112 synthesized winners through the assembly
+/// structure of tests/m3_proof.rs and byte-compares the
+/// composed codegen against this module's original emitter
+/// functions over an adversarial corpus. Test-only; it lives
+/// inside codegen so the harness can call the emitter's
+/// private functions — the original side of the comparison
+/// is the real thing, not a copy.
+#[cfg(test)]
+mod m3_gate;
 
 #[cfg(test)]
 mod tests {
@@ -2243,12 +2432,88 @@ mod tests {
         compile_rust_lib(&generate(&mapped, "rust").unwrap());
     }
 
-    /// Compile a generated file with `rustc --edition 2021
-    /// --crate-type lib` (the probe's external check, in-process).
-    /// Skips silently only when no rustc is reachable at all.
-    fn compile_rust_lib(code: &str) {
-        use std::io::Write;
-        let rustc = std::process::Command::new("rustc")
+    // ── Phase 29: rendering fixes (user-approved unfreeze) ──
+    //
+    // The three defects measured in Phases 25/27/28, fixed
+    // under the re-pin inventory in ROAD_TO_SELF_HOSTING.md.
+    // Each test below renders a shape that previously failed
+    // rustc (or produced invalid Rust) and asserts the emitted
+    // code compiles AND behaves when executed.
+
+    #[test]
+    fn rust_concat_literal_first_assembly_compiles_and_runs() {
+        // Defect 1 (E0369): `"Vec<" ++ inner ++ ">"` rendered
+        // `(("Vec<" + inner) + ">")` — a &str literal as the
+        // left operand of `+`. The left operand of a Concat
+        // must be owned. (The Var RHS borrow is defect 2a,
+        // covered by its own test below.)
+        let body = IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(IRNode::Literal(IRLiteral::String("Vec<".into()))),
+                Box::new(IRNode::Var("inner".into())),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::String(">".into()))),
+        );
+        // The left-operand ownership is defect 1's part of
+        // this rendering; the `&inner` borrow is defect 2a's
+        // (its own test below asserts the full text again
+        // through the generator).
+        assert_eq!(
+            ir_to_rust_expr(&body),
+            "((\"Vec<\".to_string() + &inner) + \">\")"
+        );
+        // The compile leg isolates defect 1: a literal pair
+        // (left owned, right a &str) through the full
+        // generator.
+        let pair_body = IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::Literal(IRLiteral::String("Vec<".into()))),
+            Box::new(IRNode::Literal(IRLiteral::String(">".into()))),
+        );
+        let cand = candidate_with("empty_vec", vec![], TypeRef::String, pair_body);
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("(\"Vec<\".to_string() + \">\")"),
+            "literal-pair concat not owned on the left:\n{}",
+            code
+        );
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(empty_vec(), \"Vec<>\");\nprintln!(\"empty_vec ok\");",
+        );
+        assert!(out.contains("empty_vec ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_concat_literal_pair_and_variable_first_compile() {
+        // Literal ++ literal: left owned, right stays a &str.
+        let pair = ir_to_rust_expr(&IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::Literal(IRLiteral::String("a".into()))),
+            Box::new(IRNode::Literal(IRLiteral::String("b".into()))),
+        ));
+        assert_eq!(pair, "(\"a\".to_string() + \"b\")");
+        // Variable-first (the Phase 25 exclaim shape): the Var
+        // yields a String, but a bare rendering would MOVE it
+        // (Phase 39, E0382) — in left position it takes the
+        // owned-copy treatment, `.clone()`; the literal RHS
+        // stays bare. (Phase 29 recorded this rendering as
+        // byte-identical to pre-fix at `(inner + "!")`; the
+        // Phase 39 inventory's C-1 re-pins it.)
+        let var_first = ir_to_rust_expr(&IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::Var("inner".into())),
+            Box::new(IRNode::Literal(IRLiteral::String("!".into()))),
+        ));
+        assert_eq!(var_first, "(inner.clone() + \"!\")");
+    }
+
+    /// Discover a reachable rustc (PATH first, then the cargo
+    /// home fallback), shared by the compile helpers.
+    fn rustc_path() -> Option<String> {
+        std::process::Command::new("rustc")
             .arg("--version")
             .output()
             .ok()
@@ -2263,14 +2528,587 @@ mod tests {
                     .ok()
                     .filter(|o| o.status.success())
                     .map(|_| path)
-            });
-        let Some(rustc) = rustc else {
+            })
+    }
+
+    /// Compile generated code as a binary with an appended
+    /// `main` and run it, returning stdout (Phase 29: the
+    /// fixed renderings must not only parse — the emitted
+    /// shapes must behave identically when executed). Panics
+    /// on any compile or run failure; skips only when no
+    /// rustc is reachable at all.
+    fn compile_and_run(code: &str, main_body: &str) -> String {
+        use std::io::Write;
+        let Some(rustc) = rustc_path() else {
+            eprintln!("rustc not reachable; skipping run check");
+            return String::new();
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_codegen_run_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("winner_main.rs");
+        let full = format!("{}\nfn main() {{\n{}\n}}\n", code, main_body);
+        let mut f = std::fs::File::create(&file).unwrap();
+        f.write_all(full.as_bytes()).unwrap();
+        drop(f);
+        let bin = dir.join("winner_main");
+        let out = std::process::Command::new(&rustc)
+            .args(["--edition", "2021"])
+            .arg(&file)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "generated code does not compile as a binary:\n{}\n--- code ---\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            full
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            run.status.success(),
+            "generated binary failed:\n{}\n--- code ---\n{}",
+            String::from_utf8_lossy(&run.stderr),
+            full
+        );
+        String::from_utf8_lossy(&run.stdout).into_owned()
+    }
+
+    #[test]
+    fn rust_concat_string_rhs_is_borrowed_and_runs() {
+        // Defect 2a (E0308): the Concat RHS was never
+        // borrowed, so `String + String` failed — the
+        // rust_param_text shape (`name ++ ": " ++ ty`).
+        let body = IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(IRNode::Var("name".into())),
+                Box::new(IRNode::Literal(IRLiteral::String(": ".into()))),
+            )),
+            Box::new(IRNode::Var("ty".into())),
+        );
+        assert_eq!(
+            ir_to_rust_expr(&body),
+            "((name.clone() + \": \") + &ty)"
+        );
+        let cand = candidate_with(
+            "param_text",
+            vec![("name", TypeRef::String), ("ty", TypeRef::String)],
+            TypeRef::String,
+            body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(param_text(\"count\".to_string(), \"i64\".to_string()), \"count: i64\");\n\
+             println!(\"param_text ok\");",
+        );
+        assert!(out.contains("param_text ok"), "run output: {}", out);
+        // With defect 1, the full wrap_vec assembly now
+        // compiles and runs end to end.
+        let wrap_body = IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(IRNode::Literal(IRLiteral::String("Vec<".into()))),
+                Box::new(IRNode::Var("inner".into())),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::String(">".into()))),
+        );
+        let wrap = candidate_with(
+            "wrap_vec",
+            vec![("inner", TypeRef::String)],
+            TypeRef::String,
+            wrap_body,
+        );
+        let wrap_code = generate(&wrap, "rust").unwrap();
+        assert!(
+            wrap_code.contains(r#"(("Vec<".to_string() + &inner) + ">")"#),
+            "wrap_vec rendering:\n{}",
+            wrap_code
+        );
+        let out = compile_and_run(
+            &wrap_code,
+            "assert_eq!(wrap_vec(\"i64\".to_string()), \"Vec<i64>\");\n\
+             assert_eq!(wrap_vec(\"Vec<u8>\".to_string()), \"Vec<Vec<u8>>\");\n\
+             assert_eq!(wrap_vec(String::new()), \"Vec<>\");\n\
+             println!(\"wrap_vec ok\");",
+        );
+        assert!(out.contains("wrap_vec ok"), "run output: {}", out);
+        // A nested Concat on the right is borrowed as a unit.
+        let nested = ir_to_rust_expr(&IRNode::BinOp(
+            IRBinOp::Concat,
+            Box::new(IRNode::Literal(IRLiteral::String("x".into()))),
+            Box::new(IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(IRNode::Literal(IRLiteral::String("y".into()))),
+                Box::new(IRNode::Var("s".into())),
+            )),
+        ));
+        assert_eq!(nested, "(\"x\".to_string() + &(\"y\".to_string() + &s))");
+    }
+
+    // ── Phase 39: E0382 Concat-operand move ──────────────
+    //
+    // The fourth rendering family (Phase 36, Finding 2):
+    // Concat's rendered `+` MOVES a String variable in
+    // left-operand position. Phase 29 owned a literal there
+    // and borrowed right operands, but a variable used two
+    // or more times on one execution path — the statement
+    // templates' pad / pad_inner, repeated in a single `++`
+    // chain — fails E0382 (borrow of moved value). The
+    // tests below render the four measured winners' body
+    // shapes through the full generator and assert the
+    // emitted Rust compiles AND executes correctly (the
+    // compile_and_run discipline of Phase 29).
+
+    fn concat_chain(parts: Vec<IRNode>) -> IRNode {
+        let mut it = parts.into_iter();
+        let first = it.next().unwrap();
+        it.fold(first, |acc, p| {
+            IRNode::BinOp(IRBinOp::Concat, Box::new(acc), Box::new(p))
+        })
+    }
+
+    fn lit(s: &str) -> IRNode {
+        IRNode::Literal(IRLiteral::String(s.into()))
+    }
+
+    fn var(name: &str) -> IRNode {
+        IRNode::Var(name.into())
+    }
+
+    #[test]
+    fn rust_concat_var_left_renders_clone() {
+        // The unit shape: a variable in Concat left position
+        // takes the owned-copy treatment (`.clone()`, the
+        // literal treatment's analogue); a variable on the
+        // right stays borrowed, a literal left stays
+        // `.to_string()`.
+        assert_eq!(
+            ir_to_rust_expr(&IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(var("x")),
+                Box::new(lit("a")),
+            )),
+            "(x.clone() + \"a\")"
+        );
+        assert_eq!(
+            ir_to_rust_expr(&IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(var("x")),
+                Box::new(var("y")),
+            )),
+            "(x.clone() + &y)"
+        );
+    }
+
+    #[test]
+    fn rust_stmt_template_pad_reuse_compiles_and_runs() {
+        // rust_stmt_hole_text's seed body, verbatim shape:
+        // pad used twice in one chain.
+        let hole_body = concat_chain(vec![
+            var("pad"),
+            lit("// TODO: synthesis incomplete\n"),
+            var("pad"),
+            lit("panic!(\"Hole not filled\");\n"),
+        ]);
+        assert_eq!(
+            ir_to_rust_expr(&hole_body),
+            "(((pad.clone() + \"// TODO: synthesis incomplete\\n\") + &pad) + \"panic!(\\\"Hole not filled\\\");\\n\")"
+        );
+        let cand = candidate_with(
+            "stmt_hole_text",
+            vec![("pad", TypeRef::String)],
+            TypeRef::String,
+            hole_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(stmt_hole_text(\"    \".to_string()), \"    // TODO: synthesis incomplete\\n    panic!(\\\"Hole not filled\\\");\\n\");\n\
+             assert_eq!(stmt_hole_text(String::new()), \"// TODO: synthesis incomplete\\npanic!(\\\"Hole not filled\\\");\\n\");\n\
+             println!(\"hole ok\");",
+        );
+        assert!(out.contains("hole ok"), "run output: {}", out);
+
+        // rust_stmt_for_text's shape: pad opens the line and
+        // pads the closing brace.
+        let for_body = concat_chain(vec![
+            var("pad"),
+            lit("for "),
+            var("v"),
+            lit(" in "),
+            var("start"),
+            lit(".."),
+            var("end"),
+            lit(" {\n"),
+            var("body"),
+            var("pad"),
+            lit("}\n"),
+        ]);
+        let cand = candidate_with(
+            "stmt_for_text",
+            vec![
+                ("pad", TypeRef::String),
+                ("v", TypeRef::String),
+                ("start", TypeRef::String),
+                ("end", TypeRef::String),
+                ("body", TypeRef::String),
+            ],
+            TypeRef::String,
+            for_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(stmt_for_text(\"  \".to_string(), \"i\".to_string(), \"0\".to_string(), \"3\".to_string(), \"  x;\\n\".to_string()), \"  for i in 0..3 {\\n  x;\\n  }\\n\");\n\
+             println!(\"for ok\");",
+        );
+        assert!(out.contains("for ok"), "run output: {}", out);
+
+        // rust_stmt_match_arm_text's shape: pad_inner frames
+        // the arm on both sides.
+        let arm_body = concat_chain(vec![
+            var("pad_inner"),
+            var("pat"),
+            lit(" => {\n"),
+            var("body"),
+            var("pad_inner"),
+            lit("},\n"),
+        ]);
+        let cand = candidate_with(
+            "stmt_match_arm_text",
+            vec![
+                ("pad_inner", TypeRef::String),
+                ("pat", TypeRef::String),
+                ("body", TypeRef::String),
+            ],
+            TypeRef::String,
+            arm_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(stmt_match_arm_text(\"    \".to_string(), \"Some(x)\".to_string(), \"        x\\n\".to_string()), \"    Some(x) => {\\n        x\\n    },\\n\");\n\
+             println!(\"arm ok\");",
+        );
+        assert!(out.contains("arm ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_stmt_while_invariant_pad_thrice_compiles_and_runs() {
+        // rust_stmt_while_text's invariant branch: pad three
+        // times in one chain (comment line, loop head,
+        // closing brace), inv once on the right.
+        let while_body = concat_chain(vec![
+            var("pad"),
+            lit("// invariant: "),
+            var("inv"),
+            lit("\n"),
+            var("pad"),
+            lit("while "),
+            var("cond"),
+            lit(" {\n"),
+            var("body"),
+            var("pad"),
+            lit("}\n"),
+        ]);
+        let cand = candidate_with(
+            "stmt_while_text",
+            vec![
+                ("pad", TypeRef::String),
+                ("inv", TypeRef::String),
+                ("cond", TypeRef::String),
+                ("body", TypeRef::String),
+            ],
+            TypeRef::String,
+            while_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(stmt_while_text(\"  \".to_string(), \"x > 0\".to_string(), \"c\".to_string(), \"    s;\\n\".to_string()), \"  // invariant: x > 0\\n  while c {\\n    s;\\n  }\\n\");\n\
+             println!(\"while ok\");",
+        );
+        assert!(out.contains("while ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_concat_var_reused_after_chain_compiles_and_runs() {
+        // A variable moved by a chain and then used again by
+        // a LATER statement: the Let value consumes x in a
+        // Concat, the Let's body uses x again. Pre-fix this
+        // is the same E0382, one statement later.
+        let body = IRNode::Block(vec![IRNode::Let {
+            name: "y".into(),
+            value: Box::new(concat_chain(vec![var("x"), lit("a")])),
+            body: Box::new(concat_chain(vec![var("x"), var("y")])),
+        }]);
+        let cand = candidate_with(
+            "reuse_after",
+            vec![("x", TypeRef::String)],
+            TypeRef::String,
+            body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(reuse_after(\"m\".to_string()), \"mma\");\n\
+             println!(\"reuse ok\");",
+        );
+        assert!(out.contains("reuse ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_match_over_string_scrutinee_uses_as_str() {
+        // Defect 2b (E0308): a Match whose scrutinee is a
+        // String and whose patterns are string literals
+        // rendered `match name { "type" => ... }` — &str
+        // patterns against a String scrutinee (the
+        // rust_ident_empty winner's shape).
+        let lit_str = |s: &str| IRNode::Literal(IRLiteral::String(s.into()));
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("name".into())),
+            cases: vec![
+                (
+                    IRPattern::Guard(
+                        Box::new(IRPattern::Literal(IRLiteral::String(
+                            "type".into(),
+                        ))),
+                        "flag".to_string(),
+                    ),
+                    lit_str("keyword"),
+                ),
+                (
+                    IRPattern::Literal(IRLiteral::String("fn".into())),
+                    lit_str("keyword"),
+                ),
+                (IRPattern::Wildcard, lit_str("plain")),
+            ],
+        };
+        let cand = candidate_with(
+            "classify",
+            vec![
+                ("name", TypeRef::String),
+                ("flag", TypeRef::Bool),
+            ],
+            TypeRef::String,
+            body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("match name.as_str()"),
+            "string-pattern match not rendered with .as_str():\n{}",
+            code
+        );
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(classify(\"type\".to_string(), true), \"keyword\");\n\
+             assert_eq!(classify(\"type\".to_string(), false), \"plain\");\n\
+             assert_eq!(classify(\"fn\".to_string(), false), \"keyword\");\n\
+             assert_eq!(classify(\"hello\".to_string(), true), \"plain\");\n\
+             println!(\"classify ok\");",
+        );
+        assert!(out.contains("classify ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_match_as_str_only_where_patterns_need_it() {
+        // A literal scrutinee is already a &str (and &str
+        // has no stable .as_str()): it must stay bare.
+        let body = IRNode::Match {
+            scrutinee: Box::new(IRNode::Literal(IRLiteral::String(
+                "type".into(),
+            ))),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::String("type".into())),
+                    IRNode::Literal(IRLiteral::Int(1)),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Int(0)),
+                ),
+            ],
+        };
+        let rendered = ir_to_rust_expr(&body);
+        assert!(
+            rendered.contains("match \"type\" {"),
+            "literal scrutinee must stay bare:\n{}",
+            rendered
+        );
+        assert!(!rendered.contains(".as_str()"), "rendered: {}", rendered);
+        // Expression position (a Let value) gets the same
+        // treatment as statement position.
+        let expr_body = IRNode::Let {
+            name: "r".into(),
+            value: Box::new(IRNode::Match {
+                scrutinee: Box::new(IRNode::Var("name".into())),
+                cases: vec![
+                    (
+                        IRPattern::Literal(IRLiteral::String("a".into())),
+                        IRNode::Literal(IRLiteral::Int(1)),
+                    ),
+                    (
+                        IRPattern::Wildcard,
+                        IRNode::Literal(IRLiteral::Int(0)),
+                    ),
+                ],
+            }),
+            body: Box::new(IRNode::Var("r".into())),
+        };
+        let cand = candidate_with(
+            "score",
+            vec![("name", TypeRef::String)],
+            TypeRef::Int,
+            expr_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        assert!(
+            code.contains("match name.as_str()"),
+            "expression-position match not rendered with .as_str():\n{}",
+            code
+        );
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(score(\"a\".to_string()), 1);\n\
+             assert_eq!(score(\"b\".to_string()), 0);\n\
+             println!(\"score ok\");",
+        );
+        assert!(out.contains("score ok"), "run output: {}", out);
+        // Int patterns against an Int scrutinee: untouched.
+        let int_match = ir_to_rust_expr(&IRNode::Match {
+            scrutinee: Box::new(IRNode::Var("n".into())),
+            cases: vec![
+                (
+                    IRPattern::Literal(IRLiteral::Int(3)),
+                    IRNode::Literal(IRLiteral::Int(1)),
+                ),
+                (
+                    IRPattern::Wildcard,
+                    IRNode::Literal(IRLiteral::Int(0)),
+                ),
+            ],
+        });
+        assert!(!int_match.contains(".as_str()"), "rendered: {}", int_match);
+    }
+
+    #[test]
+    fn rust_string_literals_are_escaped() {
+        // Defect 3 (parse-level): string literals were
+        // emitted with contents RAW, so any literal
+        // containing `"`, `\` or a control character
+        // produced syntactically invalid Rust (`"""` for
+        // the quote templates). All five emission sites
+        // escape per Rust source rules; literals without
+        // special characters render byte-identically.
+        let lit = |s: &str| IRNode::Literal(IRLiteral::String(s.into()));
+        // Expression position.
+        assert_eq!(ir_to_rust_expr(&lit("a\"b")), "\"a\\\"b\"");
+        assert_eq!(ir_to_rust_expr(&lit("a\\b")), "\"a\\\\b\"");
+        assert_eq!(ir_to_rust_expr(&lit("line\nbreak")), "\"line\\nbreak\"");
+        assert_eq!(ir_to_rust_expr(&lit("a\tb")), "\"a\\tb\"");
+        assert_eq!(ir_to_rust_expr(&lit("a\u{1}b")), "\"a\\u{1}b\"");
+        // Innocent contents: identity.
+        assert_eq!(ir_to_rust_expr(&lit("Int")), "\"Int\"");
+        assert_eq!(ir_to_rust_expr(&lit("café")), "\"café\"");
+        assert_eq!(ir_to_rust_expr(&lit("with space")), "\"with space\"");
+        assert_eq!(ir_to_rust_expr(&lit("")), "\"\"");
+        // Owned position (typed emitter).
+        assert_eq!(
+            ir_to_rust_expr_typed(&lit("a\"b"), Some(&TypeRef::String)),
+            "\"a\\\"b\".to_string()"
+        );
+        // Concat left position (defect 1's owned arm).
+        assert_eq!(
+            concat_owned_operand(&lit("a\"")),
+            "\"a\\\"\".to_string()"
+        );
+        // Pattern position.
+        assert_eq!(
+            ir_pattern_to_rust(&IRPattern::Literal(IRLiteral::String(
+                "a\"b".into()
+            ))),
+            "\"a\\\"b\""
+        );
+        // Spec-Expr position (generated test modules and
+        // precondition asserts).
+        assert_eq!(
+            expr_to_rust(&Expr::StringLit("a\"b".into())),
+            "\"a\\\"b\""
+        );
+        // Char literals: the same defect class at the
+        // adjacent arm.
+        let chr = |c: char| IRNode::Literal(IRLiteral::Char(c));
+        assert_eq!(ir_to_rust_expr(&chr('\'')), "'\\''");
+        assert_eq!(ir_to_rust_expr(&chr('\\')), "'\\\\'");
+        assert_eq!(ir_to_rust_expr(&chr('\n')), "'\\n'");
+        assert_eq!(ir_to_rust_expr(&chr('a')), "'a'");
+    }
+
+    #[test]
+    fn rust_quote_bearing_literals_compile_and_run() {
+        // The quote templates' winner shape: a body whose
+        // value is a quote-bearing literal (here the single
+        // character `"`), plus a generated test module whose
+        // expected value contains quotes — the
+        // rust_precondition_block parse failure flowed
+        // through the test module's spec-Expr rendering.
+        let mut cand = candidate_with(
+            "echo_quote",
+            vec![("s", TypeRef::String)],
+            TypeRef::String,
+            IRNode::Literal(IRLiteral::String("say \"hi\"\nbye".into())),
+        );
+        cand.spec.tests = vec![Test {
+            name: Some("quotes".into()),
+            input: Expr::StringLit("x".into()),
+            expected_output: Expr::StringLit("say \"hi\"\nbye".into()),
+            timeout_ms: None,
+            property: false,
+        }];
+        let code = generate(&cand, "rust").unwrap();
+        compile_rust_lib(&code);
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(echo_quote(\"x\".to_string()), \"say \\\"hi\\\"\\nbye\");\n\
+             println!(\"quote ok\");",
+        );
+        assert!(out.contains("quote ok"), "run output: {}", out);
+    }
+
+    /// Compile a generated file with `rustc --edition 2021
+    /// --crate-type lib` (the probe's external check, in-process).
+    /// Skips silently only when no rustc is reachable at all.
+    fn compile_rust_lib(code: &str) {
+        use std::io::Write;
+        let Some(rustc) = rustc_path() else {
             eprintln!("rustc not reachable; skipping compile check");
             return;
         };
+        // Unique per call: tests run on parallel threads in
+        // one process, and a pid-only directory made
+        // concurrent compile checks stomp on each other's
+        // winner.rs/rlib (surfaced by Phase 29's added
+        // compile legs as a spurious archive error in an
+        // unrelated test).
         let dir = std::env::temp_dir().join(format!(
-            "morphic_codegen_compile_{}",
-            std::process::id()
+            "morphic_codegen_compile_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("winner.rs");

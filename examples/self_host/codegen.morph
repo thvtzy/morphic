@@ -1,0 +1,1955 @@
+// =================================================================
+//  M3: Codegen -- IR to Rust (slices 1-5: leaf mappings +
+//  small template families + name/text assembly + the
+//  expression walker + the statement walker)
+//  Self-host spec for the Rust emitter in src/codegen/mod.rs.
+//
+//  The codegen is the biggest self-host component and is being
+//  decomposed into ordered slices (see the M3 notes in
+//  ROAD_TO_SELF_HOSTING.md): leaf mappings first, then the small
+//  template families, name assembly, the expression walker, the
+//  statement walker, and finally the driver. Slice 1 is the
+//  pure tag/kind -> string-or-form tables that the walkers
+//  consult; slice 2 is the small template families (ty_to_rust
+//  composite forms, literal rendering, ir_pattern_to_rust,
+//  expr_to_rust + constraint_to_rust, and the wrap
+//  classification of expr_in_condition_position); slice 3 is
+//  name/text assembly (rust_ident, the String-ownership rule
+//  of ir_to_rust_expr_typed, generate_rust's assembly pieces).
+//  Every spec below states the COMPLETE mapping of its table
+//  as constraints -- the central M2 lesson is that specs
+//  pinning only tested rows crown memorizers -- while the
+//  in-spec tests stay representative, not exhaustive.
+//  Mirrors + full-range golden tests live in
+//  tests/m3_proof.rs.
+//
+//  Enums are simulated with Int codes, as in M0/M1/M2, using
+//  declaration order in the Rust source.
+//
+//  DIALECT NOTE (verified against the real parser, 2026-11-21):
+//  same dialect as validator.morph / printer.morph -- operators
+//  inside expressions are written tight, constraints may not
+//  start with '(', and lookup tables are per-row guards:
+//  op<4||op>4||output=="%" reads as "op == 4 implies output
+//  == %". String inputs, string-equality constraints, and
+//  string-literal test inputs were probed against the compiled
+//  binary before use here (spec rust_keyword depends on them).
+//  Slice-2 probes (2026-11-21) added: Bool inputs with Bool
+//  guard rows and Bool test inputs parse and check
+//  (rust_literal_bool); a multi-input identity guard parses
+//  (rust_pattern_ctor_name); string literals may contain
+//  escaped quotes. Char literals do NOT parse in expression
+//  position ('a' is a parse error), though Char-typed inputs
+//  declare fine -- so no spec below writes a Char value.
+//  Slice-3 probes (2026-11-21) added: F1 is RESOLVED -- the
+//  parser now surfaces BinOp::Concat as the `++` operator
+//  (Phase 25), so template assembly is statable as equations
+//  over already-rendered parts, and slice 3 pins its
+//  templates that way. String literals support the escapes
+//  \n, \t, \\ and \" (the parser's escape set), which the
+//  generate_rust templates rely on. A constraint may call
+//  another spec of the module (validator.morph's
+//  validate_kind_tag is the precedent), which
+//  rust_ident_suffix's composition over rust_keyword uses.
+// =================================================================
+
+Codegen {
+
+// -- Types ---------------------------------------------------
+
+// Type codes: declaration order of TypeRef in src/spec/ast.rs.
+// 0=Int, 1=Float, 2=Bool, 3=String, 4=Char, 5=Unit,
+// 6=I8, 7=I16, 8=I32, 9=I64, 10=U8, 11=U16, 12=U32, 13=U64,
+// 14=Generic, 15=Named, 16=List, 17=Set, 18=Map, 19=Option,
+// 20=Result, 21=Tuple, 22=Array, 23=Function, 24=Ref, 25=Stream
+type TypeCode = Int;
+
+// IR binary operator codes: declaration order of IRBinOp in
+// src/synthesis/engine.rs.
+// 0=Add, 1=Sub, 2=Mul, 3=Div, 4=Mod, 5=And, 6=Or, 7=Xor,
+// 8=Eq, 9=Neq, 10=Lt, 11=Le, 12=Gt, 13=Ge, 14=Shl, 15=Shr,
+// 16=Concat, 17=Append, 18=Merge
+type IRBinOpCode = Int;
+
+// IR unary operator codes: declaration order of IRUnaryOp in
+// src/synthesis/engine.rs.
+// 0=Neg, 1=Not, 2=Abs, 3=Len, 4=Head, 5=Tail, 6=Init, 7=Last,
+// 8=Reverse, 9=Clone
+type IRUnaryOpCode = Int;
+
+// Collection kind codes: declaration order of CollectionKind in
+// src/synthesis/engine.rs.
+// 0=List, 1=Set, 2=Map, 3=Array, 4=Tuple
+type CollectionKindCode = Int;
+
+// Spec-expression binary operator codes: declaration order of
+// BinOp in src/spec/ast.rs. These are the operators of spec
+// expressions (emitted by expr_to_rust into generated test
+// code), NOT the IR operators above -- the two tables differ.
+// 0=Add, 1=Sub, 2=Mul, 3=Div, 4=Mod, 5=And, 6=Or, 7=Eq,
+// 8=Neq, 9=Lt, 10=Le, 11=Gt, 12=Ge, 13=Concat
+type SpecBinOpCode = Int;
+
+// IR node kind codes: declaration order of IRNode in
+// src/synthesis/engine.rs. Needed by the wrap classification
+// of expr_in_condition_position (slice 2).
+// 0=Hole, 1=Block, 2=Let, 3=If, 4=While, 5=For, 6=Match,
+// 7=Call, 8=Return, 9=Literal, 10=Var, 11=BinOp, 12=UnaryOp,
+// 13=Lambda, 14=Closure, 15=Collection, 16=Map, 17=Filter,
+// 18=Fold, 19=Sort, 20=Alloc, 21=Assign, 22=Typed, 23=Index,
+// 24=Loop, 25=Break, 26=StructDef, 27=TryPropagate
+type IRNodeKindCode = Int;
+
+// IR literal kind codes: declaration order of IRLiteral in
+// src/synthesis/engine.rs.
+// 0=Int, 1=Float, 2=Bool, 3=String, 4=Char, 5=Unit
+type IRLiteralKindCode = Int;
+
+// IR pattern kind codes: declaration order of IRPattern in
+// src/synthesis/engine.rs.
+// 0=Wildcard, 1=Variable, 2=Literal, 3=Constructor, 4=Guard
+type IRPatternKindCode = Int;
+
+// Spec-expression kind codes: declaration order of Expr in
+// src/spec/ast.rs (the spec AST that expr_to_rust walks).
+// 0=Var, 1=IntLit, 2=FloatLit, 3=BoolLit, 4=StringLit,
+// 5=Field, 6=Index, 7=Call, 8=BinOp, 9=UnaryOp, 10=Lambda,
+// 11=Length, 12=Comprehension
+type SpecExprKindCode = Int;
+
+// Constraint kind codes: declaration order of Constraint in
+// src/spec/ast.rs (the constraint AST constraint_to_rust
+// walks).
+// 0=True, 1=Expr, 2=Forall, 3=Exists, 4=Implies, 5=And,
+// 6=Or, 7=Not, 8=Eq, 9=Order, 10=Predicate
+type ConstraintKindCode = Int;
+
+// Order operator codes: declaration order of OrderOp in
+// src/spec/ast.rs.
+// 0=LessThan, 1=LessThanOrEqual, 2=GreaterThan,
+// 3=GreaterThanOrEqual
+type OrderOpCode = Int;
+
+// Expectation codes for ir_to_rust_expr_typed (slice 3): a
+// TypeRef code (0-25, as in TypeCode) stands for
+// Some(that type); 26 stands for no expectation (None).
+type ExpectedTypeCode = Int;
+
+// -- Type names ------------------------------------------------
+
+spec rust_type_name {
+    doc: "Rust name of a scalar TypeRef: the leaf table of ty_to_rust. Composite types (List..Stream) and Named/Generic are recursive or name-carrying forms, specified in a later slice and deliberately unpinned here. The table is not injective: Int (0) and I64 (9) both name i64."
+    input: tag: Int
+    output: String
+
+    constraint: tag<0||tag>0||output=="i64"
+    constraint: tag<1||tag>1||output=="f64"
+    constraint: tag<2||tag>2||output=="bool"
+    constraint: tag<3||tag>3||output=="String"
+    constraint: tag<4||tag>4||output=="char"
+    constraint: tag<5||tag>5||output=="()"
+    constraint: tag<6||tag>6||output=="i8"
+    constraint: tag<7||tag>7||output=="i16"
+    constraint: tag<8||tag>8||output=="i32"
+    constraint: tag<9||tag>9||output=="i64"
+    constraint: tag<10||tag>10||output=="u8"
+    constraint: tag<11||tag>11||output=="u16"
+    constraint: tag<12||tag>12||output=="u32"
+    constraint: tag<13||tag>13||output=="u64"
+
+    optimize: time < O(n)
+
+    test "int-name" { input: 0 expect: "i64" }
+    test "string-name" { input: 3 expect: "String" }
+    test "unit-name" { input: 5 expect: "()" }
+    test "u64-name" { input: 13 expect: "u64" }
+}
+
+// -- IR operator tables -----------------------------------------
+
+spec rust_binop_symbol {
+    doc: "Infix symbol of an IR binary operator in Rust output (the operator table of ir_to_rust_expr). Append (17) and Merge (18) have no infix symbol -- they render as method calls -- and are deliberately unpinned: the emitter's own table binds '.push'/'.extend' for them, but those values are dead because the arms are special-cased first. Concat (16) shares Add's '+'."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output=="+"
+    constraint: op<1||op>1||output=="-"
+    constraint: op<2||op>2||output=="*"
+    constraint: op<3||op>3||output=="/"
+    constraint: op<4||op>4||output=="%"
+    constraint: op<5||op>5||output=="&&"
+    constraint: op<6||op>6||output=="||"
+    constraint: op<7||op>7||output=="^"
+    constraint: op<8||op>8||output=="=="
+    constraint: op<9||op>9||output=="!="
+    constraint: op<10||op>10||output=="<"
+    constraint: op<11||op>11||output=="<="
+    constraint: op<12||op>12||output==">"
+    constraint: op<13||op>13||output==">="
+    constraint: op<14||op>14||output=="<<"
+    constraint: op<15||op>15||output==">>"
+    constraint: op<16||op>16||output=="+"
+
+    optimize: time < O(n)
+
+    test "add-symbol" { input: 0 expect: "+" }
+    test "mod-symbol" { input: 4 expect: "%" }
+    test "xor-symbol" { input: 7 expect: "^" }
+    test "shl-symbol" { input: 14 expect: "<<" }
+    test "concat-symbol" { input: 16 expect: "+" }
+}
+
+spec rust_unaryop_symbol {
+    doc: "Prefix symbol of an IR unary operator: only Neg and Not have one (emitted parenthesized, as (- x) and (! x)). All other unary operators are unpinned here; they render as method calls or index forms (see rust_unaryop_form)."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output=="-"
+    constraint: op<1||op>1||output=="!"
+
+    optimize: time < O(n)
+
+    test "neg-symbol" { input: 0 expect: "-" }
+    test "not-symbol" { input: 1 expect: "!" }
+}
+
+spec rust_unaryop_method {
+    doc: "Method name of an IR unary operator rendered as a zero-argument method call (x.abs(), x.len(), x.reverse(), x.clone()). The remaining operators are unpinned here: Neg/Not are prefix forms and Head/Tail/Init/Last are index forms (see rust_unaryop_form)."
+    input: op: Int
+    output: String
+
+    constraint: op<2||op>2||output=="abs"
+    constraint: op<3||op>3||output=="len"
+    constraint: op<8||op>8||output=="reverse"
+    constraint: op<9||op>9||output=="clone"
+
+    optimize: time < O(n)
+
+    test "abs-method" { input: 2 expect: "abs" }
+    test "len-method" { input: 3 expect: "len" }
+    test "clone-method" { input: 9 expect: "clone" }
+}
+
+spec rust_unaryop_form {
+    doc: "Emission family of an IR unary operator: 0 = prefix symbol ((- x), (! x)), 1 = method call (x.m()), 2 = list-part index/slice form (Head, Tail, Init, Last, whose bespoke templates belong to the expression-walker slice). Total over all ten operators. Note: the method family includes Reverse, whose emitted call returns () in today's emitter -- a defect of the walker slice's template, not of this classification."
+    input: op: Int
+    output: Int
+
+    constraint: op<0||op>0||output==0
+    constraint: op<1||op>1||output==0
+    constraint: op<2||op>2||output==1
+    constraint: op<3||op>3||output==1
+    constraint: op<4||op>4||output==2
+    constraint: op<5||op>5||output==2
+    constraint: op<6||op>6||output==2
+    constraint: op<7||op>7||output==2
+    constraint: op<8||op>8||output==1
+    constraint: op<9||op>9||output==1
+
+    optimize: time < O(n)
+
+    test "neg-form" { input: 0 expect: 0 }
+    test "abs-form" { input: 2 expect: 1 }
+    test "head-form" { input: 4 expect: 2 }
+    test "clone-form" { input: 9 expect: 1 }
+}
+
+// -- Collection forms -------------------------------------------
+
+spec rust_collection_form {
+    doc: "Emission form of a collection literal in EXPRESSION position: 0 = vec![..] macro (List), 1 = std::collections::HashSet::from([..]) (Set), 2 = std::collections::HashMap::from([..]) (Map), 3 = array literal [..] (Array), 4 = tuple literal (..) (Tuple). Total over all five kinds. Statement position is a different, position-dependent rule -- List, Set and Map all collapse to the vec![..]; form there -- and belongs to the statement-walker slice."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<3||kind>3||output==3
+    constraint: kind<4||kind>4||output==4
+
+    optimize: time < O(n)
+
+    test "list-form" { input: 0 expect: 0 }
+    test "set-form" { input: 1 expect: 1 }
+    test "tuple-form" { input: 4 expect: 4 }
+}
+
+// -- Identifier rules -------------------------------------------
+
+spec rust_keyword {
+    doc: "Whether a name is a Rust keyword for the emitter (is_rust_keyword): the exact 51-word set the emitter lists -- strict, reserved and weak keywords mixed, not any single Rust edition's set (for example it has no 'gen'). Matching is exact and case-sensitive: 'Self' is a keyword, 'SELF' and 'selfish' are not. rust_ident appends '_' to a name exactly when this holds."
+    input: name: String
+    output: Bool
+
+    constraint: output == (name=="as"||name=="break"||name=="const"||name=="continue"||name=="crate"||name=="else"||name=="enum"||name=="extern"||name=="false"||name=="fn"||name=="for"||name=="if"||name=="impl"||name=="in"||name=="let"||name=="loop"||name=="match"||name=="mod"||name=="move"||name=="mut"||name=="pub"||name=="ref"||name=="return"||name=="self"||name=="Self"||name=="static"||name=="struct"||name=="super"||name=="trait"||name=="true"||name=="type"||name=="unsafe"||name=="use"||name=="where"||name=="while"||name=="async"||name=="await"||name=="dyn"||name=="abstract"||name=="become"||name=="box"||name=="do"||name=="final"||name=="macro"||name=="override"||name=="priv"||name=="typeof"||name=="unsized"||name=="virtual"||name=="yield"||name=="try")
+
+    optimize: time < O(n)
+
+    test "fn-keyword" { input: "fn" expect: true }
+    test "self-keyword" { input: "Self" expect: true }
+    test "plain-name" { input: "sort" expect: false }
+    test "prefix-name" { input: "selfish" expect: false }
+    test "case-name" { input: "Fn" expect: false }
+}
+
+// -- Spec-expression operator table ------------------------------
+
+spec spec_binop_symbol {
+    doc: "Operator symbol expr_to_rust uses when emitting a spec expression into generated Rust (test assertions in generate_rust's output) -- a SEPARATE, weaker table than rust_binop_symbol. The '?' rows are the emitter's real fallback for the operators it does not map (Mod, Lt, Le, Gt, Ge, Concat) and are pinned deliberately: a synthesized replacement must reproduce today's bytes, fallback included. Fixing the fallback is a separate later decision. Total over all fourteen operators."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output=="+"
+    constraint: op<1||op>1||output=="-"
+    constraint: op<2||op>2||output=="*"
+    constraint: op<3||op>3||output=="/"
+    constraint: op<4||op>4||output=="?"
+    constraint: op<5||op>5||output=="&&"
+    constraint: op<6||op>6||output=="||"
+    constraint: op<7||op>7||output=="=="
+    constraint: op<8||op>8||output=="!="
+    constraint: op<9||op>9||output=="?"
+    constraint: op<10||op>10||output=="?"
+    constraint: op<11||op>11||output=="?"
+    constraint: op<12||op>12||output=="?"
+    constraint: op<13||op>13||output=="?"
+
+    optimize: time < O(n)
+
+    test "add-symbol" { input: 0 expect: "+" }
+    test "neq-symbol" { input: 8 expect: "!=" }
+    test "mod-fallback" { input: 4 expect: "?" }
+    test "lt-fallback" { input: 9 expect: "?" }
+}
+
+// -- Slice 2: small template families -------------------------
+//
+//  Representation (the slice-2 design rule): the walkers render
+//  children first, so a composite form is a template over the
+//  children's ALREADY-RENDERED strings. Everything about a
+//  template that is fixed text -- which template applies to a
+//  kind, its prefix / separator / midfix / suffix, and every
+//  constant fallback -- is pinned below as classifications and
+//  guard tables. The assembly act itself (concatenating fixed
+//  text with rendered children) is NOT pinned anywhere in this
+//  slice: the spec language has no string concatenation.
+//  BinOp::Concat exists in the AST, the IR, the interpreter
+//  (eval.rs) and the verifier (String::concat), but the parser
+//  never produces it -- '+' parses to BinOp::Add, which the
+//  interpreter evaluates numerically only and the verifier
+//  cannot encode on strings. Recorded in the ROAD M3 notes as
+//  a language finding for the language owner.
+
+// -- Type templates (ty_to_rust composites) --------------------
+
+spec rust_type_form {
+    doc: "Template family of a TypeRef code in ty_to_rust (src/codegen/mod.rs:1093): 0 = scalar leaf (codes 0-13, named by rust_type_name), 1 = name-carrying (Generic 14, Named 15: the output is the rust_ident-rendered name itself -- slice 3 owns rust_ident), 2 = wrap-one (prefix + inner + suffix: List, Set, Option, Ref, Stream), 3 = wrap-two (prefix + first + separator + second + suffix: Map, Result), 4 = tuple join (prefix + parts joined by separator + suffix), 5 = array (prefix + element + separator + decimal size + suffix), 6 = function (prefix + args joined by separator + midfix + return type + suffix). Total over all 26 TypeRef codes. The fixed texts are pinned by rust_type_prefix / rust_type_separator / rust_type_midfix / rust_type_suffix; the concatenation itself is unpinned (no concat operator in the spec language -- see the slice-2 note)."
+    input: tag: Int
+    output: Int
+
+    constraint: tag<0||tag>0||output==0
+    constraint: tag<1||tag>1||output==0
+    constraint: tag<2||tag>2||output==0
+    constraint: tag<3||tag>3||output==0
+    constraint: tag<4||tag>4||output==0
+    constraint: tag<5||tag>5||output==0
+    constraint: tag<6||tag>6||output==0
+    constraint: tag<7||tag>7||output==0
+    constraint: tag<8||tag>8||output==0
+    constraint: tag<9||tag>9||output==0
+    constraint: tag<10||tag>10||output==0
+    constraint: tag<11||tag>11||output==0
+    constraint: tag<12||tag>12||output==0
+    constraint: tag<13||tag>13||output==0
+    constraint: tag<14||tag>14||output==1
+    constraint: tag<15||tag>15||output==1
+    constraint: tag<16||tag>16||output==2
+    constraint: tag<17||tag>17||output==2
+    constraint: tag<18||tag>18||output==3
+    constraint: tag<19||tag>19||output==2
+    constraint: tag<20||tag>20||output==3
+    constraint: tag<21||tag>21||output==4
+    constraint: tag<22||tag>22||output==5
+    constraint: tag<23||tag>23||output==6
+    constraint: tag<24||tag>24||output==2
+    constraint: tag<25||tag>25||output==2
+
+    optimize: time < O(n)
+
+    test "scalar-form" { input: 0 expect: 0 }
+    test "name-form" { input: 14 expect: 1 }
+    test "list-form" { input: 16 expect: 2 }
+    test "map-form" { input: 18 expect: 3 }
+    test "tuple-form" { input: 21 expect: 4 }
+    test "array-form" { input: 22 expect: 5 }
+    test "function-form" { input: 23 expect: 6 }
+}
+
+spec rust_type_prefix {
+    doc: "Fixed opening text of a composite type form in ty_to_rust (src/codegen/mod.rs:1107-1122), keyed by TypeRef code. Set (17) is UNQUALIFIED 'HashSet<' -- unlike the fully qualified Set literal in ir_to_rust_expr, and no import is ever generated, so a Set-typed signature fails E0433 in real output; pinned as-is: a synthesized replacement must reproduce today's bytes. Scalar and name codes have no prefix and are unpinned here."
+    input: tag: Int
+    output: String
+
+    constraint: tag<16||tag>16||output=="Vec<"
+    constraint: tag<17||tag>17||output=="HashSet<"
+    constraint: tag<18||tag>18||output=="HashMap<"
+    constraint: tag<19||tag>19||output=="Option<"
+    constraint: tag<20||tag>20||output=="Result<"
+    constraint: tag<21||tag>21||output=="("
+    constraint: tag<22||tag>22||output=="["
+    constraint: tag<23||tag>23||output=="fn("
+    constraint: tag<24||tag>24||output=="&"
+    constraint: tag<25||tag>25||output=="impl Iterator<Item = "
+
+    optimize: time < O(n)
+
+    test "vec-prefix" { input: 16 expect: "Vec<" }
+    test "set-prefix" { input: 17 expect: "HashSet<" }
+    test "ref-prefix" { input: 24 expect: "&" }
+    test "stream-prefix" { input: 25 expect: "impl Iterator<Item = " }
+}
+
+spec rust_type_suffix {
+    doc: "Fixed closing text of a composite type form in ty_to_rust (src/codegen/mod.rs:1107-1122), keyed by TypeRef code. Function (23) and Ref (24) close with the empty string: a function's return type follows its midfix directly, and a reference is prefix-only. Scalar and name codes have no suffix and are unpinned here."
+    input: tag: Int
+    output: String
+
+    constraint: tag<16||tag>16||output==">"
+    constraint: tag<17||tag>17||output==">"
+    constraint: tag<18||tag>18||output==">"
+    constraint: tag<19||tag>19||output==">"
+    constraint: tag<20||tag>20||output==">"
+    constraint: tag<21||tag>21||output==")"
+    constraint: tag<22||tag>22||output=="]"
+    constraint: tag<23||tag>23||output==""
+    constraint: tag<24||tag>24||output==""
+    constraint: tag<25||tag>25||output==">"
+
+    optimize: time < O(n)
+
+    test "vec-suffix" { input: 16 expect: ">" }
+    test "tuple-suffix" { input: 21 expect: ")" }
+    test "function-suffix" { input: 23 expect: "" }
+    test "ref-suffix" { input: 24 expect: "" }
+}
+
+spec rust_type_separator {
+    doc: "Fixed text between the rendered children of a composite type form in ty_to_rust: ', ' between Map/Result children, tuple parts and function arguments; '; ' between an array's element type and its size. The size itself is rendered by the Int -> decimal rule, which the spec language cannot express (see rust_literal_form). Wrap-one and name/scalar codes have no separator and are unpinned here."
+    input: tag: Int
+    output: String
+
+    constraint: tag<18||tag>18||output==", "
+    constraint: tag<20||tag>20||output==", "
+    constraint: tag<21||tag>21||output==", "
+    constraint: tag<22||tag>22||output=="; "
+    constraint: tag<23||tag>23||output==", "
+
+    optimize: time < O(n)
+
+    test "map-separator" { input: 18 expect: ", " }
+    test "array-separator" { input: 22 expect: "; " }
+    test "function-separator" { input: 23 expect: ", " }
+}
+
+spec rust_type_midfix {
+    doc: "Fixed text between the joined argument list and the return type of a function type in ty_to_rust: ') -> '. Only Function (23) has a midfix; every other code is unpinned here."
+    input: tag: Int
+    output: String
+
+    constraint: tag<23||tag>23||output==") -> "
+
+    optimize: time < O(n)
+
+    test "function-midfix" { input: 23 expect: ") -> " }
+}
+
+// -- Literal rendering ------------------------------------------
+
+spec rust_literal_form {
+    doc: "Rendering family of an IR literal in expression position (the Literal arm of ir_to_rust_expr, src/codegen/mod.rs:605-612); pattern position uses the same six kinds with its own fallback table (rust_pattern_literal_form). 0 = decimal text of the value (Int: n.to_string()), 1 = f64 Display text (Float: f.to_string() -- 1.0 renders '1', not '1.0'), 2 = value text (Bool, via rust_literal_bool), 3 = quoted template (String: a quote, the escaped contents, a quote -- the escape rule is per-character and mirror-pinned, Phase 29), 4 = quoted template (Char: a single quote, the escaped character, a single quote), 5 = fixed text (Unit, via rust_literal_fixed_text). Total over all six IRLiteral kinds. Families 0 and 1 are classifications only: turning a number into its decimal/Display text is not expressible in the spec language (no Int -> String conversion, no float formatting), and families 3 and 4 need the concatenation the language lacks -- all recorded in the ROAD M3 notes. What is pinned here is WHICH rule applies to each kind, completely."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<3||kind>3||output==3
+    constraint: kind<4||kind>4||output==4
+    constraint: kind<5||kind>5||output==5
+
+    optimize: time < O(n)
+
+    test "int-form" { input: 0 expect: 0 }
+    test "float-form" { input: 1 expect: 1 }
+    test "string-form" { input: 3 expect: 3 }
+    test "unit-form" { input: 5 expect: 5 }
+}
+
+spec rust_literal_bool {
+    doc: "Text of a Bool literal: IRLiteral::Bool rendered by b.to_string() in ir_to_rust_expr (src/codegen/mod.rs:607) and identically in ir_pattern_to_rust (src/codegen/mod.rs:818) -- 'true' for true, 'false' for false. Total over the Bool domain; serves both walkers."
+    input: value: Bool
+    output: String
+
+    constraint: value==false||output=="true"
+    constraint: value==true||output=="false"
+
+    optimize: time < O(n)
+
+    test "true-text" { input: true expect: "true" }
+    test "false-text" { input: false expect: "false" }
+}
+
+spec rust_literal_fixed_text {
+    doc: "Value-independent text of an IR literal kind in expression position: only Unit (5) has one -- '()' (src/codegen/mod.rs:611). Every other kind's text depends on the literal's value and is unpinned here."
+    input: kind: Int
+    output: String
+
+    constraint: kind<5||kind>5||output=="()"
+
+    optimize: time < O(n)
+
+    test "unit-text" { input: 5 expect: "()" }
+}
+
+// -- Pattern templates (ir_pattern_to_rust) ---------------------
+
+spec rust_pattern_form {
+    doc: "Rendering family of an IR pattern in ir_pattern_to_rust (src/codegen/mod.rs:813): 0 = fixed text (Wildcard, via rust_pattern_fixed_text), 1 = name (Variable: the rust_ident-rendered name itself -- slice 3 owns rust_ident), 2 = literal (Literal: the family of rust_pattern_literal_form), 3 = constructor template (the name, then '(' + sub-patterns joined ', ' + ')' -- or the bare name when there are no sub-patterns, pinned by rust_pattern_ctor_name), 4 = guard template (the pattern, then ' if ', then the guard text -- the guard is already text in the IR and is interpolated raw). Total over all five IRPattern kinds. The templates' fixed texts are stated here; their assembly needs concatenation and is unpinned (slice-2 note)."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<3||kind>3||output==3
+    constraint: kind<4||kind>4||output==4
+
+    optimize: time < O(n)
+
+    test "wildcard-form" { input: 0 expect: 0 }
+    test "literal-form" { input: 2 expect: 2 }
+    test "guard-form" { input: 4 expect: 4 }
+}
+
+spec rust_pattern_fixed_text {
+    doc: "Value-independent text of an IR pattern kind: only Wildcard (0) has one -- '_' (src/codegen/mod.rs:815)."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="_"
+
+    optimize: time < O(n)
+
+    test "wildcard-text" { input: 0 expect: "_" }
+}
+
+spec rust_pattern_literal_form {
+    doc: "Rendering family of a literal inside a pattern (the Literal arm of ir_pattern_to_rust, src/codegen/mod.rs:817-822): 0 = value text (Int renders its decimal text; Bool renders via rust_literal_bool), 1 = wildcard fallback (Float, Char and Unit patterns render '_' regardless of value -- pinned by rust_pattern_literal_text; such a pattern therefore matches EVERYTHING, silently widening the match arm), 2 = quoted template (String: a quote, the escaped contents, a quote -- as in expression position; the escape rule is per-character and mirror-pinned, Phase 29). Total over all six IRLiteral kinds."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==0
+    constraint: kind<3||kind>3||output==2
+    constraint: kind<4||kind>4||output==1
+    constraint: kind<5||kind>5||output==1
+
+    optimize: time < O(n)
+
+    test "int-value-text" { input: 0 expect: 0 }
+    test "float-wildcard" { input: 1 expect: 1 }
+    test "string-quoted" { input: 3 expect: 2 }
+    test "unit-wildcard" { input: 5 expect: 1 }
+}
+
+spec rust_pattern_literal_text {
+    doc: "Fixed text of the pattern-literal fallback rows (src/codegen/mod.rs:821): Float (1), Char (4) and Unit (5) literal patterns all render '_'. Int, Bool and String literals are value-dependent and unpinned here."
+    input: kind: Int
+    output: String
+
+    constraint: kind<1||kind>1||output=="_"
+    constraint: kind<4||kind>4||output=="_"
+    constraint: kind<5||kind>5||output=="_"
+
+    optimize: time < O(n)
+
+    test "float-text" { input: 1 expect: "_" }
+    test "char-text" { input: 4 expect: "_" }
+    test "unit-text" { input: 5 expect: "_" }
+}
+
+spec rust_pattern_ctor_name {
+    doc: "A constructor pattern with NO sub-patterns renders as its bare name (ir_pattern_to_rust, src/codegen/mod.rs:823-827): output == name exactly, for every name. The name arrives already rendered by rust_ident (slice 3 owns sanitization). The with-sub-patterns branch -- the name, then '(' + the joined sub-pattern renderings + ')' -- is assembly and unpinned (slice-2 note). Multi-input spec: no in-spec tests (the test syntax cannot bind tuple inputs); golden cases live in tests/m3_proof.rs."
+    input: name: String, has_subs: Bool
+    output: String
+
+    constraint: has_subs==true||output==name
+
+    optimize: time < O(n)
+}
+
+// -- Spec-expression templates (expr_to_rust) -------------------
+
+spec rust_expr_form {
+    doc: "Rendering family of a spec expression in expr_to_rust (src/codegen/mod.rs:1177-1200) -- the walker that emits spec tests into generated code (generate_rust's test module) and constraint operands into precondition asserts: 0 = name (Var: the rust_ident-rendered name), 1 = decimal text (IntLit), 2 = value text (BoolLit, via rust_literal_bool), 3 = quoted template (StringLit: a quote, the escaped contents, a quote -- the escape rule is per-character and mirror-pinned, Phase 29), 4 = call template (the name, then '(' + args joined ', ' + ')'), 5 = binary template ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from spec_binop_symbol, slice 1), 6 = fallback fixed text '??' (via rust_expr_fixed_text). Total over all thirteen Expr kinds. Two sharp edges of the original are pinned deliberately: FloatLit (2) and UnaryOp (9) have NO arm and fall through to '??' like the structural kinds -- a float literal in a spec test renders as '??' in the generated test. And StringLit's rendering carries a placement caveat, pinned as-is: the E0308 it can cause (a &str literal passed where the synthesized function takes String) is a property of generate_rust placing this rendering in call position -- the driver slice owns it; the IR side's ownership rewrite (ir_to_rust_expr_typed) has no counterpart here."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==6
+    constraint: kind<3||kind>3||output==2
+    constraint: kind<4||kind>4||output==3
+    constraint: kind<5||kind>5||output==6
+    constraint: kind<6||kind>6||output==6
+    constraint: kind<7||kind>7||output==4
+    constraint: kind<8||kind>8||output==5
+    constraint: kind<9||kind>9||output==6
+    constraint: kind<10||kind>10||output==6
+    constraint: kind<11||kind>11||output==6
+    constraint: kind<12||kind>12||output==6
+
+    optimize: time < O(n)
+
+    test "var-form" { input: 0 expect: 0 }
+    test "floatlit-fallback" { input: 2 expect: 6 }
+    test "call-form" { input: 7 expect: 4 }
+    test "binop-form" { input: 8 expect: 5 }
+    test "comprehension-fallback" { input: 12 expect: 6 }
+}
+
+spec rust_expr_fixed_text {
+    doc: "Fixed text of expr_to_rust's catch-all (src/codegen/mod.rs:1199): every Expr kind without an arm -- FloatLit (2), Field (5), Index (6), UnaryOp (9), Lambda (10), Length (11), Comprehension (12) -- renders '??'."
+    input: kind: Int
+    output: String
+
+    constraint: kind<2||kind>2||output=="??"
+    constraint: kind<5||kind>5||output=="??"
+    constraint: kind<6||kind>6||output=="??"
+    constraint: kind<9||kind>9||output=="??"
+    constraint: kind<10||kind>10||output=="??"
+    constraint: kind<11||kind>11||output=="??"
+    constraint: kind<12||kind>12||output=="??"
+
+    optimize: time < O(n)
+
+    test "floatlit-text" { input: 2 expect: "??" }
+    test "unaryop-text" { input: 9 expect: "??" }
+}
+
+// -- Constraint templates (constraint_to_rust) ------------------
+
+spec rust_constraint_form {
+    doc: "Rendering family of a constraint in constraint_to_rust (src/codegen/mod.rs:1162-1174) -- the walker behind generate_rust's precondition debug_assert!s: 0 = fixed text 'true' (True itself, plus every kind the catch-all swallows: Expr, Forall, Exists, Implies, Or, Predicate -- pinned row by row in rust_constraint_fixed_text), 1 = negation template ('!(' + inner rendering + ')'), 2 = equality template (left + ' == ' + right, operands rendered by expr_to_rust), 3 = order (rust_order_form: LessThan/LessThanOrEqual are templates over expr_to_rust operands, GreaterThan/GreaterThanOrEqual fall back to 'true'), 4 = conjunction template ('(' + parts joined ' && ' + ')'). Total over all eleven Constraint kinds. Pinning family 0 completely is the point: an Or precondition, for example, asserts nothing in generated code today."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==0
+    constraint: kind<2||kind>2||output==0
+    constraint: kind<3||kind>3||output==0
+    constraint: kind<4||kind>4||output==0
+    constraint: kind<5||kind>5||output==4
+    constraint: kind<6||kind>6||output==0
+    constraint: kind<7||kind>7||output==1
+    constraint: kind<8||kind>8||output==2
+    constraint: kind<9||kind>9||output==3
+    constraint: kind<10||kind>10||output==0
+
+    optimize: time < O(n)
+
+    test "true-form" { input: 0 expect: 0 }
+    test "and-form" { input: 5 expect: 4 }
+    test "or-swallowed" { input: 6 expect: 0 }
+    test "not-form" { input: 7 expect: 1 }
+    test "order-form" { input: 9 expect: 3 }
+}
+
+spec rust_constraint_fixed_text {
+    doc: "Fixed text of constraint_to_rust's True arm and catch-all (src/codegen/mod.rs:1163,1173): True (0), Expr (1), Forall (2), Exists (3), Implies (4), Or (6) and Predicate (10) all render 'true'."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="true"
+    constraint: kind<1||kind>1||output=="true"
+    constraint: kind<2||kind>2||output=="true"
+    constraint: kind<3||kind>3||output=="true"
+    constraint: kind<4||kind>4||output=="true"
+    constraint: kind<6||kind>6||output=="true"
+    constraint: kind<10||kind>10||output=="true"
+
+    optimize: time < O(n)
+
+    test "true-text" { input: 0 expect: "true" }
+    test "or-text" { input: 6 expect: "true" }
+    test "predicate-text" { input: 10 expect: "true" }
+}
+
+spec rust_order_form {
+    doc: "Rendering family of an Order constraint's operator (constraint_to_rust, src/codegen/mod.rs:1166-1167): 0 = comparison template with separator ' < ' (LessThan), 1 = comparison template with separator ' <= ' (LessThanOrEqual), 2 = fallback fixed text 'true' (GreaterThan and GreaterThanOrEqual have no arm and are swallowed by the catch-all, so a '>' precondition asserts nothing in generated code). Total over all four OrderOp codes. The separators are pinned by rust_order_separator."
+    input: op: Int
+    output: Int
+
+    constraint: op<0||op>0||output==0
+    constraint: op<1||op>1||output==1
+    constraint: op<2||op>2||output==2
+    constraint: op<3||op>3||output==2
+
+    optimize: time < O(n)
+
+    test "lt-form" { input: 0 expect: 0 }
+    test "le-form" { input: 1 expect: 1 }
+    test "gt-fallback" { input: 2 expect: 2 }
+    test "ge-fallback" { input: 3 expect: 2 }
+}
+
+spec rust_order_separator {
+    doc: "Infix separator of an order comparison in constraint_to_rust, spaces included: ' < ' for LessThan (0), ' <= ' for LessThanOrEqual (1). GreaterThan and GreaterThanOrEqual never reach a separator (rust_order_form family 2) and are unpinned here."
+    input: op: Int
+    output: String
+
+    constraint: op<0||op>0||output==" < "
+    constraint: op<1||op>1||output==" <= "
+
+    optimize: time < O(n)
+
+    test "lt-separator" { input: 0 expect: " < " }
+    test "le-separator" { input: 1 expect: " <= " }
+}
+
+// -- Condition-position wrap (expr_in_condition_position) -------
+
+spec rust_condition_wrap {
+    doc: "Whether expr_in_condition_position (src/codegen/mod.rs:587-601) wraps a node's rendering in parentheses when the node appears as an if/while condition or a match scrutinee: the block-like kinds -- Block (1), Let (2), If (3), While (4), For (5), Match (6), Lambda (13), Closure (14), Loop (24), StructDef (26) -- wrap; every other kind renders bare (a BinOp, for example, is already parenthesized by its own template and is NOT wrapped again). Total over all 28 IRNode kinds. The wrap template itself ('(' + rendering + ')') is assembly and unpinned (slice-2 note); what is pinned is exactly the classification the original's match states."
+    input: kind: Int
+    output: Bool
+
+    constraint: output == (kind==1||kind==2||kind==3||kind==4||kind==5||kind==6||kind==13||kind==14||kind==24||kind==26)
+
+    optimize: time < O(n)
+
+    test "match-wraps" { input: 6 expect: true }
+    test "loop-wraps" { input: 24 expect: true }
+    test "literal-bare" { input: 9 expect: false }
+    test "hole-bare" { input: 0 expect: false }
+}
+
+// -- Slice 3: name / text assembly ----------------------------
+//
+//  rust_ident, the String-ownership rule of
+//  ir_to_rust_expr_typed, and generate_rust's assembly
+//  pieces. With F1 resolved (the `++` concat operator,
+//  Phase 25), this slice's templates are pinned as EQUATIONS
+//  over already-rendered parts -- the slice-2 representation
+//  rule, with the assembly act itself now statable. What
+//  remains unpinnable is what needs per-character or
+//  per-element iteration (rust_ident's sanitization loop,
+//  the ", " joins inside generate_rust) and the Int ->
+//  decimal conversion (F2); those are mirror-only and
+//  recorded as finding F5 in the ROAD M3 notes.
+
+// -- rust_ident (src/codegen/mod.rs:32-52) ---------------------
+
+spec rust_ident_suffix {
+    doc: "The keyword-suffix step of rust_ident (src/codegen/mod.rs:49-51), stated as a composition over rust_keyword: a name that is a Rust keyword gets '_' appended; any other name passes through unchanged. The input is the PER-CHAR STEP'S OUTPUT (the sanitized string -- never empty: the empty name becomes '_' in that step, pinned by rust_ident_empty), not a raw spec name; the per-char step itself is finding F5. Stating the guard over the sanitized string loses nothing: sanitization only ever introduces '_' characters or a leading '_' prefix, and no keyword contains '_', so a raw name is a keyword iff its sanitization is one."
+    input: name: String
+    output: String
+
+    constraint: rust_keyword(name)==false||output==name++"_"
+    constraint: rust_keyword(name)==true||output==name
+
+    optimize: time < O(n)
+
+    test "type-suffix" { input: "type" expect: "type_" }
+    test "self-suffix" { input: "Self" expect: "Self_" }
+    test "try-suffix" { input: "try" expect: "try_" }
+    test "plain-name" { input: "sort" expect: "sort" }
+    test "suffixed-name" { input: "type_" expect: "type_" }
+    test "underscore-name" { input: "_" expect: "_" }
+}
+
+spec rust_ident_empty {
+    doc: "The empty-name fallback of rust_ident's per-char step (src/codegen/mod.rs:46-48): an empty name sanitizes to '_'. This is the only case of the per-char step the spec language pins completely -- the step is a per-character loop and the language has no character access (finding F5); every non-empty name is unpinned here and covered by the mirror. The fallback feeds the suffix step: '_' is not a keyword, so the full rust_ident of the empty name is exactly '_'."
+    input: name: String
+    output: String
+
+    constraint: name!=""||output=="_"
+
+    optimize: time < O(n)
+
+    test "empty-name" { input: "" expect: "_" }
+}
+
+// -- String ownership (ir_to_rust_expr_typed) ------------------
+
+spec rust_typed_form {
+    doc: "Dispatch family of ir_to_rust_expr_typed (src/codegen/mod.rs:549-558) over IRNode kinds: 0 = delegate to the untyped emitter ir_to_rust_expr (no ownership rewrite -- every kind except Literal and Typed, INCLUDING composites: a string literal nested inside a BinOp, Call or Collection is rendered untyped and stays bare even where a String is expected) -- with one Phase 29 exception: the untyped emitter's Concat arm applies the ownership/borrow treatment to its own operands directly (defects 1 and 2a of the unfreeze inventory), so a literal that IS a Concat operand no longer stays bare; literals nested in any other composite still do, 1 = Literal -- the ownership check (rust_string_ownership) decides owned vs bare, 2 = Typed -- re-enter the typed emitter with the node's declared type as the expectation (the untyped emitter routes Typed nodes here too, src/codegen/mod.rs:809). Total over all 28 IRNode kinds."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<9||kind>9||output==1
+    constraint: kind<22||kind>22||output==2
+    constraint: kind==9||kind==22||output==0
+
+    optimize: time < O(n)
+
+    test "literal-check" { input: 9 expect: 1 }
+    test "typed-reenter" { input: 22 expect: 2 }
+    test "binop-delegates" { input: 11 expect: 0 }
+    test "var-delegates" { input: 10 expect: 0 }
+}
+
+spec rust_string_ownership {
+    doc: "The ownership leaf check of ir_to_rust_expr_typed (src/codegen/mod.rs:552-554): a String literal is emitted owned -- rust_string_literal_owned_text instead of rust_string_literal_text -- exactly when its literal kind is String (3) AND the expected type is String (ExpectedTypeCode 3). 'expected' is an ExpectedTypeCode: a TypeRef code for Some(type), 26 for None. Callers pass Some(String) only via: a Return in a String-returning function (fn_ret, src/codegen/mod.rs:400), an Alloc whose declared type is String (src/codegen/mod.rs:406), a tail position inheriting the function's return type (ir_to_rust_tail, src/codegen/mod.rs:507-540; generate_rust seeds the body with Some(return type)), or a Typed node annotated String (src/codegen/mod.rs:551 and 809). Every other expectation -- any other type, or none -- leaves the literal a &str. Only the String literal kind is ever rewritten; no other literal kind has a &str form. Multi-input spec: no in-spec tests (the test syntax cannot bind tuple inputs); golden cases live in tests/m3_proof.rs."
+    input: lit: Int, expected: Int
+    output: Bool
+
+    constraint: lit<3||lit>3||expected<3||expected>3||output==true
+    constraint: lit==3||output==false
+    constraint: expected==3||output==false
+
+    optimize: time < O(n)
+}
+
+spec rust_string_literal_text {
+    doc: "The bare rendering of a String literal: a quote, the ESCAPED contents, a quote. The escaping follows Rust source rules (a quote or backslash takes a backslash; newline, carriage return and tab use their short forms; other control characters use the unicode escape form; every other character, including non-ASCII text, is emitted as-is) and is a per-character transformation -- inexpressible in the spec language (F5) and therefore mirror-pinned (tests/m3_proof.rs). This spec's equation pins the WRAP: it is exact exactly on the identity subdomain (contents with no quote, backslash or control character, where escaping changes nothing) and silent off it -- cross-validation counts such contents as spec-silent for this spec. Before Phase 29 the emitter rendered the contents RAW and this equation was total; the user-approved unfreeze of the three rendering defects replaced the raw rendering with the escaped one. This one template serves three emitter sites: the Literal arm of ir_to_rust_expr, the Literal arm of ir_pattern_to_rust, and the delegate target of ir_to_rust_expr_typed whenever rust_string_ownership does not fire. Slice 2 could only classify it (rust_literal_form family 3, rust_pattern_literal_form family 2) because the spec language had no concatenation; F1's resolution makes the template itself a statable equation."
+    input: contents: String
+    output: String
+
+    constraint: output == "\"" ++ contents ++ "\""
+
+    optimize: time < O(n)
+
+    test "plain-text" { input: "Int" expect: "\"Int\"" }
+    test "empty-text" { input: "" expect: "\"\"" }
+    test "symbol-text" { input: "Vec<i64>" expect: "\"Vec<i64>\"" }
+}
+
+spec rust_string_literal_owned_text {
+    doc: "The owned rendering of a String literal (src/codegen/mod.rs:552-554): the bare template (rust_string_literal_text) with '.to_string()' appended -- exactly what ir_to_rust_expr_typed emits when rust_string_ownership fires, converting the &str literal into a String where the expected type requires one. The bare template it composes escapes its contents (Phase 29; see rust_string_literal_text) -- this spec's equation is exact on the same identity subdomain."
+    input: contents: String
+    output: String
+
+    constraint: output == "\"" ++ contents ++ "\".to_string()"
+
+    optimize: time < O(n)
+
+    test "owned-text" { input: "Int" expect: "\"Int\".to_string()" }
+    test "owned-empty" { input: "" expect: "\"\".to_string()" }
+}
+
+// -- generate_rust assembly pieces (src/codegen/mod.rs:66) -----
+
+spec rust_doc_line {
+    doc: "One line of generate_rust's module doc header (src/codegen/mod.rs:73): '//! ' + the doc line + a newline. The doc string is split into lines by the driver (str::lines -- iteration, mirror-only) and the header exists only when the spec has a doc comment; after the last line the driver emits one blank line (rust_file_fixed_text, piece 1)."
+    input: line: String
+    output: String
+
+    constraint: output == "//! " ++ line ++ "\n"
+
+    optimize: time < O(n)
+
+    test "doc-line" { input: "Sorts a list" expect: "//! Sorts a list\n" }
+    test "doc-empty-line" { input: "" expect: "//! \n" }
+}
+
+spec rust_param_text {
+    doc: "One parameter of the generated signature (src/codegen/mod.rs:91): the rust_ident-rendered name, ': ', the ty_to_rust-rendered type. Both parts arrive already rendered (the slice-2/3 representation rule); the ', ' join over the parameter list is iteration and lives in the mirror. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: name: String, ty: String
+    output: String
+
+    constraint: output == name ++ ": " ++ ty
+
+    optimize: time < O(n)
+}
+
+spec rust_generics_text {
+    doc: "The generics bracket of the generated signature (src/codegen/mod.rs:80-88): no generics renders the empty string; otherwise '<' + the ', '-joined rust_ident-rendered generic names + '>'. The joined text arrives pre-rendered -- the join is iteration, mirror-only. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: joined: String, present: Bool
+    output: String
+
+    constraint: present==true||output==""
+    constraint: present==false||output=="<" ++ joined ++ ">"
+
+    optimize: time < O(n)
+}
+
+spec rust_signature {
+    doc: "The generated function's signature line (src/codegen/mod.rs:107-110) over pre-rendered parts: 'pub fn ' + the rust_ident-rendered name + the generics text (rust_generics_text) + '(' + the ', '-joined parameter texts (rust_param_text) + ') -> ' + the ty_to_rust-rendered return type + ' {' and a newline. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: name: String, generics: String, params: String, ret: String
+    output: String
+
+    constraint: output == "pub fn " ++ name ++ generics ++ "(" ++ params ++ ") -> " ++ ret ++ " {\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_precondition_assert {
+    doc: "One precondition assert line inside generate_rust's debug block (src/codegen/mod.rs:100-101): four spaces, 'debug_assert!(', the constraint_to_rust rendering, ', \"Precondition violated\");' and a newline. The rendering arrives pre-rendered (slice 2 owns constraint_to_rust's families); note a constraint the walker swallows still asserts -- as 'true' -- it is not dropped at this layer."
+    input: rendered: String
+    output: String
+
+    constraint: output == "    debug_assert!(" ++ rendered ++ ", \"Precondition violated\");\n"
+
+    optimize: time < O(n)
+
+    test "assert-line" { input: "x > 0" expect: "    debug_assert!(x > 0, \"Precondition violated\");\n" }
+    test "assert-true" { input: "true" expect: "    debug_assert!(true, \"Precondition violated\");\n" }
+}
+
+spec rust_precondition_block {
+    doc: "generate_rust's precondition block (src/codegen/mod.rs:96-104) over the pre-joined assert lines (rust_precondition_assert): the '#[cfg(debug_assertions)]' attribute line, '{', the asserts, '}' and a blank line. The block exists only when the spec has preconditions -- that branch is the driver's. Recorded as-is (surprise 13 in the ROAD M3 notes): the block is emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters -- outside the function body entirely."
+    input: asserts: String
+    output: String
+
+    constraint: output == "#[cfg(debug_assertions)]\n{\n" ++ asserts ++ "}\n\n"
+
+    optimize: time < O(n)
+
+    test "block-one-assert" { input: "    debug_assert!(true, \"Precondition violated\");\n" expect: "#[cfg(debug_assertions)]\n{\n    debug_assert!(true, \"Precondition violated\");\n}\n\n" }
+}
+
+spec rust_test_name_form {
+    doc: "Which name a generated test gets (src/codegen/mod.rs:136): 0 = the test's own name (rust_ident-rendered), 1 = the default 'test_{i}' with i the test's index. Only the CHOICE is pinned: the default's text needs the index as decimal, which the spec language cannot express (finding F2) -- the mirror renders it exactly."
+    input: has_name: Bool
+    output: Int
+
+    constraint: has_name==false||output==0
+    constraint: has_name==true||output==1
+
+    optimize: time < O(n)
+
+    test "named-test" { input: true expect: 0 }
+    test "unnamed-test" { input: false expect: 1 }
+}
+
+spec rust_test_case {
+    doc: "One generated test's block (src/codegen/mod.rs:139-150) over pre-rendered parts: the '#[test]' attribute and 'fn' line at four spaces with the test's final name (rust_ident-rendered, chosen per rust_test_name_form), then at eight spaces the call 'let result = <fn>(<input>);' and the assertion 'assert_eq!(result, <expected>);', then the closing brace at four spaces. The function name arrives rust_ident-rendered; input and expected arrive as expr_to_rust renderings (slice 2 owns that walker) placed BARE in call/assert position -- the recorded E0308 property of the generated-test path (a String test input renders as a &str literal against a String parameter) is a property of this placement, pinned as-is. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: test_name: String, fn_name: String, input_text: String, expected_text: String
+    output: String
+
+    constraint: output == "    #[test]\n    fn " ++ test_name ++ "() {\n        let result = " ++ fn_name ++ "(" ++ input_text ++ ");\n        assert_eq!(result, " ++ expected_text ++ ");\n    }\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_test_module {
+    doc: "generate_rust's test module wrapper (src/codegen/mod.rs:131-133,151) over the pre-joined test blocks (rust_test_case): a blank line, '#[cfg(test)]', 'mod tests {', the 'use super::*;' import and a blank line, then the blocks, then '}'. The module exists only when the spec has tests -- that branch is the driver's."
+    input: tests: String
+    output: String
+
+    constraint: output == "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n" ++ tests ++ "}\n"
+
+    optimize: time < O(n)
+
+    test "module-marker" { input: "X" expect: "\n#[cfg(test)]\nmod tests {\n    use super::*;\n\nX}\n" }
+}
+
+spec rust_file_fixed_text {
+    doc: "generate_rust's two standalone fixed texts -- the ones no slice-3 template carries: piece 0 = the function body's closing brace and newline, emitted after the rendered body (src/codegen/mod.rs:127); piece 1 = the blank line after the doc header block (src/codegen/mod.rs:75). Every other fixed text of the driver lives inside a slice-3 template (rust_signature, rust_precondition_block, rust_test_module)."
+    input: piece: Int
+    output: String
+
+    constraint: piece<0||piece>0||output=="}\n"
+    constraint: piece<1||piece>1||output=="\n"
+
+    optimize: time < O(n)
+
+    test "fn-close" { input: 0 expect: "}\n" }
+    test "doc-blank" { input: 1 expect: "\n" }
+}
+
+// -- Slice 4: the expression walker (ir_to_rust_expr) --------
+//
+//  ir_to_rust_expr (src/codegen/mod.rs:742) is the recursive
+//  heart of the Rust emitter. This slice specs it arm by
+//  arm, in the ROAD's sub-slices: operators; collections +
+//  iterator combinators; control forms; leaves/misc. The
+//  representation rule is slices 2/3's: children arrive
+//  PRE-RENDERED (rendered by this same walker, recursively
+//  -- the assembly mirror in tests/m3_proof.rs performs
+//  the recursion), and each spec pins its arm's template
+//  over those parts, composing slice 1-3 specs by call
+//  where the walker consults them (rust_binop_symbol for
+//  the infix symbol, rust_condition_wrap for the
+//  condition wrap). Three arms need no new spec: Literal
+//  (slice 1/2's rust_literal_form family +
+//  rust_string_literal_text), Var (slice 3's rust_ident
+//  composition) and Typed (slice 3's rust_typed_form
+//  dispatch back into ir_to_rust_expr_typed).
+
+// -- Operators: the BinOp arm ---------------------------------
+
+spec rust_expr_binop_form {
+    doc: "Emission family of an IR binary operator in ir_to_rust_expr (src/codegen/mod.rs:753-781): 0 = general infix ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from rust_binop_symbol), 1 = Concat (the owned/borrowed '+' form -- rust_binop_concat_text over the two operand treatments), 2 = Append (the '.push' method form), 3 = Merge (the '.extend' method form). Total over all nineteen IRBinOp codes. The branch is taken BEFORE the operator table is consulted for families 1/2/3: the table's '.push'/'.extend' bindings for Append/Merge are dead values (see rust_binop_symbol), and Concat's '+' symbol row is used by no template -- family 1 has its own operand treatments (Phase 29)."
+    input: op: Int
+    output: Int
+
+    constraint: op<0||op>0||output==0
+    constraint: op<1||op>1||output==0
+    constraint: op<2||op>2||output==0
+    constraint: op<3||op>3||output==0
+    constraint: op<4||op>4||output==0
+    constraint: op<5||op>5||output==0
+    constraint: op<6||op>6||output==0
+    constraint: op<7||op>7||output==0
+    constraint: op<8||op>8||output==0
+    constraint: op<9||op>9||output==0
+    constraint: op<10||op>10||output==0
+    constraint: op<11||op>11||output==0
+    constraint: op<12||op>12||output==0
+    constraint: op<13||op>13||output==0
+    constraint: op<14||op>14||output==0
+    constraint: op<15||op>15||output==0
+    constraint: op<16||op>16||output==1
+    constraint: op<17||op>17||output==2
+    constraint: op<18||op>18||output==3
+
+    optimize: time < O(n)
+
+    test "add-form" { input: 0 expect: 0 }
+    test "shr-form" { input: 15 expect: 0 }
+    test "concat-form" { input: 16 expect: 1 }
+    test "append-form" { input: 17 expect: 2 }
+    test "merge-form" { input: 18 expect: 3 }
+}
+
+spec rust_binop_infix_text {
+    doc: "The general infix rendering of a BinOp node (src/codegen/mod.rs:778): '(' + left + ' ' + symbol + ' ' + right + ')' with the symbol looked up in rust_binop_symbol -- stated as a composition over that call, the way the walker consults the table. The operands arrive rendered by ir_to_rust_expr itself (bare: whatever parenthesization exists comes from the operands' own templates). Contract: op is a general operator (rust_expr_binop_form family 0); Concat/Append/Merge branch away before this template. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: op: Int, l: String, r: String
+    output: String
+
+    constraint: output == "(" ++ l ++ " " ++ rust_binop_symbol(op) ++ " " ++ r ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_binop_append_text {
+    doc: "The Append rendering of a BinOp node (src/codegen/mod.rs:762-763): left + '.push(' + right + ')'. The left operand is interpolated BARE (no added parentheses -- a block-like left operand would not parse, a pre-existing property of the arm, pinned as-is); the symbol table's '.push' binding for Append is a dead value and plays no part here. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: l: String, r: String
+    output: String
+
+    constraint: output == l ++ ".push(" ++ r ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_binop_merge_text {
+    doc: "The Merge rendering of a BinOp node (src/codegen/mod.rs:764-765): left + '.extend(' + right + ')'. As with Append, the left operand is interpolated bare and the table's '.extend' binding is dead. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: l: String, r: String
+    output: String
+
+    constraint: output == l ++ ".extend(" ++ r ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_binop_concat_text {
+    doc: "The Concat rendering of a BinOp node (src/codegen/mod.rs:766-777, as amended by Phase 29): '(' + owned-left + ' + ' + borrowed-right + ')'. The two operands do NOT arrive as their plain renderings: the left arrives treated by concat_owned_operand (rust_concat_left_owned decides, rust_concat_left_text renders) and the right by concat_borrowed_operand (rust_concat_right_form decides, rust_concat_right_text renders), because Rust's Add for text is String + &str -- an owned left operand and a borrowed right one. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: owned: String, borrowed: String
+    output: String
+
+    constraint: output == "(" ++ owned ++ " + " ++ borrowed ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_concat_left_owned {
+    doc: "Whether the LEFT operand of a Concat takes the ownership treatment (concat_owned_operand, src/codegen/mod.rs; Phase 29 defect 1, extended by Phase 39): exactly when the operand node is directly a String literal -- node kind Literal (9) with literal kind String (3) -- or directly a variable -- node kind Var (10). A bare literal in left position is a &str, and &str + &str has no Add impl (E0369); it takes the same .to_string() ownership ir_to_rust_expr_typed applies in expectation positions. A bare variable in left position MOVES (Phase 39, E0382): Rust's + consumes its left operand, so a variable used again later on the execution path fails with borrow of moved value; it takes the owned-copy treatment, .clone() -- the literal treatment's analogue (no borrow form exists: &String + &str has no Add impl). Every other operand shape evaluates to a fresh String value and renders as usual. The match is on the DIRECT node only: a Typed node wrapping a string literal (or a variable) is not this rule -- the Typed arm delegates to the typed emitter, whose own ownership rule (slice 3) decides. 'kind' is an IRNodeKindCode, 'lit' an IRLiteralKindCode (meaningful only when kind is 9). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: kind: Int, lit: Int
+    output: Bool
+
+    constraint: kind<9||kind>9||lit<3||lit>3||output==true
+    constraint: kind<10||kind>10||output==true
+    constraint: kind==9||kind==10||output==false
+    constraint: lit==3||kind==10||output==false
+
+    optimize: time < O(n)
+}
+
+spec rust_concat_left_text {
+    doc: "The left Concat operand's final text (concat_owned_operand, src/codegen/mod.rs): when rust_concat_left_owned fires, the operand's OWNED FORM, arriving pre-rendered as 'owned_text' -- formed per shape: for a String literal, the owned literal template (rust_string_literal_owned_text, the quoted text under .to_string()); for a variable, the clone text (the variable's rendered name under .clone() -- the same text slice 4's rust_unary_text pins for the Clone operator, op 9; Phase 39). Otherwise the operand's own rendering, unchanged. Both parts arrive pre-rendered; which applies is the leaf check's Bool. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: owned: Bool, rendered: String, owned_text: String
+    output: String
+
+    constraint: owned==false||output==owned_text
+    constraint: owned==true||output==rendered
+
+    optimize: time < O(n)
+}
+
+spec rust_concat_right_form {
+    doc: "Emission family of the RIGHT operand of a Concat (concat_borrowed_operand, src/codegen/mod.rs:640-651; Phase 29 defect 2a -- String + String is E0308, so the right operand is borrowed): 0 = bare (the operand is a String literal: already a &str; borrowing it would produce a &&str, which has no Add impl), 1 = parenthesized borrow (the block-like kinds -- the is_block_like_expr set, src/codegen/mod.rs:653-666: Block (1), Let (2), If (3), While (4), For (5), Match (6), Lambda (13), Closure (14), Loop (24), StructDef (26)), 2 = plain borrow (every other kind). 'kind' is an IRNodeKindCode, 'lit' an IRLiteralKindCode (meaningful only when kind is 9: kind 9 with lit 3 is family 0, kind 9 with any other lit is family 2). Total over all 28 kinds x 6 literal kinds. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: kind: Int, lit: Int
+    output: Int
+
+    constraint: kind<9||kind>9||lit<3||lit>3||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==1
+    constraint: kind<3||kind>3||output==1
+    constraint: kind<4||kind>4||output==1
+    constraint: kind<5||kind>5||output==1
+    constraint: kind<6||kind>6||output==1
+    constraint: kind<13||kind>13||output==1
+    constraint: kind<14||kind>14||output==1
+    constraint: kind<24||kind>24||output==1
+    constraint: kind<26||kind>26||output==1
+    constraint: kind==1||kind==2||kind==3||kind==4||kind==5||kind==6||kind==9||kind==13||kind==14||kind==24||kind==26||output==2
+    constraint: kind<9||kind>9||lit==3||output==2
+
+    optimize: time < O(n)
+}
+
+spec rust_concat_right_text {
+    doc: "The right Concat operand's final text, by rust_concat_right_form: family 0 renders bare (the operand's own rendering), family 1 renders '&(' + rendering + ')', family 2 renders '&' + rendering. A nested Concat operand (kind 11, family 2) renders '&' + its already-parenthesized template -- textually equal to family 1's form for that operand; the families are the emitter's decision procedure (concat_borrowed_operand's match order), not distinct texts. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: form: Int, rendered: String
+    output: String
+
+    constraint: form<0||form>0||output==rendered
+    constraint: form<1||form>1||output=="&(" ++ rendered ++ ")"
+    constraint: form<2||form>2||output=="&" ++ rendered
+
+    optimize: time < O(n)
+}
+
+// -- Operators: the UnaryOp arm --------------------------------
+
+spec rust_unary_text {
+    doc: "The full rendering of a UnaryOp node (src/codegen/mod.rs:789-809) over the operand's own rendering: Neg '(- x)' and Not '(! x)' (the prefix family of rust_unaryop_form, symbols from rust_unaryop_symbol); Abs/Len/Reverse/Clone 'x.m()' (the method family, names from rust_unaryop_method -- Reverse's call returns () in Rust: a defect of this template, pinned as-is, not of the classification); Head '(x)[0]', Tail '(x)[1..].to_vec()', Init '(x)[..(x).len() - 1].to_vec()', Last '(x)[(x).len() - 1]' (the list-part family: indexing/slicing lowerings whose operand text is emitted TWICE for Init and Last, sound for the IR's pure expression forms). Total over all ten IRUnaryOp codes. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: op: Int, inner: String
+    output: String
+
+    constraint: op<0||op>0||output=="(- " ++ inner ++ ")"
+    constraint: op<1||op>1||output=="(! " ++ inner ++ ")"
+    constraint: op<2||op>2||output==inner ++ ".abs()"
+    constraint: op<3||op>3||output==inner ++ ".len()"
+    constraint: op<4||op>4||output=="(" ++ inner ++ ")[0]"
+    constraint: op<5||op>5||output=="(" ++ inner ++ ")[1..].to_vec()"
+    constraint: op<6||op>6||output=="(" ++ inner ++ ")[..(" ++ inner ++ ").len() - 1].to_vec()"
+    constraint: op<7||op>7||output=="(" ++ inner ++ ")[(" ++ inner ++ ").len() - 1]"
+    constraint: op<8||op>8||output==inner ++ ".reverse()"
+    constraint: op<9||op>9||output==inner ++ ".clone()"
+
+    optimize: time < O(n)
+}
+
+// -- Collections + iterator combinators -------------------------
+
+spec rust_collection_prefix {
+    doc: "Fixed opening text of a collection literal in EXPRESSION position (the Collection arm of ir_to_rust_expr, src/codegen/mod.rs:838-852), keyed by CollectionKind code: List 'vec![', Set 'std::collections::HashSet::from([', Map 'std::collections::HashMap::from([', Array '[', Tuple '('. Set and Map are FULLY QUALIFIED -- no import is generated for winner files, so the bare paths would fail E0433 (contrast ty_to_rust's unqualified 'HashSet<' in type position, rust_type_prefix). The family classification is rust_collection_form (slice 1); the elements arrive pre-joined with ', ' (the join is iteration, mirror-only) and the closing text is rust_collection_suffix. Statement position is a different rule (slice 5): List, Set and Map all collapse to the vec![..] form there."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="vec!["
+    constraint: kind<1||kind>1||output=="std::collections::HashSet::from(["
+    constraint: kind<2||kind>2||output=="std::collections::HashMap::from(["
+    constraint: kind<3||kind>3||output=="["
+    constraint: kind<4||kind>4||output=="("
+
+    optimize: time < O(n)
+
+    test "list-prefix" { input: 0 expect: "vec![" }
+    test "set-prefix" { input: 1 expect: "std::collections::HashSet::from([" }
+    test "tuple-prefix" { input: 4 expect: "(" }
+}
+
+spec rust_collection_suffix {
+    doc: "Fixed closing text of a collection literal in expression position (src/codegen/mod.rs:838-852), keyed by CollectionKind code: List ']', Set '])', Map '])', Array ']', Tuple ')'. Pairs with rust_collection_prefix."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="]"
+    constraint: kind<1||kind>1||output=="])"
+    constraint: kind<2||kind>2||output=="])"
+    constraint: kind<3||kind>3||output=="]"
+    constraint: kind<4||kind>4||output==")"
+
+    optimize: time < O(n)
+
+    test "list-suffix" { input: 0 expect: "]" }
+    test "set-suffix" { input: 1 expect: "])" }
+    test "tuple-suffix" { input: 4 expect: ")" }
+}
+
+spec rust_map_text {
+    doc: "The Map rendering of ir_to_rust_expr (src/codegen/mod.rs:853-859): '(' + over + ').iter().map(' + function + ').collect()'. Both children arrive rendered by ir_to_rust_expr itself. Note the collect has no type annotation, so the result type is inferred at the use site. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: over: String, func: String
+    output: String
+
+    constraint: output == "(" ++ over ++ ").iter().map(" ++ func ++ ").collect()"
+
+    optimize: time < O(n)
+}
+
+spec rust_filter_text {
+    doc: "The Filter rendering of ir_to_rust_expr (src/codegen/mod.rs:860-866): '(' + over + ').iter().filter(' + predicate + ').collect()'. The predicate is rendered by ir_to_rust_expr and passed as the closure value; filter hands it &Self::Item, so the emitted predicate receives a reference -- the known Vec<&T> flavor of this template's output (pinned as-is; the template is what this spec states). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: over: String, pred: String
+    output: String
+
+    constraint: output == "(" ++ over ++ ").iter().filter(" ++ pred ++ ").collect()"
+
+    optimize: time < O(n)
+}
+
+spec rust_fold_text {
+    doc: "The Fold rendering of ir_to_rust_expr (src/codegen/mod.rs:867-873): '(' + over + ').iter().fold(' + initial + ', ' + operation + ')'. All three children arrive rendered by ir_to_rust_expr itself; note the fold argument order in the text is (initial, operation) although the IR node fields are declared (operation, initial, over). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: over: String, initial: String, operation: String
+    output: String
+
+    constraint: output == "(" ++ over ++ ").iter().fold(" ++ initial ++ ", " ++ operation ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_sort_text {
+    doc: "The Sort rendering of ir_to_rust_expr (src/codegen/mod.rs:874-882): the statement form (bind, sort, yield) wrapped as a block expression so the sorted value is the value -- '{ let mut sorted = ' + collection + '; sorted.sort_by(' + comparator + '); sorted }'. Both children arrive rendered by ir_to_rust_expr itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: coll: String, cmp: String
+    output: String
+
+    constraint: output == "{ let mut sorted = " ++ coll ++ "; sorted.sort_by(" ++ cmp ++ "); sorted }"
+
+    optimize: time < O(n)
+}
+
+// -- Control forms ----------------------------------------------
+
+spec rust_call_text {
+    doc: "The Call rendering of ir_to_rust_expr (src/codegen/mod.rs:810-813): the rust_ident-rendered function name + '(' + the argument renderings joined ', ' + ')'. The name arrives rendered (slice 3 owns rust_ident) and the arguments pre-joined (the join is iteration, mirror-only); each argument is rendered by ir_to_rust_expr itself, UNTYPED -- a String argument renders as a bare &str literal even where the callee takes String (the same placement property as rust_test_case's, one walker down). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: func: String, args: String
+    output: String
+
+    constraint: output == func ++ "(" ++ args ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_condition_text {
+    doc: "expr_in_condition_position (src/codegen/mod.rs:734-740) assembled: a block-like node's rendering is wrapped in parentheses, every other rendering passes through bare -- stated as a composition over rust_condition_wrap (slice 2), the classification the original consults. Serves the If arm's condition and, as the base rendering, the Match arm's scrutinee (rust_match_scrutinee_text). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: kind: Int, rendered: String
+    output: String
+
+    constraint: rust_condition_wrap(kind)==false||output=="(" ++ rendered ++ ")"
+    constraint: rust_condition_wrap(kind)==true||output==rendered
+
+    optimize: time < O(n)
+}
+
+spec rust_if_text {
+    doc: "The If rendering of ir_to_rust_expr (src/codegen/mod.rs:814-822): 'if ' + condition + ' { ' + then + ' } else { ' + else + ' }'. The condition arrives condition-position-rendered (rust_condition_text); the branches are rendered by ir_to_rust_expr itself, UNTYPED -- the typed dispatcher's ownership rewrite does not reach them (slice 3's rust_typed_form owns that boundary). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: cond: String, then_text: String, else_text: String
+    output: String
+
+    constraint: output == "if " ++ cond ++ " { " ++ then_text ++ " } else { " ++ else_text ++ " }"
+
+    optimize: time < O(n)
+}
+
+spec rust_lambda_text {
+    doc: "The Lambda/Closure rendering of ir_to_rust_expr (src/codegen/mod.rs:823-832): '|' + the parameter names joined ', ' + '| { ' + body + ' }'. Lambda and Closure share ONE arm -- a Closure's captured environment is not rendered at all. The names arrive rust_ident-rendered and pre-joined (the join is iteration, mirror-only); the parameters' TYPES are dropped by the arm (the generated closure is unannotated). The body is rendered by ir_to_rust_expr itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: params: String, body: String
+    output: String
+
+    constraint: output == "|" ++ params ++ "| { " ++ body ++ " }"
+
+    optimize: time < O(n)
+}
+
+spec rust_match_arm_text {
+    doc: "One arm of the Match rendering (src/codegen/mod.rs:883-890): pattern + ' => ' + body. The pattern arrives rendered by ir_pattern_to_rust (slice 2 owns that walker) and the body by ir_to_rust_expr itself. The arms are joined ', ' by the Match template (the join is iteration, mirror-only). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: pat: String, body: String
+    output: String
+
+    constraint: output == pat ++ " => " ++ body
+
+    optimize: time < O(n)
+}
+
+spec rust_match_text {
+    doc: "The Match rendering of ir_to_rust_expr (src/codegen/mod.rs:883-898): 'match ' + scrutinee + ' { ' + arms + ' }'. The scrutinee arrives rendered by match_scrutinee_to_rust (rust_match_scrutinee_text over the rust_condition_text base) and the arms pre-joined ', ' (rust_match_arm_text each). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: scrutinee: String, arms: String
+    output: String
+
+    constraint: output == "match " ++ scrutinee ++ " { " ++ arms ++ " }"
+
+    optimize: time < O(n)
+}
+
+spec rust_match_scrutinee_bare {
+    doc: "Whether a match scrutinee is itself a bare String literal (is_bare_string_literal, src/codegen/mod.rs:708-714): directly a Literal node (kind 9) of literal kind String (3). The original recurses through Typed wrappers -- a Typed scrutinee's bareness is its inner node's, which the flat (kind, lit) codes do not carry -- so kind 22 (Typed) is deliberately unpinned here and decided by the mirror's recursion. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: kind: Int, lit: Int
+    output: Bool
+
+    constraint: kind<9||kind>9||lit<3||lit>3||output==true
+    constraint: kind==9||kind==22||output==false
+    constraint: lit==3||kind==22||output==false
+
+    optimize: time < O(n)
+}
+
+spec rust_match_scrutinee_form {
+    doc: "Whether match_scrutinee_to_rust (src/codegen/mod.rs:683-695; Phase 29 defect 2b) appends '.as_str()' to the scrutinee's condition-position rendering: 1 exactly when some case pattern is or contains a String literal (has_string_pat) AND the scrutinee is not itself a bare String literal (rust_match_scrutinee_bare) -- a literal scrutinee is already a &str, its patterns already match, and &str has no stable as_str() (E0658). 0 otherwise. has_string_pat is a property of the case patterns' TREE (pattern_has_string_literal recurses through Constructor and Guard patterns, src/codegen/mod.rs:697-706); patterns arrive pre-rendered in this slice's representation, so the Bool arrives precomputed -- the recursion is mirror-only (see the slice-4 notes). The rule is syntactic (the emitter carries no types); its recorded blind spot is a scrutinee variable let-bound to a bare literal. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: has_string_pat: Bool, bare: Bool
+    output: Int
+
+    constraint: has_string_pat==false||bare==true||output==1
+    constraint: has_string_pat==true||output==0
+    constraint: bare==false||output==0
+
+    optimize: time < O(n)
+}
+
+spec rust_match_scrutinee_text {
+    doc: "The match scrutinee's final text (match_scrutinee_to_rust, src/codegen/mod.rs:683-695): the condition-position rendering (rust_condition_text), with '.as_str()' appended exactly when rust_match_scrutinee_form is 1. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: form: Int, rendered: String
+    output: String
+
+    constraint: form<0||form>0||output==rendered
+    constraint: form<1||form>1||output==rendered ++ ".as_str()"
+
+    optimize: time < O(n)
+}
+
+spec rust_block_text {
+    doc: "The block-expression wrap shared by two sites with one outer form: the Block arm of ir_to_rust_expr (src/codegen/mod.rs:900-913) over the assembled statement renderings, and expr_block_stmt (src/codegen/mod.rs:716-719) wrapping a single statement rendering -- the form the Let/While/For arms of ir_to_rust_expr (src/codegen/mod.rs:914-916) take. '{ ' + inner + ' }' in both. The inner arrives rendered AND end-trimmed (both sites trim_end the statement rendering) in a neutral Unit return-type context; the statement rendering itself is the statement-walker slice (slice 5), whose only loss here is the String-ownership rewrite in nested return/tail positions. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: inner: String
+    output: String
+
+    constraint: output == "{ " ++ inner ++ " }"
+
+    optimize: time < O(n)
+}
+
+spec rust_loop_text {
+    doc: "The Loop rendering of ir_to_rust_expr (src/codegen/mod.rs:917-922): 'loop {' + a newline + the statement-rendered body + '}'. Note there is NO space before the closing brace and none after the newline -- the body's own indentation (or lack of it: the statement walker renders at indent 0 here) is entirely the body's. The body arrives rendered and end-trimmed by the statement walker (slice 5) in a neutral Unit return-type context."
+    input: body: String
+    output: String
+
+    constraint: output == "loop {\n" ++ body ++ "}"
+
+    optimize: time < O(n)
+}
+
+spec rust_struct_def_text {
+    doc: "The StructDef rendering of ir_to_rust_expr (src/codegen/mod.rs:923-935): '{ struct ' + name + ' { ' + fields + ' } ' + body + ' }' -- an item definition followed by the body that uses it, inside one block expression (Rust allows item declarations inside a block). The name arrives rust_ident-rendered; the fields pre-joined ', ', each field 'name: type' by the same template as rust_param_text (the original formats both with '{}: {}' over rust_ident and ty_to_rust); the body is rendered by ir_to_rust_expr itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: name: String, fields: String, body: String
+    output: String
+
+    constraint: output == "{ struct " ++ name ++ " { " ++ fields ++ " } " ++ body ++ " }"
+
+    optimize: time < O(n)
+}
+
+// -- Leaves / misc ----------------------------------------------
+
+spec rust_index_text {
+    doc: "The Index rendering of ir_to_rust_expr (src/codegen/mod.rs:936-938): '(' + collection + ')[' + index + ']'. The collection is parenthesized, the index is not. Both children arrive rendered by ir_to_rust_expr itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: coll: String, idx: String
+    output: String
+
+    constraint: output == "(" ++ coll ++ ")[" ++ idx ++ "]"
+
+    optimize: time < O(n)
+}
+
+spec rust_try_text {
+    doc: "The TryPropagate rendering of ir_to_rust_expr (src/codegen/mod.rs:939-941): '(' + inner + ')?'. The operand is parenthesized before the '?' so a composite operand's boundary survives. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: inner: String
+    output: String
+
+    constraint: output == "(" ++ inner ++ ")?"
+
+    optimize: time < O(n)
+}
+
+spec rust_assign_text {
+    doc: "The Assign rendering of ir_to_rust_expr (src/codegen/mod.rs:942-948): '(' + target + ' = ' + value + ')'. Both children arrive rendered by ir_to_rust_expr itself; the whole assignment is parenthesized because an assignment expression's value is () and its boundary must survive embedding. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: target: String, value: String
+    output: String
+
+    constraint: output == "(" ++ target ++ " = " ++ value ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_return_text {
+    doc: "The Return rendering of ir_to_rust_expr (src/codegen/mod.rs:949-954): '(return ' + inner + ')'. Parenthesized because return greedily consumes a following expression -- '(return 5) + 1' must not become 'return (5 + 1)'. The operand is rendered by ir_to_rust_expr itself, UNTYPED: a returned String literal stays bare here; the ownership rewrite for return positions lives in the statement walker (ir_to_rust's Return arm consults fn_ret, slice 5). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: inner: String
+    output: String
+
+    constraint: output == "(return " ++ inner ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_break_text {
+    doc: "The Break rendering of ir_to_rust_expr (src/codegen/mod.rs:955-958): with a value, '(break ' + value + ')'; without, the fixed text '(break)'. Parenthesized for the same greedy-consumption reason as rust_return_text. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: has_value: Bool, value: String
+    output: String
+
+    constraint: has_value==true||output=="(break)"
+    constraint: has_value==false||output=="(break " ++ value ++ ")"
+
+    optimize: time < O(n)
+}
+
+spec rust_hole_text {
+    doc: "The fixed text of the Hole arm of ir_to_rust_expr (src/codegen/mod.rs:959): 'panic!(\"Hole not filled\")'. panic! has type ! and coerces anywhere, so the generated file still parses and compiles with the gap loud instead of silent (the Phase 13 convention). Keyed by IRNode kind like the other fixed-text tables: only Hole (0) has this text."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="panic!(\"Hole not filled\")"
+
+    optimize: time < O(n)
+
+    test "hole-text" { input: 0 expect: "panic!(\"Hole not filled\")" }
+}
+
+spec rust_unsupported_text {
+    doc: "The loud fallback for a shape with no honest expression form (unsupported_expr, src/codegen/mod.rs:725-727): 'panic!(\"unsupported IR in expression position: ' + shape + '\")'. In THIS walker exactly one arm uses it -- Alloc (an Alloc binds a name for later statements and has no value of its own), with shape 'Alloc'; the statement walker has further call sites (slice 5). Following the Hole convention, the panic! keeps the generated file parseable with the gap named."
+    input: shape: String
+    output: String
+
+    constraint: output == "panic!(\"unsupported IR in expression position: " ++ shape ++ "\")"
+
+    optimize: time < O(n)
+
+    test "alloc-text" { input: "Alloc" expect: "panic!(\"unsupported IR in expression position: Alloc\")" }
+}
+
+// -- Slice 5: the statement walker (ir_to_rust + ir_to_rust_tail) --
+//
+//  ir_to_rust (src/codegen/mod.rs:310-498) renders a node in
+//  STATEMENT position: every rendering is a sequence of complete
+//  lines at a given indent, each self-terminating in "\n".
+//  ir_to_rust_tail (src/codegen/mod.rs:507-541) renders a node
+//  in TAIL position (a function body, a match arm body, an
+//  If/Let value position): its value is the enclosing block's
+//  value, so expression nodes render bare where the statement
+//  walker would discard them with ";". The two walkers are
+//  mutually recursive (statement arms route value positions
+//  through the tail walker; the tail walker's statement-shaped
+//  kinds fall back to the statement walker), and both thread
+//  fn_ret, the enclosing function's return type, for the
+//  expectation positions (slice 3's rust_string_ownership is
+//  the leaf rule those expectations feed).
+//
+//  The slice's three representation questions, resolved on
+//  the established pre-rendered-children rule:
+//  (a) SEQUENCES: a Block's rendering is the plain
+//      concatenation of its statements' renderings -- no
+//      separator, no braces of its own (the braces in the
+//      output belong to the If/While/For/Match arms). There
+//      is no sequence template to pin: the iteration is
+//      mirror-only (F5 family, like the ", " joins), and
+//      what the specs pin is the per-statement DECISION --
+//      which renderer renders each statement
+//      (rust_stmt_seq_form) and how the tail walker treats
+//      each kind (rust_tail_form). The assembly mirror in
+//      tests/m3_proof.rs performs the concatenation.
+//  (b) INDENTATION: pad is "    " repeated indent times --
+//      repetition by a count is iteration, mirror-only. The
+//      specs therefore take pad (and pad_inner, the next
+//      level's pad, where an arm uses both) as pre-rendered
+//      String inputs, and pin the indent ARITHMETIC instead:
+//      rust_stmt_child_indent is the total table of the
+//      relative indent at which each part of a statement
+//      rendering is placed. Two arms place lines WITHOUT the
+//      pad their neighbours use -- the If arm's closing
+//      braces and the Sort arm's second/third lines; those
+//      are fixed-text facts of their templates, pinned
+//      there, not indent decisions.
+//  (c) TAIL CLASSIFICATION: rust_tail_form is the tail
+//      walker's dispatch as a total table over the 28 node
+//      kinds (statement fallthrough / bare expression /
+//      block split / typed re-entry), and rust_stmt_form is
+//      the statement walker's own dispatch, likewise total.
+//      Which expectation each recursive site passes is
+//      rust_expectation_source. One arm needs no new spec:
+//      Typed in statement position is a transparent
+//      recursion (its annotation is dropped -- the typed
+//      dispatch is slice 3's, and only the TAIL Typed arm
+//      consults the annotation, via rust_tail_form family
+//      3). The Block arm likewise has no template of its
+//      own (pure concatenation, see (a)).
+
+// -- Classifications ------------------------------------------
+
+spec rust_stmt_form {
+    doc: "Dispatch family of ir_to_rust (src/codegen/mod.rs:310-498), the statement walker: which arm renders a node in statement position. 0 = Hole (the two-line TODO + panic), 1 = Block (concatenation of the statements, no template of its own), 2 = Let, 3 = If, 4 = While, 5 = For, 6 = Match, 7 = Call (terminated), 8 = Return, 9 = Alloc, 10 = Assign, 11 = Collection (statement form, rust_stmt_collection_text), 12 = Map, 13 = Filter, 14 = Fold, 15 = Sort (three-line statement form), 16 = Typed (transparent recursion -- the annotation is dropped in statement position), 17 = the fallback: the node's ir_to_rust_expr rendering terminated with ';' (Literal, Var, BinOp, UnaryOp, Lambda, Closure, Index, Loop, Break, StructDef, TryPropagate -- expression shapes in statement position, Loop and StructDef included: they keep their expression renderings). Arm codes are in the original's source order. Total over all 28 IRNode kinds; a kind outside the 28 falls to the fallback arm exactly as the original's '_' arm catches it."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<0||kind>0||output==0
+    constraint: kind<1||kind>1||output==1
+    constraint: kind<2||kind>2||output==2
+    constraint: kind<3||kind>3||output==3
+    constraint: kind<4||kind>4||output==4
+    constraint: kind<5||kind>5||output==5
+    constraint: kind<6||kind>6||output==6
+    constraint: kind<7||kind>7||output==7
+    constraint: kind<8||kind>8||output==8
+    constraint: kind<15||kind>15||output==11
+    constraint: kind<16||kind>16||output==12
+    constraint: kind<17||kind>17||output==13
+    constraint: kind<18||kind>18||output==14
+    constraint: kind<19||kind>19||output==15
+    constraint: kind<20||kind>20||output==9
+    constraint: kind<21||kind>21||output==10
+    constraint: kind<22||kind>22||output==16
+    constraint: kind==0||kind==1||kind==2||kind==3||kind==4||kind==5||kind==6||kind==7||kind==8||kind==15||kind==16||kind==17||kind==18||kind==19||kind==20||kind==21||kind==22||output==17
+
+    optimize: time < O(n)
+
+    test "hole-arm" { input: 0 expect: 0 }
+    test "match-arm" { input: 6 expect: 6 }
+    test "collection-arm" { input: 15 expect: 11 }
+    test "alloc-arm" { input: 20 expect: 9 }
+    test "typed-arm" { input: 22 expect: 16 }
+    test "loop-fallback" { input: 24 expect: 17 }
+}
+
+spec rust_tail_form {
+    doc: "Dispatch family of ir_to_rust_tail (src/codegen/mod.rs:507-541), the tail-position walker: 0 = statement fallthrough (the node keeps its ir_to_rust statement rendering, which is already tail-shaped where it needs to be: Hole, Let, If, While, For, Match, Return, Alloc, Assign, Loop, Break, StructDef), 1 = bare expression (pad + the typed rendering + a newline, NO semicolon -- the value survives as the enclosing block's value: Literal, Var, BinOp, UnaryOp, Lambda, Closure, Collection, Call, Map, Filter, Fold, Sort, Index, TryPropagate), 2 = Block split (every statement but the last renders as a statement; the last renders as a tail -- rust_stmt_seq_form position 1), 3 = Typed re-entry (the node's own annotation replaces the inherited expectation). Total over all 28 IRNode kinds; a kind outside the 28 takes the statement fallthrough, as the original's '_' arm routes it to ir_to_rust."
+    input: kind: Int
+    output: Int
+
+    constraint: kind<1||kind>1||output==2
+    constraint: kind<22||kind>22||output==3
+    constraint: kind<7||kind>7||output==1
+    constraint: kind<9||kind>9||output==1
+    constraint: kind<10||kind>10||output==1
+    constraint: kind<11||kind>11||output==1
+    constraint: kind<12||kind>12||output==1
+    constraint: kind<13||kind>13||output==1
+    constraint: kind<14||kind>14||output==1
+    constraint: kind<15||kind>15||output==1
+    constraint: kind<16||kind>16||output==1
+    constraint: kind<17||kind>17||output==1
+    constraint: kind<18||kind>18||output==1
+    constraint: kind<19||kind>19||output==1
+    constraint: kind<23||kind>23||output==1
+    constraint: kind<27||kind>27||output==1
+    constraint: kind==1||kind==7||kind==9||kind==10||kind==11||kind==12||kind==13||kind==14||kind==15||kind==16||kind==17||kind==18||kind==19||kind==22||kind==23||kind==27||output==0
+
+    optimize: time < O(n)
+
+    test "block-split" { input: 1 expect: 2 }
+    test "call-bare" { input: 7 expect: 1 }
+    test "let-fallthrough" { input: 2 expect: 0 }
+    test "typed-reentry" { input: 22 expect: 3 }
+}
+
+spec rust_stmt_collection_prefix {
+    doc: "Fixed opening text of a collection literal in STATEMENT position (the Collection arm of ir_to_rust, src/codegen/mod.rs:418-451), keyed by CollectionKind code: List 'vec![', Set 'vec![', Map 'vec![', Array '[', Tuple '('. Set and Map COLLAPSE to the List form here -- the fully qualified HashSet/HashMap forms of expression position (slice 4's rust_collection_prefix) appear only where the collection's value is used; as a statement the value is discarded, and the original renders all three sequence kinds identically. Pairs with rust_stmt_collection_suffix."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="vec!["
+    constraint: kind<1||kind>1||output=="vec!["
+    constraint: kind<2||kind>2||output=="vec!["
+    constraint: kind<3||kind>3||output=="["
+    constraint: kind<4||kind>4||output=="("
+
+    optimize: time < O(n)
+
+    test "list-prefix" { input: 0 expect: "vec![" }
+    test "set-collapses" { input: 1 expect: "vec![" }
+    test "array-prefix" { input: 3 expect: "[" }
+    test "tuple-prefix" { input: 4 expect: "(" }
+}
+
+spec rust_stmt_collection_suffix {
+    doc: "Fixed closing text of a collection literal in statement position (src/codegen/mod.rs:418-451), keyed by CollectionKind code: List ']', Set ']', Map ']', Array ']', Tuple ')'. The collapse is complete: Set and Map also lose expression position's '])' ending (slice 4's rust_collection_suffix), because the whole rendering is the List form. Pairs with rust_stmt_collection_prefix; the terminating ';' belongs to rust_stmt_collection_text."
+    input: kind: Int
+    output: String
+
+    constraint: kind<0||kind>0||output=="]"
+    constraint: kind<1||kind>1||output=="]"
+    constraint: kind<2||kind>2||output=="]"
+    constraint: kind<3||kind>3||output=="]"
+    constraint: kind<4||kind>4||output==")"
+
+    optimize: time < O(n)
+
+    test "set-collapses" { input: 1 expect: "]" }
+    test "tuple-suffix" { input: 4 expect: ")" }
+}
+
+spec rust_expectation_source {
+    doc: "Which expectation each expectation-carrying recursive site of the two statement walkers passes to the typed emitter (ir_to_rust_expr_typed -- slice 3's rust_typed_form dispatch and rust_string_ownership leaf rule consume it). Sources: 0 = Some(fn_ret), the enclosing function's return type; 1 = Some(the node's own declared type); 2 = the inherited expectation, passed through unchanged. Sites: 0 = a Let's body (tail), 1 = an If's then branch (tail), 2 = an If's else branch (tail), 3 = a Match arm's body (tail), 4 = a Return's expression (the statement walker's typed call), 5 = an Alloc's initial value (the Alloc's declared type), 6 = a tail-position Typed node (its annotation overrides the inherited expectation), 7 = a tail Block's last statement (the expectation is inherited unchanged -- the Block itself sets none). Sites outside these two functions are not this table's: generate_rust seeds a function body with Some(return type) (the driver, slice 6), and expr_block_stmt's inner tail passes None (the expression walker's Block arm, slice 4)."
+    input: site: Int
+    output: Int
+
+    constraint: site<0||site>4||output==0
+    constraint: site<5||site>6||output==1
+    constraint: site<7||site>7||output==2
+
+    optimize: time < O(n)
+
+    test "let-tail-fn-ret" { input: 0 expect: 0 }
+    test "alloc-own-type" { input: 5 expect: 1 }
+    test "block-last-inherits" { input: 7 expect: 2 }
+}
+
+spec rust_stmt_child_indent {
+    doc: "The relative indent (in levels of four spaces) at which each part of a statement rendering is placed, over the placement sites of ir_to_rust and ir_to_rust_tail (src/codegen/mod.rs:310-541). The pad STRING is '    ' repeated (indent + delta) times -- the repetition is iteration and mirror-only; this table pins the arithmetic. Sites: 0 = a Block's statement (statement position), 1 = a Let's tail body, 2 = an If branch body (tail), 3 = a While body, 4 = a For body, 5 = a Match arm's header line (the pattern line and the arm's closing '},' -- the pad_inner lines), 6 = a Match arm's body (tail), 7 = a tail Block's non-last statement, 8 = a tail Block's last statement (tail). Everything else in a rendering sits at the node's own indent (delta 0 by the templates' use of pad): the header lines, and the While/For/Match closing braces. Two placements take NO pad at all -- the If arm's closing braces and the Sort arm's continuation lines; those are fixed-text facts of rust_stmt_if_text and rust_stmt_sort_text, not rows of this table. expr_block_stmt renders its inner statement at absolute indent 0 in a neutral Unit context -- the expression walker's site (slice 4), not a row here."
+    input: site: Int
+    output: Int
+
+    constraint: site<0||site>1||output==0
+    constraint: site<7||site>8||output==0
+    constraint: site<2||site>5||output==1
+    constraint: site<6||site>6||output==2
+
+    optimize: time < O(n)
+
+    test "block-same" { input: 0 expect: 0 }
+    test "if-branch-in" { input: 2 expect: 1 }
+    test "match-arm-body-in2" { input: 6 expect: 2 }
+}
+
+spec rust_stmt_seq_form {
+    doc: "Which renderer renders one statement of a Block, by the Block's position and the statement's place in it: 0 = the statement walker (ir_to_rust), 1 = the tail walker (ir_to_rust_tail). Positions: 0 = statement position (ir_to_rust's Block arm -- EVERY statement renders as a statement, last included: the Block's own value is discarded with the enclosing statement's), 1 = tail position (ir_to_rust_tail's Block arm -- every statement but the last renders as a statement; the last renders as a tail, so its value becomes the block's). A position code other than 1 takes the statement renderer, as every non-tail context does. The concatenation of the chosen renderings is the Block's rendering (mirror-only iteration; see the slice-5 notes)."
+    input: position: Int, last: Bool
+    output: Int
+
+    constraint: position<1||position>1||last==false||output==1
+    constraint: position==1||output==0
+    constraint: last==true||output==0
+
+    optimize: time < O(n)
+}
+
+// -- Statement templates (ir_to_rust arms) ---------------------
+
+spec rust_stmt_hole_text {
+    doc: "The Hole arm of ir_to_rust (src/codegen/mod.rs:316-319): TWO lines at the node's indent -- a TODO comment, then the loud panic terminated as a statement. The panic text is the same fixed text as the expression walker's Hole (slice 4's rust_hole_text), but the statement arm is its own format site: it adds the comment line, pads both lines, and terminates with ';'. Following the Hole convention the panic keeps the generated file parseable with the gap named."
+    input: pad: String
+    output: String
+
+    constraint: output == pad ++ "// TODO: synthesis incomplete\n" ++ pad ++ "panic!(\"Hole not filled\");\n"
+
+    optimize: time < O(n)
+
+    test "hole-at-zero" { input: "" expect: "// TODO: synthesis incomplete\npanic!(\"Hole not filled\");\n" }
+    test "hole-padded" { input: "    " expect: "    // TODO: synthesis incomplete\n    panic!(\"Hole not filled\");\n" }
+}
+
+spec rust_stmt_let_text {
+    doc: "The Let arm of ir_to_rust (src/codegen/mod.rs:328-337): pad + 'let ' + name + ' = ' + value + ';' + a newline, followed IMMEDIATELY by the body's tail rendering (the Let has no closing line of its own -- the body IS the Let's continuation at the same indent, rust_stmt_child_indent site 1). The name arrives rust_ident-rendered (slice 3); the value arrives rendered by ir_to_rust_expr UNTYPED (a String literal value stays bare -- the Let value position carries no expectation); the body arrives rendered by ir_to_rust_tail with expectation Some(fn_ret) (rust_expectation_source site 0), so a bare-expression body yields its value."
+    input: pad: String, name: String, value: String, body: String
+    output: String
+
+    constraint: output == pad ++ "let " ++ name ++ " = " ++ value ++ ";\n" ++ body
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_if_text {
+    doc: "The If arm of ir_to_rust (src/codegen/mod.rs:339-349): pad + 'if ' + condition + ' {' + newline + the then branch's tail rendering + '} else {' + newline + the else branch's tail rendering + '}' + newline. The condition arrives condition-position-rendered (slice 4's rust_condition_text); the branches arrive tail-rendered at indent + 1 with expectation Some(fn_ret) (rust_stmt_child_indent site 2, rust_expectation_source sites 1-2). QUIRK, pinned as-is: the two closing braces carry NO pad -- the format string interpolates no indent before them, unlike the While/For/Match arms, whose closings sit at pad. At indent 0 the difference is invisible; nested, an If's braces land at column 0."
+    input: pad: String, cond: String, then_text: String, else_text: String
+    output: String
+
+    constraint: output == pad ++ "if " ++ cond ++ " {\n" ++ then_text ++ "} else {\n" ++ else_text ++ "}\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_while_text {
+    doc: "The While arm of ir_to_rust (src/codegen/mod.rs:352-362): with an invariant, a comment line at pad ('// invariant: ' + the invariant text, which arrives RAW from the IR -- no walker renders it) precedes the loop; then pad + 'while ' + condition + ' {' + newline + the body's statement rendering at indent + 1 (rust_stmt_child_indent site 3 -- a STATEMENT rendering, not a tail: a while body yields nothing) + pad + '}' + newline. The condition arrives condition-position-rendered (slice 4's rust_condition_text). Unlike the If arm, the closing brace sits at pad."
+    input: has_inv: Bool, inv: String, pad: String, cond: String, body: String
+    output: String
+
+    constraint: has_inv==false||output==pad ++ "// invariant: " ++ inv ++ "\n" ++ pad ++ "while " ++ cond ++ " {\n" ++ body ++ pad ++ "}\n"
+    constraint: has_inv==true||output==pad ++ "while " ++ cond ++ " {\n" ++ body ++ pad ++ "}\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_for_text {
+    doc: "The For arm of ir_to_rust (src/codegen/mod.rs:364-373): pad + 'for ' + var + ' in ' + start + '..' + end + ' {' + newline + the body's statement rendering at indent + 1 (rust_stmt_child_indent site 4 -- statement, not tail, as with While) + pad + '}' + newline. The variable arrives rust_ident-rendered (slice 3); the bounds arrive rendered by ir_to_rust_expr, the range unparenthesized and exclusive, exactly as the original formats it."
+    input: pad: String, var: String, start: String, end: String, body: String
+    output: String
+
+    constraint: output == pad ++ "for " ++ var ++ " in " ++ start ++ ".." ++ end ++ " {\n" ++ body ++ pad ++ "}\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_match_head_text {
+    doc: "The head line of the Match arm of ir_to_rust (src/codegen/mod.rs:376): pad + 'match ' + scrutinee + ' {' + newline. The scrutinee arrives rendered by match_scrutinee_to_rust (slice 4's scrutinee trio over the condition-position base -- the same helper both Match arms consult). The arm lines and the closing line are rust_stmt_match_arm_text and rust_stmt_match_close_text; joining the arms is iteration (mirror-only)."
+    input: pad: String, scrutinee: String
+    output: String
+
+    constraint: output == pad ++ "match " ++ scrutinee ++ " {\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_match_arm_text {
+    doc: "One case line-group of the Match arm of ir_to_rust (src/codegen/mod.rs:378-384): pad_inner + pattern + ' => {' + newline + the body's tail rendering at indent + 2 + pad_inner + '},' + newline. pad_inner (the pad of indent + 1) frames the arm; the body sits one level deeper still (rust_stmt_child_indent sites 5 and 6). The pattern arrives rendered by ir_pattern_to_rust (slice 2); the body arrives tail-rendered with expectation Some(fn_ret) (rust_expectation_source site 3), so a bare-expression arm body yields its value inside the braces. Not slice 4's rust_match_arm_text: that is the EXPRESSION match's one-line 'pattern => body' arm; the statement match wraps each body in its own braces."
+    input: pad_inner: String, pat: String, body: String
+    output: String
+
+    constraint: output == pad_inner ++ pat ++ " => {\n" ++ body ++ pad_inner ++ "},\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_match_close_text {
+    doc: "The closing line of the Match arm of ir_to_rust (src/codegen/mod.rs:386): pad + '}' + newline -- at the Match's own indent, like the While/For closings (and unlike the If arm's unpadded braces)."
+    input: pad: String
+    output: String
+
+    constraint: output == pad ++ "}\n"
+
+    optimize: time < O(n)
+
+    test "close-at-zero" { input: "" expect: "}\n" }
+    test "close-padded" { input: "    " expect: "    }\n" }
+}
+
+spec rust_stmt_call_text {
+    doc: "The Call arm of ir_to_rust (src/codegen/mod.rs:389-398): pad + function + '(' + arguments + ');' + newline -- the expression call template (slice 4's rust_call_text) terminated as a statement, its value discarded. The function name arrives rust_ident-rendered (slice 3) and the arguments pre-joined with ', ' (the join is iteration, mirror-only); each argument is rendered by ir_to_rust_expr. In tail position the same call renders WITHOUT the ';' (rust_tail_form family 1) -- the pair is the recorded fix for the unterminated-statement syntax error."
+    input: pad: String, func: String, args: String
+    output: String
+
+    constraint: output == pad ++ func ++ "(" ++ args ++ ");\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_return_text {
+    doc: "The Return arm of ir_to_rust (src/codegen/mod.rs:400-402): pad + 'return ' + rendered + ';' + newline. The rendered expression arrives from ir_to_rust_expr_typed with expectation Some(fn_ret) (rust_expectation_source site 4) -- this arm is the statement walker's own typed call, the one through which a String literal in a String-returning function takes the owned form (slice 3's rust_string_ownership decides, rust_string_literal_owned_text renders). Not slice 4's rust_return_text: that is the expression walker's parenthesized '(return x)', whose operand is rendered UNTYPED."
+    input: pad: String, rendered: String
+    output: String
+
+    constraint: output == pad ++ "return " ++ rendered ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_alloc_text {
+    doc: "The Alloc arm of ir_to_rust (src/codegen/mod.rs:404-409): pad + 'let mut ' + name + ': ' + type + ' = ' + initial + ';' + newline. The name arrives rust_ident-rendered (slice 3), the type rendered by ty_to_rust (slices 1-2), and the initial value rendered by ir_to_rust_expr_typed with expectation Some(the Alloc's OWN declared type) (rust_expectation_source site 5) -- so a String-typed Alloc's String literal initial takes the owned form, where a Let's value would stay bare. In expression position an Alloc has no honest form at all (slice 4's rust_unsupported_text); statement position is its only rendering."
+    input: pad: String, name: String, ty: String, initial: String
+    output: String
+
+    constraint: output == pad ++ "let mut " ++ name ++ ": " ++ ty ++ " = " ++ initial ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_assign_text {
+    doc: "The Assign arm of ir_to_rust (src/codegen/mod.rs:411-416): pad + target + ' = ' + value + ';' + newline. Both children arrive rendered by ir_to_rust_expr. Not slice 4's rust_assign_text: the expression form is parenthesized ('(t = v)') because an assignment's boundary must survive embedding; the statement form is bare, as a statement needs no boundary."
+    input: pad: String, target: String, value: String
+    output: String
+
+    constraint: output == pad ++ target ++ " = " ++ value ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_collection_text {
+    doc: "The Collection arm of ir_to_rust (src/codegen/mod.rs:418-451) assembled: pad + the statement-position prefix + the elements + the statement-position suffix + ';' + newline, stated as a composition over rust_stmt_collection_prefix / rust_stmt_collection_suffix, the classifications the arm consults. The elements arrive pre-joined with ', ' (the join is iteration, mirror-only), each rendered by ir_to_rust_expr. The ';' is the recorded fix for the unterminated-collection syntax error; in tail position the same collection renders bare in its EXPRESSION form (fully qualified for Set/Map -- rust_tail_form family 1 over slice 4's affixes), never this collapsed one."
+    input: kind: Int, pad: String, elems: String
+    output: String
+
+    constraint: output == pad ++ rust_stmt_collection_prefix(kind) ++ elems ++ rust_stmt_collection_suffix(kind) ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_map_text {
+    doc: "The Map arm of ir_to_rust (src/codegen/mod.rs:453-460): pad + '(' + over + ').iter().map(' + function + ').collect();' + newline -- slice 4's rust_map_text template terminated as a statement, its collected value discarded. Both children arrive rendered by ir_to_rust_expr."
+    input: pad: String, over: String, func: String
+    output: String
+
+    constraint: output == pad ++ "(" ++ over ++ ").iter().map(" ++ func ++ ").collect();\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_filter_text {
+    doc: "The Filter arm of ir_to_rust (src/codegen/mod.rs:462-469): pad + '(' + over + ').iter().filter(' + predicate + ').collect();' + newline -- slice 4's rust_filter_text template terminated as a statement. Both children arrive rendered by ir_to_rust_expr (the predicate with the same reference-receiving property slice 4 recorded)."
+    input: pad: String, over: String, pred: String
+    output: String
+
+    constraint: output == pad ++ "(" ++ over ++ ").iter().filter(" ++ pred ++ ").collect();\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_fold_text {
+    doc: "The Fold arm of ir_to_rust (src/codegen/mod.rs:471-479): pad + '(' + over + ').iter().fold(' + initial + ', ' + operation + ');' + newline -- slice 4's rust_fold_text template terminated as a statement, with the same (initial, operation) text order against the IR's (operation, initial, over) field order. All three children arrive rendered by ir_to_rust_expr."
+    input: pad: String, over: String, initial: String, operation: String
+    output: String
+
+    constraint: output == pad ++ "(" ++ over ++ ").iter().fold(" ++ initial ++ ", " ++ operation ++ ");\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_sort_text {
+    doc: "The Sort arm of ir_to_rust (src/codegen/mod.rs:481-491): THREE lines -- pad + 'let mut sorted = ' + collection + ';' + newline, then 'sorted.sort_by(' + comparator + ');' + newline, then 'sorted;' + newline, the final value discarded by its own ';'. QUIRK, pinned as-is: only the first line carries the pad; the sort_by and sorted lines are interpolated with NO indent at any depth (the format string has no pad for them), unlike every other multi-line arm. Both children arrive rendered by ir_to_rust_expr. In tail position a Sort instead takes slice 4's rust_sort_text block-expression form, which KEEPS the value -- the statement/tail pair is the sharpest instance of the position deciding the rendering."
+    input: pad: String, coll: String, cmp: String
+    output: String
+
+    constraint: output == pad ++ "let mut sorted = " ++ coll ++ ";\n" ++ "sorted.sort_by(" ++ cmp ++ ");\n" ++ "sorted;\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_stmt_expr_text {
+    doc: "The fallback arm of ir_to_rust (src/codegen/mod.rs:496): pad + the node's ir_to_rust_expr rendering + ';' + newline. This arm serves exactly rust_stmt_form family 17 -- the expression shapes in statement position (Literal, Var, BinOp, UnaryOp, Lambda, Closure, Index, Loop, Break, StructDef, TryPropagate): each keeps its expression rendering whole (a statement Loop keeps the 'loop {...}' block form; a statement StructDef keeps its block-wrapped definition) and is merely terminated. The ';' after a block-form rendering ('};') is part of the pinned text."
+    input: pad: String, rendered: String
+    output: String
+
+    constraint: output == pad ++ rendered ++ ";\n"
+
+    optimize: time < O(n)
+}
+
+// -- Tail templates (ir_to_rust_tail arms) ----------------------
+
+spec rust_tail_expr_text {
+    doc: "The bare-expression arm of ir_to_rust_tail (src/codegen/mod.rs:529-538): pad + the typed rendering + a newline -- NO semicolon, so the value becomes the enclosing block's value (a ';' here would discard it to () and fail the function's return type, E0308 -- the defect this walker exists to fix). Serves rust_tail_form family 1 (Literal, Var, BinOp, UnaryOp, Lambda, Closure, Collection, Call, Map, Filter, Fold, Sort, Index, TryPropagate). The rendering arrives from ir_to_rust_expr_typed under the position's expectation (rust_expectation_source: fn_ret at the Let's/If's/Match's value positions, the Typed node's own annotation inside one, the inherited expectation through a tail Block's last statement) -- slice 3's rust_string_ownership is the one rewrite that expectation drives."
+    input: pad: String, rendered: String
+    output: String
+
+    constraint: output == pad ++ rendered ++ "\n"
+
+    optimize: time < O(n)
+}
+
+spec rust_tail_block_text {
+    doc: "The Block arm of ir_to_rust_tail (src/codegen/mod.rs:514-524) assembled: the non-last statements' renderings (each by ir_to_rust, rust_stmt_seq_form position 1) concatenated with the last statement's tail rendering -- a plain concatenation with no separator and no wrap, the two parts arriving pre-rendered. The split itself (all but last vs last) and the iteration are mirror-only; an EMPTY Block renders the empty string (no last statement exists, and the arm emits nothing). The same assembly serves a statement-position Block, whose every statement takes the statement renderer (rust_stmt_seq_form position 0): the parts differ, the concatenation is this one."
+    input: rest: String, last: String
+    output: String
+
+    constraint: output == rest ++ last
+
+    optimize: time < O(n)
+}
+
+// -- Slice 6: the driver (generate + generate_rust) ----------
+//
+//  generate (src/codegen/mod.rs:12-22) dispatches on the
+//  target name; generate_rust (src/codegen/mod.rs:66-155)
+//  assembles the whole file for ONE candidate: doc header,
+//  precondition block, signature, tail-rendered body, test
+//  module. Slice 3 specced the driver's TEXT pieces
+//  (rust_doc_line, rust_param_text, rust_generics_text,
+//  rust_signature, rust_precondition_assert,
+//  rust_precondition_block, rust_test_name_form,
+//  rust_test_case, rust_test_module, rust_file_fixed_text);
+//  this slice specs the DECISIONS and the ASSEMBLY that
+//  consume them -- the dispatch table, the result form,
+//  the section-presence rule, the header assembly, the
+//  whole-file equation. What remains mirror-only: every
+//  iteration (the doc-line split, the generics / params /
+//  asserts / tests joins and loops -- the F5 family), the
+//  Int -> decimal conversion in default test names (F2),
+//  and debug_ir_string's internals behind the "ir" route
+//  (its Hole arm needs F2 for the id, its Literal arm is
+//  Rust Debug formatting, its fallback arm is a
+//  discriminant's Debug text -- none of it statable).
+//  One candidate is one file holding exactly ONE function:
+//  the driver has no multi-function assembly, and no
+//  import is ever generated at file level.
+
+// -- Dispatch (generate) ---------------------------------------
+
+spec rust_target_route {
+    doc: "generate's dispatch on the target name (src/codegen/mod.rs:12-22): 0 = the Rust driver (generate_rust -- this module's assembly), 1 = the C generator, 2 = the Wasm generator, 3 = the Python generator, 4 = the JavaScript generator (TWO names route here: 'javascript' and 'js'), 5 = the IR debug dump (debug_ir_string over the candidate body, seeded at indent 0), 6 = unsupported -- generate returns Err(CodegenError::UnsupportedTarget) carrying the name verbatim (rust_target_result_form, rust_unsupported_target_text). Matching is exact and case-sensitive (a match on the &str): 'Rust', 'JS', 'rs' and '' are all route 6. Routes 1-4 name the other targets' generators, whose internals sit outside this module under the ROAD's one-target rule; only their routing is pinned here. The rows are String-equality guards -- the rust_ident_empty shape: fully statable in the spec, and (like it) outside every admitted seed family, whose guards key on Int/Bool only."
+    input: target: String
+    output: Int
+
+    constraint: target!="rust"||output==0
+    constraint: target!="c"||output==1
+    constraint: target!="wasm"||output==2
+    constraint: target!="python"||output==3
+    constraint: target!="javascript"||output==4
+    constraint: target!="js"||output==4
+    constraint: target!="ir"||output==5
+    constraint: target=="rust"||target=="c"||target=="wasm"||target=="python"||target=="javascript"||target=="js"||target=="ir"||output==6
+
+    optimize: time < O(n)
+
+    test "rust-route" { input: "rust" expect: 0 }
+    test "c-route" { input: "c" expect: 1 }
+    test "wasm-route" { input: "wasm" expect: 2 }
+    test "python-route" { input: "python" expect: 3 }
+    test "javascript-route" { input: "javascript" expect: 4 }
+    test "js-route" { input: "js" expect: 4 }
+    test "ir-route" { input: "ir" expect: 5 }
+    test "unknown-route" { input: "java" expect: 6 }
+    test "case-route" { input: "Rust" expect: 6 }
+    test "empty-route" { input: "" expect: 6 }
+}
+
+spec rust_target_result_form {
+    doc: "Whether generate returns Ok or Err for a rust_target_route route (src/codegen/mod.rs:12-22): 0 = Ok -- routes 0-5, every named target produces text (generate_rust in particular has no error path at all: no fallible call inside, it ends in Ok unconditionally), 1 = Err -- route 6 only, CodegenError::UnsupportedTarget carrying the target name. Total over the seven routes; route codes outside 0..=6 never occur and are unpinned."
+    input: route: Int
+    output: Int
+
+    constraint: route<0||route>5||output==0
+    constraint: route<6||route>6||output==1
+
+    optimize: time < O(n)
+
+    test "rust-ok" { input: 0 expect: 0 }
+    test "ir-ok" { input: 5 expect: 0 }
+    test "unsupported-err" { input: 6 expect: 1 }
+}
+
+spec rust_unsupported_target_text {
+    doc: "The Display text of CodegenError::UnsupportedTarget (src/codegen/mod.rs:1415): 'Unsupported target language: ' + the target name, verbatim -- the error generate's route 6 returns. The name is carried through unmodified: no rust_ident sanitization, no case folding, no trimming."
+    input: target: String
+    output: String
+
+    constraint: output == "Unsupported target language: " ++ target
+
+    optimize: time < O(n)
+
+    test "error-text" { input: "java" expect: "Unsupported target language: java" }
+    test "error-empty" { input: "" expect: "Unsupported target language: " }
+}
+
+// -- Assembly (generate_rust) ----------------------------------
+
+spec rust_doc_header_text {
+    doc: "generate_rust's module doc header, assembled (src/codegen/mod.rs:70-76): the doc's lines -- split by str::lines and each rendered by rust_doc_line, concatenated (the split and the concatenation are iteration, mirror-only) -- followed by ONE blank line, rust_file_fixed_text piece 1, emitted inside the doc branch: a doc of Some(\"\") has zero lines and still yields exactly the blank line. Whether the header appears at all is the driver's branch (the spec's doc is Some rather than None); rust_driver_section_text states that rule, with this text as its present-arm input."
+    input: lines: String
+    output: String
+
+    constraint: output == lines ++ "\n"
+
+    optimize: time < O(n)
+
+    test "header-one-line" { input: "//! Sorts a list\n" expect: "//! Sorts a list\n\n" }
+    test "header-no-lines" { input: "" expect: "\n" }
+}
+
+spec rust_driver_section_text {
+    doc: "generate_rust's conditional-section rule, shared by its three optional sections (src/codegen/mod.rs:70-76, 96-104, 131-152): a section whose presence flag holds contributes its assembled text; otherwise it contributes the empty string -- no placeholder, comment or partial frame is emitted for an absent section. The three call sites differ only in what presence MEANS: the doc header's flag is the spec's doc being Some (a present-but-empty doc still emits its blank line -- rust_doc_header_text), while the precondition block's and the test module's flags are their lists being non-empty. One spec serves all three sites, as rust_block_text serves two sites in slices 4-5. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: present: Bool, text: String
+    output: String
+
+    constraint: present==false||output==text
+    constraint: present==true||output==""
+
+    optimize: time < O(n)
+}
+
+spec rust_file_text {
+    doc: "generate_rust's whole-file assembly (src/codegen/mod.rs:66-155) over pre-rendered sections, in emission order: the doc header (rust_doc_header_text, via rust_driver_section_text), the precondition block (rust_precondition_block, via rust_driver_section_text -- emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters: slice 3 recorded the placement surprise, this equation is where it lands in the file), the signature (rust_signature), the body, the function's closing brace (the text of rust_file_fixed_text piece 0), and the test module (rust_test_module, via rust_driver_section_text). Absent sections arrive as the empty string (rust_driver_section_text's absent arm), so the equation is unconditional. The body arrives rendered by ir_to_rust_tail at indent 1, with the function's return type as both fn_ret and the Some expectation -- the driver's own seed, the one expectation site outside rust_expectation_source's table (that table's doc names this site as the driver's); statement-shaped bodies fall through the tail renderer to the statement walker unchanged, bare-expression bodies keep their value as the function's return. Exactly one function per file, and NO import is ever generated at file level -- the only use statement in the output is the test module's inner 'use super::*;', inside rust_test_module. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs."
+    input: header: String, pre_block: String, signature: String, body: String, test_module: String
+    output: String
+
+    constraint: output == header ++ pre_block ++ signature ++ body ++ "}\n" ++ test_module
+
+    optimize: time < O(n)
+}
+
+}
