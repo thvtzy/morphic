@@ -4678,7 +4678,23 @@ mod xval3 {
         // (ALL_SPECS / PINNED_TOTALS) likewise still
         // covers slices 1–5; extending the sweeps to
         // slice 6 belongs to the measurement phase.
-        const RECOGNIZED: [&str; 93] = [
+        //
+        // Phase 41 flip: the measurement landed. Five of
+        // the six slice-6 specs are recognized — the three
+        // `++` equations by equation (rust_file_text at
+        // arity five, the widest equation yet),
+        // rust_target_result_form by guard_table, and
+        // rust_driver_section_text by composition_guard
+        // (the composition precedence: its Bool-param guard
+        // carries a bare-variable pin and a literal pin,
+        // the rust_concat_left_text shape at arity two) —
+        // and the iterated set grows to 98.
+        // rust_target_route joins rust_ident_empty below:
+        // its rows are String-equality leaves, the recorded
+        // unadmitted family, unrecognized BY DESIGN (the
+        // probe measures a deterministic Verified pool
+        // winner for it instead — see the Phase 41 record).
+        const RECOGNIZED: [&str; 98] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -4736,6 +4752,13 @@ mod xval3 {
             // ── Phase 38: the mixed pair-keyed guard
             // table ──
             "rust_stmt_seq_form",
+            // ── slice 6 (Phase 41): the driver's text
+            // assembly via equation, its result form via
+            // guard_table, its section rule via
+            // composition_guard ──
+            "rust_unsupported_target_text", "rust_doc_header_text",
+            "rust_file_text", "rust_target_result_form",
+            "rust_driver_section_text",
         ];
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 112, "module spec count");
@@ -4760,6 +4783,11 @@ mod xval3 {
             // guards are a recorded unadmitted family);
             // Phase 38's mixed pair-keyed table closed the
             // last gap shape, rust_stmt_seq_form ──
+            "rust_target_route",
+            // ── Phase 41: slice 6's dispatch table is the
+            // same String-equality shape at table scale —
+            // seven name rows plus a catch-all — and stays
+            // unrecognized by the same design ──
         ] {
             assert!(
                 index.callee_body(name).is_none(),
