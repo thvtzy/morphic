@@ -4299,11 +4299,20 @@ mod xval3 {
         // this list because a body IS recognized and
         // encodable; the refutation is a verification
         // outcome, recorded in the Phase 36 record, not a
-        // recognition failure. rust_stmt_seq_form joins
+        // recognition failure. rust_stmt_seq_form joined
         // rust_ident_empty below: its rows range jointly
         // over an Int key and a Bool key, a mixed two-key
-        // table no admitted family claims.
-        const RECOGNIZED: [&str; 92] = [
+        // table no admitted family claimed.
+        //
+        // Phase 38 flip: the mixed pair-keyed guard table
+        // (the eighth family, specified by the Phase 36
+        // measurement) claims rust_stmt_seq_form — rows
+        // over one Int key and one Bool key, literal pins,
+        // joint falsify-every-leaf over the Int span
+        // crossed with the Bool domain — so it moves to
+        // the recognized set (93) and rust_ident_empty
+        // stands alone below, unrecognized BY DESIGN.
+        const RECOGNIZED: [&str; 93] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -4358,6 +4367,9 @@ mod xval3 {
             "rust_stmt_collection_prefix",
             "rust_stmt_collection_suffix",
             "rust_expectation_source", "rust_stmt_child_indent",
+            // ── Phase 38: the mixed pair-keyed guard
+            // table ──
+            "rust_stmt_seq_form",
         ];
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 106, "module spec count");
@@ -4378,13 +4390,10 @@ mod xval3 {
         for name in [
             "rust_ident_empty",
             // ── Phase 34: the module's only remaining
-            // unrecognized shape, by design ──
-            "rust_stmt_seq_form",
-            // ── Phase 36: the mixed Int x Bool two-key
-            // table — no admitted family claims a key set
-            // of two different domains (guard_table arity,
-            // pair_guard_table's Int-family keys,
-            // multi_guard's Bool-expression guards) ──
+            // unrecognized shape, by design (String-equality
+            // guards are a recorded unadmitted family);
+            // Phase 38's mixed pair-keyed table closed the
+            // last gap shape, rust_stmt_seq_form ──
         ] {
             assert!(
                 index.callee_body(name).is_none(),
