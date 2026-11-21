@@ -5176,9 +5176,12 @@ fn evaluate_candidate(candidate: &CandidateImplementation, spec: &FunctionSpec) 
     // it does not get the benefit of the doubt.
     //
     // FALLBACK: if a spec has tests but NONE of them can be
-    // mapped (e.g. multi-param specs, whose tuple test inputs
-    // the current spec syntax cannot bind), there is no truth
-    // signal to measure. Keep the previous structural behavior
+    // mapped (e.g. tuple test inputs carrying a lambda for a
+    // fn-typed parameter — the evaluator has no function
+    // values, so sort's and binary_search's tests still
+    // cannot bind; tuple inputs of first-order values DO bind
+    // elementwise since Phase 53), there is no truth signal
+    // to measure. Keep the previous structural behavior
     // (tests assumed passed) rather than punishing every
     // candidate for an encoding limitation. Specs with no tests
     // at all keep the neutral 0.5.
@@ -10311,6 +10314,131 @@ spec exclaim {
         let unbound = make_candidate(IRNode::Var("result".into()), &spec);
         let scores = evaluate_candidate(&unbound, &spec);
         assert_eq!(scores.test_pass_ratio, 0.0);
+    }
+
+    /// A two-param spec with tuple-form tests — the parser
+    /// shape of examples/self_host/count_matching.morph's
+    /// tests, on an (a, b) -> a + b semantics whose correct
+    /// body the interpreter can execute.
+    fn tuple_test_spec() -> FunctionSpec {
+        let mut spec = dummy_spec();
+        spec.name = "add_pair".into();
+        spec.params = ["a", "b"]
+            .iter()
+            .map(|name| Param {
+                name: name.to_string(),
+                ty: TypeRef::Int,
+                annotations: HashMap::new(),
+            })
+            .collect();
+        spec.return_type = TypeRef::Int;
+        let test = |x: i64, y: i64, expected: i64| Test {
+            name: None,
+            input: Expr::Call(
+                "__tuple__".into(),
+                vec![Expr::IntLit(x), Expr::IntLit(y)],
+            ),
+            expected_output: Expr::IntLit(expected),
+            timeout_ms: None,
+            property: false,
+        };
+        spec.tests = vec![test(1, 2, 3), test(10, 5, 15), test(0, 0, 0)];
+        spec
+    }
+
+    /// Phase 53: tuple-form test inputs bind elementwise, so
+    /// a multi-param spec's tpr is MEASURED, not the FALLBACK.
+    /// Before the fix, run_spec_tests reported evaluable == 0
+    /// for this spec and the correct and trivial bodies below
+    /// BOTH scored the fallback 1.0 (the Phase 52 finding).
+    #[test]
+    fn evaluate_candidate_tuple_tests_discriminate() {
+        let spec = tuple_test_spec();
+
+        // Correct: a + b earns its 1.0 (3/3 tests).
+        let correct = make_candidate(
+            IRNode::BinOp(
+                IRBinOp::Add,
+                Box::new(IRNode::Var("a".into())),
+                Box::new(IRNode::Var("b".into())),
+            ),
+            &spec,
+        );
+        let scores = evaluate_candidate(&correct, &spec);
+        assert!((scores.test_pass_ratio - 1.0).abs() < 1e-9);
+
+        // Trivial: returns the first parameter — passes only
+        // the (0, 0) test, so 1/3, strictly below the correct
+        // body. This assertion FAILED before the fix (the
+        // trivial body scored the fallback 1.0).
+        let trivial = make_candidate(IRNode::Var("a".into()), &spec);
+        let scores = evaluate_candidate(&trivial, &spec);
+        assert!((scores.test_pass_ratio - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    /// Phase 53: the FALLBACK keeps its legitimate domain,
+    /// stated explicitly. A spec whose tests exist but NONE
+    /// can be mapped — here sort.morph's shape: tuple inputs
+    /// carrying a lambda for a fn-typed parameter, which the
+    /// evaluator cannot represent as a value — still scores
+    /// every candidate the fallback 1.0, exactly as before
+    /// the tuple fix.
+    #[test]
+    fn evaluate_candidate_unmappable_tests_keep_fallback() {
+        let mut spec = dummy_spec();
+        spec.name = "sort_shape".into();
+        spec.params = vec![
+            Param {
+                name: "list".into(),
+                ty: TypeRef::List(Box::new(TypeRef::Int)),
+                annotations: HashMap::new(),
+            },
+            Param {
+                name: "cmp".into(),
+                ty: TypeRef::Function(
+                    vec![TypeRef::Int, TypeRef::Int],
+                    Box::new(TypeRef::Bool),
+                ),
+                annotations: HashMap::new(),
+            },
+        ];
+        spec.return_type = TypeRef::List(Box::new(TypeRef::Int));
+        spec.tests = vec![Test {
+            name: None,
+            input: Expr::Call(
+                "__tuple__".into(),
+                vec![
+                    Expr::Call(
+                        "List".into(),
+                        vec![Expr::IntLit(3), Expr::IntLit(1), Expr::IntLit(2)],
+                    ),
+                    Expr::Lambda(
+                        vec![
+                            ("a".into(), TypeRef::Named("_".into())),
+                            ("b".into(), TypeRef::Named("_".into())),
+                        ],
+                        Box::new(Expr::BinOp(
+                            BinOp::Lt,
+                            Box::new(Expr::Var("a".into())),
+                            Box::new(Expr::Var("b".into())),
+                        )),
+                    ),
+                ],
+            ),
+            expected_output: Expr::Call(
+                "List".into(),
+                vec![Expr::IntLit(1), Expr::IntLit(2), Expr::IntLit(3)],
+            ),
+            timeout_ms: None,
+            property: false,
+        }];
+        // The identity body — the class Phase 52 measured
+        // being crowned for sort — still gets the fallback
+        // 1.0: no test could be mapped, so there is no truth
+        // signal to measure, by the recorded FALLBACK policy.
+        let identity = make_candidate(IRNode::Var("list".into()), &spec);
+        let scores = evaluate_candidate(&identity, &spec);
+        assert!((scores.test_pass_ratio - 1.0).abs() < 1e-9);
     }
 
     /// The TestInduced shape — a match on the input with one
