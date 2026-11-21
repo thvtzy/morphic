@@ -616,13 +616,39 @@ fn escape_rust_char(c: char) -> String {
 /// String. A string literal renders as a &str, so in left
 /// position it takes the same `.to_string()` ownership the
 /// typed emitter applies in expectation positions; every
-/// other operand shape (Var, Call, nested Concat, …)
-/// already evaluates to a String value and renders as
-/// usual.
+/// other operand shape (Call, nested Concat, …) already
+/// evaluates to a fresh String value and renders as usual.
+///
+/// Phase 39 (E0382, Concat-operand move — the second
+/// scoped unfreeze, user-approved 2026-11-21): a VARIABLE
+/// is not a fresh value — rendering it bare MOVES it, so
+/// a template that uses one String parameter two or more
+/// times on an execution path (the statement templates'
+/// `pad` / `pad_inner`, repeated in a single `++` chain)
+/// failed E0382, borrow of moved value. The borrow-based
+/// alternative does not exist (`&String + &str` has no
+/// `Add` impl — string concatenation requires an owned
+/// String on the left, verified empirically), so the Var
+/// takes the literal treatment's own analogue: an owned
+/// copy, `.clone()` (the emitter's Clone-op rendering).
+/// The clone is value-transparent — the IR is pure — so
+/// every previously compiling rendering keeps its
+/// behavior; only its bytes move (single-use Var-left
+/// renderings included: whether a bare move is legal
+/// depends on uses anywhere later on the path, which an
+/// operand renderer cannot see — see the Phase 39
+/// inventory in ROAD_TO_SELF_HOSTING.md). The match is on
+/// the DIRECT node only, as with the literal arm: a
+/// Typed-wrapped variable delegates through the typed
+/// walker and is outside this treatment (no measured
+/// winner has that shape).
 fn concat_owned_operand(node: &IRNode) -> String {
     match node {
         IRNode::Literal(IRLiteral::String(s)) => {
             format!("\"{}\".to_string()", escape_rust_str(s))
+        }
+        IRNode::Var(name) => {
+            format!("{}.clone()", rust_ident(name))
         }
         _ => ir_to_rust_expr(node),
     }
@@ -2614,6 +2640,218 @@ mod tests {
             )),
         ));
         assert_eq!(nested, "(\"x\".to_string() + &(\"y\".to_string() + &s))");
+    }
+
+    // ── Phase 39: E0382 Concat-operand move ──────────────
+    //
+    // The fourth rendering family (Phase 36, Finding 2):
+    // Concat's rendered `+` MOVES a String variable in
+    // left-operand position. Phase 29 owned a literal there
+    // and borrowed right operands, but a variable used two
+    // or more times on one execution path — the statement
+    // templates' pad / pad_inner, repeated in a single `++`
+    // chain — fails E0382 (borrow of moved value). The
+    // tests below render the four measured winners' body
+    // shapes through the full generator and assert the
+    // emitted Rust compiles AND executes correctly (the
+    // compile_and_run discipline of Phase 29).
+
+    fn concat_chain(parts: Vec<IRNode>) -> IRNode {
+        let mut it = parts.into_iter();
+        let first = it.next().unwrap();
+        it.fold(first, |acc, p| {
+            IRNode::BinOp(IRBinOp::Concat, Box::new(acc), Box::new(p))
+        })
+    }
+
+    fn lit(s: &str) -> IRNode {
+        IRNode::Literal(IRLiteral::String(s.into()))
+    }
+
+    fn var(name: &str) -> IRNode {
+        IRNode::Var(name.into())
+    }
+
+    #[test]
+    fn rust_concat_var_left_renders_clone() {
+        // The unit shape: a variable in Concat left position
+        // takes the owned-copy treatment (`.clone()`, the
+        // literal treatment's analogue); a variable on the
+        // right stays borrowed, a literal left stays
+        // `.to_string()`.
+        assert_eq!(
+            ir_to_rust_expr(&IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(var("x")),
+                Box::new(lit("a")),
+            )),
+            "(x.clone() + \"a\")"
+        );
+        assert_eq!(
+            ir_to_rust_expr(&IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(var("x")),
+                Box::new(var("y")),
+            )),
+            "(x.clone() + &y)"
+        );
+    }
+
+    #[test]
+    fn rust_stmt_template_pad_reuse_compiles_and_runs() {
+        // rust_stmt_hole_text's seed body, verbatim shape:
+        // pad used twice in one chain.
+        let hole_body = concat_chain(vec![
+            var("pad"),
+            lit("// TODO: synthesis incomplete\n"),
+            var("pad"),
+            lit("panic!(\"Hole not filled\");\n"),
+        ]);
+        assert_eq!(
+            ir_to_rust_expr(&hole_body),
+            "(((pad.clone() + \"// TODO: synthesis incomplete\\n\") + &pad) + \"panic!(\\\"Hole not filled\\\");\\n\")"
+        );
+        let cand = candidate_with(
+            "stmt_hole_text",
+            vec![("pad", TypeRef::String)],
+            TypeRef::String,
+            hole_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(stmt_hole_text(\"    \".to_string()), \"    // TODO: synthesis incomplete\\n    panic!(\\\"Hole not filled\\\");\\n\");\n\
+             assert_eq!(stmt_hole_text(String::new()), \"// TODO: synthesis incomplete\\npanic!(\\\"Hole not filled\\\");\\n\");\n\
+             println!(\"hole ok\");",
+        );
+        assert!(out.contains("hole ok"), "run output: {}", out);
+
+        // rust_stmt_for_text's shape: pad opens the line and
+        // pads the closing brace.
+        let for_body = concat_chain(vec![
+            var("pad"),
+            lit("for "),
+            var("v"),
+            lit(" in "),
+            var("start"),
+            lit(".."),
+            var("end"),
+            lit(" {\n"),
+            var("body"),
+            var("pad"),
+            lit("}\n"),
+        ]);
+        let cand = candidate_with(
+            "stmt_for_text",
+            vec![
+                ("pad", TypeRef::String),
+                ("v", TypeRef::String),
+                ("start", TypeRef::String),
+                ("end", TypeRef::String),
+                ("body", TypeRef::String),
+            ],
+            TypeRef::String,
+            for_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(stmt_for_text(\"  \".to_string(), \"i\".to_string(), \"0\".to_string(), \"3\".to_string(), \"  x;\\n\".to_string()), \"  for i in 0..3 {\\n  x;\\n  }\\n\");\n\
+             println!(\"for ok\");",
+        );
+        assert!(out.contains("for ok"), "run output: {}", out);
+
+        // rust_stmt_match_arm_text's shape: pad_inner frames
+        // the arm on both sides.
+        let arm_body = concat_chain(vec![
+            var("pad_inner"),
+            var("pat"),
+            lit(" => {\n"),
+            var("body"),
+            var("pad_inner"),
+            lit("},\n"),
+        ]);
+        let cand = candidate_with(
+            "stmt_match_arm_text",
+            vec![
+                ("pad_inner", TypeRef::String),
+                ("pat", TypeRef::String),
+                ("body", TypeRef::String),
+            ],
+            TypeRef::String,
+            arm_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(stmt_match_arm_text(\"    \".to_string(), \"Some(x)\".to_string(), \"        x\\n\".to_string()), \"    Some(x) => {\\n        x\\n    },\\n\");\n\
+             println!(\"arm ok\");",
+        );
+        assert!(out.contains("arm ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_stmt_while_invariant_pad_thrice_compiles_and_runs() {
+        // rust_stmt_while_text's invariant branch: pad three
+        // times in one chain (comment line, loop head,
+        // closing brace), inv once on the right.
+        let while_body = concat_chain(vec![
+            var("pad"),
+            lit("// invariant: "),
+            var("inv"),
+            lit("\n"),
+            var("pad"),
+            lit("while "),
+            var("cond"),
+            lit(" {\n"),
+            var("body"),
+            var("pad"),
+            lit("}\n"),
+        ]);
+        let cand = candidate_with(
+            "stmt_while_text",
+            vec![
+                ("pad", TypeRef::String),
+                ("inv", TypeRef::String),
+                ("cond", TypeRef::String),
+                ("body", TypeRef::String),
+            ],
+            TypeRef::String,
+            while_body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(stmt_while_text(\"  \".to_string(), \"x > 0\".to_string(), \"c\".to_string(), \"    s;\\n\".to_string()), \"  // invariant: x > 0\\n  while c {\\n    s;\\n  }\\n\");\n\
+             println!(\"while ok\");",
+        );
+        assert!(out.contains("while ok"), "run output: {}", out);
+    }
+
+    #[test]
+    fn rust_concat_var_reused_after_chain_compiles_and_runs() {
+        // A variable moved by a chain and then used again by
+        // a LATER statement: the Let value consumes x in a
+        // Concat, the Let's body uses x again. Pre-fix this
+        // is the same E0382, one statement later.
+        let body = IRNode::Block(vec![IRNode::Let {
+            name: "y".into(),
+            value: Box::new(concat_chain(vec![var("x"), lit("a")])),
+            body: Box::new(concat_chain(vec![var("x"), var("y")])),
+        }]);
+        let cand = candidate_with(
+            "reuse_after",
+            vec![("x", TypeRef::String)],
+            TypeRef::String,
+            body,
+        );
+        let code = generate(&cand, "rust").unwrap();
+        let out = compile_and_run(
+            &code,
+            "assert_eq!(reuse_after(\"m\".to_string()), \"mma\");\n\
+             println!(\"reuse ok\");",
+        );
+        assert!(out.contains("reuse ok"), "run output: {}", out);
     }
 
     #[test]
