@@ -7243,6 +7243,26 @@ spec exclaim {
     /// body the gate kept Z3 from judging), and the
     /// resolver-visible diff over all 138 specs shows the
     /// new family moved no resolver body anywhere.
+    /// Phase 55 REPLACES three bodies in place and appends
+    /// four: the spec amendments changed the guard-table
+    /// bodies of spec_binop_symbol (six rows now carry
+    /// their real symbols), rust_expr_form (Lambda leaves
+    /// the fallback family for the closure family) and
+    /// rust_expr_fixed_text (the Lambda row is gone) —
+    /// amended specs' bodies legitimately change, and the
+    /// replacement lines are exactly the amended specs'
+    /// resolver-visible bodies. The four appends are the
+    /// phase's three new equation templates
+    /// (rust_expr_lambda_text, rust_expr_list_text,
+    /// rust_expr_tuple_text) and rust_file_text, whose
+    /// equation the placement amendment reordered — a body
+    /// corrected by a phase joins the fixture, as in
+    /// Phase 37: 45 Codegen bodies, 62 total. The other 55
+    /// bodies are asserted byte-identical below, unchanged.
+    /// (rust_expr_call_form, the phase's fourth new spec,
+    /// has no seed body — String-equality guards are the
+    /// recorded unadmitted family, like rust_target_route
+    /// and rust_ident_empty, which are likewise absent.)
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -7255,7 +7275,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 58, "41 Codegen + 14 M2 + 3 tokenizer golden bodies");
+        assert_eq!(expected.len(), 62, "45 Codegen + 14 M2 + 3 tokenizer golden bodies");
         let mut modules: Vec<(String, Vec<FunctionSpec>)> = ["validator", "printer", "codegen"]
             .iter()
             .map(|f| (f.to_string(), load_m2_module(f)))

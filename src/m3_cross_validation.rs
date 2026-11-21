@@ -3,13 +3,17 @@
 //  (Phase 41: the sweeps now cover all 112 specs — slice
 //  6's 6 driver specs extended here from their mirrors in
 //  tests/m3_proof.rs, on the Phase 31/36 pattern. The
-//  seed-shape diagnostic below counts 112 since Phase 40.)
+//  seed-shape diagnostic below counts 112 since Phase 40.
+//  Phase 55: the spec amendments add 4 specs — the Call
+//  dispatch classification and the list / tuple / closure
+//  templates of the spec-expression walker — for 116
+//  total; slice 2's count below reads 24 accordingly.)
 //
 //  Generalizes the M2 cross-validation harness
 //  (src/m2_cross_validation.rs) to the Codegen module. For
-//  every one of the 112 specs in
+//  every one of the 116 specs in
 //  examples/self_host/codegen.morph (slice 1: 8 leaf mappings;
-//  slice 2: 20 small template families; slice 3: 16 name/text
+//  slice 2: 24 small template families; slice 3: 16 name/text
 //  assembly specs; slice 4: 35 expression-walker specs;
 //  slice 5: 27 statement-walker specs — 7 classifications
 //  and 20 templates; slice 6: 6 driver specs — the dispatch
@@ -538,16 +542,16 @@ mod xval3 {
             1 => Mirror::Text("-"),
             2 => Mirror::Text("*"),
             3 => Mirror::Text("/"),
-            4 => Mirror::Text("?"),
+            4 => Mirror::Text("%"),
             5 => Mirror::Text("&&"),
             6 => Mirror::Text("||"),
             7 => Mirror::Text("=="),
             8 => Mirror::Text("!="),
-            9 => Mirror::Text("?"),
-            10 => Mirror::Text("?"),
-            11 => Mirror::Text("?"),
-            12 => Mirror::Text("?"),
-            13 => Mirror::Text("?"),
+            9 => Mirror::Text("<"),
+            10 => Mirror::Text("<="),
+            11 => Mirror::Text(">"),
+            12 => Mirror::Text(">="),
+            13 => Mirror::Text("+"),
             _ => Mirror::Unpinned,
         }
     }
@@ -675,16 +679,38 @@ mod xval3 {
             4 => Mirror::Int(3),
             7 => Mirror::Int(4),
             8 => Mirror::Int(5),
-            2 | 5 | 6 | 9 | 10 | 11 | 12 => Mirror::Int(6),
+            10 => Mirror::Int(7),
+            2 | 5 | 6 | 9 | 11 | 12 => Mirror::Int(6),
             _ => Mirror::Unpinned,
         }
     }
 
     fn rust_expr_fixed_text(kind: i64) -> Mirror {
         match kind {
-            2 | 5 | 6 | 9 | 10 | 11 | 12 => Mirror::Text("??"),
+            2 | 5 | 6 | 9 | 11 | 12 => Mirror::Text("??"),
             _ => Mirror::Unpinned,
         }
+    }
+
+    fn rust_expr_call_form(name: &str) -> Mirror {
+        match name {
+            "List" => Mirror::Int(1),
+            "__tuple__" => Mirror::Int(2),
+            "None" => Mirror::Int(3),
+            _ => Mirror::Int(0),
+        }
+    }
+
+    fn rust_expr_list_text(args: &str) -> Mirror {
+        Mirror::Owned(format!("vec![{}]", args))
+    }
+
+    fn rust_expr_tuple_text(args: &str) -> Mirror {
+        Mirror::Owned(format!("({})", args))
+    }
+
+    fn rust_expr_lambda_text(params: &str, body: &str) -> Mirror {
+        Mirror::Owned(format!("|{}| {}", params, body))
     }
 
     fn rust_constraint_form(kind: i64) -> Mirror {
@@ -1516,7 +1542,7 @@ mod xval3 {
         match rust_file_fixed_text(0) {
             Mirror::Text(brace) => Mirror::Owned(format!(
                 "{}{}{}{}{}{}",
-                header, pre_block, signature, body, brace, test_module
+                header, signature, pre_block, body, brace, test_module
             )),
             _ => unreachable!("piece 0 is a fixed text"),
         }
@@ -1555,6 +1581,10 @@ mod xval3 {
             }
             ("rust_expr_form", In::Int(a)) => rust_expr_form(*a),
             ("rust_expr_fixed_text", In::Int(a)) => rust_expr_fixed_text(*a),
+            ("rust_expr_call_form", In::Text(s)) => rust_expr_call_form(s),
+            ("rust_expr_list_text", In::Text(s)) => rust_expr_list_text(s),
+            ("rust_expr_tuple_text", In::Text(s)) => rust_expr_tuple_text(s),
+            ("rust_expr_lambda_text", In::StrPair(p, b)) => rust_expr_lambda_text(p, b),
             ("rust_constraint_form", In::Int(a)) => rust_constraint_form(*a),
             ("rust_constraint_fixed_text", In::Int(a)) => rust_constraint_fixed_text(*a),
             ("rust_order_form", In::Int(a)) => rust_order_form(*a),
@@ -1767,7 +1797,7 @@ mod xval3 {
     /// whole module and the grand totals below are module
     /// totals. Phase 36: slice 5's 27 statement-walker specs
     /// join — 106 in total.)
-    const ALL_SPECS: [&str; 112] = [
+    const ALL_SPECS: [&str; 116] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -1791,6 +1821,10 @@ mod xval3 {
         "rust_pattern_ctor_name",
         "rust_expr_form",
         "rust_expr_fixed_text",
+        "rust_expr_call_form",
+        "rust_expr_list_text",
+        "rust_expr_tuple_text",
+        "rust_expr_lambda_text",
         "rust_constraint_form",
         "rust_constraint_fixed_text",
         "rust_order_form",
@@ -1938,6 +1972,47 @@ mod xval3 {
     /// representative rendered constructor names from the
     /// assembly mirrors' golden tests.
     const CTOR_NAMES: [&str; 7] = ["Some", "None", "Ok", "Err", "Pair", "Leaf", ""];
+
+    /// Call names for the rust_expr_call_form sweep
+    /// (Phase 55): the three pseudo-call names, near-miss
+    /// case variants, genuine call names, and the empty
+    /// name. The classification is total and exact-match,
+    /// so every case is pinned.
+    const CALL_FORM_NAMES: [&str; 12] = [
+        "List",
+        "__tuple__",
+        "None",
+        "Some",
+        "Ok",
+        "max",
+        "list",
+        "LIST",
+        "none",
+        "__Tuple__",
+        "",
+        "f",
+    ];
+
+    /// Pre-rendered, pre-joined argument texts for the
+    /// rust_expr_list_text / rust_expr_tuple_text sweeps
+    /// (Phase 55): empty, single, joined, string-shaped
+    /// and nested-tuple-shaped renderings. Both templates
+    /// are total equations, so every case is pinned.
+    const ARG_TEXTS: [&str; 6] = ["", "1", "1, 2", "a, b, c", "\"x\"", "(1, 2)"];
+
+    /// (params, body) pairs for the rust_expr_lambda_text
+    /// sweep (Phase 55): the sort comparator shape, a
+    /// single parameter, an empty parameter list, a
+    /// parenthesized body and a bare flag body. The
+    /// template is a total equation, so every case is
+    /// pinned.
+    const EXPR_LAMBDA_PAIRS: [(&str, &str); 5] = [
+        ("a, b", "(a < b)"),
+        ("x", "x"),
+        ("", "0"),
+        ("a", "(a + 1)"),
+        ("cmp", "flag"),
+    ];
 
     // ── Slice-3 sweep batteries ────────────────────────────
 
@@ -2524,6 +2599,17 @@ mod xval3 {
                 .iter()
                 .map(|(t, f, i, e)| In::Str4(t, f, i, e))
                 .collect(),
+            "rust_expr_call_form" => CALL_FORM_NAMES
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            "rust_expr_list_text" | "rust_expr_tuple_text" => {
+                ARG_TEXTS.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_expr_lambda_text" => EXPR_LAMBDA_PAIRS
+                .iter()
+                .map(|(p, b)| In::StrPair(p, b))
+                .collect(),
             // ── slice 4 ──
             "rust_binop_infix_text" => INFIX_CASES
                 .iter()
@@ -2778,8 +2864,9 @@ mod xval3 {
                 .iter()
                 .map(|s| In::Text(s))
                 .collect(),
-            // tests: add 0, neq 8, mod-fallback 4, lt-fallback 9
-            "spec_binop_symbol" => ints(&[0, 8, 4, 9]),
+            // tests: add 0, neq 8, mod-symbol 4, lt-symbol 9,
+            // concat-symbol 13
+            "spec_binop_symbol" => ints(&[0, 8, 4, 9, 13]),
             // ── slice 2 ──
             // tests: scalar 0, name 14, list 16, map 18, tuple 21, array 22, function 23
             "rust_type_form" => ints(&[0, 14, 16, 18, 21, 22, 23]),
@@ -2814,10 +2901,36 @@ mod xval3 {
             "rust_pattern_ctor_name" => {
                 vec![In::Pair("Some", false), In::Pair("", false)]
             }
-            // tests: var 0, floatlit-fallback 2, call 7, binop 8, comprehension 12
-            "rust_expr_form" => ints(&[0, 2, 7, 8, 12]),
+            // tests: var 0, floatlit-fallback 2, call 7, binop 8,
+            // lambda 10, comprehension 12
+            "rust_expr_form" => ints(&[0, 2, 7, 8, 10, 12]),
             // tests: floatlit 2, unaryop 9
             "rust_expr_fixed_text" => ints(&[2, 9]),
+            // tests: list/tuple/none forms, some/plain/case/
+            // empty calls (the complete in-spec test set)
+            "rust_expr_call_form" => {
+                ["List", "__tuple__", "None", "Some", "max", "list", ""]
+                    .iter()
+                    .map(|s| In::Text(s))
+                    .collect()
+            }
+            // tests: list-text, list-empty
+            "rust_expr_list_text" => ["1, 2", ""]
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            // tests: tuple-text, tuple-three
+            "rust_expr_tuple_text" => ["1, 2", "a, b, c"]
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            // No in-spec tests exist (multi-input spec);
+            // golden cases are the proof file's pinned
+            // assertions for the closure template.
+            "rust_expr_lambda_text" => vec![
+                In::StrPair("a, b", "(a < b)"),
+                In::StrPair("x", "x"),
+            ],
             // tests: true 0, and 5, or-swallowed 6, not 7, order 9
             "rust_constraint_form" => ints(&[0, 5, 6, 7, 9]),
             // tests: true 0, or 6, predicate 10
@@ -3746,7 +3859,7 @@ mod xval3 {
     // ─────────────────────────────────────────────────────────
 
     #[test]
-    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 112 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
+    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 116 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
     fn m3_cross_validation() {
         let root = env!("CARGO_MANIFEST_DIR");
         let out_dir = format!("{}/target/m3-synthesis", root);
@@ -4113,8 +4226,12 @@ mod xval3 {
     /// and the remaining four are total equations /
     /// selections over their batteries).
     /// The harness's bookkeeping stands or falls with these
-    /// numbers, so they are pinned here, per spec, all 112.
-    const PINNED_TOTALS: [(&str, usize); 112] = [
+    /// numbers, so they are pinned here, per spec, all 116.
+    /// (Phase 55: rust_expr_fixed_text drops to 6 — the
+    /// Lambda row left its table — and the four new specs
+    /// join, each total over its battery: call_form 12,
+    /// list_text 6, tuple_text 6, lambda_text 5.)
+    const PINNED_TOTALS: [(&str, usize); 116] = [
         ("rust_type_name", 14),
         ("rust_binop_symbol", 17),
         ("rust_unaryop_symbol", 2),
@@ -4137,7 +4254,11 @@ mod xval3 {
         ("rust_pattern_literal_text", 3),
         ("rust_pattern_ctor_name", 7),
         ("rust_expr_form", 13),
-        ("rust_expr_fixed_text", 7),
+        ("rust_expr_fixed_text", 6),
+        ("rust_expr_call_form", 12),
+        ("rust_expr_list_text", 6),
+        ("rust_expr_tuple_text", 6),
+        ("rust_expr_lambda_text", 5),
         ("rust_constraint_form", 11),
         ("rust_constraint_fixed_text", 7),
         ("rust_order_form", 4),
@@ -4434,8 +4555,8 @@ mod xval3 {
             let (_, pinned, unpinned) = totals(name, &sw);
             assert_eq!((pinned, unpinned), (n, 0), "{}", name);
         }
-        // Grand totals across the module: 3881 cases per
-        // run, 2962 pinned, 912 spec-silent, 7 out of
+        // Grand totals across the module: 3910 cases per
+        // run, 2990 pinned, 913 spec-silent, 7 out of
         // contract. (Slices 1–3: 2196 cases, 1533 pinned,
         // 656 silent — Phase 29 moved the literal specs'
         // three special-contents cases each from pinned to
@@ -4450,11 +4571,15 @@ mod xval3 {
         // rust_target_route 23 / 23, the result form's
         // band 33 / 7 (its 26 off-route codes are the
         // slice's only silent cases), and the four total
-        // batteries 18 / 18.)
+        // batteries 18 / 18. Phase 55 adds 29 cases, all
+        // pinned — the four new specs' batteries (12 + 6
+        // + 6 + 5) — and moves one case from pinned to
+        // spec-silent: rust_expr_fixed_text's kind-10
+        // case, unpinned since Lambda left its table.)
         let total_cases: usize = ALL_SPECS.iter().map(|n| sweep(n).len()).sum();
         let total_pinned: usize = PINNED_TOTALS.iter().map(|(_, t)| t).sum();
-        assert_eq!(total_cases, 3881);
-        assert_eq!(total_pinned, 2962);
+        assert_eq!(total_cases, 3910);
+        assert_eq!(total_pinned, 2990);
     }
 
     #[test]
@@ -4694,7 +4819,16 @@ mod xval3 {
         // unadmitted family, unrecognized BY DESIGN (the
         // probe measures a deterministic Verified pool
         // winner for it instead — see the Phase 41 record).
-        const RECOGNIZED: [&str; 98] = [
+        //
+        // Phase 55 flip: the spec amendments add four
+        // specs (116 total). The three new templates are
+        // pure `++` equations and are recognized by
+        // equation — the iterated set grows to 101.
+        // rust_expr_call_form joins the unrecognized set
+        // below: its rows are String-equality leaves, the
+        // same recorded unadmitted family as
+        // rust_target_route's, unrecognized BY DESIGN.
+        const RECOGNIZED: [&str; 101] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -4759,9 +4893,13 @@ mod xval3 {
             "rust_unsupported_target_text", "rust_doc_header_text",
             "rust_file_text", "rust_target_result_form",
             "rust_driver_section_text",
+            // ── Phase 55: the three new `++` templates
+            // via equation ──
+            "rust_expr_list_text", "rust_expr_tuple_text",
+            "rust_expr_lambda_text",
         ];
         let functions = load_codegen_module();
-        assert_eq!(functions.len(), 112, "module spec count");
+        assert_eq!(functions.len(), 116, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
             if !RECOGNIZED.contains(&func.name.as_str()) {
@@ -4788,6 +4926,11 @@ mod xval3 {
             // same String-equality shape at table scale —
             // seven name rows plus a catch-all — and stays
             // unrecognized by the same design ──
+            "rust_expr_call_form",
+            // ── Phase 55: the Call dispatch is the same
+            // String-equality shape — three name rows plus
+            // a catch-all — unrecognized by the same
+            // design ──
         ] {
             assert!(
                 index.callee_body(name).is_none(),

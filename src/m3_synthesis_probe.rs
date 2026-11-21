@@ -7,8 +7,8 @@
 //  to the Codegen module: runs the real build pipeline (parse →
 //  typecheck → synthesize at opt level 1 → verify_all (Z3) →
 //  select_best → codegen) for every spec in
-//  examples/self_host/codegen.morph (all 112: the 8 slice-1 leaf
-//  mappings, the 20 slice-2 template families, the 16 slice-3
+//  examples/self_host/codegen.morph (all 116: the 8 slice-1 leaf
+//  mappings, the 24 slice-2 template families, the 16 slice-3
 //  name/text-assembly specs, the 35 slice-4 expression-
 //  walker specs, the 27 slice-5 statement-walker specs, and
 //  the 6 slice-6 driver specs —
@@ -35,8 +35,11 @@
 //  compiled; Phase 29 fixed that rendering family under the
 //  user's unfreeze, and its re-measurement recorded 44/44
 //  compiles per run over slices 1–3 — the probe now runs all
-//  112 specs and reports the rustc verdict per winner, never
-//  a judgment.
+//  116 specs and reports the rustc verdict per winner, never
+//  a judgment. (Phase 55 added the 4 newest slice-2 specs:
+//  the Call dispatch classification — String-equality rows,
+//  the rust_target_route shape, predicted seedless by
+//  design — and the list / tuple / closure templates.)
 //
 //  For the specs the phase records predict seedless the probe
 //  additionally dumps one CAND3 line per verified-pool
@@ -182,8 +185,11 @@ mod probe3 {
     /// questions (rust_target_route, seedless by design —
     /// its pool dump is the determinism evidence;
     /// rust_target_result_form; rust_driver_section_text;
-    /// rust_file_text).
-    const SEEDLESS_WATCH: [&str; 19] = [
+    /// rust_file_text), and in Phase 55 by
+    /// rust_expr_call_form (seedless by design — the same
+    /// String-equality shape; its pool dump is the
+    /// determinism evidence).
+    const SEEDLESS_WATCH: [&str; 20] = [
         "rust_ident_suffix",
         "rust_ident_empty",
         "rust_string_ownership",
@@ -205,6 +211,8 @@ mod probe3 {
         "rust_target_result_form",
         "rust_driver_section_text",
         "rust_file_text",
+        // ── Phase 55 ──
+        "rust_expr_call_form",
     ];
 
     /// Body facts for the CAND3 pool dump: the spec names this

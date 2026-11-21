@@ -119,7 +119,18 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
 
     let ret = ty_to_rust(&candidate.spec.return_type);
 
-    // Precondition asserts (debug-only)
+    // Function definition
+    out.push_str(&format!(
+        "pub fn {}{}({}) -> {} {{\n",
+        rust_ident(&candidate.spec.name), generics, params.join(", "), ret
+    ));
+
+    // Precondition asserts (debug-only), at the head of the
+    // function body (Phase 55): through Phase 54 this block
+    // was emitted before the signature as a free-standing
+    // module-level block, which no Rust file can parse; the
+    // block's text is unchanged, only its position moved
+    // (rust_file_text's equation states the order).
     if !candidate.spec.preconditions.is_empty() {
         out.push_str("#[cfg(debug_assertions)]\n");
         out.push_str("{\n");
@@ -129,12 +140,6 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
         }
         out.push_str("}\n\n");
     }
-
-    // Function definition
-    out.push_str(&format!(
-        "pub fn {}{}({}) -> {} {{\n",
-        rust_ident(&candidate.spec.name), generics, params.join(", "), ret
-    ));
 
     // Body — a tail position: its value is the function's return
     // value, so it is rendered with the tail renderer (the same
@@ -163,10 +168,28 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
             let test_name = test.name.clone().unwrap_or_else(|| format!("test_{}", i));
             out.push_str(&format!("    #[test]\n"));
             out.push_str(&format!("    fn {}() {{\n", rust_ident(&test_name)));
+            // A tuple test input whose arity equals the
+            // parameter count spreads its elements into the
+            // call positionally (rust_test_case's doc states
+            // the rule; the same arity rule Phase 53's
+            // evaluation binding uses). Every other input
+            // renders as a single expression.
+            let input_text = match &test.input {
+                Expr::Call(name, args)
+                    if name == "__tuple__"
+                        && args.len() == candidate.spec.params.len() =>
+                {
+                    args.iter()
+                        .map(expr_to_rust)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+                other => expr_to_rust(other),
+            };
             out.push_str(&format!(
                 "        let result = {}({});\n",
                 rust_ident(&candidate.spec.name),
-                expr_to_rust(&test.input)
+                input_text
             ));
             out.push_str(&format!(
                 "        assert_eq!(result, {});\n",
@@ -1388,17 +1411,41 @@ fn expr_to_rust(expr: &Expr) -> String {
         Expr::Var(name) => rust_ident(name),
         Expr::Call(name, args) => {
             let args_str: Vec<String> = args.iter().map(expr_to_rust).collect();
-            format!("{}({})", rust_ident(name), args_str.join(", "))
+            // The parser's pseudo-calls (rust_expr_call_form,
+            // Phase 55): the list literal renders as the vec
+            // literal, the tuple literal as a Rust tuple, and
+            // the zero-argument None as the bare constructor.
+            // Every other call keeps the plain call template.
+            match name.as_str() {
+                "List" => format!("vec![{}]", args_str.join(", ")),
+                "__tuple__" => format!("({})", args_str.join(", ")),
+                "None" => "None".to_string(),
+                _ => format!("{}({})", rust_ident(name), args_str.join(", ")),
+            }
         }
         Expr::BinOp(op, lhs, rhs) => {
             let rust_op = match op {
                 BinOp::Add => "+", BinOp::Sub => "-",
                 BinOp::Mul => "*", BinOp::Div => "/",
+                BinOp::Mod => "%",
                 BinOp::Eq => "==", BinOp::Neq => "!=",
                 BinOp::And => "&&", BinOp::Or => "||",
-                _ => "?",
+                BinOp::Lt => "<", BinOp::Le => "<=",
+                BinOp::Gt => ">", BinOp::Ge => ">=",
+                BinOp::Concat => "+",
             };
             format!("({} {} {})", expr_to_rust(lhs), rust_op, expr_to_rust(rhs))
+        }
+        // The closure template (rust_expr_lambda_text,
+        // Phase 55): parameter names only — the generated
+        // closure is unannotated, as in the IR walker's
+        // Lambda arm.
+        Expr::Lambda(params, body) => {
+            let names: Vec<String> = params
+                .iter()
+                .map(|(name, _)| rust_ident(name))
+                .collect();
+            format!("|{}| {}", names.join(", "), expr_to_rust(body))
         }
         _ => "??".into(),
     }
