@@ -554,8 +554,8 @@ spec test_tokenizer_equivalence {
 ### W0: Scope audit
 
 - [x] Audit what “Morphic in the browser” can honestly mean (Phase 65)
-- [ ] Owner scope decision (D1 below)
-- [ ] W1: Core extraction + WASM build
+- [x] Owner scope decision (D1 below) — **D1–D6 all ratified as recommended, 2026-11-21**
+- [x] W1: Core extraction + WASM build — **Phase 66, gate passed (below)**
 - [ ] W2: Check playground MVP
 - [ ] W3: Interpreter-judged synthesis
 - [ ] W4: Worker, performance, and UX hardening
@@ -617,12 +617,12 @@ spec test_tokenizer_equivalence {
 > **(F) The v0.6 roadmap (draft — gates are measurable; checkboxes stay empty until measured).**
 >
 > ### W1: Core extraction + WASM build
-> - [ ] `src/lib.rs` + string/DTO API; CLI is a shell over it, native outputs unchanged
-> - [ ] Feature seams landed: no-Z3 verifier backend, `compiled-runner` gate, `llm`/`interactive` outside the WASM graph
-> - [ ] Seeded-RNG path for playground runs (D3)
-> - [ ] `cargo build --target wasm32-unknown-unknown --no-default-features --features wasm-playground` succeeds from a clean target dir
-> - [ ] Browser-worker smoke test: `check_source` on a valid + an invalid example returns the same accept/diagnostic class as the native CLI; timing behaviour (S6) measured and recorded
-> - [ ] **Gate**: Native suite green in both standing configurations **and** the WASM build + smoke test pass; the WASM dependency graph contains no `z3-sys`, no `reqwest`, no process-spawning module
+> - [x] `src/lib.rs` + string/DTO API; CLI is a shell over it, native outputs unchanged
+> - [x] Feature seams landed: no-Z3 verifier backend, `compiled-runner` gate, `llm`/`interactive` outside the WASM graph
+> - [x] Seeded-RNG path for playground runs (D3)
+> - [x] `cargo build --target wasm32-unknown-unknown --no-default-features --features wasm-playground` succeeds from a clean target dir
+> - [x] Browser-worker smoke test: `check_source` on a valid + an invalid example returns the same accept/diagnostic class as the native CLI; timing behaviour (S6) measured and recorded
+> - [x] **Gate**: Native suite green in both standing configurations **and** the WASM build + smoke test pass; the WASM dependency graph contains no `z3-sys`, no `reqwest`, no process-spawning module
 >
 > ### W2: Check playground MVP
 > - [ ] Editor + bundled examples + parse/typecheck results with diagnostics positioned in the source
@@ -657,6 +657,30 @@ spec test_tokenizer_equivalence {
 > - **D4 — JS glue.** `wasm-pack` + `wasm-bindgen` wrapper crate (recommended) vs hand-rolled WASM ABI.
 > - **D5 — Hosting.** GitHub Pages static deployment from `playground/` (recommended) vs an external host (name it, and its cost owner).
 > - **D6 — Generated-WAT behaviour.** Text preview + copy/download only in v0.6 (recommended) vs adding in-browser WAT assembly/execution (a new dependency and test surface; name it as scope, not as a free extra).
+>
+> **Owner ratification (2026-11-21): D1–D6 ALL adopted as recommended** — D1 full client-side delivered staged (check MVP ships inside it as W2); D2 executed-test evidence + the explicit “formal verification unavailable in browser build” label; D3 seeded, bounded, LLM-free playground profile; D4 wasm-pack + wasm-bindgen; D5 GitHub Pages from `playground/`; D6 WAT text preview + copy/download only. W1 was scoped and executed on that basis the same day.
+>
+> **Phase 66 (2026-11-21, branch `feat/v06-w1-lib-wasm`) — W1 EXECUTED: core extraction + feature seams + seeded RNG + WASM crate; W1 GATE PASSED.** Suite totals: **default 418 passed / 0 failed / 26 ignored; `bootstrap-codegen` 418 / 0 / 26** (standing baseline 410/0/26 + 8 new tests: 3 API + 5 encodable); **no-Z3/no-runner configuration (`--no-default-features --features wasm-playground`) 344 / 0 / 19**, its delta fully accounted below. Native CLI behaviour unchanged (check/build smoke re-run; the standing suites incl. M2/M3/tokenizer probes pass at standing tallies in every configuration, including against the no-Z3 binary).
+>
+> **Extraction map.** New `src/lib.rs` owns `api`, `codegen`, `spec`, `synthesis`, `timeutil`, `verify` (the `llm` module is deliberately NOT in the lib). `src/main.rs` is a thin CLI: it re-exports the lib modules (`pub use morphic::{codegen, spec, synthesis, verify}`) so the bin-root test/measurement modules keep their `crate::…` paths, keeps `mod llm` (feature `llm-client`), the CLI furniture, and the Phase 58–62 measurement instruments (now behind `compiled-runner`). The module moves were mechanical — `spec/`, `codegen/`, and `eval.rs` logic are byte-untouched. **API (`src/api.rs`, string/DTO in-out):** `check(source) -> CheckReport` (parse + typecheck; per spec: params, return type, postcondition count, and per-test `{index, name, bindable}` — bindability via the new `synthesis::eval::test_bindability`, of which the existing `bindable_test_count` is now a fold); `render(candidate, target)` over `codegen::generate` (no deferral needed — the existing types allowed it directly); `playground_config()` (the D3 profile: opt-level-1 shape, `use_llm: false`, `use_z3` reflecting the build); `synthesize_seeded(source, seed) -> SynthesisReport` (winner body debug text + full score breakdown + verification-status string + `verification_available` flag).
+>
+> **Feature seams** (defaults reproduce today's native build exactly): `default = [z3-support, compiled-runner, interactive, llm-client]`; `llm-remote = [tokio, llm-client]`, `llm-local = [llama-cpp-2]` unchanged in meaning; `bootstrap-codegen` unchanged; new marker `wasm-playground` names the browser profile (`--no-default-features --features wasm-playground`). `reqwest` became `optional` behind `llm-client` so the no-LLM graph excludes it. A target-gated `getrandom/js` dependency resolves S1 for wasm32.
+>
+> **No-Z3 verdict contract (S3 split).** The pure verdict types (`VerificationResult`, `VerificationStatus`, `ConstraintResult`, `Counterexample`, `VerificationError`, `SmtResult`, `SmtValue`) moved verbatim to `src/verify/verdict.rs`; `verify/smt.rs` and all Z3 session/symbolic code are `#[cfg(feature = "z3-support")]`. The no-Z3 `verify_one` returns **Malformed** for holed bodies (same well-formedness test) and otherwise **Inconclusive** with one `holds: false` ConstraintResult per postcondition and `verification_time_ms: 0` — never Verified, never a renamed substitute; interpreter-measured scores are untouched, exactly as the audit's design (E)(ii) required. **Encodability split:** the engine consults `body_is_encodable_with` while building constraint seeds, and that predicate secretly ran the symbolic evaluator over real Z3 ASTs. It is now backed by `src/verify/encodable.rs`, a pure abstract mirror (sorts + Int/Str known-ness) written construct-by-construct against `sym_eval_flow`, cross-checked against the symbolic predicate on every candidate body harvested from validator+printer synthesis pools plus hand-built corners (>100 bodies, exact agreement — `pure_mirror_agrees_with_symbolic_predicate`, Z3 builds only). The cross-check caught one real semantic fact the mirror first got wrong: **Z3's arithmetic constructors do not fold numerals** (`1 + 1` is an application term `Z3_get_numeral_int64` cannot read), so known-ness arises only from literals, `len` of a literal list, and values flowing unchanged through Let/Var/Collection/Match/inlining.
+>
+> **Seeded RNG (D3).** The engine's 13 `rand::thread_rng()` sites now draw from a thread-local `StdRng` behind a clonable `SharedRng` handle (`engine_rng()` / `seed_engine_rng(seed)`); the default is entropy-seeded, so native CLI behaviour is unchanged in kind, and the API seeds it explicitly for playground runs. Determinism rests on the RNG + iteration order alone (measured: the engine never consults `max_time_ms` in the run path). Pinned by `api::tests::seeded_synthesis_is_deterministic` — same seed + same spec → identical winner body, score, and candidate count — passing in all three configurations, and reproduced inside the WASM runtime by the smoke (below).
+>
+> **Compiled-runner seam (H2).** `synthesis::runner` is behind default-on `compiled-runner`; off, `src/synthesis/runner_stub.rs` provides the same surface with `rescore_finalists` as the identity and a single `RunnerOutcome::Unavailable` — Phase 58's documented degradation (“the pool is returned unchanged”), reused, not reinvented. The Phase 58–62 measurement instruments are bin-side and compiled only with the runner. `interactive` is likewise default-on and bin-consumed; with it off, `synthesize --interactive` bails with a clear message (native default unaffected).
+>
+> **Configuration-gated tests (named, with reasons).** In the no-Z3/no-runner configuration only: 45 tests asserting Z3-produced verdicts are `#[cfg(feature = "z3-support")]`-gated — 30 `synthesis::engine` constraint-seed tests (they end by asserting `verify_one` → Verified), 14 `verify::verifier` verdict tests, 1 `synthesis::selector` verified-winner test; the encodable cross-check is Z3-only by construction (it compares against the symbolic predicate). The real runner's 13 unit tests are replaced by the stub (no tests), `verify::smt`'s 3 tests vanish with the module, and the bin loses the 19 Phase 58–62 instrument tests. Lib delta 269→209 passed is exactly these classes; nothing else moved.
+>
+> **WASM graph proof.** `crates/morphic-wasm/` (wasm-bindgen 0.2.123 wrapper; `check` / `synthesize_seeded` / `probe_timing` as JSON strings). `cargo tree -p morphic-wasm --target wasm32-unknown-unknown`: 67 unique packages — **no `z3`/`z3-sys`, no `reqwest`, no `tokio`, no `llama-cpp-2`**; the compiled-runner is feature-excluded, so no `std::process` path exists in the graph. The gate build `cargo build --target wasm32-unknown-unknown --no-default-features --features wasm-playground` succeeds, including from a clean target dir (verified with a fresh `CARGO_TARGET_DIR` on the home disk; /tmp is a 512 MB tmpfs and cannot hold a target dir). Recorded observations for W4's diet: `clap`, `indicatif`, `colored`, and `rayon` ride along as package-level dependencies although the playground path never calls them.
+>
+> **Browser-equivalent smoke (Node 22 + wasm-bindgen `--target nodejs` glue; harness kept with the phase scratch, results here are the record).** `check(validator.morph)` → `ok: true`, 7 specs, 22 tests, 22 bindable — native CLI on the same file: accept (exit 0). `check(truncated spec)` → `ok: false`, stage `parse` — native CLI: reject (exit 1, “Parse error”). **S6 ANSWERED: `std::time::Instant::now()` PANICS on wasm32-unknown-unknown** (“time not implemented on this platform”, `std/src/sys/time/unsupported.rs`) — the probe export throws, as designed to detect. Because the pipeline uses wall-clock only for statistics (engine elapsed counter, verifier `verification_time_ms`; never control flow), W1 landed the seam the audit priced as W3 work: `src/timeutil.rs` `TimeMark` — Instant-backed natively, a zero clock on wasm32 — and after it, **`synthesize_seeded` runs to completion in the WASM runtime**: winner crowned at test ratio 1.000 on the smoke spec, `verification_available: false`, winner status `Inconclusive` (the honest D2 label), and two same-seed runs byte-identical. Playground budgets remain iteration/population caps (D3), now by construction rather than by workaround.
+>
+> **Bundle baseline (for W4's budget):** cargo release `morphic_wasm.wasm` 1,000,891 B; post-bindgen shippable `morphic_wasm_bg.wasm` **546,229 B** (~0.52 MB, no wasm-opt pass — none is installed in this sandbox).
+>
+> **W1 GATE VERDICT: PASSED** — native suite green in both standing configurations, WASM build + Node smoke pass, graph free of z3-sys/reqwest/process-spawning. Residue handed forward: W2 owns the editor page in `playground/` (D5) and the pinned check corpus; W3 owns presenting the seeded synthesis path (already runtime-proven here) with executed-evidence denominators; W4 owns the bundle diet (clap/indicatif/rayon) and the worker shell, with 546,229 B as its baseline.
 
 ## 📋 PRE-FLIGHT CHECKLIST
 
