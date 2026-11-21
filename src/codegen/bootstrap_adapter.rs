@@ -265,32 +265,6 @@ fn spec_binop_code(op: SpecBinOp) -> i64 {
     }
 }
 
-/// Glue transcription of the AMENDED `spec_binop_symbol`
-/// table (Phase 55): the checked-in artifact's winner for
-/// that spec still returns the pre-amendment "?" rows for
-/// Mod/Lt/Le/Gt/Ge/Concat. Phase 56 regenerates the
-/// artifact from the amended specs, at which point this
-/// transcription is replaced by the winner call again.
-fn amended_spec_binop_symbol(code: i64) -> &'static str {
-    match code {
-        0 => "+",
-        1 => "-",
-        2 => "*",
-        3 => "/",
-        4 => "%",
-        5 => "&&",
-        6 => "||",
-        7 => "==",
-        8 => "!=",
-        9 => "<",
-        10 => "<=",
-        11 => ">",
-        12 => ">=",
-        13 => "+",
-        _ => "?",
-    }
-}
-
 fn order_code(op: OrderOp) -> i64 {
     match op {
         OrderOp::LessThan => 0,
@@ -463,38 +437,37 @@ impl Adapter {
                 // Phase 55): 'List' renders as the vec literal,
                 // '__tuple__' as a Rust tuple, 'None' as the
                 // bare constructor. The classification and the
-                // two templates are specced (rust_expr_call_form
-                // / rust_expr_list_text / rust_expr_tuple_text)
-                // but have no artifact modules yet — glue
-                // transcriptions until Phase 56 regenerates
-                // the artifact from the amended specs.
-                match name.as_str() {
-                    "List" => format!("vec![{}]", joined),
-                    "__tuple__" => format!("({})", joined),
-                    "None" => "None".to_string(),
+                // two templates are the artifact winners'
+                // (Phase 56 regeneration landed their modules);
+                // the bare constructor (form 3) is the name
+                // itself, as in the assembly.
+                match syn::rust_expr_call_form::rust_expr_call_form(name.clone()) {
+                    1 => syn::rust_expr_list_text::rust_expr_list_text(joined),
+                    2 => syn::rust_expr_tuple_text::rust_expr_tuple_text(joined),
+                    3 => "None".to_string(),
                     _ => format!("{}({})", rust_ident(name), joined),
                 }
             }
             SpecExpr::BinOp(op, lhs, rhs) => format!(
                 "({} {} {})",
                 self.sexpr_text(lhs)?,
-                // The AMENDED spec_binop_symbol table (Phase
-                // 55), transcribed as glue: the checked-in
-                // artifact's winner still returns the
-                // pre-amendment "?" rows until Phase 56
-                // regenerates it.
-                amended_spec_binop_symbol(spec_binop_code(*op)),
+                // The spec_binop_symbol winner (its table was
+                // amended in Phase 55; the Phase 56 artifact
+                // carries the amended winner).
+                syn::spec_binop_symbol::spec_binop_symbol(spec_binop_code(*op)),
                 self.sexpr_text(rhs)?,
             ),
             // The closure template (rust_expr_lambda_text,
             // Phase 55): parameter names only, the body
-            // rendered by this same walker. Specced but not
-            // yet an artifact module — glue transcription
-            // until Phase 56 regenerates the artifact.
+            // rendered by this same walker; composed through
+            // the artifact winner (Phase 56).
             SpecExpr::Lambda(params, body) => {
                 let names: Vec<String> =
                     params.iter().map(|(n, _)| rust_ident(n)).collect();
-                format!("|{}| {}", names.join(", "), self.sexpr_text(body)?)
+                syn::rust_expr_lambda_text::rust_expr_lambda_text(
+                    names.join(", "),
+                    self.sexpr_text(body)?,
+                )
             }
             // Every kind without an arm: the fixed text the
             // rust_expr_fixed_text table pins ("??").
@@ -1097,10 +1070,8 @@ impl Adapter {
         // Precondition block: presence is non-emptiness.
         // Its position in the file is rust_file_text's
         // composition — the AMENDED equation places it
-        // after the signature, but the checked-in
-        // artifact's winner still composes the
-        // pre-amendment order until Phase 56 regenerates
-        // it (the recorded stale-artifact state).
+        // after the signature, and the Phase 56 artifact's
+        // winner composes the amended order.
         let pre_block = if spec.preconditions.is_empty() {
             syn::rust_driver_section_text::rust_driver_section_text(false, String::new())
         } else {

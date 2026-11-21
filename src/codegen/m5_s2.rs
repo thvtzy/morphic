@@ -590,3 +590,323 @@ fn m5_s2_roundtrip_behavioral() {
     }
     println!("M5S2-BEHAVIORAL|DONE|both binaries built sort.morph end-to-end on every draw; per-draw outcomes in target/m5-s2/behavioral-report.md");
 }
+
+// ── Phase 56: the deferred build measurements ─────────────
+//
+// Phase 54's steps 4–5, deferred because the vehicle (the
+// generated test module) was itself the broken rendering.
+// After the Phase 55 amendments + the Phase 56 cascade, the
+// claims to measure, per drawn winner of the REAL binary
+// (`-O 1`, the default configuration — rendering identity
+// across configurations is roundtrip (a)'s proven claim):
+//   * the whole produced file PARSES (no parse-class rustc
+//     errors: the test-value shapes and the precondition
+//     placement were the parse blockers);
+//   * the winner function compiles (failures itemized; the
+//     E0689 junk-draw class reported separately, as before);
+//   * the generated test module compiles (`rustc --test`)
+//     and EXECUTES — per-draw passed/failed counts against
+//     the crowned winner. The crowns are still not correct
+//     sorts (Phase 53's generation gap), so test FAILURES
+//     are the honest signal working, not a rendering
+//     regression; outcomes are recorded, not asserted (the
+//     behavioral precedent). Only the binary's end-to-end
+//     build success is asserted per draw.
+// Report at target/phase56/build-measurements-report.md.
+
+/// Parse-class error patterns in rustc stderr (syntax-stage
+/// failures, as catalogued in Phase 54: "expected item after
+/// attributes", the `?`-token "expected expression", …).
+/// Name-resolution (E0425), arity (E0061), type (E0308) and
+/// the E0689 junk class are later stages, not parse errors.
+fn has_parse_error(stderr: &str) -> bool {
+    const PATTERNS: [&str; 7] = [
+        "expected item",
+        "expected expression",
+        "expected one of",
+        "unexpected token",
+        "mismatched closing delimiter",
+        "unknown start of token",
+        "cannot parse",
+    ];
+    stderr.lines().any(|l| {
+        l.starts_with("error") && PATTERNS.iter().any(|p| l.contains(p))
+    })
+}
+
+/// The sorted set of E-codes in a rustc stderr, for the
+/// report's failure itemization.
+fn error_codes(stderr: &str) -> Vec<String> {
+    let mut codes: Vec<String> = Vec::new();
+    for line in stderr.lines() {
+        if let Some(idx) = line.find("[E") {
+            let rest = &line[idx + 1..];
+            if let Some(end) = rest.find(']') {
+                let code = &rest[..end];
+                if code.len() == 5 && !codes.contains(&code.to_string()) {
+                    codes.push(code.to_string());
+                }
+            }
+        }
+    }
+    codes.sort();
+    codes
+}
+
+fn first_error_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find(|l| l.starts_with("error"))
+        .unwrap_or("")
+        .chars()
+        .take(140)
+        .collect()
+}
+
+struct FileDraw {
+    build_ok: bool,
+    whole_compiles: bool,
+    parse_ok: bool,
+    whole_codes: Vec<String>,
+    whole_first: String,
+    function_compiles: bool,
+    function_class: String,
+    testmod_compiles: bool,
+    testmod_codes: Vec<String>,
+    tests_passed: Option<usize>,
+    tests_failed: Option<usize>,
+}
+
+fn measure_draw(
+    root: &str,
+    dir: &str,
+    bin: &str,
+    file: &str,
+    tag: &str,
+) -> FileDraw {
+    let out_rs = format!("{}/{}.rs", dir, tag);
+    let src_path = format!("{}/{}", root, file);
+    let build = run_timed(
+        dir,
+        &format!("{}_build", tag),
+        bin,
+        &["build", &src_path, "--target", "rust", "-O", "1", "-o", &out_rs],
+        root,
+        Duration::from_secs(120),
+    );
+    let build_ok = matches!(build, Some((true, _))) && std::path::Path::new(&out_rs).exists();
+    let fail = |class: &str| FileDraw {
+        build_ok: false,
+        whole_compiles: false,
+        parse_ok: false,
+        whole_codes: vec![],
+        whole_first: String::new(),
+        function_compiles: false,
+        function_class: class.to_string(),
+        testmod_compiles: false,
+        testmod_codes: vec![],
+        tests_passed: None,
+        tests_failed: None,
+    };
+    if !build_ok {
+        return fail("build failed");
+    }
+    let generated = std::fs::read_to_string(&out_rs).unwrap_or_default();
+    // Whole file under rustc as a lib.
+    let whole = run_timed(
+        dir,
+        &format!("{}_whole", tag),
+        "rustc",
+        &["--edition", "2021", "--crate-type", "lib", &out_rs, "-o", &format!("{}/{}.rlib", dir, tag)],
+        root,
+        Duration::from_secs(120),
+    );
+    let (whole_compiles, whole_stderr) = match &whole {
+        Some((ok, e)) => (*ok, e.clone()),
+        None => (false, "timeout".to_string()),
+    };
+    let parse_ok = whole_compiles || !has_parse_error(&whole_stderr);
+    // Winner function only (file minus the test module).
+    let fn_rs = format!("{}/{}_fn.rs", dir, tag);
+    std::fs::write(&fn_rs, function_part(&generated)).unwrap();
+    let func = run_timed(
+        dir,
+        &format!("{}_func", tag),
+        "rustc",
+        &["--edition", "2021", "--crate-type", "lib", &fn_rs, "-o", &format!("{}/{}_fn.rlib", dir, tag)],
+        root,
+        Duration::from_secs(120),
+    );
+    let (function_compiles, func_stderr) = match &func {
+        Some((ok, e)) => (*ok, e.clone()),
+        None => (false, "timeout".to_string()),
+    };
+    let function_class = if function_compiles {
+        String::new()
+    } else if func_stderr.contains("E0689") {
+        "E0689 junk class".to_string()
+    } else {
+        format!("other {}", error_codes(&func_stderr).join("/"))
+    };
+    // The generated test module: compile the whole file
+    // with --test and run it.
+    let test_bin = format!("{}/{}_testbin", dir, tag);
+    let testc = run_timed(
+        dir,
+        &format!("{}_testc", tag),
+        "rustc",
+        &["--edition", "2021", "--test", &out_rs, "-o", &test_bin],
+        root,
+        Duration::from_secs(120),
+    );
+    let (testmod_compiles, testc_stderr) = match &testc {
+        Some((ok, e)) => (*ok, e.clone()),
+        None => (false, "timeout".to_string()),
+    };
+    let (mut tests_passed, mut tests_failed) = (None, None);
+    if testmod_compiles {
+        let run = run_timed(
+            dir,
+            &format!("{}_testrun", tag),
+            &test_bin,
+            &[],
+            root,
+            Duration::from_secs(30),
+        );
+        if run.is_some() {
+            let stdout = std::fs::read_to_string(format!("{}/{}_testrun.stdout", dir, tag))
+                .unwrap_or_default();
+            for line in stdout.lines() {
+                if let Some(rest) = line.strip_prefix("test result:") {
+                    // "ok. 3 passed; 0 failed; ..." / "FAILED. …"
+                    let nums: Vec<usize> = rest
+                        .split(|c: char| !c.is_ascii_digit())
+                        .filter(|t| !t.is_empty())
+                        .filter_map(|t| t.parse().ok())
+                        .collect();
+                    if nums.len() >= 2 {
+                        tests_passed = Some(nums[0]);
+                        tests_failed = Some(nums[1]);
+                    }
+                }
+            }
+        }
+    }
+    FileDraw {
+        build_ok,
+        whole_compiles,
+        parse_ok,
+        whole_codes: error_codes(&whole_stderr),
+        whole_first: first_error_line(&whole_stderr),
+        function_compiles,
+        function_class,
+        testmod_compiles,
+        testmod_codes: error_codes(&testc_stderr),
+        tests_passed,
+        tests_failed,
+    }
+}
+
+#[test]
+#[ignore = "Phase 56 build measurements: cargo build + 4 files x 5 draws of binary builds with rustc/--test per draw; run explicitly with --ignored --nocapture phase56_build_measurements"]
+fn phase56_build_measurements() {
+    let root = env!("CARGO_MANIFEST_DIR").to_string();
+    let out_dir = format!("{}/target/phase56", root);
+    let draws_dir = format!("{}/draws", out_dir);
+    std::fs::create_dir_all(&draws_dir).unwrap();
+    let mut report = String::new();
+    let mut writelnr = |report: &mut String, s: &str| {
+        println!("{}", s);
+        report.push_str(s);
+        report.push('\n');
+    };
+    writelnr(&mut report, "# Phase 56 build measurements — the deferred Phase 54 steps 4–5");
+    writelnr(&mut report, "");
+    writelnr(
+        &mut report,
+        "Real binary (default configuration, this tree), `-O 1`, five draws per file. Rendering identity across configurations is roundtrip (a)'s claim; this measures the produced files: parse, winner-function compile (E0689 itemized), generated test module compile + execution against the crowned winners.",
+    );
+    writelnr(&mut report, "");
+
+    let build = run_timed(
+        &out_dir,
+        "cargo_build",
+        "cargo",
+        &["build"],
+        &root,
+        Duration::from_secs(900),
+    );
+    assert!(
+        matches!(build, Some((true, _))),
+        "the default cargo build failed: {:?}",
+        build.map(|(_, e)| e)
+    );
+    let bin = format!("{}/target/debug/morphic", root);
+
+    // (file, spec, in-spec test count)
+    let files: [(&str, &str, usize); 4] = [
+        ("examples/sort.morph", "sort", 6),
+        ("examples/binary_search.morph", "binary_search", 7),
+        ("examples/self_host/count_matching.morph", "count_matching", 3),
+        ("examples/self_host/is_sorted.morph", "is_sorted", 5),
+    ];
+    for (file, spec, test_count) in files {
+        writelnr(&mut report, &format!("## {} (spec {}, {} in-spec tests)", file, spec, test_count));
+        let (mut parse, mut whole, mut func, mut tmod, mut full_pass) = (0, 0, 0, 0, 0);
+        for draw in 1..=5 {
+            let tag = format!("{}_{}", spec, draw);
+            let d = measure_draw(&root, &draws_dir, &bin, file, &tag);
+            assert!(d.build_ok, "{} draw {}: the binary did not build end-to-end", spec, draw);
+            if d.parse_ok { parse += 1; }
+            if d.whole_compiles { whole += 1; }
+            if d.function_compiles { func += 1; }
+            if d.testmod_compiles { tmod += 1; }
+            if d.tests_failed == Some(0) && d.tests_passed == Some(test_count) {
+                full_pass += 1;
+            }
+            writelnr(
+                &mut report,
+                &format!(
+                    "- draw {} — parse: {}; whole compiles: {}{}; function compiles: {}{}; test module compiles: {}{}; tests executed: {}",
+                    draw,
+                    d.parse_ok,
+                    d.whole_compiles,
+                    if d.whole_compiles {
+                        String::new()
+                    } else {
+                        format!(" [{}] {}", d.whole_codes.join("/"), d.whole_first)
+                    },
+                    d.function_compiles,
+                    if d.function_compiles {
+                        String::new()
+                    } else {
+                        format!(" ({})", d.function_class)
+                    },
+                    d.testmod_compiles,
+                    if d.testmod_compiles {
+                        String::new()
+                    } else {
+                        format!(" [{}]", d.testmod_codes.join("/"))
+                    },
+                    match (d.tests_passed, d.tests_failed) {
+                        (Some(p), Some(f)) => format!("{}/{} passed", p, p + f),
+                        _ => "not run".to_string(),
+                    },
+                ),
+            );
+            std::fs::write(format!("{}/build-measurements-report.md", out_dir), &report).unwrap();
+        }
+        let totals = format!(
+            "Totals for {}: parse {}/5; whole-file compiles {}/5; function compiles {}/5; test module compiles {}/5; draws passing all {} in-spec tests {}/5",
+            spec, parse, whole, func, tmod, test_count, full_pass
+        );
+        writelnr(&mut report, &totals);
+        writelnr(&mut report, "");
+        println!(
+            "PHASE56-MEASURE|file={}|parse={}/5|whole={}/5|function={}/5|testmod={}/5|full-pass={}/5",
+            spec, parse, whole, func, tmod, full_pass
+        );
+    }
+    std::fs::write(format!("{}/build-measurements-report.md", out_dir), &report).unwrap();
+    println!("PHASE56-MEASURE|DONE|report at target/phase56/build-measurements-report.md");
+}

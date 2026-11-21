@@ -2,19 +2,21 @@
 //  SYNTHESIZED CODEGEN — GENERATED FILE. DO NOT EDIT.
 //
 //  The bootstrap artifact of M5-S1 (Phase 51): the M3 Codegen
-//  module's 112 synthesized winners, compiled into this crate
+//  module's 116 synthesized winners, compiled into this crate
 //  and called directly by the bootstrap adapter
 //  (src/codegen/bootstrap_adapter.rs). Each winner is rendered
 //  through the ORIGINAL `codegen::generate` and wrapped in its
 //  own module (so names cannot collide).
 //
 //  WINNER-SET PROVENANCE (fixed, run-independent — M3 gate,
-//  Phases 41–42): 110 constraint-derived seeds — equation 54,
-//  guard_table 39, composition_guard 7, pair_guard_table 4,
-//  expr_pin_guard 3, guarded_identity 1, multi_guard 1,
-//  mixed_pair_guard_table 1 — plus the 2 by-design seedless
-//  pool winners (rust_ident_empty, rust_target_route; Mutation
-//  provenance, deterministic across extraction passes).
+//  Phases 41–42; re-derived in Phase 56 after the Phase 55
+//  spec amendments): 113 constraint-derived seeds — equation
+//  57, guard_table 39, composition_guard 7, pair_guard_table
+//  4, expr_pin_guard 3, guarded_identity 1, multi_guard 1,
+//  mixed_pair_guard_table 1 — plus the 3 by-design seedless
+//  pool winners (rust_ident_empty, rust_target_route,
+//  rust_expr_call_form; Mutation provenance, deterministic
+//  across extraction passes).
 //
 //  REGENERATION (always from the ORIGINAL pipeline — the
 //  generated compiler never generates a compiler):
@@ -25,9 +27,9 @@
 //
 //  Two mechanical adaptations separate this file from the M3
 //  gate's raw render (target/m3-gate/synthesized_codegen.rs,
-//  123,741 B); winner function bodies are byte-identical:
+//  131,216 B); winner function bodies are byte-identical:
 //  (1) each winner's generated `#[cfg(test)] mod tests` block
-//      is stripped (55 of 112 winners carry one): verbatim
+//      is stripped (58 of 116 winners carry one): verbatim
 //      inclusion breaks `cargo test` compilation — the
 //      generated tests pass &str literals to String parameters
 //      (E0308, the Phase 20 record) — and the M3 gate compiles
@@ -289,7 +291,7 @@ pub fn rust_keyword(name: String) -> bool {
 }
 
 pub(crate) mod spec_binop_symbol {
-//! Operator symbol expr_to_rust uses when emitting a spec expression into generated Rust (test assertions in generate_rust's output) -- a SEPARATE, weaker table than rust_binop_symbol. The '?' rows are the emitter's real fallback for the operators it does not map (Mod, Lt, Le, Gt, Ge, Concat) and are pinned deliberately: a synthesized replacement must reproduce today's bytes, fallback included. Fixing the fallback is a separate later decision. Total over all fourteen operators.
+//! Operator symbol expr_to_rust uses when emitting a spec expression into generated Rust (test assertions in generate_rust's output) -- a SEPARATE, weaker table than rust_binop_symbol. Through Phase 54 the six rows Mod/Lt/Le/Gt/Ge/Concat carried the emitter's real '?' fallback, pinned deliberately with the reservation that fixing the fallback was a separate later decision; that decision was taken on 2026-11-21 (Phase 55) and the six rows now carry their real Rust symbols: Mod '%', Lt '<', Le '<=', Gt '>', Ge '>=', and Concat '+', sharing Add's symbol exactly as the IR table's Concat row does (rust_binop_symbol op 16). Concat's '+' is the honest symbol in this walker too: expr_to_rust applies no operand-ownership treatment anywhere (a StringLit renders as a bare quoted literal in every position -- the recorded placement property), so the symbol table states the operator's symbol and nothing more. Total over all fourteen operators.
 
 pub fn spec_binop_symbol(op: i64) -> String {
     match op {
@@ -306,7 +308,7 @@ pub fn spec_binop_symbol(op: i64) -> String {
             "/".to_string()
         },
         4 => {
-            "?".to_string()
+            "%".to_string()
         },
         5 => {
             "&&".to_string()
@@ -321,19 +323,19 @@ pub fn spec_binop_symbol(op: i64) -> String {
             "!=".to_string()
         },
         9 => {
-            "?".to_string()
+            "<".to_string()
         },
         10 => {
-            "?".to_string()
+            "<=".to_string()
         },
         11 => {
-            "?".to_string()
+            ">".to_string()
         },
         12 => {
-            "?".to_string()
+            ">=".to_string()
         },
         13 => {
-            "?".to_string()
+            "+".to_string()
         },
         _ => {
             "".to_string()
@@ -743,7 +745,7 @@ pub fn rust_pattern_ctor_name(name: String, has_subs: bool) -> String {
 }
 
 pub(crate) mod rust_expr_form {
-//! Rendering family of a spec expression in expr_to_rust (src/codegen/mod.rs:1177-1200) -- the walker that emits spec tests into generated code (generate_rust's test module) and constraint operands into precondition asserts: 0 = name (Var: the rust_ident-rendered name), 1 = decimal text (IntLit), 2 = value text (BoolLit, via rust_literal_bool), 3 = quoted template (StringLit: a quote, the escaped contents, a quote -- the escape rule is per-character and mirror-pinned, Phase 29), 4 = call template (the name, then '(' + args joined ', ' + ')'), 5 = binary template ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from spec_binop_symbol, slice 1), 6 = fallback fixed text '??' (via rust_expr_fixed_text). Total over all thirteen Expr kinds. Two sharp edges of the original are pinned deliberately: FloatLit (2) and UnaryOp (9) have NO arm and fall through to '??' like the structural kinds -- a float literal in a spec test renders as '??' in the generated test. And StringLit's rendering carries a placement caveat, pinned as-is: the E0308 it can cause (a &str literal passed where the synthesized function takes String) is a property of generate_rust placing this rendering in call position -- the driver slice owns it; the IR side's ownership rewrite (ir_to_rust_expr_typed) has no counterpart here.
+//! Rendering family of a spec expression in expr_to_rust (src/codegen/mod.rs:1177-1200) -- the walker that emits spec tests into generated code (generate_rust's test module) and constraint operands into precondition asserts: 0 = name (Var: the rust_ident-rendered name), 1 = decimal text (IntLit), 2 = value text (BoolLit, via rust_literal_bool), 3 = quoted template (StringLit: a quote, the escaped contents, a quote -- the escape rule is per-character and mirror-pinned, Phase 29), 4 = call template (the name, then '(' + args joined ', ' + ')' -- with the pseudo-call forms of rust_expr_call_form selecting the vec-literal / tuple / bare-constructor renderings instead, Phase 55), 5 = binary template ('(' + left + ' ' + symbol + ' ' + right + ')' with the symbol from spec_binop_symbol, slice 1), 6 = fallback fixed text '??' (via rust_expr_fixed_text), 7 = closure template (Lambda: '|' + the parameter names joined ', ' + '| ' + the body rendering, via rust_expr_lambda_text). Total over all thirteen Expr kinds. Two sharp edges of the original are pinned deliberately: FloatLit (2) and UnaryOp (9) have NO arm and fall through to '??' like the structural kinds -- a float literal in a spec test renders as '??' in the generated test. Lambda (10) shared that fate through Phase 54; the Phase 55 amendment (2026-11-21) gives it family 7. And StringLit's rendering carries a placement caveat, pinned as-is: the E0308 it can cause (a &str literal passed where the synthesized function takes String) is a property of generate_rust placing this rendering in call position -- the driver slice owns it; the IR side's ownership rewrite (ir_to_rust_expr_typed) has no counterpart here.
 
 pub fn rust_expr_form(kind: i64) -> i64 {
     match kind {
@@ -778,7 +780,7 @@ pub fn rust_expr_form(kind: i64) -> i64 {
             6
         },
         10 => {
-            6
+            7
         },
         11 => {
             6
@@ -795,7 +797,7 @@ pub fn rust_expr_form(kind: i64) -> i64 {
 }
 
 pub(crate) mod rust_expr_fixed_text {
-//! Fixed text of expr_to_rust's catch-all (src/codegen/mod.rs:1199): every Expr kind without an arm -- FloatLit (2), Field (5), Index (6), UnaryOp (9), Lambda (10), Length (11), Comprehension (12) -- renders '??'.
+//! Fixed text of expr_to_rust's catch-all (src/codegen/mod.rs:1199): every Expr kind without an arm -- FloatLit (2), Field (5), Index (6), UnaryOp (9), Length (11), Comprehension (12) -- renders '??'. Lambda (10) stood in this table through Phase 54; the Phase 55 amendment (2026-11-21) gives Lambda its own template (rust_expr_lambda_text, rust_expr_form family 7) and its row is removed here.
 
 pub fn rust_expr_fixed_text(kind: i64) -> String {
     match kind {
@@ -811,9 +813,6 @@ pub fn rust_expr_fixed_text(kind: i64) -> String {
         9 => {
             "??".to_string()
         },
-        10 => {
-            "??".to_string()
-        },
         11 => {
             "??".to_string()
         },
@@ -826,6 +825,66 @@ pub fn rust_expr_fixed_text(kind: i64) -> String {
     }
 }
 
+}
+
+pub(crate) mod rust_expr_call_form {
+//! Which rendering a Call in expr_to_rust takes, keyed by the call's NAME (Phase 55 amendment, 2026-11-21): 0 = the plain call template (the name, then '(' + args joined ', ' + ')' -- every genuine function call, and pseudo-calls like Some(x) whose Rust form is the call itself), 1 = the vec-literal template (rust_expr_list_text) for the parser's list pseudo-call 'List', 2 = the tuple template (rust_expr_tuple_text) for the parser's tuple pseudo-call '__tuple__', 3 = the bare constructor: 'None' renders as the bare name with no parentheses (its pseudo-call carries no arguments, so the plain template produced 'None()', which is not a value). Matching is exact and case-sensitive. The rows are String-equality guards -- the rust_target_route shape: fully statable in the spec, and (like it) outside every admitted seed family, whose guards key on Int/Bool/Char only.
+
+pub fn rust_expr_call_form(name: String) -> i64 {
+    match name.as_str() {
+        "List" => {
+            1
+        },
+        "__tuple__" => {
+            2
+        },
+        "None" => {
+            3
+        },
+        "Some" => {
+            0
+        },
+        "max" => {
+            0
+        },
+        "list" => {
+            0
+        },
+        "" => {
+            0
+        },
+        _ => {
+            0
+        },
+    }
+}
+
+}
+
+pub(crate) mod rust_expr_list_text {
+//! The list-literal rendering of expr_to_rust's Call arm (Phase 55 amendment, 2026-11-21): the parser lowers a spec list literal [a, b, ...] to the pseudo-call Call("List", ...) (parser.rs), and the walker renders that pseudo-call as the Rust vec literal 'vec![' + the element renderings joined ', ' + ']'. The elements arrive pre-rendered by expr_to_rust itself and pre-joined (the join is iteration, mirror-only); WHICH calls take this form is rust_expr_call_form's classification (family 1).
+
+pub fn rust_expr_list_text(args: String) -> String {
+    (("vec![".to_string() + &args) + "]")
+}
+
+}
+
+pub(crate) mod rust_expr_tuple_text {
+//! The tuple rendering of expr_to_rust's Call arm (Phase 55 amendment, 2026-11-21): the parser lowers a spec tuple (a, b, ...) to the pseudo-call Call("__tuple__", ...) (parser.rs) -- always two or more elements, since a parenthesized single expression is not a tuple in the grammar -- and the walker renders that pseudo-call as the Rust tuple '(' + the element renderings joined ', ' + ')'. The elements arrive pre-rendered by expr_to_rust itself and pre-joined (the join is iteration, mirror-only); WHICH calls take this form is rust_expr_call_form's classification (family 2). This is the VALUE-position rendering (expected outputs, nested positions): in test-INPUT position the driver may instead spread the elements into the generated call -- rust_test_case's doc states that rule.
+
+pub fn rust_expr_tuple_text(args: String) -> String {
+    (("(".to_string() + &args) + ")")
+}
+
+}
+
+pub(crate) mod rust_expr_lambda_text {
+//! The Lambda rendering of expr_to_rust (its Lambda arm, added by the Phase 55 amendment, 2026-11-21): '|' + the parameter names joined ', ' + '| ' + the body rendering -- a Rust closure whose body is the walker's own rendering of the lambda's body (a BinOp body arrives already parenthesized by the binary template, so sort's |a, b| a < b renders '|a, b| (a < b)'). The names arrive rust_ident-rendered and pre-joined (the join is iteration, mirror-only); the parameters' TYPES are dropped, as in the IR walker's closure arm (rust_lambda_text) -- the generated closure is unannotated. The body is rendered by expr_to_rust itself. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
+
+pub fn rust_expr_lambda_text(params: String, body: String) -> String {
+    ((("|".to_string() + &params) + "| ") + &body)
+}
 }
 
 pub(crate) mod rust_constraint_form {
@@ -1108,7 +1167,7 @@ pub fn rust_precondition_assert(rendered: String) -> String {
 }
 
 pub(crate) mod rust_precondition_block {
-//! generate_rust's precondition block (src/codegen/mod.rs:96-104) over the pre-joined assert lines (rust_precondition_assert): the '#[cfg(debug_assertions)]' attribute line, '{', the asserts, '}' and a blank line. The block exists only when the spec has preconditions -- that branch is the driver's. Recorded as-is (surprise 13 in the ROAD M3 notes): the block is emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters -- outside the function body entirely.
+//! generate_rust's precondition block (src/codegen/mod.rs:96-104) over the pre-joined assert lines (rust_precondition_assert): the '#[cfg(debug_assertions)]' attribute line, '{', the asserts, '}' and a blank line. The block exists only when the spec has preconditions -- that branch is the driver's. Placement amended in Phase 55 (2026-11-21): through Phase 54 the block was emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters -- outside the function body entirely (surprise 13 in the ROAD M3 notes) -- which no Rust file can parse ('expected item after attributes'). It is now emitted at the head of the function body, immediately after the signature (rust_file_text's equation states the order), where the parameters are in scope. The block's TEXT is unchanged by the amendment; only its position moved.
 
 pub fn rust_precondition_block(asserts: String) -> String {
     (("#[cfg(debug_assertions)]\n{\n".to_string() + &asserts) + "}\n\n")
@@ -1136,7 +1195,7 @@ pub fn rust_test_name_form(has_name: bool) -> i64 {
 }
 
 pub(crate) mod rust_test_case {
-//! One generated test's block (src/codegen/mod.rs:139-150) over pre-rendered parts: the '#[test]' attribute and 'fn' line at four spaces with the test's final name (rust_ident-rendered, chosen per rust_test_name_form), then at eight spaces the call 'let result = <fn>(<input>);' and the assertion 'assert_eq!(result, <expected>);', then the closing brace at four spaces. The function name arrives rust_ident-rendered; input and expected arrive as expr_to_rust renderings (slice 2 owns that walker) placed BARE in call/assert position -- the recorded E0308 property of the generated-test path (a String test input renders as a &str literal against a String parameter) is a property of this placement, pinned as-is. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
+//! One generated test's block (src/codegen/mod.rs:139-150) over pre-rendered parts: the '#[test]' attribute and 'fn' line at four spaces with the test's final name (rust_ident-rendered, chosen per rust_test_name_form), then at eight spaces the call 'let result = <fn>(<input>);' and the assertion 'assert_eq!(result, <expected>);', then the closing brace at four spaces. The function name arrives rust_ident-rendered; input and expected arrive as expr_to_rust renderings (slice 2 owns that walker) placed BARE in call/assert position -- the recorded E0308 property of the generated-test path (a String test input renders as a &str literal against a String parameter) is a property of this placement, pinned as-is. The input text the driver hands this template is the test input's ARGUMENT rendering (Phase 55 amendment, 2026-11-21): for a tuple input (the parser's '__tuple__' pseudo-call) whose arity equals the function's parameter count, the driver spreads the elements -- their expr_to_rust renderings joined ', ' -- so the call receives its arguments positionally (the same arity rule Phase 53's evaluation binding uses); every other input arrives as its single expr_to_rust rendering, and a tuple in EXPECTED position arrives as its Rust-tuple rendering (rust_expr_tuple_text). Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
 
 pub fn rust_test_case(test_name: String, fn_name: String, input_text: String, expected_text: String) -> String {
     (((((((("    #[test]\n    fn ".to_string() + &test_name) + "() {\n        let result = ") + &fn_name) + "(") + &input_text) + ");\n        assert_eq!(result, ") + &expected_text) + ");\n    }\n")
@@ -2265,10 +2324,10 @@ pub fn rust_driver_section_text(present: bool, text: String) -> String {
 }
 
 pub(crate) mod rust_file_text {
-//! generate_rust's whole-file assembly (src/codegen/mod.rs:66-155) over pre-rendered sections, in emission order: the doc header (rust_doc_header_text, via rust_driver_section_text), the precondition block (rust_precondition_block, via rust_driver_section_text -- emitted BEFORE the signature, as a free-standing block at module level whose asserts name the function's parameters: slice 3 recorded the placement surprise, this equation is where it lands in the file), the signature (rust_signature), the body, the function's closing brace (the text of rust_file_fixed_text piece 0), and the test module (rust_test_module, via rust_driver_section_text). Absent sections arrive as the empty string (rust_driver_section_text's absent arm), so the equation is unconditional. The body arrives rendered by ir_to_rust_tail at indent 1, with the function's return type as both fn_ret and the Some expectation -- the driver's own seed, the one expectation site outside rust_expectation_source's table (that table's doc names this site as the driver's); statement-shaped bodies fall through the tail renderer to the statement walker unchanged, bare-expression bodies keep their value as the function's return. Exactly one function per file, and NO import is ever generated at file level -- the only use statement in the output is the test module's inner 'use super::*;', inside rust_test_module. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
+//! generate_rust's whole-file assembly (src/codegen/mod.rs:66-155) over pre-rendered sections, in emission order: the doc header (rust_doc_header_text, via rust_driver_section_text), the signature (rust_signature), the precondition block (rust_precondition_block, via rust_driver_section_text -- emitted AFTER the signature, at the head of the function body, where its asserts name the function's parameters in scope; through Phase 54 it stood before the signature as a free-standing block at module level -- slice 3 recorded the placement surprise, and the Phase 55 amendment (2026-11-21) moves it inside, the block's own text unchanged), the body, the function's closing brace (the text of rust_file_fixed_text piece 0), and the test module (rust_test_module, via rust_driver_section_text). Absent sections arrive as the empty string (rust_driver_section_text's absent arm), so the equation is unconditional. The body arrives rendered by ir_to_rust_tail at indent 1, with the function's return type as both fn_ret and the Some expectation -- the driver's own seed, the one expectation site outside rust_expectation_source's table (that table's doc names this site as the driver's); statement-shaped bodies fall through the tail renderer to the statement walker unchanged, bare-expression bodies keep their value as the function's return. Exactly one function per file, and NO import is ever generated at file level -- the only use statement in the output is the test module's inner 'use super::*;', inside rust_test_module. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
 
 pub fn rust_file_text(header: String, pre_block: String, signature: String, body: String, test_module: String) -> String {
-    (((((header.clone() + &pre_block) + &signature) + &body) + "}\n") + &test_module)
+    (((((header.clone() + &signature) + &pre_block) + &body) + "}\n") + &test_module)
 }
 }
 
