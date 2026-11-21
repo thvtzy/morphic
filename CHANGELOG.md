@@ -9,14 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The v0.5 self-hosting stack — merged to master 2026-11-21 (PRs #2–#5). Full technical record in [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md); entries below are grouped by milestone.
+## [0.5.0] — 2026-11-21
+
+The v0.5 self-hosting release — the full stack merged to master 2026-11-21 (PRs #2–#6) and tagged `v0.5.0`. Full technical record in [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md); entries below are grouped by milestone. One deliberate omission: the formal M1 gate stays open by owner decision (2026-11-21) until the language has method calls, IR field access, and record literals, so the tokenizer gate can pass in full without a standards compromise; the three Char classifiers stand exact by executed agreement (774/774) meanwhile.
 
 | Milestone | Outcome | Closed |
 |---|---|---|
 | M2 — validator + printer | Gate closed: verified winners 42/42, cross-validation 64/64 + 539/539 | 2026-11-20 |
 | M3 — codegen | Gate closed: byte-identical over a 2,559-case corpus (re-derived in the Phase 56 cascade), winners 116/116 verified | 2026-11-21 |
 | M4 — integration | Gate closed: composed compiler byte-identical on every check-passing spec (142/142 corpus after the Phase 56 re-derivation) | 2026-11-21 |
-| Tokenizer (M1/S4) | Specs re-authored + measured; Char classifiers exact (774/774); formal M1 gate still open | measured 2026-11-21 |
+| Tokenizer (M1/S4) | Specs re-authored + measured; Char classifiers exact (774/774); formal M1 gate still open — deferred by owner decision pending method calls, IR field access, and record literals | measured 2026-11-21 |
 | M5 — bootstrap | Gate closed: bootstrap binary (synthesized codegen seated behind the `bootstrap-codegen` flag); held-out component synthesized; roundtrip behavioral leg green in both configurations; SC3 recorded at 1.590× (≤ 2×) | 2026-11-21 |
 
 ### Added

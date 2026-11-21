@@ -5,7 +5,7 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge" alt="Language: Rust"></a>
   <a href="https://github.com/thvtzy/morphic/actions"><img src="https://img.shields.io/github/actions/workflow/status/thvtzy/morphic/ci.yml?branch=master&style=for-the-badge&label=CI" alt="CI Status"></a>
   <br>
-  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v0.4.0-brightgreen?style=for-the-badge" alt="Version: v0.4.0"></a>
+  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v0.5.0-brightgreen?style=for-the-badge" alt="Version: v0.5.0"></a>
   <img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status: Alpha">
   <img src="https://img.shields.io/badge/z3-verified-blue?style=for-the-badge" alt="Z3 Verified">
   <img src="https://img.shields.io/badge/LLM-Ollama-purple?style=for-the-badge" alt="LLM: Ollama">
@@ -275,7 +275,7 @@ v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 +
 - **M5 (bootstrap)** — closed 2026-11-21: the bootstrap binary is the original compiler with its Rust codegen stage replaced — behind the `bootstrap-codegen` Cargo feature — by the synthesized Codegen module itself (117 winners, checked in as a compiled artifact and called through a hand-written adapter; the original emitter is kept and reachable with the flag off). The synthesized stage is byte-identical to the original over both gate corpora; the flag-on binary synthesized a held-out component it was not built from (RustVisibility, Phase 63); the sort roundtrip is behaviorally correct on every measured draw in both configurations (the generation campaign G1–G3 + G6 and the Clone-bound decision closed it); and the SC3 render cost is recorded at **1.590× the original (≤ 2× threshold)** — measured in the debug profile, the release build being impossible in the measuring sandbox (recorded in the ROAD).
 - **Tokenizer (M1/S4)** — `functional_tokenizer.morph` re-authored into the accepted dialect (it passes `morphic check` for the first time) and measured: the three Char classifiers are **exact** (774/774 executed agreement via the `char_equation` seed family); the remaining specs are blocked on recorded structural gaps (no field access in the IR; method calls not yet in the spec language), so M1's formal gate stays open.
 
-**410 tests passing.** Recorded residue, itemized in the ROAD: binary_search's crowns still do not compile (i64 index typing — G5), is_sorted's correct template still cannot crown through interpreter judging (owner-reserved), the mutation stubs and GA/LLM decoupling (G7), and the open M1 formal gate. A v0.5 release/tag is a separate decision — the version badge stays v0.4.0. Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
+**410 tests passing.** Recorded residue, itemized in the ROAD: binary_search's crowns still do not compile (i64 index typing — G5), is_sorted's correct template still cannot crown through interpreter judging (owner-reserved), the mutation stubs and GA/LLM decoupling (G7), and the open M1 formal gate. Released as **v0.5.0** (2026-11-21, tag `v0.5.0` on master); the formal M1 gate stays open by owner decision until the language has method calls, IR field access, and record literals. Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
 
 ---
 

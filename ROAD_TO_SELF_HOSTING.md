@@ -159,6 +159,8 @@ spec test_tokenizer_equivalence {
 - [ ] Benchmark: must be ≤ 2x slower
 - [ ] **Gate**: 100% golden test pass + Z3 verified
 
+> **Owner decision (2026-11-21):** the M1 formal gate stays OPEN — deliberately deferred, not abandoned — until the Morphic language has (1) method calls in spec expressions, (2) a field-access node in the IR, and (3) record literals, so the gate can pass in full (100% golden + Z3 verified) without compromising its standard (e.g. by accepting executed agreement in place of Z3 verification for the Char classifiers, which stand exact at 774/774 meanwhile). The structural blockers are recorded in the Phase 48/49 notes. v0.5.0 ships with this gate open by decision.
+
 ### M2: Pretty-Printer + Validator
 - [x] Tulis `validator.morph` (type checker lite)
 - [x] Tulis `printer.morph` (IR → text)
