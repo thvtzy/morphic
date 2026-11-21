@@ -1357,6 +1357,7 @@ fn expr_to_rust(expr: &Expr) -> String {
         Expr::IntLit(n) => n.to_string(),
         Expr::BoolLit(b) => b.to_string(),
         Expr::StringLit(s) => format!("\"{}\"", escape_rust_str(s)),
+        Expr::CharLit(c) => format!("'{}'", escape_rust_char(*c)),
         Expr::Var(name) => rust_ident(name),
         Expr::Call(name, args) => {
             let args_str: Vec<String> = args.iter().map(expr_to_rust).collect();
@@ -1433,6 +1434,17 @@ impl std::error::Error for CodegenError {}
 /// is the real thing, not a copy.
 #[cfg(test)]
 mod m3_gate;
+
+/// M4-S1 composed-compiler harness (Phase 44): generalizes
+/// the M3 gate's composition into a reusable build-path
+/// instrument — one winner extraction per spec through the
+/// real pipeline, that single winner rendered by the
+/// original `generate` AND by the composed codegen
+/// (m3_gate's mirror-completed composition), byte-compared
+/// as whole files. Test-only; it lives inside codegen next
+/// to the M3 gate whose machinery it reuses.
+#[cfg(test)]
+mod m4_harness;
 
 #[cfg(test)]
 mod tests {

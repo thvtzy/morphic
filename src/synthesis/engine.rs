@@ -2768,7 +2768,8 @@ fn equation_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> 
 fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Var(v) => v == name,
-        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_) => false,
+        Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_) | Expr::StringLit(_)
+        | Expr::CharLit(_) => false,
         Expr::Field(inner, _) => expr_mentions_var(inner, name),
         Expr::Index(coll, idx) => {
             expr_mentions_var(coll, name) || expr_mentions_var(idx, name)
@@ -3267,6 +3268,7 @@ fn composition_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNo
                 | Expr::FloatLit(_)
                 | Expr::BoolLit(_)
                 | Expr::StringLit(_)
+                | Expr::CharLit(_)
         )
     });
     if !guard_is_call && !any_compound_pin {
@@ -3653,6 +3655,7 @@ fn expr_pin_guard_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode>
                 | Expr::FloatLit(_)
                 | Expr::BoolLit(_)
                 | Expr::StringLit(_)
+                | Expr::CharLit(_)
         )
     });
     if !any_compound_pin {
@@ -4376,7 +4379,8 @@ fn expr_calls_indexed(expr: &Expr, index: &SpecIndex) -> bool {
         | Expr::IntLit(_)
         | Expr::FloatLit(_)
         | Expr::BoolLit(_)
-        | Expr::StringLit(_) => true,
+        | Expr::StringLit(_)
+        | Expr::CharLit(_) => true,
         Expr::Field(inner, _) => expr_calls_indexed(inner, index),
         Expr::Index(coll, idx) => {
             expr_calls_indexed(coll, index) && expr_calls_indexed(idx, index)
@@ -4406,6 +4410,7 @@ fn expr_same(a: &Expr, b: &Expr) -> bool {
         (Expr::FloatLit(x), Expr::FloatLit(y)) => x.to_bits() == y.to_bits(),
         (Expr::BoolLit(x), Expr::BoolLit(y)) => x == y,
         (Expr::StringLit(x), Expr::StringLit(y)) => x == y,
+        (Expr::CharLit(x), Expr::CharLit(y)) => x == y,
         (Expr::Field(x, f), Expr::Field(y, g)) => f == g && expr_same(x, y),
         (Expr::Index(c1, i1), Expr::Index(c2, i2)) => {
             expr_same(c1, c2) && expr_same(i1, i2)
@@ -4970,6 +4975,7 @@ pub fn expr_to_pattern(expr: &Expr) -> IRPattern {
     match expr {
         Expr::IntLit(n) => IRPattern::Literal(IRLiteral::Int(*n)),
         Expr::StringLit(s) => IRPattern::Literal(IRLiteral::String(s.clone())),
+        Expr::CharLit(c) => IRPattern::Literal(IRLiteral::Char(*c)),
         Expr::BoolLit(b) => IRPattern::Literal(IRLiteral::Bool(*b)),
         Expr::Call(name, args) => {
             let sub_patterns: Vec<IRPattern> = args.iter().map(expr_to_pattern).collect();
@@ -4986,6 +4992,7 @@ pub(crate) fn expr_to_ir(expr: &Expr) -> IRNode {
         Expr::FloatLit(f) => IRNode::Literal(IRLiteral::Float(*f)),
         Expr::BoolLit(b) => IRNode::Literal(IRLiteral::Bool(*b)),
         Expr::StringLit(s) => IRNode::Literal(IRLiteral::String(s.clone())),
+        Expr::CharLit(c) => IRNode::Literal(IRLiteral::Char(*c)),
         Expr::Var(v) => IRNode::Var(v.clone()),
         Expr::Call(name, args) => IRNode::Call {
             function: name.clone(),
@@ -5273,6 +5280,7 @@ fn format_expr(expr: &Expr) -> String {
     match expr {
         Expr::IntLit(n) => n.to_string(),
         Expr::StringLit(s) => format!("\"{}\"", s),
+        Expr::CharLit(c) => format!("{:?}", c),
         Expr::Var(v) => v.clone(),
         Expr::Call(name, args) => {
             let args: Vec<String> = args.iter().map(format_expr).collect();
@@ -9407,6 +9415,133 @@ spec exclaim {
                 .map(|c| (count_holes(&c.body), c.scores.test_pass_ratio))
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// F4 end-to-end (Phase 45): a Char classifier stated
+    /// with char literals — range constraint plus char-literal
+    /// tests — goes through the real build path
+    /// (synthesize_with_module → verify_all → select_best,
+    /// the main.rs sequence). Two measured facts, both
+    /// asserted:
+    ///
+    /// 1. The crowned winner is hole-free, passes every test
+    ///    (tpr 1.000), and agrees with the hand mirror on
+    ///    every TESTED char — char literals flow through
+    ///    parse → synthesis → test execution exactly.
+    /// 2. The pool also contains the SPEC-EXACT completion
+    ///    of the test-induced seed (one Char arm per test,
+    ///    wildcard filled with `false`), and THAT body,
+    ///    executed on the IR interpreter, agrees with the
+    ///    mirror over a battery far wider than the tests.
+    ///
+    /// The two are different candidates, and the gap is a
+    /// recorded finding, not a fudge: both completions score
+    /// tpr 1.000 (no test exercises the wildcard arm — every
+    /// tested input has its own arm), and Char is Opaque to
+    /// the Z3 verifier, so no constraint seed and no proof
+    /// can prefer the exact one; selection's tie-break
+    /// crowns the wildcard-`true` completion, which is wrong
+    /// on every untested char. That is the guard-table
+    /// wildcard caveat without its usual Z3 backstop — the
+    /// exactness S4 can claim for Char classifiers today is
+    /// "the exact body is in the pool and executes exactly",
+    /// not "the build crowns it".
+    #[test]
+    fn char_literal_classifier_builds_and_executes() {
+        let src = r#"
+        T {
+        spec is_digit {
+            input: c: Char
+            output: Bool
+            constraint: output == (c >= '0' && c <= '9')
+            test "d0" { input: '0'; expect: true }
+            test "d1" { input: '1'; expect: true }
+            test "d2" { input: '2'; expect: true }
+            test "d3" { input: '3'; expect: true }
+            test "d4" { input: '4'; expect: true }
+            test "d5" { input: '5'; expect: true }
+            test "d6" { input: '6'; expect: true }
+            test "d7" { input: '7'; expect: true }
+            test "d8" { input: '8'; expect: true }
+            test "d9" { input: '9'; expect: true }
+            test "below" { input: '/'; expect: false }
+            test "above" { input: ':'; expect: false }
+            test "letter" { input: 'a'; expect: false }
+            test "space" { input: ' '; expect: false }
+            test "newline" { input: '\n'; expect: false }
+        }
+        }
+        "#;
+        let module = crate::spec::parser::parse(src).expect("char spec must parse");
+        let spec = module.functions[0].clone();
+        let pool = synthesize_with_module(&spec, 1, &module.functions)
+            .expect("synthesis must succeed");
+
+        let run_on = |body: &IRNode, c: char| -> crate::synthesis::eval::Value {
+            let mut env = crate::synthesis::eval::Env::new();
+            env.insert("c".into(), crate::synthesis::eval::Value::Char(c));
+            crate::synthesis::eval::eval(body, &env)
+                .unwrap_or_else(|e| panic!("body not evaluable on {:?}: {:?}", c, e))
+        };
+        let mirror = |c: char| crate::synthesis::eval::Value::Bool(('0'..='9').contains(&c));
+        let tested: Vec<char> = spec
+            .tests
+            .iter()
+            .map(|t| match t.input {
+                Expr::CharLit(c) => c,
+                ref other => panic!("test input is not a char literal: {:?}", other),
+            })
+            .collect();
+
+        // Fact 2's candidate, found in the pool BEFORE
+        // verification/selection consume it: the test-induced
+        // shape whose wildcard arm is the `false` literal.
+        let exact = pool
+            .iter()
+            .find(|cand| match &cand.body {
+                IRNode::Match { cases, .. } => {
+                    count_holes(&cand.body) == 0
+                        && cases.len() == spec.tests.len() + 1
+                        && matches!(
+                            cases[spec.tests.len()],
+                            (IRPattern::Wildcard, IRNode::Literal(IRLiteral::Bool(false)))
+                        )
+                }
+                _ => false,
+            })
+            .expect("pool must contain the spec-exact test-induced completion");
+        let mut battery: Vec<char> = ('\u{0}'..='\u{2FF}').collect();
+        battery.extend(['\u{660}', '\u{6F0}', '\u{B2}', '\u{FF10}', '😀', '\u{10FFFF}']);
+        for c in battery {
+            assert_eq!(
+                run_on(&exact.body, c),
+                mirror(c),
+                "spec-exact completion disagrees with the mirror on {:?}",
+                c
+            );
+        }
+
+        // Fact 1: the crowned winner, judged on the signal
+        // the pipeline can actually see — its own tests.
+        let verified = crate::verify::verifier::Verifier::with_specs(&module.functions)
+            .verify_all(pool, &spec)
+            .expect("verification must succeed");
+        let winner = crate::synthesis::selector::select_best(verified, &spec)
+            .expect("selection must crown a winner");
+        assert_eq!(count_holes(&winner.body), 0, "winner must be hole-free");
+        assert!(
+            (winner.scores.test_pass_ratio - 1.0).abs() < 1e-9,
+            "winner must pass every test, tpr = {}",
+            winner.scores.test_pass_ratio
+        );
+        for c in tested {
+            assert_eq!(
+                run_on(&winner.body, c),
+                mirror(c),
+                "winner disagrees with the mirror on tested {:?}",
+                c
+            );
+        }
     }
 
     /// Hole penalty: correctness credit halves per unfilled hole,

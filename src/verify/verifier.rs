@@ -895,6 +895,10 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
         Expr::FloatLit(_) => Some(Sym::Opaque),
         Expr::BoolLit(b) => Some(Sym::Bool(z3::ast::Bool::from_bool(*b))),
         Expr::StringLit(s) => Some(Sym::Str(z3::ast::String::from_str(s).ok()?)),
+        // Char, like Float: no honest Z3 sort in this
+        // encoder — Opaque (bindable, not usable in an
+        // operation that needs a concrete sort).
+        Expr::CharLit(_) => Some(Sym::Opaque),
         Expr::BinOp(op, l, r) => {
             let kind = match op {
                 BinOp::Add => BinKind::Add,

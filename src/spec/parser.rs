@@ -646,6 +646,15 @@ impl<'a> Parser<'a> {
             return Ok(Expr::StringLit(s));
         }
 
+        // Char literal (Phase 45, finding F4): the reference
+        // has always documented `'a'` / `'\n'` (section 1)
+        // and the layers below have always carried Char —
+        // only this arm was missing.
+        if self.peek() == Some('\'') {
+            let c = self.parse_char_literal_value()?;
+            return Ok(Expr::CharLit(c));
+        }
+
         // Boolean literal
         if self.peek() == Some('t') {
             if self.peek_n(4) == "true" {
@@ -1017,6 +1026,93 @@ impl<'a> Parser<'a> {
 
     fn parse_string_literal(&mut self) -> Result<String, ParseError> {
         self.parse_string_literal_value()
+    }
+
+    /// One char literal: `'a'`, `'\n'`, `'\''`, `'\\'`,
+    /// `'\u{1F600}'`, or any single Unicode scalar written
+    /// directly. The escape set mirrors the emitter's
+    /// `escape_rust_char` world (src/codegen/mod.rs): quote,
+    /// backslash, `\n` `\r` `\t`, and `\u{...}` for the
+    /// characters the emitter writes that way. Malformed
+    /// literals — empty, more than one character,
+    /// unterminated, an unknown escape, or a `\u` value that
+    /// is not a Unicode scalar — are parse errors.
+    fn parse_char_literal_value(&mut self) -> Result<char, ParseError> {
+        self.expect_char('\'')?;
+        let c = match self.peek() {
+            None => {
+                return Err(self.simple_error("Unterminated char literal"));
+            }
+            Some('\'') => {
+                return Err(self.simple_error("Empty char literal"));
+            }
+            Some('\\') => {
+                self.advance();
+                match self.peek() {
+                    Some('n') => { self.advance(); '\n' }
+                    Some('r') => { self.advance(); '\r' }
+                    Some('t') => { self.advance(); '\t' }
+                    Some('\\') => { self.advance(); '\\' }
+                    Some('\'') => { self.advance(); '\'' }
+                    Some('u') => {
+                        self.advance();
+                        self.expect_char('{')?;
+                        let mut hex = String::new();
+                        while self.peek() != Some('}') {
+                            match self.peek() {
+                                Some(h) if h.is_ascii_hexdigit() => {
+                                    hex.push(h);
+                                    self.advance();
+                                }
+                                _ => {
+                                    return Err(self.simple_error(
+                                        "Invalid \\u{...} escape in char literal",
+                                    ));
+                                }
+                            }
+                            if hex.len() > 6 {
+                                return Err(self.simple_error(
+                                    "Invalid \\u{...} escape in char literal",
+                                ));
+                            }
+                        }
+                        self.advance(); // consume '}'
+                        if hex.is_empty() {
+                            return Err(self.simple_error(
+                                "Invalid \\u{...} escape in char literal",
+                            ));
+                        }
+                        let value = u32::from_str_radix(&hex, 16).map_err(|_| {
+                            self.simple_error("Invalid \\u{...} escape in char literal")
+                        })?;
+                        char::from_u32(value).ok_or_else(|| {
+                            self.simple_error(
+                                "\\u{...} value is not a Unicode scalar value",
+                            )
+                        })?
+                    }
+                    _ => {
+                        return Err(self.simple_error("Unknown escape in char literal"));
+                    }
+                }
+            }
+            Some(c) => {
+                self.advance();
+                c
+            }
+        };
+        // Exactly one character: the next character must be
+        // the closing quote (a second character or EOF makes
+        // the literal malformed).
+        match self.peek() {
+            Some('\'') => {
+                self.advance();
+                Ok(c)
+            }
+            _ => Err(self.simple_error(
+                "Char literal must contain exactly one character",
+            )),
+        }
     }
 
     fn parse_string_literal_value(&mut self) -> Result<String, ParseError> {
@@ -1835,5 +1931,202 @@ mod tests {
         constraint_ops(&spec.functions[0].postconditions[0], &mut ops);
         assert!(ops.contains(&BinOp::Add), "no Add in {:?}", ops);
         assert!(!ops.contains(&BinOp::Concat), "unexpected Concat in {:?}", ops);
+    }
+
+    // ── Char literals (Phase 45, finding F4) ────────────────
+    //
+    // The layers below the parser have always known Char:
+    // TypeRef::Char, IRLiteral::Char, Value::Char, the
+    // emitter's Char arm. But parse_expr_atom had no `'` arm,
+    // so a char literal in an expression, a constraint or a
+    // test was a parse error — and the tokenizer module's
+    // Char classifiers (whose constraints ARE char-literal
+    // equalities) could not be written at all. These tests
+    // pin the surface syntax.
+
+    /// Every char literal occurring in an expression tree,
+    /// in traversal order.
+    fn expr_char_literals(expr: &Expr, out: &mut Vec<char>) {
+        match expr {
+            Expr::CharLit(c) => out.push(*c),
+            Expr::BinOp(_, l, r) => {
+                expr_char_literals(l, out);
+                expr_char_literals(r, out);
+            }
+            Expr::UnaryOp(_, inner) => expr_char_literals(inner, out),
+            Expr::Call(_, args) => {
+                for a in args {
+                    expr_char_literals(a, out);
+                }
+            }
+            Expr::Field(base, _) => expr_char_literals(base, out),
+            Expr::Index(base, idx) => {
+                expr_char_literals(base, out);
+                expr_char_literals(idx, out);
+            }
+            Expr::Length(inner) => expr_char_literals(inner, out),
+            _ => {}
+        }
+    }
+
+    fn constraint_char_literals(c: &Constraint, out: &mut Vec<char>) {
+        match c {
+            Constraint::Eq(l, r) | Constraint::Order(_, l, r) => {
+                expr_char_literals(l, out);
+                expr_char_literals(r, out);
+            }
+            Constraint::Expr(e) => expr_char_literals(e, out),
+            Constraint::And(parts) | Constraint::Or(parts) => {
+                for p in parts {
+                    constraint_char_literals(p, out);
+                }
+            }
+            Constraint::Not(inner) => constraint_char_literals(inner, out),
+            Constraint::Implies(l, r) => {
+                constraint_char_literals(l, out);
+                constraint_char_literals(r, out);
+            }
+            Constraint::Predicate(_, args) => {
+                for a in args {
+                    expr_char_literals(a, out);
+                }
+            }
+            Constraint::Forall { body, .. } | Constraint::Exists { body, .. } => {
+                constraint_char_literals(body, out)
+            }
+            Constraint::True => {}
+        }
+    }
+
+    #[test]
+    fn parse_char_literal_in_constraint_and_tests() {
+        // The is_whitespace shape from functional_tokenizer:
+        // the constraint is a disjunction of char-literal
+        // equalities, and the tests name char values directly.
+        let src = r#"
+        T {
+        spec is_whitespace {
+            input: c: Char
+            output: Bool
+            constraint: output == (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+            test "space" { input: ' '; expect: true }
+            test "letter" { input: 'a'; expect: false }
+            test "newline" { input: '\n'; expect: true }
+        }
+        }
+        "#;
+        let spec = parse(src).expect("char literals must parse");
+        let func = &spec.functions[0];
+        let mut chars = Vec::new();
+        for post in &func.postconditions {
+            constraint_char_literals(post, &mut chars);
+        }
+        assert_eq!(chars, vec![' ', '\t', '\n', '\r']);
+        assert!(matches!(func.tests[0].input, Expr::CharLit(' ')));
+        assert!(matches!(func.tests[1].input, Expr::CharLit('a')));
+        assert!(matches!(func.tests[2].input, Expr::CharLit('\n')));
+    }
+
+    #[test]
+    fn parse_char_literal_escapes_and_unicode() {
+        // The escape set mirrors escape_rust_char's world
+        // (src/codegen/mod.rs): quote, backslash, \n \r \t,
+        // and \u{...} for the control characters the emitter
+        // writes that way. A non-ASCII char is one scalar.
+        let src = r#"
+        T {
+        spec f {
+            input: c: Char
+            output: Bool
+            constraint: output == (c == '\'' || c == '\\' || c == 'é' || c == '\u{1F600}' || c == 'A')
+            test "quote" { input: '\''; expect: true }
+        }
+        }
+        "#;
+        let spec = parse(src).expect("char escapes must parse");
+        let func = &spec.functions[0];
+        let mut chars = Vec::new();
+        for post in &func.postconditions {
+            constraint_char_literals(post, &mut chars);
+        }
+        assert_eq!(chars, vec!['\'', '\\', 'é', '😀', 'A']);
+        assert!(matches!(func.tests[0].input, Expr::CharLit('\'')));
+    }
+
+    #[test]
+    fn parse_tokenizer_classifier_constraint_shapes() {
+        // The three Char classifiers of
+        // examples/functional_tokenizer.morph, verbatim
+        // constraint shapes (the file as a whole still fails
+        // its earlier dialect layers — module wrapper, alias
+        // `;`, if-constraints — which are S4's re-authoring
+        // work; what F4 owns is that these constraints now
+        // parse in isolation), plus next_char's `'\n'` inside
+        // the Some(...) call its rule compares against.
+        let src = r#"
+        T {
+        spec is_whitespace {
+            input: c: Char
+            output: Bool
+            constraint: output == (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+        }
+        spec is_ident_start {
+            input: c: Char
+            output: Bool
+            constraint: output == (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+        }
+        spec is_ident_continue {
+            input: c: Char
+            output: Bool
+            constraint: output == is_ident_start(c) || (c >= '0' && c <= '9')
+        }
+        spec next_char_peek {
+            input: c: Char
+            output: Bool
+            constraint: output == (Some(c) == Some('\n'))
+        }
+        }
+        "#;
+        let spec = parse(src).expect("classifier constraint shapes must parse");
+        assert_eq!(spec.functions.len(), 4);
+        let mut chars = Vec::new();
+        for func in &spec.functions {
+            for post in &func.postconditions {
+                constraint_char_literals(post, &mut chars);
+            }
+        }
+        assert_eq!(
+            chars,
+            vec![' ', '\t', '\n', '\r', 'a', 'z', 'A', 'Z', '_', '0', '9', '\n']
+        );
+    }
+
+    #[test]
+    fn parse_char_literal_rejects_malformed() {
+        // Empty, multi-char, unterminated, unknown escapes
+        // and non-scalar \u values are parse errors, never a
+        // guessed character.
+        for lit in [
+            "''",
+            "'ab'",
+            "'a",
+            "'\\x'",
+            "'\\u{}'",
+            "'\\u{110000}'",
+            "'\\u{D800}'",
+            "'\\u{FFFFFF}'",
+        ] {
+            let src = format!(
+                "T {{\n spec f {{\n input: c: Char\n output: Bool\n test \"t\" {{ input: {}; expect: true }}\n }}\n }}",
+                lit
+            );
+            let result = parse(&src);
+            assert!(
+                result.is_err(),
+                "malformed char literal {} must be a parse error, got: {:?}",
+                lit,
+                result.map(|s| s.name)
+            );
+        }
     }
 }

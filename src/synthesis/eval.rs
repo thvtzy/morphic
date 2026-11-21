@@ -458,6 +458,7 @@ pub fn value_of_expr(expr: &Expr) -> Option<Value> {
         Expr::FloatLit(f) => Some(Value::Float(*f)),
         Expr::BoolLit(b) => Some(Value::Bool(*b)),
         Expr::StringLit(s) => Some(Value::Str(s.clone())),
+        Expr::CharLit(c) => Some(Value::Char(*c)),
         _ => {
             let ir = super::engine::expr_to_ir(expr);
             eval(&ir, &Env::new()).ok()
@@ -808,6 +809,16 @@ mod tests {
         );
         // A free variable cannot be mapped.
         assert_eq!(value_of_expr(&Expr::Var("output".into())), None);
+        // Char literal (Phase 45, finding F4): maps to the
+        // Value::Char the interpreter has always carried.
+        assert_eq!(
+            value_of_expr(&Expr::CharLit('x')),
+            Some(Value::Char('x'))
+        );
+        assert_eq!(
+            value_of_expr(&Expr::CharLit('\n')),
+            Some(Value::Char('\n'))
+        );
     }
 
     // ── run_spec_tests ────────────────────────────────────
