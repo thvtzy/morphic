@@ -85,6 +85,20 @@
 //  its `++` chain, rust_binop_infix_text's precedent,
 //  predicted equation).
 //
+//  Phase 41 extends the probe to slice 6 (Phase 40's 6
+//  driver specs; the probe iterates the whole module, so
+//  the extension is the watch list) and adds its four
+//  recorded questions: rust_target_route — seedless BY
+//  DESIGN (String-equality guards, the rust_ident_empty
+//  family), whose claim under test is a DETERMINISTIC
+//  Verified pool winner; rust_target_result_form
+//  (predicted guard_table); rust_driver_section_text
+//  (predicted composition precedence: a Bool-parameter
+//  guard with a bare-Var pin and a literal pin at
+//  arity 2); and rust_file_text (predicted equation —
+//  the `++` template shape at arity 5, one beyond the
+//  arities measured so far).
+//
 //  The probe never asserts on synthesis *quality* — the engine
 //  is randomized — only on pipeline invariants: parse/typecheck
 //  succeed and synthesize returns Ok with at least one
@@ -163,8 +177,13 @@ mod probe3 {
     /// shapes (see the module header), joined in Phase 36
     /// by slice 5's three recorded questions
     /// (rust_stmt_seq_form, the candidate mixed-key gap;
-    /// rust_stmt_while_text; rust_stmt_collection_text).
-    const SEEDLESS_WATCH: [&str; 15] = [
+    /// rust_stmt_while_text; rust_stmt_collection_text),
+    /// and in Phase 41 by slice 6's four recorded
+    /// questions (rust_target_route, seedless by design —
+    /// its pool dump is the determinism evidence;
+    /// rust_target_result_form; rust_driver_section_text;
+    /// rust_file_text).
+    const SEEDLESS_WATCH: [&str; 19] = [
         "rust_ident_suffix",
         "rust_ident_empty",
         "rust_string_ownership",
@@ -181,6 +200,11 @@ mod probe3 {
         "rust_stmt_seq_form",
         "rust_stmt_while_text",
         "rust_stmt_collection_text",
+        // ── slice 6 (Phase 41) ──
+        "rust_target_route",
+        "rust_target_result_form",
+        "rust_driver_section_text",
+        "rust_file_text",
     ];
 
     /// Body facts for the CAND3 pool dump: the spec names this
