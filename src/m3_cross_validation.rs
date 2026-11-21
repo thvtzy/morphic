@@ -3304,7 +3304,7 @@ mod xval3 {
         // composition-guard shapes (rust_condition_text's
         // call guard, rust_break_text's Bool guard with a
         // compound pin). The eight remaining slice-4 shapes
-        // are asserted UNRECOGNIZED below, each on its
+        // were asserted UNRECOGNIZED below, each on its
         // measured predicate: the Int-keyed expression pins
         // (rust_unary_text, rust_concat_right_text,
         // rust_match_scrutinee_text — guard_table_body
@@ -3323,7 +3323,20 @@ mod xval3 {
         // guard with bare-variable pins at arity three:
         // composition_guard_body's territory rule refuses
         // it, and neither earlier family admits its arity).
-        const RECOGNIZED: [&str; 57] = [
+        //
+        // Phase 32 flip: the fifth builder family — the
+        // expression-pin guard table (rows recognized as the
+        // guard family's are, the key one Int parameter, the
+        // pin admitted the way composition_pin admits pins,
+        // with at least one compound pin as the territory
+        // rule) — recognizes the Int-keyed expression-pin
+        // trio, so the iterated set grows to 60. The five
+        // remaining slice-4 shapes stay unrecognized on their
+        // Phase 31 predicates, asserted below: the
+        // two-parameter Int guard tables with literal pins,
+        // the Bool x Bool region rows, and
+        // rust_concat_left_text's territory hole.
+        const RECOGNIZED: [&str; 60] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -3347,6 +3360,9 @@ mod xval3 {
             "rust_loop_text", "rust_struct_def_text", "rust_index_text",
             "rust_try_text", "rust_assign_text", "rust_return_text",
             "rust_break_text", "rust_hole_text", "rust_unsupported_text",
+            // ── slice 4 (Phase 32): expression-pin guard table ──
+            "rust_unary_text", "rust_concat_right_text",
+            "rust_match_scrutinee_text",
         ];
         let functions = load_codegen_module();
         assert_eq!(functions.len(), 79, "module spec count");
@@ -3368,10 +3384,7 @@ mod xval3 {
             "rust_string_ownership",
             "rust_ident_empty",
             // ── slice 4 (Phase 31): measured unrecognized ──
-            "rust_unary_text",
-            "rust_concat_right_text",
             "rust_concat_right_form",
-            "rust_match_scrutinee_text",
             "rust_match_scrutinee_form",
             "rust_match_scrutinee_bare",
             "rust_concat_left_owned",
