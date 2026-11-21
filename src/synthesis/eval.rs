@@ -27,6 +27,30 @@ pub enum Value {
     Char(char),
     Unit,
     List(Vec<Value>),
+    /// A record value (M1 feature 2/3, decisions D2a/D3a;
+    /// Phase 75): the declared type name plus the field
+    /// values in the constructing literal's written order.
+    /// Equality is the derived structural equality over that
+    /// representation — field order is part of it, matching
+    /// how literals are written in the modules (declaration
+    /// order).
+    Record {
+        type_name: String,
+        fields: Vec<(String, Value)>,
+    },
+    /// `Ok(v)` — a Result success value (Phase 75). Result
+    /// and Option values exist so that bodies and test
+    /// expectations built from the `Ok`/`Err`/`Some`/`None`
+    /// constructor calls can be judged in-process; before
+    /// this phase those calls were unevaluable and any test
+    /// carrying one was unbindable.
+    Ok(Box<Value>),
+    /// `Err(e)` — a Result failure value (Phase 75).
+    Err(Box<Value>),
+    /// `Some(v)` — an Option present value (Phase 75).
+    Some(Box<Value>),
+    /// `None()` — an Option empty value (Phase 75).
+    None,
 }
 
 /// Variable environment for one evaluation.
@@ -182,16 +206,52 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
         IRNode::Fold { .. } => Err(not_evaluable("Fold (higher-order)")),
         IRNode::Sort { .. } => Err(not_evaluable("Sort (higher-order)")),
         IRNode::StructDef { .. } => Err(not_evaluable("StructDef (declaration)")),
-        IRNode::TryPropagate(_) => Err(not_evaluable("TryPropagate (no Result values)")),
-        // M1 features (Phase 73): the nodes exist, but the
-        // interpreter has no record VALUE yet — Value::Record
-        // lands in Phase 75, and these arms become real
-        // evaluation there. Until then, honestly not evaluable.
-        IRNode::FieldAccess { .. } => {
-            Err(not_evaluable("FieldAccess (record values land in Phase 75)"))
+        // TryPropagate: Result VALUES exist since Phase 75,
+        // but `?` propagation semantics in the interpreter do
+        // not — unwinding an Err out of the enclosing body is
+        // a control-flow behavior this evaluator does not
+        // model, so the node stays outside the subset (the
+        // Phase 73-era reason, "no Result values", no longer
+        // states the cause and is not repeated).
+        IRNode::TryPropagate(_) => Err(not_evaluable(
+            "TryPropagate (? propagation is outside the evaluable subset)",
+        )),
+        // M1 features (Phase 75): record construction and
+        // field projection over Value::Record (D2a/D3a).
+        // Fields evaluate in written order, like Collection
+        // elements; a Return inside a field value unwinds
+        // the whole evaluation, also like Collection.
+        IRNode::RecordLit { type_name, fields } => {
+            let mut values = Vec::with_capacity(fields.len());
+            for (name, field_node) in fields {
+                match eval_flow(field_node, env)? {
+                    Flow::Returned(v) => return Ok(Flow::Returned(v)),
+                    Flow::Normal(v) => values.push((name.clone(), v)),
+                }
+            }
+            Ok(Flow::Normal(Value::Record {
+                type_name: type_name.clone(),
+                fields: values,
+            }))
         }
-        IRNode::RecordLit { .. } => {
-            Err(not_evaluable("RecordLit (record values land in Phase 75)"))
+        IRNode::FieldAccess { base, field } => {
+            let base_value = eval_flow(base, env)?.unwrap();
+            match base_value {
+                Value::Record { type_name, fields } => fields
+                    .into_iter()
+                    .find(|(name, _)| name == field)
+                    .map(|(_, v)| Flow::Normal(v))
+                    .ok_or_else(|| {
+                        not_evaluable(format!(
+                            "record `{}` has no field `{}`",
+                            type_name, field
+                        ))
+                    }),
+                other => Err(not_evaluable(format!(
+                    "field `{}` accessed on a non-record value ({:?})",
+                    field, other
+                ))),
+            }
         }
     }
 }
@@ -214,10 +274,15 @@ fn literal_value(lit: &IRLiteral) -> Value {
 ///   unparsed string condition), so the whole match is
 ///   not evaluable rather than a guess.
 ///
-/// Constructor patterns return `Ok(None)`: values in this
-/// domain are never constructors (a constructor-shaped test
-/// input cannot be mapped to a `Value` in the first place),
-/// so a constructor arm can never be the matching arm here.
+/// Constructor patterns return `Ok(None)`: since Phase 75
+/// the value domain DOES include constructor values
+/// (`Value::Ok` / `Err` / `Some` / `None`), but constructor
+/// pattern matching in the interpreter does not — a body
+/// whose match discriminates on a constructor cannot be
+/// judged in-process (its constructor arms never match
+/// here, so it falls through to a later arm or to the
+/// no-match failure). That is a recorded residual of this
+/// evaluator's subset, not a claim about the values.
 fn bind_pattern(pattern: &IRPattern, value: &Value) -> Result<Option<Env>, EvalError> {
     match pattern {
         IRPattern::Wildcard => Ok(Some(Env::new())),
@@ -249,6 +314,38 @@ fn eval_call(function: &str, args: &[IRNode], env: &mut Env) -> Result<Value, Ev
         // `List[...]` is the spec language's list literal; the
         // parser lowers it to a Call named "List" (parser.rs).
         "List" => Ok(Value::List(values)),
+        // The Result/Option constructors (Phase 75): the
+        // typechecker types `Ok(v)` / `Err(e)` / `Some(v)` /
+        // `None()` as constructor calls (Phase 74, parallel
+        // to the standing Some/None treatment), and bodies
+        // and test expectations are full of them — `peek`'s
+        // expected outputs are `Some('h')` / `None()`,
+        // `tokenize_one`'s are `Ok(state)`. Each takes
+        // exactly its declared arity; anything else is a
+        // named failure, not a guessed value.
+        "Ok" | "Err" | "Some" => {
+            let [value] = values.as_slice() else {
+                return Err(not_evaluable(format!(
+                    "constructor `{}` expects exactly one argument",
+                    function
+                )));
+            };
+            let value = value.clone();
+            Ok(match function {
+                "Ok" => Value::Ok(Box::new(value)),
+                "Err" => Value::Err(Box::new(value)),
+                _ => Value::Some(Box::new(value)),
+            })
+        }
+        "None" => {
+            if values.is_empty() {
+                Ok(Value::None)
+            } else {
+                Err(not_evaluable(
+                    "constructor `None` expects no arguments",
+                ))
+            }
+        }
         // The one pure builtin the specs and templates rely on.
         "len" => match values.as_slice() {
             [Value::List(items)] => Ok(Value::Int(items.len() as i64)),
@@ -261,6 +358,70 @@ fn eval_call(function: &str, args: &[IRNode], env: &mut Env) -> Result<Value, Ev
         other => Err(not_evaluable(format!(
             "call to unknown function `{}`",
             other
+        ))),
+    }
+}
+
+/// Evaluate one D1a builtin method call on an already
+/// evaluated receiver (Phase 75): the spec language's method
+/// semantics on interpreter values. The table is exactly the
+/// typechecker's closed table (Phase 74) — `Result`:
+/// `is_ok` / `is_err` / `unwrap`; `List`: `len` — all
+/// zero-argument. Anything else (unknown method, wrong
+/// receiver family, arguments to a builtin, a receiver with
+/// no method table) is a named `NotEvaluable`, never a
+/// guessed value; `unwrap` on an `Err` value is the named
+/// failure the interpreter's failure semantics require.
+pub(crate) fn eval_method_call(
+    receiver: &Value,
+    name: &str,
+    args: &[Value],
+) -> Result<Value, EvalError> {
+    // Every ratified builtin is zero-argument (D1a); an
+    // argument is a named failure here just as it is a type
+    // error in the checker (Phase 74).
+    if !args.is_empty() {
+        return Err(not_evaluable(format!(
+            "method `{}` is a zero-argument builtin ({} argument(s) given)",
+            name,
+            args.len()
+        )));
+    }
+    match receiver {
+        Value::Ok(payload) => match name {
+            "is_ok" => Ok(Value::Bool(true)),
+            "is_err" => Ok(Value::Bool(false)),
+            "unwrap" => Ok((**payload).clone()),
+            _ => Err(not_evaluable(format!(
+                "method `{}` does not exist on a Result value",
+                name
+            ))),
+        },
+        Value::Err(_) => match name {
+            "is_ok" => Ok(Value::Bool(false)),
+            "is_err" => Ok(Value::Bool(true)),
+            // The interpreter's failure semantics: unwrapping
+            // an Err has no value, so it is an evaluation
+            // failure with a reason — never a panic and never
+            // a guessed payload.
+            "unwrap" => Err(not_evaluable(
+                "method `unwrap` called on an Err value",
+            )),
+            _ => Err(not_evaluable(format!(
+                "method `{}` does not exist on a Result value",
+                name
+            ))),
+        },
+        Value::List(items) => match name {
+            "len" => Ok(Value::Int(items.len() as i64)),
+            _ => Err(not_evaluable(format!(
+                "method `{}` does not exist on a List value",
+                name
+            ))),
+        },
+        _ => Err(not_evaluable(format!(
+            "method `{}` called on a value with no method table ({:?})",
+            name, receiver
         ))),
     }
 }
@@ -462,6 +623,26 @@ fn eval_unaryop(op: IRUnaryOp, v: Value) -> Result<Value, EvalError> {
 /// environment — the same conversion `seed_from_tests` uses
 /// for expected outputs. Anything referencing a variable or an
 /// unknown call cannot be mapped and returns `None`.
+///
+/// One carve-out (Phase 75): `Expr::MethodCall` is evaluated
+/// HERE, directly on mapped values, because `expr_to_ir`
+/// lowers it to a Hole (the IR kind table has no method-call
+/// kind — pinned by
+/// `expr_to_ir_method_call_lowers_to_hole_pending_74_76`).
+/// The receiver and arguments map recursively through this
+/// same function, so a method call on a closed receiver
+/// (`Ok(5).is_ok()`, `Ok([1, 2]).unwrap().len()`) maps,
+/// while one on a variable does not. The semantics are
+/// `eval_method_call`'s D1a table; its failures (unwrap on
+/// an Err, unknown method, …) map to `None`, this function's
+/// only failure channel. Note the boundary precisely: a
+/// method call UNDER another composite (a field projection
+/// or index over a method call, say) still routes through
+/// the `expr_to_ir` fallback and hits the pinned Hole —
+/// no test in the restored tokenizer module has that shape,
+/// and constraints themselves are never mapped here at all
+/// (Z3 judges them natively, Phase 76; the compiled runner
+/// renders them, Phase 77).
 pub fn value_of_expr(expr: &Expr) -> Option<Value> {
     match expr {
         Expr::IntLit(n) => Some(Value::Int(*n)),
@@ -469,6 +650,18 @@ pub fn value_of_expr(expr: &Expr) -> Option<Value> {
         Expr::BoolLit(b) => Some(Value::Bool(*b)),
         Expr::StringLit(s) => Some(Value::Str(s.clone())),
         Expr::CharLit(c) => Some(Value::Char(*c)),
+        Expr::MethodCall {
+            receiver,
+            name,
+            args,
+        } => {
+            let receiver = value_of_expr(receiver)?;
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                values.push(value_of_expr(arg)?);
+            }
+            eval_method_call(&receiver, name, &values).ok()
+        }
         _ => {
             let ir = super::engine::expr_to_ir(expr);
             eval(&ir, &Env::new()).ok()
@@ -1465,5 +1658,870 @@ mod tests {
         let correct = binop(IRBinOp::Add, var("a"), var("b"));
         let run = run_spec_tests(&correct, &spec);
         assert_eq!(run, TestRun { evaluable: 1, passed: 1 });
+    }
+
+    // ── Records, Result/Option values, method calls ─────
+    // (Phase 75, M1 features: Value::Record + the
+    // FieldAccess / RecordLit evaluation arms, the
+    // Ok/Err/Some/None constructor calls, and spec-level
+    // MethodCall evaluation for the D1a builtin table.)
+
+    fn chr(c: char) -> IRNode {
+        IRNode::Literal(IRLiteral::Char(c))
+    }
+
+    fn field(base: IRNode, name: &str) -> IRNode {
+        IRNode::FieldAccess {
+            base: Box::new(base),
+            field: name.into(),
+        }
+    }
+
+    fn call_ir(name: &str, args: Vec<IRNode>) -> IRNode {
+        IRNode::Call {
+            function: name.into(),
+            args,
+        }
+    }
+
+    fn record_val(type_name: &str, fields: Vec<(&str, Value)>) -> Value {
+        Value::Record {
+            type_name: type_name.into(),
+            fields: fields
+                .into_iter()
+                .map(|(n, v)| (n.to_string(), v))
+                .collect(),
+        }
+    }
+
+    fn token_val(kind: i64, lexeme: &str, line: i64, col: i64) -> Value {
+        record_val(
+            "Token",
+            vec![
+                ("kind", Value::Int(kind)),
+                ("lexeme", Value::Str(lexeme.into())),
+                ("line", Value::Int(line)),
+                ("col", Value::Int(col)),
+            ],
+        )
+    }
+
+    fn state_val(source: &str, pos: i64, line: i64, col: i64, tokens: Vec<Value>) -> Value {
+        record_val(
+            "TokenizerState",
+            vec![
+                ("source", Value::Str(source.into())),
+                ("pos", Value::Int(pos)),
+                ("line", Value::Int(line)),
+                ("col", Value::Int(col)),
+                ("tokens", Value::List(tokens)),
+            ],
+        )
+    }
+
+    #[test]
+    fn eval_record_lit_constructs_record_value_in_written_order() {
+        // Token { kind: 0, lexeme: "spec", line: 1, col: 1 } —
+        // the tokenizer's nested-literal shape.
+        let lit = IRNode::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), int(0)),
+                ("lexeme".into(), string("spec")),
+                ("line".into(), int(1)),
+                ("col".into(), int(1)),
+            ],
+        };
+        assert_eq!(
+            eval(&lit, &Env::new()),
+            Ok(token_val(0, "spec", 1, 1)),
+            "a record literal must evaluate to a record value carrying its type name"
+        );
+
+        // Field values are full expressions, evaluated: a
+        // state whose pos field is 0 + 1 and whose tokens
+        // field is a list holding a record literal.
+        let state = IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), string("spec")),
+                ("pos".into(), binop(IRBinOp::Add, int(0), int(1))),
+                ("line".into(), int(1)),
+                ("col".into(), int(2)),
+                (
+                    "tokens".into(),
+                    IRNode::Collection {
+                        kind: CollectionKind::List,
+                        elements: vec![IRNode::RecordLit {
+                            type_name: "Token".into(),
+                            fields: vec![
+                                ("kind".into(), int(0)),
+                                ("lexeme".into(), string("spec")),
+                                ("line".into(), int(1)),
+                                ("col".into(), int(1)),
+                            ],
+                        }],
+                    },
+                ),
+            ],
+        };
+        assert_eq!(
+            eval(&state, &Env::new()),
+            Ok(state_val("spec", 1, 1, 2, vec![token_val(0, "spec", 1, 1)]))
+        );
+    }
+
+    #[test]
+    fn eval_record_lit_field_failures_surface_in_written_order() {
+        // Two failing fields: the FIRST field's failure is
+        // the reported one (fields evaluate in written
+        // order, like Collection elements).
+        let lit = IRNode::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                (
+                    "kind".into(),
+                    IRNode::Hole {
+                        id: 0,
+                        expected_type: None,
+                    },
+                ),
+                ("lexeme".into(), var("unbound")),
+            ],
+        };
+        match eval(&lit, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("Hole"),
+                    "the first field's failure must surface, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+
+        // A Return inside a field value unwinds the whole
+        // evaluation, exactly as it does inside a Collection.
+        let lit = IRNode::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![("kind".into(), IRNode::Return(Box::new(int(3))))],
+        };
+        assert_eq!(eval(&lit, &Env::new()), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn eval_field_access_projects_named_fields() {
+        let env = env_with(&[(
+            "state",
+            state_val("spec", 4, 1, 5, vec![token_val(0, "spec", 1, 1)]),
+        )]);
+        // Scalar projection.
+        assert_eq!(
+            eval(&field(var("state"), "pos"), &env),
+            Ok(Value::Int(4))
+        );
+        // Projection of a list-of-records field, then index,
+        // then projection again: state.tokens[0].lexeme.
+        let lexeme = field(
+            IRNode::Index(
+                Box::new(field(var("state"), "tokens")),
+                Box::new(int(0)),
+            ),
+            "lexeme",
+        );
+        assert_eq!(eval(&lexeme, &env), Ok(Value::Str("spec".into())));
+        // Projection directly off a record literal.
+        let lit = IRNode::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), int(7)),
+                ("lexeme".into(), string("x")),
+                ("line".into(), int(1)),
+                ("col".into(), int(1)),
+            ],
+        };
+        assert_eq!(
+            eval(&field(lit, "kind"), &Env::new()),
+            Ok(Value::Int(7))
+        );
+    }
+
+    #[test]
+    fn eval_field_access_failures_are_named_not_guessed() {
+        let env = env_with(&[("state", state_val("hi", 0, 1, 1, vec![]))]);
+        // Unknown field: the reason names the field.
+        match eval(&field(var("state"), "bogus"), &env) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("bogus"),
+                    "unknown-field failure must name the field, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // Non-record base: named, not a panic or a guess.
+        match eval(&field(int(3), "pos"), &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("pos"),
+                    "non-record failure must name the field, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // A base that itself cannot evaluate propagates its
+        // own reason.
+        match eval(
+            &field(
+                IRNode::Hole {
+                    id: 0,
+                    expected_type: None,
+                },
+                "pos",
+            ),
+            &Env::new(),
+        ) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(reason.contains("Hole"), "got: {reason}");
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_constructor_calls_build_result_and_option_values() {
+        let env = Env::new();
+        assert_eq!(
+            eval(&call_ir("Ok", vec![int(5)]), &env),
+            Ok(Value::Ok(Box::new(Value::Int(5))))
+        );
+        assert_eq!(
+            eval(&call_ir("Err", vec![string("boom")]), &env),
+            Ok(Value::Err(Box::new(Value::Str("boom".into()))))
+        );
+        assert_eq!(
+            eval(&call_ir("Some", vec![chr('h')]), &env),
+            Ok(Value::Some(Box::new(Value::Char('h'))))
+        );
+        assert_eq!(eval(&call_ir("None", vec![]), &env), Ok(Value::None));
+        // Constructors compose: Ok(Some(1)).
+        assert_eq!(
+            eval(&call_ir("Ok", vec![call_ir("Some", vec![int(1)])]), &env),
+            Ok(Value::Ok(Box::new(Value::Some(Box::new(Value::Int(1))))))
+        );
+        // Wrong arity is a named failure, never a guess.
+        for bad in [
+            call_ir("Ok", vec![]),
+            call_ir("Ok", vec![int(1), int(2)]),
+            call_ir("Err", vec![]),
+            call_ir("Some", vec![]),
+            call_ir("None", vec![int(1)]),
+        ] {
+            assert!(
+                matches!(eval(&bad, &env), Err(EvalError::NotEvaluable(_))),
+                "expected NotEvaluable for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn eval_method_call_builtins_and_named_failures() {
+        let ok5 = Value::Ok(Box::new(Value::Int(5)));
+        let err = Value::Err(Box::new(Value::Str("boom".into())));
+        // The D1a Result table.
+        assert_eq!(eval_method_call(&ok5, "is_ok", &[]), Ok(Value::Bool(true)));
+        assert_eq!(eval_method_call(&ok5, "is_err", &[]), Ok(Value::Bool(false)));
+        assert_eq!(eval_method_call(&err, "is_ok", &[]), Ok(Value::Bool(false)));
+        assert_eq!(eval_method_call(&err, "is_err", &[]), Ok(Value::Bool(true)));
+        assert_eq!(eval_method_call(&ok5, "unwrap", &[]), Ok(Value::Int(5)));
+        // unwrap on an Err value: a named eval failure.
+        match eval_method_call(&err, "unwrap", &[]) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("unwrap") && reason.contains("Err"),
+                    "unwrap-on-Err failure must name the operation, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // The D1a List table.
+        let list = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert_eq!(eval_method_call(&list, "len", &[]), Ok(Value::Int(3)));
+        // Wrong family, unknown method, arguments to a
+        // zero-arg builtin, method on a value with no table:
+        // each a named failure naming the method.
+        for (receiver, name, args) in [
+            (ok5.clone(), "len", vec![]),
+            (list.clone(), "is_ok", vec![]),
+            (ok5.clone(), "bogus", vec![]),
+            (Value::Int(1), "is_ok", vec![]),
+            (ok5.clone(), "is_ok", vec![Value::Int(1)]),
+        ] {
+            match eval_method_call(&receiver, name, &args) {
+                Err(EvalError::NotEvaluable(reason)) => {
+                    assert!(
+                        reason.contains(name),
+                        "failure must name the method `{name}`, got: {reason}"
+                    );
+                }
+                other => panic!("expected NotEvaluable for {name} on {receiver:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn value_of_expr_evaluates_method_calls_on_closed_receivers() {
+        let ok_int = |n: i64| Expr::Call("Ok".into(), vec![Expr::IntLit(n)]);
+        let method = |receiver: Expr, name: &str| Expr::MethodCall {
+            receiver: Box::new(receiver),
+            name: name.into(),
+            args: vec![],
+        };
+        assert_eq!(
+            value_of_expr(&method(ok_int(5), "is_ok")),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            value_of_expr(&method(
+                Expr::Call("Err".into(), vec![Expr::StringLit("x".into())]),
+                "is_err"
+            )),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            value_of_expr(&method(ok_int(5), "unwrap")),
+            Some(Value::Int(5))
+        );
+        // Chained: Ok([1, 2]).unwrap().len() — the
+        // tokenize_all constraint shape, on a closed receiver.
+        let chained = method(
+            method(
+                Expr::Call(
+                    "Ok".into(),
+                    vec![Expr::Call(
+                        "List".into(),
+                        vec![Expr::IntLit(1), Expr::IntLit(2)],
+                    )],
+                ),
+                "unwrap",
+            ),
+            "len",
+        );
+        assert_eq!(value_of_expr(&chained), Some(Value::Int(2)));
+        // unwrap on Err has no value: unmappable, like every
+        // other failure in value_of_expr's Option channel.
+        assert_eq!(
+            value_of_expr(&method(
+                Expr::Call("Err".into(), vec![Expr::StringLit("x".into())]),
+                "unwrap"
+            )),
+            None
+        );
+        // A method on a free variable cannot be mapped (the
+        // receiver has no closed value) — constraints over
+        // variables are judged by Z3 / the compiled runner,
+        // not by this mapping.
+        assert_eq!(
+            value_of_expr(&method(Expr::Var("output".into()), "is_err")),
+            None
+        );
+        // Unknown methods and wrong-family methods do not map.
+        assert_eq!(value_of_expr(&method(ok_int(5), "bogus")), None);
+        assert_eq!(value_of_expr(&method(ok_int(5), "len")), None);
+    }
+
+    #[test]
+    fn value_of_expr_maps_record_and_constructor_test_forms() {
+        let token_lit = Expr::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), Expr::IntLit(0)),
+                ("lexeme".into(), Expr::StringLit("spec".into())),
+                ("line".into(), Expr::IntLit(1)),
+                ("col".into(), Expr::IntLit(1)),
+            ],
+        };
+        // A bare record literal maps to a record value.
+        assert_eq!(
+            value_of_expr(&token_lit),
+            Some(token_val(0, "spec", 1, 1))
+        );
+        // Field projection over a closed record literal.
+        let state_lit = Expr::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), Expr::StringLit("hi".into())),
+                ("pos".into(), Expr::IntLit(0)),
+                ("line".into(), Expr::IntLit(1)),
+                ("col".into(), Expr::IntLit(1)),
+                (
+                    "tokens".into(),
+                    Expr::Call("List".into(), vec![token_lit.clone()]),
+                ),
+            ],
+        };
+        assert_eq!(
+            value_of_expr(&state_lit),
+            Some(state_val("hi", 0, 1, 1, vec![token_val(0, "spec", 1, 1)]))
+        );
+        assert_eq!(
+            value_of_expr(&Expr::Field(
+                Box::new(state_lit.clone()),
+                "pos".into()
+            )),
+            Some(Value::Int(0))
+        );
+        // Ok(record) — tokenize_one's expected-output shape.
+        assert_eq!(
+            value_of_expr(&Expr::Call("Ok".into(), vec![state_lit])),
+            Some(Value::Ok(Box::new(state_val(
+                "hi",
+                0,
+                1,
+                1,
+                vec![token_val(0, "spec", 1, 1)]
+            ))))
+        );
+        // Ok([Token, Token]) — tokenize_all's shape: records
+        // nested inside a list literal inside a constructor.
+        let two_tokens = Expr::Call(
+            "Ok".into(),
+            vec![Expr::Call(
+                "List".into(),
+                vec![token_lit.clone(), token_lit],
+            )],
+        );
+        assert_eq!(
+            value_of_expr(&two_tokens),
+            Some(Value::Ok(Box::new(Value::List(vec![
+                token_val(0, "spec", 1, 1),
+                token_val(0, "spec", 1, 1)
+            ]))))
+        );
+        // Some('h') / None() — peek's expected outputs.
+        assert_eq!(
+            value_of_expr(&Expr::Call("Some".into(), vec![Expr::CharLit('h')])),
+            Some(Value::Some(Box::new(Value::Char('h'))))
+        );
+        assert_eq!(
+            value_of_expr(&Expr::Call("None".into(), vec![])),
+            Some(Value::None)
+        );
+    }
+
+    #[test]
+    fn try_propagate_remains_outside_the_evaluable_subset() {
+        // Residual, pinned deliberately: Result VALUES exist
+        // since this phase, but `?` propagation semantics in
+        // the interpreter do not — a body using TryPropagate
+        // is still not evaluable in-process, and the reason
+        // must not claim the old cause (no Result values).
+        let node = IRNode::TryPropagate(Box::new(call_ir("Ok", vec![int(1)])));
+        match eval(&node, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    !reason.contains("no Result values"),
+                    "the stale reason must not survive: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+    }
+
+    // ── Headline evidence (Phase 75): the restored ──────
+    // tokenizer module's record-carrying specs bind their
+    // tests in-process and are judged by the interpreter.
+    //
+    // The module text is the Phase 73/74 restored scratch,
+    // embedded verbatim: the current module's types, the
+    // dropped tokenize_one/tokenize_all constraints restored
+    // (acda3f9), and the 9 mirror-only tests restored in the
+    // D3a named form. examples/functional_tokenizer.morph
+    // itself is NOT touched by this phase (Phase 79 owns the
+    // file); the classifiers' specs are read from it below,
+    // since their tests never left the file.
+
+    const RESTORED_TOKENIZER_MODULE: &str = r#"ScratchTokenizer {
+
+type TokenKind = Int;
+
+type Token = {
+    kind: TokenKind,
+    lexeme: String,
+    line: Int,
+    col: Int
+}
+
+type TokenizerState = {
+    source: String,
+    pos: Int,
+    line: Int,
+    col: Int,
+    tokens: List<Token>
+}
+
+type StepResult = Result<TokenizerState, String>;
+
+spec peek {
+    input: state: TokenizerState
+    output: Option<Char>
+
+    constraint: state.pos<len(state.source)||output==None()
+    constraint: state.pos>=len(state.source)||output==Some(state.source[state.pos])
+
+    test "non-empty" { input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] } expect: Some('h') }
+    test "at-end" { input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] } expect: None() }
+}
+
+spec next_char {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos==state.pos+1
+    constraint: peek(state)!=Some('\n')||output.line==state.line+1
+    constraint: peek(state)!=Some('\n')||output.col==1
+    constraint: peek(state)==Some('\n')||output.col==state.col+1
+
+    test "normal" {
+        input: TokenizerState { source: "ab", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "ab", pos: 1, line: 1, col: 2, tokens: [] }
+    }
+}
+
+spec skip_whitespace {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos>=state.pos
+    constraint: len(output.source)==len(state.source)
+
+    test "no-whitespace" {
+        input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
+    }
+
+    test "skip-spaces" {
+        input: TokenizerState { source: "  hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "  hi", pos: 2, line: 1, col: 3, tokens: [] }
+    }
+}
+
+spec tokenize_one {
+    input: state: TokenizerState
+    output: StepResult
+
+    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+    constraint: output.is_ok() || state.pos >= len(state.source)
+
+    test "keyword-spec" {
+        input: TokenizerState { source: "spec", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok(TokenizerState { source: "spec", pos: 4, line: 1, col: 5, tokens: [
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 }
+        ] })
+    }
+
+    test "end-of-input" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok(TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] })
+    }
+}
+
+spec tokenize_all {
+    input: state: TokenizerState
+    output: Result<List<Token>, String>
+
+    constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
+    optimize: time < O(n)
+
+    test "simple-spec" {
+        input: TokenizerState { source: "spec sort", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 },
+            Token { kind: 0, lexeme: "sort", line: 1, col: 6 }
+        ])
+    }
+
+    test "empty" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([])
+    }
+}
+
+}"#;
+
+    fn load_specs_from(source: &str) -> Vec<FunctionSpec> {
+        let parsed = crate::spec::parser::parse(source).expect("module must parse");
+        let checked = crate::spec::typeck::check(parsed).expect("module must typecheck");
+        checked.spec.functions
+    }
+
+    fn spec_named<'a>(specs: &'a [FunctionSpec], name: &str) -> &'a FunctionSpec {
+        specs
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("spec {name} must exist"))
+    }
+
+    fn peek_body() -> IRNode {
+        // if state.pos < len(state.source)
+        //   then Some(state.source[state.pos]) else None()
+        // — the mirror's peek (tests/tokenizer_proof.rs):
+        // chars().nth(pos).
+        IRNode::If {
+            condition: Box::new(binop(
+                IRBinOp::Lt,
+                field(var("state"), "pos"),
+                call_ir("len", vec![field(var("state"), "source")]),
+            )),
+            then_branch: Box::new(call_ir(
+                "Some",
+                vec![IRNode::Index(
+                    Box::new(field(var("state"), "source")),
+                    Box::new(field(var("state"), "pos")),
+                )],
+            )),
+            else_branch: Box::new(call_ir("None", vec![])),
+        }
+    }
+
+    fn next_char_body() -> IRNode {
+        // The mirror's next_char: pos + 1; on '\n' line + 1
+        // and col = 1, else col + 1 (line carried).
+        let is_newline = binop(
+            IRBinOp::And,
+            binop(
+                IRBinOp::Lt,
+                field(var("state"), "pos"),
+                call_ir("len", vec![field(var("state"), "source")]),
+            ),
+            binop(
+                IRBinOp::Eq,
+                IRNode::Index(
+                    Box::new(field(var("state"), "source")),
+                    Box::new(field(var("state"), "pos")),
+                ),
+                chr('\n'),
+            ),
+        );
+        IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), field(var("state"), "source")),
+                (
+                    "pos".into(),
+                    binop(IRBinOp::Add, field(var("state"), "pos"), int(1)),
+                ),
+                (
+                    "line".into(),
+                    IRNode::If {
+                        condition: Box::new(is_newline.clone()),
+                        then_branch: Box::new(binop(
+                            IRBinOp::Add,
+                            field(var("state"), "line"),
+                            int(1),
+                        )),
+                        else_branch: Box::new(field(var("state"), "line")),
+                    },
+                ),
+                (
+                    "col".into(),
+                    IRNode::If {
+                        condition: Box::new(is_newline),
+                        then_branch: Box::new(int(1)),
+                        else_branch: Box::new(binop(
+                            IRBinOp::Add,
+                            field(var("state"), "col"),
+                            int(1),
+                        )),
+                    },
+                ),
+                ("tokens".into(), field(var("state"), "tokens")),
+            ],
+        }
+    }
+
+    #[test]
+    fn tokenizer_record_specs_bind_and_are_judged() {
+        let specs = load_specs_from(RESTORED_TOKENIZER_MODULE);
+
+        // Every record-carrying spec's tests now BIND
+        // in-process (Phase 48: "nothing to bind `state`
+        // to" — all five were unbindable).
+        for (name, count) in [
+            ("peek", 2),
+            ("next_char", 1),
+            ("skip_whitespace", 2),
+            ("tokenize_one", 2),
+            ("tokenize_all", 2),
+        ] {
+            let spec = spec_named(&specs, name);
+            assert_eq!(
+                test_bindability(spec),
+                vec![true; count],
+                "{name}: every restored test must bind in-process"
+            );
+            assert_eq!(bindable_test_count(spec), count);
+        }
+
+        // peek: the mirror body passes both tests.
+        let peek = spec_named(&specs, "peek");
+        assert_eq!(
+            test_outcomes(&peek_body(), peek),
+            vec![TestOutcome::Passed, TestOutcome::Passed]
+        );
+        assert_eq!(
+            run_spec_tests(&peek_body(), peek),
+            TestRun {
+                evaluable: 2,
+                passed: 2
+            }
+        );
+
+        // next_char: the mirror body passes its test.
+        let next_char = spec_named(&specs, "next_char");
+        assert_eq!(
+            test_outcomes(&next_char_body(), next_char),
+            vec![TestOutcome::Passed]
+        );
+        assert_eq!(
+            run_spec_tests(&next_char_body(), next_char),
+            TestRun {
+                evaluable: 1,
+                passed: 1
+            }
+        );
+
+        // skip_whitespace: the mirror body is a loop, which
+        // stays outside the evaluable subset — the tests
+        // bind and count as evaluable, and the outcome says
+        // exactly why no verdict was produced.
+        let skip = spec_named(&specs, "skip_whitespace");
+        let loop_body = IRNode::While {
+            condition: Box::new(boolean(true)),
+            body: Box::new(var("state")),
+            invariant: None,
+        };
+        let outcomes = test_outcomes(&loop_body, skip);
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| matches!(o, TestOutcome::BodyNotEvaluable(_))),
+            "skip_whitespace outcomes must be BodyNotEvaluable, got {outcomes:?}"
+        );
+        assert_eq!(
+            run_spec_tests(&loop_body, skip),
+            TestRun {
+                evaluable: 2,
+                passed: 0
+            }
+        );
+
+        // tokenize_one: the partial body Ok(state) — correct
+        // at end-of-input, wrong on "keyword-spec" (it does
+        // not append the token). Judged, honestly split.
+        let one = spec_named(&specs, "tokenize_one");
+        let identity_step = call_ir("Ok", vec![var("state")]);
+        assert_eq!(
+            test_outcomes(&identity_step, one),
+            vec![TestOutcome::Failed, TestOutcome::Passed]
+        );
+        assert_eq!(
+            run_spec_tests(&identity_step, one),
+            TestRun {
+                evaluable: 2,
+                passed: 1
+            }
+        );
+
+        // tokenize_all: the partial body Ok(state.tokens) —
+        // correct on "empty", wrong on "simple-spec".
+        let all = spec_named(&specs, "tokenize_all");
+        let tokens_of_state = call_ir("Ok", vec![field(var("state"), "tokens")]);
+        assert_eq!(
+            test_outcomes(&tokens_of_state, all),
+            vec![TestOutcome::Failed, TestOutcome::Passed]
+        );
+        assert_eq!(
+            run_spec_tests(&tokens_of_state, all),
+            TestRun {
+                evaluable: 2,
+                passed: 1
+            }
+        );
+    }
+
+    #[test]
+    fn tokenizer_classifier_bodies_pass_and_match_the_mirror() {
+        // The classifiers never carried records — their
+        // in-spec tests bind as they always did. The bodies
+        // below transcribe tests/tokenizer_proof.rs lines
+        // 60–70 exactly; passing the specs' tests with them
+        // cross-checks the interpreter against the mirror.
+        let root = env!("CARGO_MANIFEST_DIR");
+        let source = std::fs::read_to_string(format!(
+            "{root}/examples/functional_tokenizer.morph"
+        ))
+        .unwrap();
+        let specs = load_specs_from(&source);
+        let c = || var("c");
+        let char_range = |lo: char, hi: char| {
+            binop(
+                IRBinOp::And,
+                binop(IRBinOp::Ge, c(), chr(lo)),
+                binop(IRBinOp::Le, c(), chr(hi)),
+            )
+        };
+        let ident_start = binop(
+            IRBinOp::Or,
+            binop(IRBinOp::Or, char_range('a', 'z'), char_range('A', 'Z')),
+            binop(IRBinOp::Eq, c(), chr('_')),
+        );
+        let bodies: Vec<(&str, IRNode)> = vec![
+            (
+                "is_whitespace",
+                [(" ", ' '), ("\t", '\t'), ("\n", '\n'), ("\r", '\r')]
+                    .into_iter()
+                    .map(|(_, ch)| binop(IRBinOp::Eq, c(), chr(ch)))
+                    .reduce(|a, b| binop(IRBinOp::Or, a, b))
+                    .unwrap(),
+            ),
+            ("is_ident_start", ident_start.clone()),
+            (
+                "is_ident_continue",
+                binop(IRBinOp::Or, ident_start, char_range('0', '9')),
+            ),
+        ];
+        for (name, body) in &bodies {
+            let spec = spec_named(&specs, name);
+            assert_eq!(
+                run_spec_tests(body, spec),
+                TestRun {
+                    evaluable: 3,
+                    passed: 3
+                },
+                "{name}: the mirror body must pass all in-spec tests"
+            );
+        }
+
+        // Mirror cross-check beyond the specs' own tests:
+        // peek / next_char on inputs the tests do not carry,
+        // against the mirror's documented behavior.
+        let env = env_with(&[("state", state_val("hi", 1, 1, 2, vec![]))]);
+        assert_eq!(
+            eval(&peek_body(), &env),
+            Ok(Value::Some(Box::new(Value::Char('i')))),
+            "mirror peek at pos 1 of \"hi\" is Some('i')"
+        );
+        let env = env_with(&[("state", state_val("hi", 2, 1, 3, vec![]))]);
+        assert_eq!(
+            eval(&peek_body(), &env),
+            Ok(Value::None),
+            "mirror peek at end of input is None"
+        );
+        let env = env_with(&[("state", state_val("a\nb", 1, 1, 2, vec![]))]);
+        assert_eq!(
+            eval(&next_char_body(), &env),
+            Ok(state_val("a\nb", 2, 2, 1, vec![])),
+            "mirror next_char over '\\n' advances line and resets col"
+        );
     }
 }
