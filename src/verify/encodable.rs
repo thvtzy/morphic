@@ -620,6 +620,11 @@ fn abs_call(
             Some(Abs::List(values))
         }
         "len" if args.len() == 1 => abs_len(abs_eval(&args[0], env, ctx)?),
+        // F2 (Phase 100, D4a): the conversion — the
+        // mirror of `sym_int_to_str` (see `abs_int_to_str`).
+        "int_to_str" if args.len() == 1 => {
+            abs_int_to_str(abs_eval(&args[0], env, ctx)?)
+        }
         // The Result/Option constructors (Phase 76), with
         // the real evaluator's literal tags.
         "Ok" if args.len() == 1 => Some(Abs::Result {
@@ -662,6 +667,23 @@ fn abs_len(v: Abs) -> Option<Abs> {
         // A symbolic list's length is its binding constant,
         // not a numeral.
         Abs::ListLen => Some(Abs::Int(IntVal::Unknown)),
+        _ => None,
+    }
+}
+
+/// The mirror of `sym_int_to_str` (Phase 100, F2 D4a),
+/// case for case: a Known Int folds to the Known Str of
+/// its exact Rust `Display` rendering (the real side's
+/// `as_i64()` fold); an Unknown Int yields an Unknown
+/// Str (the real side's UF application — a Str term that
+/// is no literal); every other sort declines on both
+/// sides.
+fn abs_int_to_str(v: Abs) -> Option<Abs> {
+    match v {
+        Abs::Int(IntVal::Known(n)) => {
+            Some(Abs::Str(StrVal::Known(format!("{}", n))))
+        }
+        Abs::Int(IntVal::Unknown) => Some(Abs::Str(StrVal::Unknown)),
         _ => None,
     }
 }
@@ -1176,6 +1198,26 @@ mod tests {
     }
 
     #[test]
+    fn int_to_str_shapes_are_encodable() {
+        // Phase 100 (F2): the mirror's `int_to_str` arm —
+        // a Known Int folds to a Known Str, an Unknown Int
+        // to an Unknown Str (the UF's abstract shadow);
+        // wrong sort and wrong arity decline, mirroring
+        // `sym_int_to_str` case for case.
+        let s = spec(vec![("x", TypeRef::Int), ("t", TypeRef::String)]);
+        let call = |args: Vec<IRNode>| IRNode::Call {
+            function: "int_to_str".into(),
+            args,
+        };
+        assert!(encodable(&s, &call(vec![int(42)])));
+        assert!(encodable(&s, &call(vec![int(-42)])));
+        assert!(encodable(&s, &call(vec![var("x")])));
+        assert!(!encodable(&s, &call(vec![var("t")])));
+        assert!(!encodable(&s, &call(vec![int(1), int(2)])));
+        assert!(!encodable(&s, &call(vec![])));
+    }
+
+    #[test]
     fn holes_and_loops_are_not_encodable() {
         let s = spec(vec![("x", TypeRef::Int)]);
         assert!(!encodable(&s, &IRNode::Hole { id: 0, expected_type: None }));
@@ -1327,6 +1369,30 @@ mod tests {
                     ),
                     (IRPattern::Wildcard, IRNode::Literal(IRLiteral::Bool(false))),
                 ],
+            },
+            // Phase 100 (F2): the conversion shapes — the
+            // fold, the UF shadow, the computed-argument
+            // boundary (an Add term is no numeral on either
+            // side), and the two declines.
+            IRNode::Call {
+                function: "int_to_str".into(),
+                args: vec![int(42)],
+            },
+            IRNode::Call {
+                function: "int_to_str".into(),
+                args: vec![var("x")],
+            },
+            IRNode::Call {
+                function: "int_to_str".into(),
+                args: vec![binop(IRBinOp::Add, int(40), int(2))],
+            },
+            IRNode::Call {
+                function: "int_to_str".into(),
+                args: vec![var("t")],
+            },
+            IRNode::Call {
+                function: "int_to_str".into(),
+                args: vec![int(1), int(2)],
             },
         ];
         for body in corners {

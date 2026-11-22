@@ -744,7 +744,17 @@ impl Verifier {
             })
             .collect();
 
-        match z3.check_and_eval_ints(&int_params) {
+        // Phase 100 (F2, D4a): the refutation-degradation
+        // rule — the countermodel check is UF-guarded
+        // (the rule is stated in
+        // `check_and_eval_ints_uf_guarded`; the judged
+        // terms are scanned by `int_to_str_apps`). With
+        // no UF application in the encoding this is the
+        // standing check, verdict for verdict.
+        let mut uf_terms: Vec<&z3::ast::Bool> = vec![&formula];
+        uf_terms.extend(call_facts.iter());
+        let uf = int_to_str_apps(&uf_terms);
+        match z3.check_and_eval_ints_uf_guarded(&int_params, &uf.apps, uf.uninspectable) {
             SmtResult::Unsat => done(true, None, Tri::Proven),
             SmtResult::Sat(model) => done(
                 false,
@@ -892,7 +902,15 @@ impl Verifier {
             z3.assert(pc);
             z3.assert(&not_exhausted);
             z3.assert(&formula.not());
-            match z3.check_and_eval_ints(&int_params) {
+            // Phase 100 (F2, D4a): the refutation-
+            // degradation rule, as in `verify_constraint`
+            // — the per-path countermodel check is
+            // UF-guarded over the row, the path condition,
+            // and the call facts.
+            let mut uf_terms: Vec<&z3::ast::Bool> = vec![&formula, pc];
+            uf_terms.extend(call_facts.iter());
+            let uf = int_to_str_apps(&uf_terms);
+            match z3.check_and_eval_ints_uf_guarded(&int_params, &uf.apps, uf.uninspectable) {
                 SmtResult::Sat(model) => {
                     return done(
                         false,
@@ -929,6 +947,84 @@ enum Tri {
     Proven,
     Refuted,
     Unknown,
+}
+
+/// The `int_to_str` UF applications occurring in judged
+/// terms (Phase 100, F2 decision D4a): the collection
+/// half of the refutation-degradation rule. The two row
+/// judges scan every term whose satisfiability they are
+/// about to read as a countermodel — the encoded row,
+/// the statement judge's path conditions, and any
+/// Phase 96 call facts — and hand the result to
+/// `Z3Session::check_and_eval_ints_uf_guarded`, which
+/// states and enforces the rule itself.
+///
+/// The walk is over the Z3 term DAG (hash-consed nodes
+/// are visited once). An application is recorded when
+/// its declaration is the `int_to_str` UF — name and
+/// arity; it is the only Int→String uninterpreted
+/// declaration the encoder ever builds (see
+/// `int_to_str_uf`). A QUANTIFIER node cannot be
+/// descended into through the safe API (a quantifier is
+/// not an app), so an occurrence under one is detected
+/// through the node's own serialization and reported
+/// as `uninspectable`: the guarded check degrades any
+/// Sat over that encoding, because the occurrence's
+/// model value is not a single checkable point.
+#[cfg(feature = "z3-support")]
+struct IntToStrApps {
+    apps: Vec<(z3::ast::Int, z3::ast::String)>,
+    uninspectable: bool,
+}
+
+#[cfg(feature = "z3-support")]
+fn int_to_str_apps(terms: &[&z3::ast::Bool]) -> IntToStrApps {
+    use z3::ast::Ast as _;
+    fn walk(
+        node: &z3::ast::Dynamic,
+        out: &mut IntToStrApps,
+        seen: &mut std::collections::HashSet<usize>,
+    ) {
+        if !seen.insert(node.get_z3_ast().as_ptr() as usize) {
+            return;
+        }
+        match node.kind() {
+            z3::AstKind::App | z3::AstKind::Numeral => {
+                if let Ok(decl) = node.safe_decl() {
+                    if decl.name() == "int_to_str" && decl.arity() == 1 {
+                        if let (Some(arg), Some(app)) = (
+                            node.nth_child(0).and_then(|c| c.as_int()),
+                            node.as_string(),
+                        ) {
+                            out.apps.push((arg, app));
+                        }
+                    }
+                }
+                for child in node.children() {
+                    walk(&child, out, seen);
+                }
+            }
+            z3::AstKind::Quantifier => {
+                let mentions = node
+                    .as_bool()
+                    .map(|b| b.to_string().contains("int_to_str"))
+                    .unwrap_or(false);
+                if mentions {
+                    out.uninspectable = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = IntToStrApps {
+        apps: Vec::new(),
+        uninspectable: false,
+    };
+    let mut seen = std::collections::HashSet::new();
+    for term in terms {
+        walk(&z3::ast::Dynamic::from_ast(*term), &mut out, &mut seen);
+    }
+    out
 }
 
 // ── Symbolic candidate encoding ────────────────────────────
@@ -1760,6 +1856,14 @@ fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv, ctx: &EvalCtx) ->
         }
         // The one pure builtin the specs and templates rely on.
         "len" if args.len() == 1 => sym_len(sym_eval(&args[0], env, ctx)?),
+        // F2 (Phase 100, D1a/D2a/D4a): the Int→decimal
+        // conversion — literal fold, else the UF arm
+        // (see `sym_int_to_str`). Exact arity, as `len`'s
+        // arm: a wrong-arity call falls through to
+        // `sym_invoke` and stays unencodable.
+        "int_to_str" if args.len() == 1 => {
+            sym_int_to_str(sym_eval(&args[0], env, ctx)?)
+        }
         // The Result/Option constructors (Phase 76): they
         // build the tag+payload forms. Exact arity, as in
         // the interpreter's eval_call — a wrong-arity
@@ -1802,6 +1906,63 @@ fn sym_len(v: Sym) -> Option<Sym> {
         Sym::List(items) => Some(Sym::Int(z3::ast::Int::from_i64(items.len() as i64))),
         Sym::Str(s) => Some(Sym::Int(s.length())),
         Sym::ListLen(n) => Some(Sym::Int(n)),
+        _ => None,
+    }
+}
+
+/// The `int_to_str` uninterpreted function (Phase 100,
+/// F2 decision D4a): the encoder's symbolic stand-in for
+/// the real Int→decimal conversion. Declared fresh at
+/// each use — Z3 interns declarations by (name, domain,
+/// range) within the thread-local context, so every
+/// application in a judged encoding shares the one
+/// symbol the refutation guard (`int_to_str_apps` +
+/// `Z3Session::check_and_eval_ints_uf_guarded`) looks
+/// for. The name is the builtin's own (D2a).
+#[cfg(feature = "z3-support")]
+fn int_to_str_uf() -> z3::FuncDecl {
+    z3::FuncDecl::new(
+        "int_to_str",
+        &[&z3::Sort::int()],
+        &z3::Sort::string(),
+    )
+}
+
+/// The F2 encoder arm (Phase 100, D4a), shared by the
+/// body side (`sym_call`) and the constraint side
+/// (`encode_expr`'s Call arm):
+///
+/// - **Literal fold.** An argument that encodes to a
+///   known i64 (`as_i64()`) folds to the exact Rust
+///   `Display` string — negatives and the i64 extremes
+///   included, computed by the same `format!` the
+///   mirrors use. (Z3's own `int.to.str` is NOT used:
+///   the pinned z3 crate exposes no constructor for it
+///   and its SMT-LIB semantics map negatives to `""`,
+///   diverging from Rust — F2_DESIGN.md §2.2.)
+/// - **UF fallback.** Any other Int term takes an
+///   application of the uninterpreted `int_to_str`
+///   function. Z3's congruence gives the one property
+///   the arm needs: equal input terms yield equal
+///   output terms. A row PROVEN under the UF is proven
+///   for every interpretation, hence for the real
+///   conversion; a row REFUTED through it is guarded by
+///   the refutation-degradation rule in the two row
+///   judges (see `check_and_eval_ints_uf_guarded`).
+///
+/// Any non-Int argument is unencodable, never a guess.
+#[cfg(feature = "z3-support")]
+fn sym_int_to_str(v: Sym) -> Option<Sym> {
+    match v {
+        Sym::Int(i) => match i.as_i64() {
+            Some(n) => z3::ast::String::from_str(&format!("{}", n))
+                .ok()
+                .map(Sym::Str),
+            None => int_to_str_uf()
+                .apply(&[&i as &dyn z3::ast::Ast])
+                .as_string()
+                .map(Sym::Str),
+        },
         _ => None,
     }
 }
@@ -4559,6 +4720,13 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
         Expr::Length(inner) => sym_len(encode_expr(inner, env, ctx)?),
         Expr::Call(name, args) => match name.as_str() {
             "len" if args.len() == 1 => sym_len(encode_expr(&args[0], env, ctx)?),
+            // F2 (Phase 100, D1a/D2a/D4a): the conversion,
+            // the same fold + UF arm as the body side (see
+            // `sym_int_to_str`) — a constraint and a body
+            // that both convert meet on the same terms.
+            "int_to_str" if args.len() == 1 => {
+                sym_int_to_str(encode_expr(&args[0], env, ctx)?)
+            }
             "List" => {
                 let mut values = Vec::with_capacity(args.len());
                 for a in args {
@@ -14123,7 +14291,12 @@ spec unguarded {
     //       constructor for it and its `Context` raw
     //       handle is crate-private (`pub(crate)`);
     //   (2) that both production encoders decline a
-    //       conversion call today;
+    //       conversion call today — PHASE 100 RECORD:
+    //       this probe's assertion inverted with the
+    //       build; it is replaced at its site by
+    //       `phase100_int_to_str_encoders_fold_battery`,
+    //       and the decline it pinned is history recorded
+    //       in F2_DESIGN.md §8;
     //   (3) that the proposed encoder arm — literal fold
     //       + uninterpreted function (UF) for symbolic
     //       args — leaves tokenize_one's REAL rows fully
@@ -14226,34 +14399,118 @@ spec unguarded {
         );
     }
 
-    /// Phase 99 probe (2): today, a conversion call is
-    /// inexpressible in BOTH encoders — the body side
-    /// (`sym_call` falls through to `sym_invoke`, which
-    /// finds no such spec) and the constraint side
-    /// (`encode_expr`'s Call arm, same fall-through).
-    /// This is the exact decline the F2 build removes.
+    /// Phase 100 (F2): the encoders ENCODE the conversion
+    /// — the literal fold. This test REPLACES Phase 99
+    /// probe 2 at its site: the probe pinned both
+    /// encoders DECLINING `Call(int_to_str)` outright,
+    /// which was the F2 gap; the build removes the
+    /// decline, so the probe's assertion inverts here
+    /// (the audit record stands in F2_DESIGN.md §8).
+    /// Both encoders fold a literal argument to the exact
+    /// Rust `Display` string, over the Phase 99 probe 5
+    /// battery (plus the tokenizer's line numbers) — the
+    /// same table the interpreter and the compiled
+    /// emitter are judged against in their Phase 100
+    /// tests.
     #[cfg(feature = "z3-support")]
     #[test]
-    fn phase99_probe_encoders_decline_conversion_today() {
+    fn phase100_int_to_str_encoders_fold_battery() {
         let index = SpecIndex::empty();
         let ctx = EvalCtx::root(&index);
+        const BATTERY: &[(i64, &str)] = &[
+            (0, "0"),
+            (1, "1"),
+            (2, "2"),
+            (3, "3"),
+            (9, "9"),
+            (10, "10"),
+            (42, "42"),
+            (-1, "-1"),
+            (-42, "-42"),
+            (1_000_000, "1000000"),
+            (i64::MAX, "9223372036854775807"),
+            (i64::MIN, "-9223372036854775808"),
+        ];
+        for (n, want) in BATTERY {
+            // Body side (sym_eval / sym_call).
+            let mut env = SymEnv::new();
+            let body = IRNode::Call {
+                function: "int_to_str".into(),
+                args: vec![IRNode::Literal(IRLiteral::Int(*n))],
+            };
+            match sym_eval(&body, &mut env, &ctx) {
+                Some(Sym::Str(s)) => assert_eq!(
+                    str_literal(&s).as_deref(),
+                    Some(*want),
+                    "body-side fold of int_to_str({}) must be the exact string",
+                    n
+                ),
+                other => panic!(
+                    "body-side int_to_str({}) must fold to a literal Str, got {:?}",
+                    n, other
+                ),
+            }
+            // Constraint side (encode_expr).
+            let expr = Expr::Call("int_to_str".into(), vec![Expr::IntLit(*n)]);
+            match encode_expr(&expr, &env, &ctx) {
+                Some(Sym::Str(s)) => assert_eq!(
+                    str_literal(&s).as_deref(),
+                    Some(*want),
+                    "constraint-side fold of int_to_str({}) must be the exact string",
+                    n
+                ),
+                other => panic!(
+                    "constraint-side int_to_str({}) must fold to a literal Str, got {:?}",
+                    n, other
+                ),
+            }
+        }
+        // A symbolic argument encodes through the UF arm
+        // (D4a): a Str term that is NOT a literal.
         let mut env = SymEnv::new();
+        env.insert(
+            "x".into(),
+            Sym::Int(z3::ast::Int::fresh_const("p100_x")),
+        );
         let body = IRNode::Call {
             function: "int_to_str".into(),
-            args: vec![IRNode::Literal(IRLiteral::Int(42))],
+            args: vec![IRNode::Var("x".into())],
         };
-        assert!(
-            sym_eval(&body, &mut env, &ctx).is_none(),
-            "body-side encoder must decline the conversion today"
+        match sym_eval(&body, &mut env, &ctx) {
+            Some(Sym::Str(s)) => assert!(
+                str_literal(&s).is_none(),
+                "a symbolic argument must encode via the UF, not a literal"
+            ),
+            other => panic!(
+                "symbolic int_to_str(x) must encode via the UF arm, got {:?}",
+                other
+            ),
+        }
+        // Wrong sort and wrong arity stay unencodable on
+        // both encoders — never a guessed value.
+        let mut env = SymEnv::new();
+        let bad_sort = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![IRNode::Literal(IRLiteral::String("x".into()))],
+        };
+        assert!(sym_eval(&bad_sort, &mut env, &ctx).is_none());
+        let bad_arity = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![
+                IRNode::Literal(IRLiteral::Int(1)),
+                IRNode::Literal(IRLiteral::Int(2)),
+            ],
+        };
+        assert!(sym_eval(&bad_arity, &mut env, &ctx).is_none());
+        let bad_expr = Expr::Call(
+            "int_to_str".into(),
+            vec![Expr::StringLit("x".into())],
         );
-        let expr = Expr::Call("int_to_str".into(), vec![Expr::IntLit(42)]);
-        assert!(
-            encode_expr(&expr, &env, &ctx).is_none(),
-            "constraint-side encoder must decline the conversion today"
-        );
+        assert!(encode_expr(&bad_expr, &env, &ctx).is_none());
         println!(
-            "P99|today: sym_eval and encode_expr both decline \
-             Call(int_to_str) — the F2 gap, pinned"
+            "P100|int_to_str: both encoders fold literals to the exact \
+             Display string (battery incl. i64 extremes); symbolic args \
+             take the UF arm; wrong sort/arity stay unencodable"
         );
     }
 
@@ -14415,6 +14672,212 @@ spec unguarded {
         println!(
             "P99|UF boundary: payload-reading row unprovable under UF \
              (SAT countermodel), provable under the literal fold (UNSAT)"
+        );
+    }
+
+    // ── Phase 100 (F2): production verdicts ─────────────
+
+    /// A scratch `f(x: Int) -> String` spec whose single
+    /// row is `output == <literal>`, for the fold verdict
+    /// teeth below.
+    #[cfg(feature = "z3-support")]
+    fn phase100_str_spec(row_literal: &str) -> FunctionSpec {
+        FunctionSpec {
+            name: "phase100_render".into(),
+            doc: None,
+            generics: vec![],
+            params: vec![crate::spec::ast::Param {
+                name: "x".into(),
+                ty: TypeRef::Int,
+                annotations: std::collections::HashMap::new(),
+            }],
+            return_type: TypeRef::String,
+            preconditions: vec![],
+            postconditions: vec![Constraint::Eq(
+                Expr::Var("output".into()),
+                Expr::StringLit(row_literal.into()),
+            )],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Fold teeth through the full judge (`verify_one`):
+    /// the row `output == "43"` REFUTES the body
+    /// `int_to_str(42)` — the fold makes the output the
+    /// literal "42", so the countermodel is exact, no UF
+    /// anywhere — and VERIFIES the body `int_to_str(43)`.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase100_int_to_str_fold_verdicts() {
+        let spec = phase100_str_spec("43");
+        let verifier = Verifier::with_index(SpecIndex::empty());
+        let body42 = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![int(42)],
+        };
+        let result = verifier.verify_one(&candidate(&spec, 10001, body42), &spec);
+        assert_eq!(
+            result.status,
+            VerificationStatus::VerificationFailed,
+            "int_to_str(42) == \"43\" must Refute through the literal fold"
+        );
+        let body43 = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![int(43)],
+        };
+        let result = verifier.verify_one(&candidate(&spec, 10002, body43), &spec);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Verified,
+            "int_to_str(43) == \"43\" must Verify through the literal fold"
+        );
+        println!(
+            "P100|fold verdicts: wrong-render claim Refuted, exact-render \
+             claim Verified — both through the fold, no UF involved"
+        );
+    }
+
+    /// Phase 99 probe 3, restated on the PRODUCTION arm:
+    /// the Err output is built by production `sym_eval`
+    /// of the post-F2 body shape — literal prefix ++
+    /// `int_to_str(line)` with `line` a free constant, so
+    /// the payload is the production UF term — and judged
+    /// against tokenize_one's REAL rows. Both rows Prove
+    /// at the faithful Err point " 5"; row 2 still
+    /// Refutes the unlicensed Err at "spec 5" (that
+    /// formula never reads the payload, so the D4a
+    /// degradation guard finds no UF application in it
+    /// and the countermodel stands).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase100_uf_arm_rows_still_decide() {
+        let module = phase84_real_module();
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let verifier = Verifier::with_module(&module);
+        let index = SpecIndex::from_module(&module);
+        // The post-F2 STEP error arm's value, as IR:
+        // Err("Unexpected character '5' at line " ++ int_to_str(line))
+        let mut benv = SymEnv::new();
+        benv.insert(
+            "line".into(),
+            Sym::Int(z3::ast::Int::fresh_const("p100_line")),
+        );
+        let body = IRNode::Call {
+            function: "Err".into(),
+            args: vec![IRNode::BinOp(
+                IRBinOp::Concat,
+                Box::new(string("Unexpected character '5' at line ")),
+                Box::new(IRNode::Call {
+                    function: "int_to_str".into(),
+                    args: vec![var("line")],
+                }),
+            )],
+        };
+        let output = sym_eval(&body, &mut benv, &EvalCtx::root(&index))
+            .expect("the post-F2 Err construction must encode via the UF arm");
+        // Faithful point: both rows Prove.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), phase84_state(" 5", 0, 0));
+        for (i, row) in spec.postconditions.iter().enumerate() {
+            let (_, tri) = verifier.verify_constraint(
+                row,
+                &format!("p100-row{}", i + 1),
+                &spec,
+                &env,
+                &Some(output.clone()),
+            );
+            assert!(
+                matches!(tri, Tri::Proven),
+                "row {} must Prove at the faithful Err point with the \
+                 production UF-built message payload",
+                i + 1
+            );
+        }
+        // Teeth: the unlicensed Err stays Refuted.
+        let mut env2 = SymEnv::new();
+        env2.insert("state".into(), phase84_state("spec 5", 0, 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "p100-row2-teeth",
+            &spec,
+            &env2,
+            &Some(output),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row 2 must still refute an unlicensed Err whose payload \
+             carries the production UF term"
+        );
+        println!(
+            "P100|UF arm (production): tokenize_one rows 1+2 Proven at \
+             \" 5\" with the UF-built Err message; row 2 still Refutes \
+             the unlicensed Err at \"spec 5\""
+        );
+    }
+
+    /// The D4a refutation-degradation rule, forced: the
+    /// conversion's argument is the term `40 + 2` — an
+    /// application, not a numeral, so the encoder takes
+    /// the UF arm even though the value is determined.
+    /// The row `output == "42"` is GENUINELY TRUE of the
+    /// body (the real conversion of 42 is "42"), yet
+    /// `¬row` is satisfiable by assigning the UF any
+    /// other string at 42. Every such countermodel
+    /// disagrees with the real conversion at its
+    /// argument's model value, so the verdict must
+    /// degrade to Unknown — a VerificationFailed here
+    /// would be a fabricated countermodel. The companion
+    /// row `output == "43"` (genuinely false) must never
+    /// come back Proven; whether its countermodel stands
+    /// or degrades depends on the model's UF assignment,
+    /// which is the rule's stated model-dependence.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase100_uf_refutation_degrades() {
+        let index = SpecIndex::empty();
+        let ctx = EvalCtx::root(&index);
+        let mut env = SymEnv::new();
+        let body = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![binop(IRBinOp::Add, int(40), int(2))],
+        };
+        let output = sym_eval(&body, &mut env, &ctx)
+            .expect("the UF arm must encode a non-numeral Int argument");
+        let verifier = Verifier::with_index(SpecIndex::empty());
+        let no_params = SymEnv::new();
+        let spec42 = phase100_str_spec("42");
+        let (_, tri) = verifier.verify_constraint(
+            &spec42.postconditions[0],
+            "p100-degrade",
+            &spec42,
+            &no_params,
+            &Some(output.clone()),
+        );
+        assert!(
+            matches!(tri, Tri::Unknown),
+            "a refutation resting on the UF's uninterpreted value must \
+             degrade to Unknown, never stand as a countermodel"
+        );
+        let spec43 = phase100_str_spec("43");
+        let (_, tri) = verifier.verify_constraint(
+            &spec43.postconditions[0],
+            "p100-no-false-proof",
+            &spec43,
+            &no_params,
+            &Some(output),
+        );
+        assert!(
+            !matches!(tri, Tri::Proven),
+            "a UF-carrying claim must never Verify through the UF"
+        );
+        println!(
+            "P100|degradation: the UF-resting refutation of a true row \
+             degrades to Unknown (no fabricated countermodel); the \
+             false row never Proves"
         );
     }
 }

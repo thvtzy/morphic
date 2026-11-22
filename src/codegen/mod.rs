@@ -998,6 +998,17 @@ fn ir_call_text(function: &str, args: &[IRNode]) -> String {
                 _ => format!("({}).len() as i64", args_str[0]),
             }
         }
+        // F2 (Phase 100, D1a/D2a): the Int→decimal-text
+        // conversion renders as Rust's own `to_string()`
+        // — Display itself, so the compiled route matches
+        // the interpreter and the encoder's literal fold
+        // exactly, negatives and i64 extremes included.
+        // Wrong arity keeps the plain call form below (the
+        // standing catch-all), as an unrendered builtin
+        // should: loud at rustc, never a guessed rendering.
+        "int_to_str" if args.len() == 1 => {
+            format!("({}).to_string()", args_str[0])
+        }
         _ => format!("{}({})", rust_ident(function), args_str.join(", ")),
     }
 }
@@ -4770,6 +4781,158 @@ pub type StepResult = Result<TokenizerState, String>;
         assert_eq!(
             ir_to_rust_expr(&call("peek", vec![v("state")])),
             "peek(state)"
+        );
+    }
+
+    #[test]
+    fn phase100_int_to_str_rendering() {
+        // F2 (Phase 100): the Rust emitter's `int_to_str`
+        // arm — `(n).to_string()`, Rust's own Display, so
+        // the compiled route is exact by construction
+        // (negatives and i64 extremes included).
+        let v = |n: &str| IRNode::Var(n.into());
+        let call = |name: &str, args: Vec<IRNode>| IRNode::Call {
+            function: name.into(),
+            args,
+        };
+        assert_eq!(
+            ir_to_rust_expr(&call("int_to_str", vec![v("n")])),
+            "(n).to_string()"
+        );
+        assert_eq!(
+            ir_to_rust_expr(&call(
+                "int_to_str",
+                vec![IRNode::Literal(IRLiteral::Int(-42))]
+            )),
+            "(-42).to_string()"
+        );
+        // Wrong arity keeps the plain call form — the
+        // standing catch-all, never a guessed rendering.
+        assert_eq!(
+            ir_to_rust_expr(&call("int_to_str", vec![v("n"), v("n")])),
+            "int_to_str(n, n)"
+        );
+    }
+
+    #[test]
+    fn phase100_int_to_str_generated_rust_compiles_and_runs() {
+        // The conversion battery through the COMPILED
+        // route: a body emitted by `generate_rust`,
+        // compiled with rustc and executed — its outputs
+        // must equal Rust's `Display` for every battery
+        // value, the same table the interpreter battery
+        // and the encoder fold battery judge. (This calls
+        // `generate_rust` directly, not the feature-routed
+        // `generate`: the bootstrap route is the
+        // synthesized emitter, whose spec corpus predates
+        // the builtin — F2's recorded no-cascade stance.)
+        use std::io::Write;
+        let Some(rustc) = rustc_path() else {
+            eprintln!("rustc not reachable; skipping Phase 100 fixture");
+            return;
+        };
+        const BATTERY: &[(&str, i64)] = &[
+            ("0i64", 0),
+            ("1i64", 1),
+            ("2i64", 2),
+            ("3i64", 3),
+            ("9i64", 9),
+            ("10i64", 10),
+            ("42i64", 42),
+            ("-1i64", -1),
+            ("-42i64", -42),
+            ("1000000i64", 1_000_000),
+            ("i64::MAX", i64::MAX),
+            ("i64::MIN", i64::MIN),
+        ];
+        let spec = FunctionSpec {
+            name: "render_int".into(),
+            doc: None,
+            generics: vec![],
+            params: vec![Param {
+                name: "n".into(),
+                ty: TypeRef::Int,
+                annotations: HashMap::new(),
+            }],
+            return_type: TypeRef::String,
+            preconditions: vec![],
+            postconditions: vec![],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: HashMap::new(),
+        };
+        let cand = CandidateImplementation {
+            id: 1,
+            body: IRNode::Call {
+                function: "int_to_str".into(),
+                args: vec![IRNode::Var("n".into())],
+            },
+            spec_name: "render_int".into(),
+            spec,
+            score: 1.0,
+            scores: ScoreBreakdown {
+                test_pass_ratio: 1.0,
+                constraint_score: 1.0,
+                complexity_score: 1.0,
+                quality_score: 1.0,
+                synthesis_time_us: 0,
+            },
+            generation: 0,
+            provenance: Provenance::HumanGuided,
+            verified: true,
+            verification_status: None,
+        };
+        let generated = generate_rust(&cand).expect("generate Phase 100 fixture");
+        assert!(
+            generated.contains("(n).to_string()"),
+            "generated body must carry the int_to_str rendering:\n{}",
+            generated
+        );
+        let mut file = generated;
+        file.push_str("\nfn main() {\n");
+        for (expr, _) in BATTERY {
+            file.push_str(&format!("    println!(\"{{}}\", render_int({}));\n", expr));
+        }
+        file.push_str("}\n");
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_phase100_fixture_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("render_int_fixture100.rs");
+        let mut f = std::fs::File::create(&src).unwrap();
+        f.write_all(file.as_bytes()).unwrap();
+        drop(f);
+        let bin = dir.join("render_int_fixture100");
+        let compile = std::process::Command::new(&rustc)
+            .args(["--edition", "2021"])
+            .arg(&src)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "Phase 100 fixture does not compile:\n{}\n--- file ---\n{}",
+            String::from_utf8_lossy(&compile.stderr),
+            file
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(run.status.success(), "Phase 100 fixture runner failed");
+        let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+        let lines: Vec<&str> = stdout.lines().collect();
+        let expected: Vec<String> = BATTERY.iter().map(|(_, n)| format!("{}", n)).collect();
+        assert_eq!(
+            lines,
+            expected.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            "compiled int_to_str outputs must equal Rust Display on the battery"
         );
     }
 
