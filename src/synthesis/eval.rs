@@ -22,7 +22,7 @@
 // └──────────────────────────────────────────────────────────┘
 
 use super::engine::{IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp};
-use crate::spec::ast::{Expr, FunctionSpec, Param};
+use crate::spec::ast::{Constraint, Expr, FunctionSpec, OrderOp, Param};
 use std::collections::HashMap;
 
 /// A runtime value in the evaluable subset.
@@ -1087,7 +1087,10 @@ fn bind_test_env(params: &[Param], input: &Expr) -> Option<Env> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TestRun {
     /// Tests whose input AND expected output could be mapped
-    /// to evaluator values. Tests that cannot be mapped are
+    /// to evaluator values, minus any point the spec's own
+    /// `require:` excludes (Phase 109: spec-silent points
+    /// are reported per test but never enter this
+    /// denominator). Tests that cannot be mapped are
     /// excluded entirely — they are a limitation of the test
     /// encoding, not of the candidate.
     pub evaluable: usize,
@@ -1129,11 +1132,114 @@ pub fn test_bindability(spec: &FunctionSpec) -> Vec<bool> {
         .collect()
 }
 
+// ── Preconditions at concrete points (Phase 109) ──────
+//
+// §3.1's executed half: a test point that violates the
+// spec's own `require:` is spec-silent (see
+// `TestOutcome::SpecSilent`). Deciding that needs the
+// preconditions evaluated at the point — three-valued:
+// `Some(true)` / `Some(false)` where the row's shape is
+// concretely evaluable, `None` where it is not (a
+// quantified row, a named predicate, a method call the
+// IR lowering drops to a hole, a call to a sibling spec —
+// the interpreter has no definitions for those here).
+// Only a PROVEN violation silences a point; an undecided
+// row leaves the point judged exactly as before, so this
+// evaluator can only ever shrink the judged set toward
+// the points the spec actually governs, never hide a
+// failure the spec does speak about.
+
+/// Evaluate a spec expression at a concrete point by the
+/// same route `value_of_expr` uses for composites: lower
+/// through the engine's `expr_to_ir` and run the
+/// interpreter in the point's environment.
+fn value_of_expr_at(expr: &Expr, env: &Env) -> Option<Value> {
+    let ir = super::engine::expr_to_ir(expr);
+    eval(&ir, env).ok()
+}
+
+/// Three-valued evaluation of one constraint at a point.
+fn constraint_holds_at(c: &Constraint, env: &Env) -> Option<bool> {
+    match c {
+        Constraint::True => Some(true),
+        Constraint::Expr(e) => match value_of_expr_at(e, env) {
+            Some(Value::Bool(b)) => Some(b),
+            _ => None,
+        },
+        Constraint::Eq(a, b) => {
+            let (x, y) = (value_of_expr_at(a, env)?, value_of_expr_at(b, env)?);
+            Some(values_equal(&x, &y))
+        }
+        Constraint::Order(op, a, b) => {
+            let (x, y) = (value_of_expr_at(a, env)?, value_of_expr_at(b, env)?);
+            let ord = match (&x, &y) {
+                (Value::Int(m), Value::Int(n)) => m.cmp(n),
+                (Value::Char(m), Value::Char(n)) => m.cmp(n),
+                (Value::Float(m), Value::Float(n)) => m.partial_cmp(n)?,
+                _ => return None,
+            };
+            Some(match op {
+                OrderOp::LessThan => ord == std::cmp::Ordering::Less,
+                OrderOp::LessThanOrEqual => ord != std::cmp::Ordering::Greater,
+                OrderOp::GreaterThan => ord == std::cmp::Ordering::Greater,
+                OrderOp::GreaterThanOrEqual => ord != std::cmp::Ordering::Less,
+            })
+        }
+        Constraint::And(parts) => {
+            let mut unknown = false;
+            for p in parts {
+                match constraint_holds_at(p, env) {
+                    Some(false) => return Some(false),
+                    Some(true) => {}
+                    None => unknown = true,
+                }
+            }
+            if unknown { None } else { Some(true) }
+        }
+        Constraint::Or(parts) => {
+            let mut unknown = false;
+            for p in parts {
+                match constraint_holds_at(p, env) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => unknown = true,
+                }
+            }
+            if unknown { None } else { Some(false) }
+        }
+        Constraint::Not(inner) => constraint_holds_at(inner, env).map(|b| !b),
+        Constraint::Implies(a, b) => {
+            match (constraint_holds_at(a, env), constraint_holds_at(b, env)) {
+                (Some(false), _) => Some(true),
+                (Some(true), r) => r,
+                (None, Some(true)) => Some(true),
+                (None, _) => None,
+            }
+        }
+        // Quantified rows and named predicates have no
+        // concrete evaluation here.
+        Constraint::Forall { .. } | Constraint::Exists { .. } | Constraint::Predicate(..) => {
+            None
+        }
+    }
+}
+
+/// Whether the point bound in `env` PROVABLY violates
+/// the spec's `require:` preconditions: some row decides
+/// false at the point. Rows that cannot be decided do
+/// not silence the point.
+fn precondition_violated_at(spec: &FunctionSpec, env: &Env) -> bool {
+    spec.preconditions
+        .iter()
+        .any(|pre| constraint_holds_at(pre, env) == Some(false))
+}
+
 /// Per-test outcome of executing one candidate body against
 /// a spec's tests — the fine-grained form of `TestRun`
 /// (Phase 68, v0.6 W3). `run_spec_tests` is a fold over
-/// these: a test counts as evaluable iff its outcome is not
-/// `Unbindable`, and as passed iff its outcome is `Passed`.
+/// these: a test counts as evaluable iff its outcome is
+/// neither `Unbindable` nor `SpecSilent`, and as passed iff
+/// its outcome is `Passed`.
 /// The playground's synthesis panel reports outcomes per
 /// test so that a small passed count never hides WHY the
 /// rest did not pass — the denominator-honesty rule.
@@ -1158,6 +1264,18 @@ pub enum TestOutcome {
     /// e.g. a function/lambda for a fn-typed parameter), or
     /// the input's shape does not match the parameter list.
     Unbindable(String),
+    /// The test binds, but its input VIOLATES the spec's
+    /// own `require:` precondition (Phase 109, §3.1): the
+    /// spec makes no promise at that point, so the point
+    /// is spec-silent — reported here with the reason, and
+    /// excluded from the evaluable denominator exactly
+    /// like `Unbindable`. No candidate may be passed or
+    /// failed on it, and the body is never evaluated
+    /// there. Only a point PROVEN to violate (a
+    /// precondition row the concrete evaluator below can
+    /// decide, deciding false) is silent; a precondition
+    /// it cannot decide leaves the point judged as before.
+    SpecSilent(String),
 }
 
 /// Execute `body` against every test in `spec.tests`,
@@ -1181,6 +1299,17 @@ pub fn test_outcomes(body: &IRNode, spec: &FunctionSpec) -> Vec<TestOutcome> {
                     "input does not match the spec's parameter list (shape/arity)".into()
                 });
             };
+            // Phase 109 (§3.1): a point the spec's own
+            // `require:` excludes is spec-silent — the
+            // body is never evaluated there and the point
+            // is never a body failure.
+            if precondition_violated_at(spec, &env) {
+                return TestOutcome::SpecSilent(
+                    "input violates the spec's `require:` precondition — \
+                     the spec makes no promise at this point"
+                        .into(),
+                );
+            }
             match eval(body, &env) {
                 Ok(actual) if values_equal(&actual, &expected) => TestOutcome::Passed,
                 Ok(_) => TestOutcome::Failed,
@@ -1198,7 +1327,9 @@ pub fn run_spec_tests(body: &IRNode, spec: &FunctionSpec) -> TestRun {
     TestRun {
         evaluable: outcomes
             .iter()
-            .filter(|o| !matches!(o, TestOutcome::Unbindable(_)))
+            .filter(|o| {
+                !matches!(o, TestOutcome::Unbindable(_) | TestOutcome::SpecSilent(_))
+            })
             .count(),
         passed: outcomes
             .iter()
@@ -1229,6 +1360,13 @@ pub fn valued_test_count(body: &IRNode, spec: &FunctionSpec) -> usize {
         ) else {
             continue;
         };
+        // Phase 109 (§3.1): a spec-silent point (below)
+        // is not evidence about the body either way —
+        // its answer is as meaningless here as it is in
+        // `test_outcomes`.
+        if precondition_violated_at(spec, &env) {
+            continue;
+        }
         if eval(body, &env).is_ok() {
             valued += 1;
         }

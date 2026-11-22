@@ -423,6 +423,7 @@ fn synthesize_spec(
                             ("body_not_evaluable", Some(r.clone()))
                         }
                         eval::TestOutcome::Unbindable(r) => ("unbindable", Some(r.clone())),
+                        eval::TestOutcome::SpecSilent(r) => ("spec_silent", Some(r.clone())),
                     };
                     TestOutcomeReport {
                         index: i,

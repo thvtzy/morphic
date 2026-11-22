@@ -402,6 +402,14 @@ fn phase106_hand_body_boundaries() {
     // unsatisfiable, so the faithful body "fails". (The Phase 106
     // pipeline probe crowns only 1/3 Inconclusive for this spec —
     // the search gap and this precondition gap are separate facts.)
+    //
+    // PHASE 109 UPDATE (§3.1 closed, decision D3a): the verifier
+    // now assumes `require:` preconditions in both judges, so
+    // this exhibit's verdict flipped — the faithful body VERIFIES
+    // and there is no counterexample. The pre-fix measurement
+    // (VerificationFailed, counterexample {x:1, lo:1, hi:0})
+    // stands in STDLIB_AUDIT.md §3.1 and the Phase 106 ROAD note;
+    // the dedicated teeth live in tests/phase109_preconditions.rs.
     let clamp = checked_spec(
         r#"Probe { spec probe_int_clamp {
             input: x: Int, lo: Int, hi: Int
@@ -442,7 +450,7 @@ fn phase106_hand_body_boundaries() {
     );
     assert_eq!((run.passed, run.evaluable), (3, 3));
     #[cfg(feature = "z3-support")]
-    assert_eq!(result.status, VerificationStatus::VerificationFailed);
+    assert_eq!(result.status, VerificationStatus::Verified);
 
     // Float literals are not merely unverifiable: the source parser
     // has no FloatLit arm, so a decimal literal in a .morph test is a
