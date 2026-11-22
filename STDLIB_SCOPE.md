@@ -405,3 +405,32 @@ import mechanism (the prelude ships the library; imports are a
 language feature with their own gate); API-stability promises
 beyond the release (1.0 is the first version such a promise
 could attach to; the gate does not pre-commit 1.x policy).
+
+---
+
+## Amendment 1 — `int_gcd` removed from the 1.0 scope (2026-11-23)
+
+**Owner decision (2026-11-23).** `int_gcd` is amended **out of
+the 1.0 scope**. This amendment is appended in the open; the
+frozen scope and gate text above are not silently edited.
+
+The entry's contract and blocker record are preserved by
+reference: the frozen contract remains stated in §2.2, the
+measurement and blocker are recorded in the ROAD Phase 111
+note, and the standing pin in
+`tests/phase111_cross_validation.rs` continues to require its
+absence from the prelude, its faithful body's 6/6 execution,
+and its **Inconclusive** verdict. The blocker is two-sided: no
+seed family builds Euclid's algorithm, and the statement judge
+cannot crown a faithful hand body because Z3 returns Unknown
+on the quantified divisibility-preservation obligations over
+`%`.
+
+`int_gcd` returns with the **post-1.0 quantified-mod
+campaign**: judge-side quantified-mod work plus an Euclid seed
+family. Until that campaign closes it, `int_gcd` is not a 1.0
+entry, is not re-tiered, and does not ship.
+
+**Amended 1.0 totals:** **29 library entries + 2 builtins =
+31 named items** (**Tier-1 18 / Tier-2 11 / builtin 2**). The
+gate in §3 is run against this amended scope.

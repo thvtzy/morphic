@@ -701,19 +701,20 @@ F2_DESIGN.md §2.3).
 | `int_is_even` | `Int → Bool` | Tier-1 | True iff 2 divides x — sign-independent (−4 is even, −3 is not) | `int_is_even(0 - 4) == true` |
 | `int_is_odd` | `Int → Bool` | Tier-1 | True iff 2 does not divide x; the exact negation of `int_is_even` | `int_is_odd(0 - 3) == true` |
 
-**`int_gcd` — named in the frozen scope, not shipped.**
+**`int_gcd` — removed from the 1.0 scope by Amendment 1.**
 `int_gcd : (Int, Int) → Int` (the greatest non-negative
 common divisor; gcd(0, 0) = 0; arguments equal to the Int
-minimum excluded by precondition) is a frozen Tier-1 entry
+minimum excluded by precondition) was a frozen Tier-1 entry
 of `STDLIB_SCOPE.md` §2.2 that does **not** ship in 1.0: it
 is a named blocker, not a silent drop. Measured in Phase
 111: no seed family builds Euclid's algorithm, and the
 statement judge cannot crown a faithful hand body either —
 the quantified divisibility-preservation invariant over `%`
 returns Z3 Unknown. Closing it needs judge-side
-quantified-mod work plus an Euclid seed family; whether it
-leaves the 1.0 scope, returns after 1.0, or is re-tiered is
-the owner's amendment decision, pending.
+quantified-mod work plus an Euclid seed family. By the
+owner's decision of 2026-11-23, recorded as **Amendment 1**
+in `STDLIB_SCOPE.md`, `int_gcd` is **out of 1.0** and returns
+with the post-1.0 quantified-mod campaign.
 
 ### Char (ASCII ranges, frozen as written)
 
