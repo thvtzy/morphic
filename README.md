@@ -296,6 +296,8 @@ v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 +
 | **1.0** | Production-ready — verified standard library | 🎯 Target |
 | **1.1** | Embeddable Morphic: verified functions as ready-to-import packages (npm/WASM + Rust crate), typed host bindings | 🎯 Target — after 1.0 |
 
+**North Star:** Morphic's long-term ambition is to become as well-known as Python and relevant in everyday use, with proven-correct code as its wedge in the AI-agent era — see the Phase 107 note in [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
+
 ---
 
 ## 📜 License
