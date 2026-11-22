@@ -3786,13 +3786,18 @@ spec tokenize_all {
         let verifier = Verifier::with_module(&module);
 
         // ── Whole body: Inconclusive, with both blockers
-        // named. The resolver denotes no body for
-        // skip_whitespace (peek denotes, since Phase 81 —
-        // asserted here so the contrast is pinned, not
-        // anecdotal).
+        // named. Phase 92 re-pin: the resolver now DOES
+        // denote skip_whitespace (the keyed While body —
+        // peek denotes since Phase 81), asserted here so
+        // the contrast is pinned, not anecdotal. The
+        // whole-body verdict below is unmoved: a
+        // denotation is a meaning, and the encoder still
+        // has no While arm to judge this body with
+        // (Phase 93) — the mirror transcription stays
+        // unencodable and Inconclusive.
         assert!(
-            index.callee_body("skip_whitespace").is_none(),
-            "no denotation exists for skip_whitespace: nothing to inline"
+            index.callee_body("skip_whitespace").is_some(),
+            "Phase 92: skip_whitespace denotes (the keyed While body)"
         );
         assert!(
             index.callee_body("peek").is_some(),
@@ -4755,9 +4760,10 @@ spec tokenize_all {
         // current+(a), and bodies are Verified under
         // current+(b) without performing the skip.
         assert!(
-            index.callee_body("skip_whitespace").is_none(),
-            "no denotation exists for skip_whitespace: nothing to inline, \
-             no seed family can build the real skip from a callee body"
+            index.callee_body("skip_whitespace").is_some(),
+            "Phase 92 re-pin: a keyed denotation now exists for \
+             skip_whitespace — a resolver meaning, not a seed: no seed \
+             family builds from it, and the seed claims below are unmoved"
         );
         let engine = SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
         assert!(
@@ -5573,6 +5579,440 @@ spec grow_first {
             status_of(spec, scalar),
             VerificationStatus::Inconclusive
         );
+    }
+
+    // ────────────────────────────────────────────────────
+    // Phase 92 — resolver denotations, judged.
+    //
+    // The chain entries land in src/synthesis/engine.rs
+    // (the phase92_* tests there pin the bodies and the
+    // decline teeth); these tests pin what the
+    // denotations DO in the verifier: next_char's
+    // denotation self-verifies with peek composed inside
+    // it, bodies that call next_char judge for the first
+    // time, the statement-mode denotations (skip, step)
+    // manufacture no verdicts, and the Phase 90 BMC
+    // discipline runs unchanged on PRODUCTION
+    // denotations instead of the probe's hand-supplied
+    // map.
+    // ────────────────────────────────────────────────────
+
+    /// Phase 92: next_char denotes (record completion,
+    /// dual-registered), and the denotation SELF-VERIFIES
+    /// against next_char's own rows — the peek precedent
+    /// (Phase 81) one level deeper: the denoted body's
+    /// guard calls peek(state), peek denotes through the
+    /// complementary-guard builder, and the composition
+    /// resolves end to end. Before this phase the same
+    /// judgments were Inconclusive by construction:
+    /// callee_body("next_char") was None, so no body that
+    /// called next_char was Z3-evaluable at all (the
+    /// design doc's finding 2).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase92_next_char_denotation_self_verifies() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "next_char").clone();
+        let denotation = index
+            .callee_body("next_char")
+            .expect("next_char denotes after Phase 92");
+        // The pure encodability mirror agrees: the
+        // denotation is expression-mode (a Let over a
+        // RecordLit of Ifs), fully inside the encodable
+        // subset.
+        assert!(
+            body_is_encodable_with(&spec, &denotation, &index),
+            "next_char's denotation must be encodable (expression-mode body)"
+        );
+        // Self-verification, timed: the composition the
+        // design doc warned about (guided decisions
+        // inside nested symbolic denotations reaching
+        // the 5 s per-constraint cap) is measured here on
+        // the production path — verify_one over the
+        // denotation, whose guard invokes peek's
+        // denotation per row.
+        let started = std::time::Instant::now();
+        let cand = candidate(&spec, 9201, denotation);
+        let result = verifier.verify_one(&cand, &spec);
+        let elapsed_ms = started.elapsed().as_millis();
+        assert_eq!(
+            result.status,
+            VerificationStatus::Verified,
+            "next_char's denotation must self-verify against its own rows"
+        );
+        println!(
+            "P92|next_char-self-verify|total_ms={}",
+            elapsed_ms
+        );
+        // A body that merely CALLS next_char now judges:
+        // the bare call, as a candidate for next_char
+        // itself, verifies — the call's meaning is the
+        // denotation, evaluated in the caller's context.
+        let call_body = IRNode::Call {
+            function: "next_char".to_string(),
+            args: vec![IRNode::Var("state".to_string())],
+        };
+        let cand = candidate(&spec, 9202, call_body);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Verified,
+            "a body calling next_char must judge through its denotation"
+        );
+        // Teeth: the denotation is semantically
+        // load-bearing, not a rubber stamp — advancing
+        // TWICE through it refutes against the rows
+        // (output.pos == state.pos + 1 fails at +2).
+        let twice = IRNode::Call {
+            function: "next_char".to_string(),
+            args: vec![IRNode::Call {
+                function: "next_char".to_string(),
+                args: vec![IRNode::Var("state".to_string())],
+            }],
+        };
+        let cand = candidate(&spec, 9203, twice);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "next_char(next_char(state)) must REFUTE against next_char's rows"
+        );
+    }
+
+    /// Phase 92 teeth: a denotation is a meaning, not a
+    /// verdict. The two statement-mode denotations
+    /// (skip, step) are available to every consumer from
+    /// today, but sym_eval still has no While/Loop arm
+    /// (Phase 93), so anything whose judgment must pass
+    /// through them stays Inconclusive — never Verified.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase92_statement_denotations_manufacture_no_verdicts() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        // A candidate for skip_whitespace whose whole
+        // body is the call to skip: the resolver now
+        // supplies the While body, the encoder still
+        // cannot evaluate it — Inconclusive, exactly the
+        // Phase 93 dependency, not a failure and not a
+        // pass.
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let call_skip = IRNode::Call {
+            function: "skip_whitespace".to_string(),
+            args: vec![IRNode::Var("state".to_string())],
+        };
+        assert!(
+            !body_is_encodable_with(&skip, &call_skip, &index),
+            "a call through the While denotation stays outside the encodable subset"
+        );
+        let cand = candidate(&skip, 9211, call_skip);
+        assert_eq!(
+            verifier.verify_one(&cand, &skip).status,
+            VerificationStatus::Inconclusive,
+            "judging through skip's denotation waits for the Phase 93 While arm"
+        );
+        // The step denotation itself, as a candidate for
+        // tokenize_one: available, and Inconclusive —
+        // the denotation does not smuggle the verdict
+        // its executed agreement (9/10) cannot yet earn
+        // symbolically.
+        let one = restored_spec(&module, "tokenize_one").clone();
+        let step = index
+            .callee_body("tokenize_one")
+            .expect("tokenize_one denotes after Phase 92");
+        assert!(
+            !body_is_encodable_with(&one, &step, &index),
+            "the STEP denotation stays outside the encodable subset (Loop/While)"
+        );
+        let cand = candidate(&one, 9212, step);
+        assert_eq!(
+            verifier.verify_one(&cand, &one).status,
+            VerificationStatus::Inconclusive,
+            "the STEP denotation must not verify before the Phase 93 encoder"
+        );
+    }
+
+    /// Phase 92: the Phase 90 BMC discipline, re-run
+    /// with the denotation map supplied ENTIRELY by
+    /// production `SpecIndex::callee_body` (Phase 90
+    /// hand-supplied the pool seed for next_char and a
+    /// test-local transcription for skip). The verdicts
+    /// must be Phase 90's, point for point: skip 12/12
+    /// at fuel = trip count with row (a) Proven at every
+    /// point; the STEP body 10/10 with rows Proven at Ok
+    /// points; and the " 5" diagnostic unchanged — row 2
+    /// still Refutes the faithful body, now through
+    /// production resolver meanings end to end (the R2
+    /// ratification's subject, not an encoder gap).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase92_bmc_points_run_on_production_denotations() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let mut denotations = std::collections::HashMap::new();
+        for name in ["next_char", "skip_whitespace", "tokenize_one"] {
+            let body = index
+                .callee_body(name)
+                .unwrap_or_else(|| panic!("{} denotes after Phase 92", name));
+            denotations.insert(name.to_string(), body);
+        }
+        // ── skip: the production denotation, judged
+        // directly (its callees resolve through the
+        // production chain: peek by sym_call, next_char
+        // by sym_call first and the map as fallback).
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let skip_body = denotations["skip_whitespace"].clone();
+        let row_a = p90_parse_row(
+            "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
+        );
+        let mut spec_a = skip.clone();
+        spec_a.postconditions.push(row_a.clone());
+        let battery: Vec<P90St> = vec![
+            p90_st("", 0, 1, 1),
+            p90_st(" ", 0, 1, 1),
+            p90_st("  \t\n x", 0, 1, 1),
+            p90_st("no-ws", 0, 1, 1),
+            p90_st("\n\nab", 0, 1, 1),
+            p90_st(" \u{A0}x", 0, 1, 1),
+            p90_st("a b", 0, 1, 1),
+            p90_st("\r\n\t", 0, 1, 1),
+            p90_st("a b", 1, 1, 2),
+            p90_st("  \t\n x", 2, 1, 3),
+            p90_st("\n\nab", 1, 1, 2),
+            p90_st(" \u{A0}x", 1, 1, 2),
+        ];
+        for (i, input) in battery.iter().enumerate() {
+            let (mirror, trips) = p90_mirror_skip(input);
+            let expected = p90_state_sym(&mirror);
+            let ctx = P90Ctx {
+                index: &index,
+                denotations: &denotations,
+                fuel: trips,
+                depth: 0,
+                list_append: true,
+            };
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(input));
+            let outcome = p90_run(&skip_body, env.clone(), &ctx)
+                .expect("the production skip denotation evaluates in statement mode");
+            let out = p90_concretize(&outcome).unwrap_or_else(|| {
+                panic!(
+                    "point {} ({:?} from {}): the production skip denotation \
+                     must resolve at the trip count {}",
+                    i, input.source, input.pos, trips
+                )
+            });
+            assert!(
+                p90_values_equal(&out, &expected),
+                "point {} ({:?} from {}): the production denotation's output \
+                 must equal the mirror's",
+                i, input.source, input.pos
+            );
+            for (j, row) in skip.postconditions.iter().enumerate() {
+                let (res, tri) = verifier.verify_constraint(
+                    row, "p92@skip-current", &skip, &env, &Some(out.clone()),
+                );
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "point {} current row {} must be Proven, got solver {} ms",
+                    i, j, res.solver_time_ms
+                );
+            }
+            let (res, tri) = verifier.verify_constraint(
+                &row_a, "p92@skip-a", &spec_a, &env, &Some(out.clone()),
+            );
+            assert!(
+                matches!(tri, Tri::Proven),
+                "point {} row (a) must be Proven for the production \
+                 denotation, got solver {} ms",
+                i, res.solver_time_ms
+            );
+            println!(
+                "P92|skip-point|{}|src={:?}|from={}|trips={}|row_a_ms={}",
+                i, input.source, input.pos, trips, res.solver_time_ms
+            );
+        }
+        // ── STEP: the production denotation at the
+        // 10-point battery (skip and next_char resolve
+        // through production meanings).
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let step_body = denotations["tokenize_one"].clone();
+        let step_battery: Vec<P90St> = vec![
+            p90_st("spec", 0, 1, 1),
+            p90_st("", 0, 1, 1),
+            p90_st("  spec", 0, 1, 1),
+            p90_st(":", 0, 1, 1),
+            p90_st("{", 0, 1, 1),
+            p90_st("=", 0, 1, 1),
+            p90_st("5", 0, 1, 1),
+            p90_st(" ", 0, 1, 1),
+            p90_st("a b", 0, 1, 1),
+            p90_st("\n\nx", 0, 1, 1),
+        ];
+        let run_step = |input: &P90St, fuel: usize| {
+            let ctx = P90Ctx {
+                index: &index,
+                denotations: &denotations,
+                fuel,
+                depth: 0,
+                list_append: true,
+            };
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(input));
+            p90_run(&step_body, env, &ctx)
+        };
+        for (i, input) in step_battery.iter().enumerate() {
+            let (mirror, sk, id) = p90_mirror_one(input);
+            let pred = if id >= 1 { sk.max(id + 1) } else { sk };
+            let outcome = run_step(input, pred)
+                .expect("the production STEP denotation evaluates in statement mode");
+            let out = p90_concretize(&outcome).unwrap_or_else(|| {
+                panic!(
+                    "point {} ({:?}): the production STEP denotation must \
+                     resolve at the predicted fuel {}",
+                    i, input.source, pred
+                )
+            });
+            match (&mirror, &out) {
+                (Ok(_), Sym::Result { ok: Tag::True, .. }) => {
+                    assert!(
+                        p90_values_equal(&out, &p90_result_sym(&mirror)),
+                        "point {} ({:?}): the STEP output must equal the mirror's",
+                        i, input.source
+                    );
+                }
+                (Err(_), Sym::Result { ok: Tag::False, .. }) => {
+                    // Tag agreement; the message text is
+                    // the standing F2 deviation.
+                }
+                _ => panic!(
+                    "point {} ({:?}): tag disagreement with the mirror",
+                    i, input.source
+                ),
+            }
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(input));
+            let is_err = matches!(&mirror, Err(_));
+            for (j, row) in spec.postconditions.iter().enumerate() {
+                let (res, tri) = verifier.verify_constraint(
+                    row, "p92@step", &spec, &env, &Some(out.clone()),
+                );
+                if is_err && j == 0 {
+                    assert!(
+                        matches!(tri, Tri::Unknown),
+                        "point {} ({:?}) row 0 at an Err output must judge \
+                         Unknown (literal-Err unwrap boundary), got solver {} ms",
+                        i, input.source, res.solver_time_ms
+                    );
+                    continue;
+                }
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "point {} ({:?}) row {} must be Proven for the production \
+                     STEP denotation, got solver {} ms",
+                    i, input.source, j, res.solver_time_ms
+                );
+            }
+            println!(
+                "P92|step-point|{}|src={:?}|skip_trips={}|ident_trips={}|min_fuel={}",
+                i, input.source, sk, id, pred
+            );
+        }
+        // ── LOOP: tokenize_all's candidate body (the
+        // pool template body — tokenize_all denotes
+        // nothing itself) calling the PRODUCTION
+        // tokenize_one denotation through
+        // TryPropagate: the composition tokenize_all's
+        // rows will be judged against in Phase 93. The
+        // verdicts are Phase 90's, source for source.
+        let all_spec = restored_spec(&module, "tokenize_all").clone();
+        let loop_body = p90_template_body(&module, "tokenize_all");
+        for src in ["", "spec sort", "spec{input:()}", "spec 5", "  \n ", "a", "x{y}:(,)", "a\nb"] {
+            let input = p90_st(src, 0, 1, 1);
+            let (mirror, outer, inner) = p90_mirror_all(&input);
+            let pred = outer.max(inner);
+            let ctx = P90Ctx {
+                index: &index,
+                denotations: &denotations,
+                fuel: pred,
+                depth: 0,
+                list_append: true,
+            };
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(&input));
+            let outcome = p90_run(&loop_body, env.clone(), &ctx)
+                .expect("the LOOP body evaluates over the production step denotation");
+            let out = p90_concretize(&outcome).unwrap_or_else(|| {
+                panic!(
+                    "{:?}: the LOOP body must resolve at the predicted fuel {} \
+                     over production denotations",
+                    src, pred
+                )
+            });
+            match (&mirror, &out) {
+                (Ok(toks), Sym::Result { ok: Tag::True, ok_payload, .. }) => {
+                    let expected = Sym::List(toks.iter().map(p90_token_sym).collect());
+                    let payload = ok_payload.as_ref().expect("Ok payload");
+                    assert!(
+                        p90_values_equal(payload, &expected),
+                        "{:?}: the LOOP output token list must equal the mirror's",
+                        src
+                    );
+                }
+                (Err(_), Sym::Result { ok: Tag::False, .. }) => {
+                    // Tag agrees; the message text is the
+                    // F2 deviation, not judged here.
+                }
+                _ => panic!("{:?}: tag disagreement with the mirror", src),
+            }
+            let (res, tri) = verifier.verify_constraint(
+                &all_spec.postconditions[0], "p92@loop", &all_spec, &env, &Some(out),
+            );
+            if matches!(&mirror, Err(_)) {
+                assert!(
+                    matches!(tri, Tri::Unknown),
+                    "{:?}: tokenize_all's row at an Err output must judge \
+                     Unknown (literal-Err unwrap boundary), got solver {} ms",
+                    src, res.solver_time_ms
+                );
+            } else {
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "{:?}: tokenize_all's row must be Proven for the LOOP body \
+                     over production denotations, got solver {} ms",
+                    src, res.solver_time_ms
+                );
+            }
+            println!(
+                "P92|loop-point|src={:?}|outer_iters={}|inner_max={}|min_fuel={}|row_ms={}",
+                src, outer, inner, pred, res.solver_time_ms
+            );
+        }
+        // The diagnostic point, through production
+        // denotations end to end: the faithful body errs
+        // at " 5" and standing row 2 Refutes it — the
+        // residue is R2's β-skip ratification (Phase 96),
+        // not an encoder gap.
+        let diag = p90_st(" 5", 0, 1, 1);
+        let outcome = run_step(&diag, 2).expect("STEP evaluates at the diagnostic point");
+        let out = p90_concretize(&outcome).expect("the diagnostic point resolves");
+        assert!(
+            matches!(&out, Sym::Result { ok: Tag::False, .. }),
+            "the faithful body errs at \" 5\""
+        );
+        let mut env = SymEnv::new();
+        env.insert("state".into(), p90_state_sym(&diag));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1], "p92@diag-row2", &spec, &env, &Some(out.clone()),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row 2 REFUTES the faithful body at \" 5\" through production \
+             denotations: the residue is the R2-β-skip ratification"
+        );
+        println!("P92|step-diag|\" 5\": row 2 Refuted through production denotations");
     }
 
     // ────────────────────────────────────────────────────

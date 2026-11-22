@@ -4754,11 +4754,18 @@ fn record_completion_equation(c: &Constraint) -> Option<(&str, &Expr)> {
 }
 
 /// The record-completion body (Phase 81, remainder (i-b)
-/// of the Phase 80 gate re-run): a seed — NOT a
-/// `callee_body` denotation — that builds a record
+/// of the Phase 80 gate re-run): a seed that builds a record
 /// construction from a spec's partial field equations, so
 /// a spec like the tokenizer's `next_char` can be
-/// CROWNED, not only hand-verified.
+/// CROWNED, not only hand-verified. Phase 92 dual-registers
+/// it as a `callee_body` denotation (appended at the END
+/// of the chain, after the complementary-guard entry, so
+/// it fires only where all nine predecessors decline):
+/// the same construction is next_char's resolver meaning,
+/// which is what lets bodies and rows that CALL next_char
+/// be judged at all (the design doc's finding 2 — before
+/// Phase 92 the builder was seed-only and next_char
+/// denoted nowhere).
 ///
 /// The exact rule. The spec's return type must resolve
 /// (through the index's declarations) to a record type R,
@@ -5174,69 +5181,23 @@ fn tokenize_classifier(index: &SpecIndex, name: &str) -> bool {
         && tokenize_resolve_alias(index, &f.return_type) == TypeRef::Bool
 }
 
-/// The tokenize template seed (Phase 85, family
-/// `tokenize_template`): a hand-authored tokenizing
-/// step — and, composed over it, the tokenizing loop
-/// — for the one spec shape the Phase 80 record
-/// priced as remainder (iii): a single state-record
-/// parameter, the tokenizer's field shape, the
-/// amended rows' is_err/is_ok + unwrap shape, and
-/// the module's own step callees present with the
-/// tokenizer's signatures.
-///
-/// STEP form (the spec returns Result<R, String>):
-/// skip_whitespace, then a dispatch on the current
-/// char — end of input is the Ok arm; an ident-start
-/// char consumes an identifier through the
-/// is_ident_continue loop; the seven punctuation
-/// chars stamp their mirror kinds (LPAREN 3,
-/// RPAREN 4, LBRACE 5, RBRACE 6, COLON 7, COMMA 9,
-/// LT 10, GT 11, EQ 12 — the mirror's table, stated
-/// here as data); anything else is the error arm.
-/// (Phase 87: the dispatch reads the char by Index
-/// under a length test rather than matching on a
-/// by-value peek — see the body.) The token stamps
-/// the post-skip state's line/col (the D4a START rule)
-/// and the consumed state's fields close the step.
-/// The error arm's message is the constant
-/// "Unexpected character": the mirror's full text
-/// ('Unexpected character '<c>' at line <n>') is not
-/// expressible in IR — a Char reaches a String only
-/// through Append, and the line number is an Int,
-/// whose conversion to text is finding F2 — so the
-/// constant is this template's one named deviation
-/// from the mirror, itemized wherever the template
-/// is executed against the mirror batteries.
-///
-/// LOOP form (the spec returns Result<List<T>,
-/// String>): the step spec is found in the index by
-/// the STEP keying itself and called by its name;
-/// the loop threads the state through the step's Ok
-/// payload (TryPropagate) and returns the final
-/// state's tokens. Phase 87: the loop breaks on the
-/// step's position progress (see the body) rather
-/// than testing peek per token.
-///
-/// Admission standard — stated, not smuggled: the
-/// bodies contain loops (While at Phase 85, Loop
-/// since Phase 87), which the encoder has no
-/// arm for, so no encodability gate can pass them;
-/// like the char_equation family before the D5a
-/// encoding, this family is admitted knowing Z3
-/// cannot judge its bodies (their verdict is
-/// Inconclusive by construction), and its evidence
-/// standard is executed agreement against the
-/// mirror batteries, measured in the cross-
-/// validation harness. Names are load-bearing here
-/// in exactly one place: the callees are called by
-/// name because IR calls are by name — every other
-/// key (fields, signatures, the rows' shape) is
-/// structural.
-fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
-    let shape = tokenize_shape(spec, index)?;
-    if !tokenize_rows_shape(spec) {
-        return None;
-    }
+/// The tokenize STEP body construction, shared by the
+/// `tokenize_template` seed (below) and the Phase 92
+/// step denotation (`tokenize_step_denotation_body`):
+/// the step-shaped spec's body — skip, dispatch on the
+/// current char, consume, stamp, close — built from
+/// the shape alone. Returns None when the spec's
+/// return is not the step return (Result<R, String>
+/// over the shape's state record) or when any callee
+/// the body calls is absent or mis-signed. The seed
+/// adds its own admission gate (the rows' shape) on
+/// top of this construction; the construction itself
+/// keys on shape and signatures only.
+fn tokenize_step_body(
+    spec: &FunctionSpec,
+    index: &SpecIndex,
+    shape: &TokenizeShape,
+) -> Option<IRNode> {
     let param = spec.params[0].name.clone();
     let state_ty = TypeRef::Named(shape.state_decl.clone());
     let ret = tokenize_resolve_alias(index, &spec.return_type);
@@ -5547,6 +5508,88 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
         ]));
     }
 
+    None
+}
+
+/// The tokenize template seed (Phase 85, family
+/// `tokenize_template`): a hand-authored tokenizing
+/// step — and, composed over it, the tokenizing loop
+/// — for the one spec shape the Phase 80 record
+/// priced as remainder (iii): a single state-record
+/// parameter, the tokenizer's field shape, the
+/// amended rows' is_err/is_ok + unwrap shape, and
+/// the module's own step callees present with the
+/// tokenizer's signatures.
+///
+/// STEP form (the spec returns Result<R, String>):
+/// skip_whitespace, then a dispatch on the current
+/// char — end of input is the Ok arm; an ident-start
+/// char consumes an identifier through the
+/// is_ident_continue loop; the seven punctuation
+/// chars stamp their mirror kinds (LPAREN 3,
+/// RPAREN 4, LBRACE 5, RBRACE 6, COLON 7, COMMA 9,
+/// LT 10, GT 11, EQ 12 — the mirror's table, stated
+/// here as data); anything else is the error arm.
+/// (Phase 87: the dispatch reads the char by Index
+/// under a length test rather than matching on a
+/// by-value peek — see the body.) The token stamps
+/// the post-skip state's line/col (the D4a START rule)
+/// and the consumed state's fields close the step.
+/// The error arm's message is the constant
+/// "Unexpected character": the mirror's full text
+/// ('Unexpected character '<c>' at line <n>') is not
+/// expressible in IR — a Char reaches a String only
+/// through Append, and the line number is an Int,
+/// whose conversion to text is finding F2 — so the
+/// constant is this template's one named deviation
+/// from the mirror, itemized wherever the template
+/// is executed against the mirror batteries.
+///
+/// LOOP form (the spec returns Result<List<T>,
+/// String>): the step spec is found in the index by
+/// the STEP keying itself and called by its name;
+/// the loop threads the state through the step's Ok
+/// payload (TryPropagate) and returns the final
+/// state's tokens. Phase 87: the loop breaks on the
+/// step's position progress (see the body) rather
+/// than testing peek per token.
+///
+/// Admission standard — stated, not smuggled: the
+/// bodies contain loops (While at Phase 85, Loop
+/// since Phase 87), which the encoder has no
+/// arm for, so no encodability gate can pass them;
+/// like the char_equation family before the D5a
+/// encoding, this family is admitted knowing Z3
+/// cannot judge its bodies (their verdict is
+/// Inconclusive by construction), and its evidence
+/// standard is executed agreement against the
+/// mirror batteries, measured in the cross-
+/// validation harness. Names are load-bearing here
+/// in exactly one place: the callees are called by
+/// name because IR calls are by name — every other
+/// key (fields, signatures, the rows' shape) is
+/// structural.
+fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let shape = tokenize_shape(spec, index)?;
+    if !tokenize_rows_shape(spec) {
+        return None;
+    }
+    let param = spec.params[0].name.clone();
+    let state_ty = TypeRef::Named(shape.state_decl.clone());
+    let ret = tokenize_resolve_alias(index, &spec.return_type);
+    let v = |n: &str| IRNode::Var(n.to_string());
+    let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+        base: Box::new(base),
+        field: field.to_string(),
+    };
+    let call = |f: &str, args: Vec<IRNode>| IRNode::Call {
+        function: f.to_string(),
+        args,
+    };
+    if let Some(step) = tokenize_step_body(spec, index, &shape) {
+        return Some(step);
+    }
+
     let is_loop_return = matches!(
         &ret,
         TypeRef::Result(ok, err)
@@ -5657,6 +5700,135 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
         ]));
     }
     None
+}
+
+/// The keyed skip denotation (Phase 92, the design
+/// doc's §2.6 item 2): the meaning of the tokenizer
+/// module's state→state slot, supplied — not derived.
+///
+/// Why keyed, never derived: skip's two rows are
+/// satisfied by the identity body and by every partial
+/// skip, so no body can be DERIVED from them; a builder
+/// that returned "a body the rows admit" would denote
+/// the identity and call it skip, which is the α
+/// failure wearing a resolver costume. This builder
+/// instead recognizes a STRUCTURAL slot — a single
+/// parameter of the tokenizer's state-record shape
+/// (tokenize_shape), a return of that same record, and
+/// the three callees the body calls present with the
+/// tokenizer's signatures (peek, next_char,
+/// is_whitespace) — and returns the mirror-faithful
+/// body for that slot: the Phase 85 hand transcription
+/// (Alloc cur; While over a peek Match; Assign cur =
+/// next_char(cur); Return cur), parameterized by the
+/// spec's own parameter name and the shape's declared
+/// names. The rows are never consulted: the slot is
+/// the key, exactly as the template family's field and
+/// signature keys are. Registered in the callee_body
+/// chain AFTER every row-derived builder, so it fires
+/// only for a state→state spec no row builder denotes
+/// — in the measured module that is skip_whitespace
+/// alone (next_char denotes through record completion,
+/// two entries earlier).
+///
+/// The body is statement-mode (While): today's
+/// sym_eval cannot encode it, so a call to skip still
+/// judges Inconclusive — the denotation makes the
+/// meaning AVAILABLE (to the Phase 90 BMC discipline
+/// now, to the statement-mode encoder in Phase 93),
+/// it does not manufacture a verdict.
+fn skip_denotation_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let shape = tokenize_shape(spec, index)?;
+    let ret = tokenize_resolve_alias(index, &spec.return_type);
+    if !matches!(&ret, TypeRef::Named(n) if n == &shape.state_decl) {
+        return None;
+    }
+    let state_ty = TypeRef::Named(shape.state_decl.clone());
+    if !tokenize_callee(
+        index,
+        "peek",
+        &shape,
+        &TypeRef::Option(Box::new(TypeRef::Char)),
+    ) || !tokenize_callee(index, "next_char", &shape, &state_ty)
+        || !tokenize_classifier(index, "is_whitespace")
+    {
+        return None;
+    }
+    let param = spec.params[0].name.as_str();
+    let v = |n: &str| IRNode::Var(n.to_string());
+    let call = |f: &str, args: Vec<IRNode>| IRNode::Call {
+        function: f.to_string(),
+        args,
+    };
+    Some(IRNode::Block(vec![
+        IRNode::Alloc {
+            name: "cur".to_string(),
+            ty: state_ty,
+            initial: Box::new(v(param)),
+        },
+        IRNode::While {
+            condition: Box::new(IRNode::Match {
+                scrutinee: Box::new(call(
+                    "peek",
+                    vec![IRNode::UnaryOp(
+                        IRUnaryOp::Clone,
+                        Box::new(v("cur")),
+                    )],
+                )),
+                cases: vec![
+                    (
+                        IRPattern::Constructor("None".to_string(), vec![]),
+                        IRNode::Literal(IRLiteral::Bool(false)),
+                    ),
+                    (
+                        IRPattern::Constructor(
+                            "Some".to_string(),
+                            vec![IRPattern::Variable("ch".to_string())],
+                        ),
+                        call("is_whitespace", vec![v("ch")]),
+                    ),
+                ],
+            }),
+            body: Box::new(IRNode::Block(vec![IRNode::Assign {
+                target: Box::new(v("cur")),
+                value: Box::new(call("next_char", vec![v("cur")])),
+            }])),
+            invariant: None,
+        },
+        IRNode::Return(Box::new(v("cur"))),
+    ]))
+}
+
+/// The keyed tokenize-step denotation (Phase 92, the
+/// design doc's §2.6 item 3): the meaning of the
+/// tokenizer module's step slot — a single parameter
+/// of the state shape, the step return
+/// Result<R, String> — is the template's STEP body
+/// (`tokenize_step_body`, the same construction the
+/// Phase 85 seed family builds).
+///
+/// The keying difference from the seed is deliberate
+/// and recorded: the seed ADDITIONALLY gates on the
+/// rows' shape (tokenize_rows_shape), because a seed
+/// claims to satisfy its spec and the rows are its
+/// admission evidence. A denotation claims something
+/// else — the meaning of a structural slot, against
+/// which candidates and rows are then judged — so it
+/// keys on the shape and the callees' signatures
+/// alone, and the rows are never consulted. (The
+/// practical consequence is also the honest one: a
+/// future row amendment — R2, Phase 96 — cannot make
+/// the step's meaning vanish from under the judging
+/// of tokenize_all's loop, whose body calls the step
+/// by name.) Like the skip denotation, the body is
+/// statement-mode: it judges Inconclusive until
+/// Phase 93, and denotes from today.
+fn tokenize_step_denotation_body(
+    spec: &FunctionSpec,
+    index: &SpecIndex,
+) -> Option<IRNode> {
+    let shape = tokenize_shape(spec, index)?;
+    tokenize_step_body(spec, index, &shape)
 }
 
 /// The Char-classifier tree validator: the number of
@@ -6409,7 +6581,14 @@ impl SpecIndex {
     /// has none of those either, its expression-pin
     /// guard-table body when it has none of those, its pair-keyed
     /// guard-table body when it has none of those, or its mixed
-    /// pair-keyed guard-table body when it has none of those. The body
+    /// pair-keyed guard-table body when it has none of those. Phase 92
+    /// appends three more, in order: its record-completion body when
+    /// it has none of those (the Phase 81 seed builder, dual-registered
+    /// as a denotation — next_char denotes through it), its keyed skip
+    /// denotation when it has none of those, or its keyed tokenize-step
+    /// denotation when it has none of those either (the two keyed
+    /// builders are shape-keyed, never row-derived — see their docs).
+    /// The body
     /// is NOT call-resolved — it may itself contain calls;
     /// resolving those is the consumer's step, under the
     /// consumer's cycle/depth guard.
@@ -6424,6 +6603,9 @@ impl SpecIndex {
             .or_else(|| pair_guard_table_body(spec))
             .or_else(|| mixed_pair_guard_table_body(spec))
             .or_else(|| complementary_guard_body(spec))
+            .or_else(|| record_completion_body(spec, self))
+            .or_else(|| skip_denotation_body(spec, self))
+            .or_else(|| tokenize_step_denotation_body(spec, self))
     }
 
     /// IR-level inlining: replace every call to an indexed
@@ -9335,6 +9517,239 @@ spec exclaim {
         // peek returns Option<Char>, not the record: decline.
         let peek = tokenizer_spec(&module.functions, "peek");
         assert!(record_completion_body(&peek, &index).is_none());
+    }
+
+    /// Phase 92 (encoder extension, design doc §2.6):
+    /// the callee_body chain's three appended entries
+    /// denote the three specs that denoted nowhere —
+    /// next_char through record completion, skip through
+    /// its keyed denotation, tokenize_one through the
+    /// keyed step denotation — and every earlier
+    /// denotation is byte-identical to its builder's
+    /// direct output (the chain's append discipline:
+    /// new entries fire only where all predecessors
+    /// decline).
+    #[test]
+    fn phase92_callee_body_denotes_next_char_skip_and_step() {
+        let module = load_tokenizer_spec();
+        let index = SpecIndex::from_module(&module);
+        // next_char: the chain entry returns exactly the
+        // record-completion builder's body.
+        let next_char = tokenizer_spec(&module.functions, "next_char");
+        let denoted = index
+            .callee_body("next_char")
+            .expect("next_char must denote after Phase 92");
+        let direct = record_completion_body(&next_char, &index)
+            .expect("record completion builds next_char");
+        assert_eq!(
+            format!("{:?}", denoted),
+            format!("{:?}", direct),
+            "next_char's denotation must be the record-completion body"
+        );
+        // skip_whitespace: the keyed denotation is the
+        // Phase 85 hand body, parameterized by the
+        // spec's own parameter name and declared types
+        // — for this module, literally the hand tree.
+        let v = |n: &str| IRNode::Var(n.to_string());
+        let call = |f: &str, args: Vec<IRNode>| IRNode::Call {
+            function: f.to_string(),
+            args,
+        };
+        let expected_skip = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "cur".to_string(),
+                ty: TypeRef::Named("TokenizerState".to_string()),
+                initial: Box::new(v("state")),
+            },
+            IRNode::While {
+                condition: Box::new(IRNode::Match {
+                    scrutinee: Box::new(call(
+                        "peek",
+                        vec![IRNode::UnaryOp(
+                            IRUnaryOp::Clone,
+                            Box::new(v("cur")),
+                        )],
+                    )),
+                    cases: vec![
+                        (
+                            IRPattern::Constructor("None".to_string(), vec![]),
+                            IRNode::Literal(IRLiteral::Bool(false)),
+                        ),
+                        (
+                            IRPattern::Constructor(
+                                "Some".to_string(),
+                                vec![IRPattern::Variable("ch".to_string())],
+                            ),
+                            call("is_whitespace", vec![v("ch")]),
+                        ),
+                    ],
+                }),
+                body: Box::new(IRNode::Block(vec![IRNode::Assign {
+                    target: Box::new(v("cur")),
+                    value: Box::new(call("next_char", vec![v("cur")])),
+                }])),
+                invariant: None,
+            },
+            IRNode::Return(Box::new(v("cur"))),
+        ]);
+        let denoted_skip = index
+            .callee_body("skip_whitespace")
+            .expect("skip_whitespace must denote after Phase 92");
+        assert_eq!(
+            format!("{:?}", denoted_skip),
+            format!("{:?}", expected_skip),
+            "skip's denotation must be the hand While body"
+        );
+        // tokenize_one: the denotation IS the template
+        // STEP body (the seed builder's construction,
+        // reached here without the seed's rows gate).
+        let one = tokenizer_spec(&module.functions, "tokenize_one");
+        let denoted_one = index
+            .callee_body("tokenize_one")
+            .expect("tokenize_one must denote after Phase 92");
+        let seed_one = tokenize_template_seed_body(&one, &index)
+            .expect("the template seed builds tokenize_one");
+        assert_eq!(
+            format!("{:?}", denoted_one),
+            format!("{:?}", seed_one),
+            "tokenize_one's denotation must be the template STEP body"
+        );
+        // Earlier denotations unmoved: peek still denotes
+        // through the complementary-guard builder (the
+        // chain's previous last entry), byte-identical.
+        let peek = tokenizer_spec(&module.functions, "peek");
+        let denoted_peek = index
+            .callee_body("peek")
+            .expect("peek still denotes");
+        let direct_peek = complementary_guard_body(&peek)
+            .expect("complementary guard builds peek");
+        assert_eq!(
+            format!("{:?}", denoted_peek),
+            format!("{:?}", direct_peek),
+            "peek's denotation must not move"
+        );
+        // tokenize_all denotes nowhere: its LOOP body is
+        // a candidate, not a meaning — the loop is judged
+        // against the step's denotation, it does not
+        // denote itself.
+        assert!(
+            index.callee_body("tokenize_all").is_none(),
+            "tokenize_all must not denote (its body is the candidate under judgment)"
+        );
+    }
+
+    /// Phase 92 teeth: the keyed builders are keyed on
+    /// SHAPE, and the shape is exact — a same-named spec
+    /// whose record, signature, or callee set differs
+    /// gets NO denotation. Each mutation below keeps the
+    /// spec's name (and, except where noted, its rows);
+    /// only the structure moves.
+    #[test]
+    fn phase92_keyed_denotations_decline_on_shape_mutations() {
+        let module = load_tokenizer_spec();
+        // (a) A load-bearing field changes type (pos:
+        // Int → String): the fingerprint is gone, so
+        // both keyed builders decline.
+        let mut m = module.clone();
+        for td in &mut m.types {
+            if td.name == "TokenizerState" {
+                let crate::spec::ast::TypeKind::Record { fields } = &mut td.kind
+                else {
+                    panic!("TokenizerState is a record");
+                };
+                fields[1].1 = TypeRef::String;
+            }
+        }
+        let index = SpecIndex::from_module(&m);
+        assert!(
+            index.callee_body("skip_whitespace").is_none(),
+            "a re-typed state field must decline the skip denotation"
+        );
+        assert!(
+            index.callee_body("tokenize_one").is_none(),
+            "a re-typed state field must decline the step denotation"
+        );
+        // (a2) An EXTRA field, by contrast, does not
+        // decline: the keying is the five-field
+        // fingerprint (the template's own discipline —
+        // its state_record iterates the declared fields
+        // and carries the rest), and both bodies thread
+        // the record whole, so an extra field is carried
+        // opaquely and the meaning is unchanged. Pinned
+        // as the designed behavior, not an oversight.
+        let mut m = module.clone();
+        for td in &mut m.types {
+            if td.name == "TokenizerState" {
+                let crate::spec::ast::TypeKind::Record { fields } = &mut td.kind
+                else {
+                    panic!("TokenizerState is a record");
+                };
+                fields.push(("extra".to_string(), TypeRef::Int));
+            }
+        }
+        let index = SpecIndex::from_module(&m);
+        assert!(
+            index.callee_body("skip_whitespace").is_some(),
+            "an extra field is carried: the fingerprint keying still denotes"
+        );
+        assert!(
+            index.callee_body("tokenize_one").is_some(),
+            "an extra field is carried: the fingerprint keying still denotes"
+        );
+        // (b) A state field renamed: same decline.
+        let mut m = module.clone();
+        for td in &mut m.types {
+            if td.name == "TokenizerState" {
+                let crate::spec::ast::TypeKind::Record { fields } = &mut td.kind
+                else {
+                    panic!("TokenizerState is a record");
+                };
+                fields[0].0 = "src".to_string();
+            }
+        }
+        let index = SpecIndex::from_module(&m);
+        assert!(index.callee_body("skip_whitespace").is_none());
+        assert!(index.callee_body("tokenize_one").is_none());
+        // (c) skip_whitespace with a different return
+        // type: the state→state signature is gone.
+        let mut m = module.clone();
+        for f in &mut m.functions {
+            if f.name == "skip_whitespace" {
+                f.return_type = TypeRef::Bool;
+            }
+        }
+        let index = SpecIndex::from_module(&m);
+        assert!(
+            index.callee_body("skip_whitespace").is_none(),
+            "a Bool-returning skip_whitespace must not denote as the skip"
+        );
+        // (d) The module without is_whitespace: the
+        // skip body calls it, so the skip denotation
+        // declines — while the step denotation, whose
+        // body never calls is_whitespace, stands. The
+        // dependency sets are the bodies' own call sets.
+        let mut m = module.clone();
+        m.functions.retain(|f| f.name != "is_whitespace");
+        let index = SpecIndex::from_module(&m);
+        assert!(
+            index.callee_body("skip_whitespace").is_none(),
+            "no is_whitespace callee: no skip denotation"
+        );
+        assert!(
+            index.callee_body("tokenize_one").is_some(),
+            "the step body does not call is_whitespace: its denotation stands"
+        );
+        // (e) The module without peek: both bodies call
+        // peek (the skip's loop condition, the step's
+        // callee keying), so both decline.
+        let mut m = module.clone();
+        m.functions.retain(|f| f.name != "peek");
+        let index = SpecIndex::from_module(&m);
+        assert!(index.callee_body("skip_whitespace").is_none());
+        assert!(
+            index.callee_body("tokenize_one").is_none(),
+            "no peek callee: no step denotation"
+        );
     }
 
     /// Admitted synthetic shapes: the range conjunction
