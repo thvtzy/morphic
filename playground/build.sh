@@ -10,10 +10,12 @@
 #  and rebuilt by this script.
 #
 #  Requires: cargo with the wasm32-unknown-unknown target,
-#  and a wasm-bindgen CLI matching the crate's bindgen
-#  version (0.2.123). Resolution order for the CLI:
-#  $WASM_BINDGEN, PATH, target/tools/wasm-bindgen, else a
-#  pinned prebuilt download into target/tools/.
+#  a wasm-bindgen CLI matching the crate's bindgen
+#  version (0.2.123), and a pinned wasm-opt (Binaryen
+#  version_133) for the Phase 114 size pass. Resolution
+#  order for the CLIs: $WASM_BINDGEN / $WASM_OPT, PATH,
+#  the durable local tool installs, target/tools/, else
+#  a pinned prebuilt download into target/tools/.
 # ─────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -21,6 +23,7 @@ PLAYGROUND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$PLAYGROUND_DIR/.." && pwd)"
 export PATH="$HOME/.cargo/bin:$PATH"
 BINDGEN_VERSION="0.2.123"
+BINARYEN_VERSION="version_133"
 
 cd "$REPO_ROOT"
 echo "== cargo build (release, wasm32-unknown-unknown, morphic-wasm)"
@@ -62,7 +65,45 @@ echo "== generating playground/pkg/ (--target web)"
 cp "$PLAYGROUND_DIR/stdlib-asset.bin" "$PLAYGROUND_DIR/pkg/stdlib-asset.bin"
 echo "== copied stdlib asset into pkg/ ($(stat -c%s "$PLAYGROUND_DIR/pkg/stdlib-asset.bin") bytes)"
 
+# Phase 114: wasm-opt size pass (pinned Binaryen). The
+# post-bindgen bundle outgrew the budget on loader code
+# alone (Phase 112's asset route moved the library DATA
+# out; the loader that installs it costs more bundle than
+# the data saved). -Oz --converge is the measured flag
+# set: 809,295 B -> 651,063 B on the Phase 114 tree, with
+# the pinned corpus green on the optimized artifact
+# (15/15 check + 6/6 synthesis). -Os measured worse;
+# --strip-producers saves ~127 B more and is not worth
+# the provenance metadata.
+WASMOPT="${WASM_OPT:-}"
+if [ -z "$WASMOPT" ] && command -v wasm-opt >/dev/null 2>&1; then
+  WASMOPT="$(command -v wasm-opt)"
+fi
+if [ -z "$WASMOPT" ] && [ -x "$HOME/workspace/tools/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" ]; then
+  WASMOPT="$HOME/workspace/tools/binaryen-${BINARYEN_VERSION}/bin/wasm-opt"
+fi
+if [ -z "$WASMOPT" ] && [ -x "$REPO_ROOT/target/tools/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" ]; then
+  WASMOPT="$REPO_ROOT/target/tools/binaryen-${BINARYEN_VERSION}/bin/wasm-opt"
+fi
+if [ -z "$WASMOPT" ]; then
+  echo "== downloading pinned Binaryen $BINARYEN_VERSION (prebuilt) into target/tools/"
+  mkdir -p "$REPO_ROOT/target/tools"
+  TARBALL="binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz"
+  curl -sL --fail -o "$REPO_ROOT/target/tools/$TARBALL" \
+    "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/${TARBALL}"
+  tar --no-same-owner -xzf "$REPO_ROOT/target/tools/$TARBALL" -C "$REPO_ROOT/target/tools"
+  rm -f "$REPO_ROOT/target/tools/$TARBALL"
+  WASMOPT="$REPO_ROOT/target/tools/binaryen-${BINARYEN_VERSION}/bin/wasm-opt"
+fi
+echo "== wasm-opt: $("$WASMOPT" --version)"
+
+WASM_OUT="$PLAYGROUND_DIR/pkg/morphic_wasm_bg.wasm"
+PRE_OPT_BYTES="$(stat -c%s "$WASM_OUT")"
+"$WASMOPT" -Oz --converge "$WASM_OUT" -o "$WASM_OUT.opt"
+mv "$WASM_OUT.opt" "$WASM_OUT"
+echo "== wasm-opt -Oz --converge: ${PRE_OPT_BYTES} -> $(stat -c%s "$WASM_OUT") bytes"
+
 WASM_BYTES="$(stat -c%s "$PLAYGROUND_DIR/pkg/morphic_wasm_bg.wasm")"
 BUDGET_BYTES="$(head -n 1 "$PLAYGROUND_DIR/budget.txt" | tr -d '[:space:]')"
 echo "== done: playground/pkg/morphic_wasm_bg.wasm is ${WASM_BYTES} bytes (budget: ${BUDGET_BYTES} bytes, playground/budget.txt)"
-echo "   (history: W1 baseline 546229 B; W2 547342 B; W3/W4 611728 B — the budget is enforced in CI: .github/workflows/playground.yml)"
+echo "   (history: W1 baseline 546229 B; W2 547342 B; W3/W4 611728 B; Phase 114: 651063 B after the wasm-opt pass — the budget is enforced in CI: .github/workflows/playground.yml)"

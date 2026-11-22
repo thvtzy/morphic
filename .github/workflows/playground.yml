@@ -7,12 +7,16 @@ name: Playground
 # 69; its first real run happens on the next push/PR that
 # touches these paths (the branch is local until then).
 #
-# Note: no wasm-opt pass runs here — the budget is enforced
-# on exactly what playground/build.sh produces, so the CI
-# number and the locally measured number are the same
-# artifact. (wasm-opt/Binaryen could shrink the bundle as a
-# future CI-side step; adopting it would re-baseline the
-# budget in its own phase.)
+# Note: since Phase 114, playground/build.sh runs a
+# pinned wasm-opt pass (Binaryen version_133, -Oz
+# --converge) over the bundle, and the budget is enforced
+# on that optimized artifact. CI installs the same pinned
+# Binaryen (step below, $WASM_OPT) that local builds
+# resolve, so the CI number and the locally measured
+# number are the same artifact. The budget was NOT
+# re-baselined for this: wasm-opt restored the standing
+# 771,072 B figure with headroom (see the ROAD Phase 114
+# note).
 
 on:
   push:
@@ -66,6 +70,20 @@ jobs:
             "https://github.com/rustwasm/wasm-bindgen/releases/download/${VERSION}/${TARBALL}"
           tar -xzf "/tmp/${TARBALL}" -C /tmp
           echo "WASM_BINDGEN=/tmp/wasm-bindgen-${VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" >> "$GITHUB_ENV"
+
+      # The pinned Binaryen (wasm-opt) for build.sh's
+      # Phase 114 size pass (build.sh resolves it via
+      # $WASM_OPT first). Same pin as the local durable
+      # install; tarball sha256 recorded in the ROAD
+      # Phase 114 note.
+      - name: Install pinned Binaryen (wasm-opt)
+        run: |
+          VERSION=version_133
+          TARBALL="binaryen-${VERSION}-x86_64-linux.tar.gz"
+          curl -sL --fail -o "/tmp/${TARBALL}" \
+            "https://github.com/WebAssembly/binaryen/releases/download/${VERSION}/${TARBALL}"
+          tar -xzf "/tmp/${TARBALL}" -C /tmp
+          echo "WASM_OPT=/tmp/binaryen-${VERSION}/bin/wasm-opt" >> "$GITHUB_ENV"
 
       # The corpus runner drives the native CLI.
       - name: Build native CLI
