@@ -72,6 +72,16 @@
 //! theirs to take; the Tier-2 battery does not wait
 //! on it, and the entry ships.
 
+//! Configuration note: pins that judge or render the
+//! NATIVE prelude (embedded library data) are gated
+//! `#[cfg(not(feature = "wasm-playground"))]` — under
+//! that feature the prelude is installed from the stdlib
+//! asset at runtime (browser-side behaviour is pinned by
+//! the Phase 112 asset pins + the playground corpus); a
+//! workspace `--all-targets` build unifies the feature
+//! into this package via the morphic-wasm member. In the
+//! standing native configurations every pin runs.
+
 use morphic::api;
 use morphic::spec::ast::{FunctionSpec, TypeRef};
 use morphic::spec::{parser, typeck};
@@ -493,6 +503,7 @@ fn tier2_docs_name_the_tier() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn tier2_shipped_bodies_are_the_hand_bodies() {
     for name in TIER2 {
@@ -506,6 +517,7 @@ fn tier2_shipped_bodies_are_the_hand_bodies() {
     }
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn tier2_bodies_are_executed_exact_in_process() {
     let specs = list_specs();
@@ -534,6 +546,7 @@ fn tier2_bodies_are_executed_exact_in_process() {
 /// body, rustc compiles the generated module, and its
 /// own test module — one generated test per in-spec
 /// test — passes in full.
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn list_bodies_are_executed_exact_through_the_compiled_route() {
     let specs = list_specs();
@@ -583,6 +596,7 @@ fn list_bodies_are_executed_exact_through_the_compiled_route() {
 }
 
 #[cfg(feature = "z3-support")]
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn tier2_verdicts_are_inconclusive_the_section_3_9_standing() {
     let specs = list_specs();

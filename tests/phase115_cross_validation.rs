@@ -26,6 +26,16 @@
 //! cancelling pairs — and no overflowing point. Such a
 //! point has no value in the language to agree on.
 
+//! Configuration note: pins that judge or render the
+//! NATIVE prelude (embedded library data) are gated
+//! `#[cfg(not(feature = "wasm-playground"))]` — under
+//! that feature the prelude is installed from the stdlib
+//! asset at runtime (browser-side behaviour is pinned by
+//! the Phase 112 asset pins + the playground corpus); a
+//! workspace `--all-targets` build unifies the feature
+//! into this package via the morphic-wasm member. In the
+//! standing native configurations every pin runs.
+
 use morphic::spec::{parser, typeck};
 use morphic::stdlib;
 use morphic::synthesis::eval::{self, Env, TestOutcome, Value};
@@ -159,6 +169,7 @@ fn lists() -> Vec<Vec<i64>> {
 
 // ── The batteries ────────────────────────────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_is_empty() {
     let pinned: Vec<(String, String)> = lists()
@@ -172,6 +183,7 @@ fn xv_list_is_empty() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_reverse() {
     let pinned: Vec<(String, String)> = lists()
@@ -185,6 +197,7 @@ fn xv_list_reverse() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_contains() {
     let targets = [0, 2, -1, 9, i64::MAX];
@@ -204,6 +217,7 @@ fn xv_list_contains() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_sum() {
     // No overflowing point (checked arithmetic): the
@@ -219,6 +233,7 @@ fn xv_list_sum() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_product() {
     // The product battery is its own: multi-element
@@ -250,6 +265,7 @@ fn xv_list_product() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_min() {
     let pinned: Vec<(String, String)> = lists()
@@ -263,6 +279,7 @@ fn xv_list_min() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_max() {
     let pinned: Vec<(String, String)> = lists()
@@ -276,6 +293,7 @@ fn xv_list_max() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_take() {
     let cases: Vec<Vec<i64>> = vec![vec![], vec![5], vec![1, 2, 3], vec![4, 3, 2, 1]];
@@ -296,6 +314,7 @@ fn xv_list_take() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_drop() {
     let cases: Vec<Vec<i64>> = vec![vec![], vec![5], vec![1, 2, 3], vec![4, 3, 2, 1]];
@@ -316,6 +335,7 @@ fn xv_list_drop() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_is_sorted() {
     let pinned: Vec<(String, String)> = lists()
@@ -329,6 +349,7 @@ fn xv_list_is_sorted() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_sort() {
     let pinned: Vec<(String, String)> = lists()
@@ -352,6 +373,7 @@ fn xv_list_sort() {
 /// points are the frozen spec-silent class — the
 /// specific index is not pinned, the property is —
 /// and are counted separately.
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_list_binary_search() {
     let sorted_lists: Vec<Vec<i64>> = vec![

@@ -25,6 +25,17 @@
 //! that measurement open: if the judge ever closes it,
 //! this test fails and the entry's return is a scope
 //! amendment, decided in the open.
+//!
+//! Configuration note: these pins judge the NATIVE
+//! prelude (the embedded library data). Under the
+//! `wasm-playground` feature the prelude is installed
+//! from the stdlib asset at runtime instead, so the pins
+//! are gated `#[cfg(not(feature = "wasm-playground"))]` —
+//! a workspace `--all-targets` build (which unifies that
+//! feature in via the morphic-wasm member) compiles and
+//! the browser-side behaviour is pinned by the Phase 112
+//! asset pins + the playground corpus. In the standing
+//! native configurations every pin runs.
 
 use morphic::spec::ast::FunctionSpec;
 use morphic::spec::{parser, typeck};
@@ -196,6 +207,7 @@ fn run_battery(
 
 // ── Int batteries ────────────────────────────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_int_abs() {
     let pinned: Vec<(String, String)> = [
@@ -214,6 +226,7 @@ fn xv_int_abs() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_int_sign() {
     let pinned: Vec<(String, String)> = [
@@ -225,6 +238,7 @@ fn xv_int_sign() {
     run_battery("int_sign", "    input: x: Int\n    output: Int", None, pinned, vec![]);
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_int_min_max() {
     let pairs: [(i64, i64); 16] = [
@@ -256,6 +270,7 @@ fn xv_int_min_max() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_int_clamp() {
     let triples: [(i64, i64, i64); 13] = [
@@ -282,6 +297,7 @@ fn xv_int_clamp() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_int_is_even_odd() {
     let inputs: [i64; 15] = [
@@ -324,6 +340,7 @@ fn char_battery(entry: &str, mirror: fn(char) -> String) {
     run_battery(entry, "    input: c: Char\n    output: Bool", None, pinned, vec![]);
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_char_classifiers() {
     char_battery("char_is_digit", |c| fmt_bool(m_digit(c)));
@@ -333,6 +350,7 @@ fn xv_char_classifiers() {
     char_battery("char_is_lowercase", |c| fmt_bool(m_lower(c)));
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_char_to_digit() {
     let pinned: Vec<(String, String)> = battery_chars()
@@ -449,6 +467,7 @@ fn euclid_body() -> IRNode {
     ])
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn int_gcd_is_a_named_blocker_not_a_shipped_entry() {
     // The entry is absent from the shipped library: no

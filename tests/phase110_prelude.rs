@@ -40,6 +40,16 @@
 //!   `morphic-std` dependency, no fake import, and the
 //!   generated spec checks).
 
+//! Configuration note: the pins that exercise the NATIVE
+//! prelude merge (embedded library data) are gated
+//! `#[cfg(not(feature = "wasm-playground"))]` — under that
+//! feature the prelude is installed from the stdlib asset
+//! at runtime, and a workspace `--all-targets` build
+//! unifies the feature into this package via the
+//! morphic-wasm member. The collision pin is
+//! configuration-independent and runs everywhere; in the
+//! standing native configurations all pins run.
+
 use morphic::api;
 use morphic::spec::ast::FunctionSpec;
 use morphic::spec::{parser, typeck};
@@ -434,6 +444,7 @@ const BATTERIES: &[(&str, usize, usize, usize)] = &[
     ("list_is_empty", 4, 4, 0),
 ];
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn shipped_body_judges_verified_and_golden_exact() {
     let specs = stdlib::prelude_specs();
@@ -563,6 +574,7 @@ fn pipeline_crowns_the_shipped_body_for_the_entry() {
 
 // ── The merge: a caller with no import ───────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn user_module_calls_entry_with_no_import() {
     // Checks — before this phase this module failed with
@@ -594,6 +606,7 @@ fn user_module_calls_entry_with_no_import() {
     assert_eq!(dbg(&inlined), dbg(&expected));
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn production_pipeline_crowns_a_verified_caller() {
     let functions = checked_functions(PROOF);
@@ -612,6 +625,7 @@ fn production_pipeline_crowns_a_verified_caller() {
     assert_eq!((run.passed, run.evaluable), (3, 3));
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn api_agrees_on_the_prelude_caller() {
     let report = api::synthesize_seeded_spec(PROOF, "abs_of_negated", 42)
@@ -673,6 +687,7 @@ fn collision_user_definition_wins() {
 
 // ── Invisibility when unused ─────────────────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn prelude_is_invisible_when_unused() {
     // The check report lists exactly the module's own specs.
@@ -730,6 +745,7 @@ fn prelude_is_invisible_when_unused() {
 
 // ── morphic init ─────────────────────────────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn init_generates_a_real_project() {
     let dir = std::env::temp_dir().join(format!("morphic-phase110-init-{}", std::process::id()));

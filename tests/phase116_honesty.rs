@@ -52,6 +52,16 @@
 //!   ROAD note, not this phase's fix: it is not
 //!   method-specific.)
 
+//! Configuration note: pins that judge or render the
+//! NATIVE prelude (embedded library data) are gated
+//! `#[cfg(not(feature = "wasm-playground"))]` — under
+//! that feature the prelude is installed from the stdlib
+//! asset at runtime (browser-side behaviour is pinned by
+//! the Phase 112 asset pins + the playground corpus); a
+//! workspace `--all-targets` build unifies the feature
+//! into this package via the morphic-wasm member. In the
+//! standing native configurations every pin runs.
+
 use morphic::codegen;
 use morphic::spec::ast::FunctionSpec;
 use morphic::spec::parser;
@@ -224,6 +234,7 @@ fn rust_compiles_and_runs(label: &str, cand: &CandidateImplementation, tests: us
 
 // ── (a) Rust: entry calls render correctly ──────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn rust_caller_of_tier1_entry_compiles_and_runs() {
     let cand = candidate(
@@ -242,6 +253,7 @@ fn rust_caller_of_tier1_entry_compiles_and_runs() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn rust_caller_of_tier2_entry_compiles_and_runs() {
     let cand = candidate(&spec_of("call_sum"), call("list_sum", vec![v("xs")]));
@@ -249,6 +261,7 @@ fn rust_caller_of_tier2_entry_compiles_and_runs() {
     assert_eq!(generated.matches("pub fn list_sum(").count(), 1);
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn rust_caller_of_option_entry_compiles_and_runs() {
     let cand = candidate(
@@ -259,6 +272,7 @@ fn rust_caller_of_option_entry_compiles_and_runs() {
     assert_eq!(generated.matches("pub fn option_unwrap_or(").count(), 1);
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn rust_caller_of_two_entries_gets_each_helper_once() {
     let cand = candidate(
@@ -270,6 +284,7 @@ fn rust_caller_of_two_entries_gets_each_helper_once() {
     assert_eq!(generated.matches("pub fn int_min(").count(), 1);
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn rust_statement_position_entry_call_compiles() {
     let cand = candidate(
@@ -283,6 +298,7 @@ fn rust_statement_position_entry_call_compiles() {
     assert_eq!(generated.matches("pub fn int_abs(").count(), 1);
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn rust_entry_candidate_gets_no_self_helper() {
     let spec = stdlib::prelude_specs()
@@ -320,6 +336,7 @@ fn rust_builtins_render_correctly() {
 
 // ── (a)+(b) C / WAT: loud named refusal ─────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn c_and_wasm_reject_library_calls_loudly() {
     let cases: Vec<(FunctionSpec, IRNode, &str)> = vec![
@@ -385,6 +402,7 @@ fn c_and_wasm_keep_standing_behaviour_without_library() {
 
 // ── (a) Python / JS: loud named refusal for entries ─────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn python_and_js_reject_entry_calls_loudly() {
     let cand = candidate(&spec_of("call_abs"), call("int_abs", vec![v("x")]));

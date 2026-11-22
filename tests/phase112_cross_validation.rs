@@ -12,6 +12,16 @@
 //! a generated spec carrying the entry's signature; the
 //! expected values are computed by the mirrors below.
 
+//! Configuration note: these pins judge the NATIVE
+//! prelude (embedded library data) and are gated
+//! `#[cfg(not(feature = "wasm-playground"))]` — under
+//! that feature the prelude is installed from the stdlib
+//! asset at runtime (browser-side behaviour is pinned by
+//! the Phase 112 asset pins + the playground corpus); a
+//! workspace `--all-targets` build unifies the feature
+//! into this package via the morphic-wasm member. In the
+//! standing native configurations every pin runs.
+
 use morphic::spec::{parser, typeck};
 use morphic::stdlib;
 use morphic::synthesis::eval::{self, TestOutcome};
@@ -120,6 +130,7 @@ fn run_battery(entry: &str, signature: &str, pinned: Vec<(String, String)>) {
 
 // ── The batteries ────────────────────────────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_string_is_empty() {
     let strings: Vec<String> = vec![
@@ -150,6 +161,7 @@ fn xv_string_is_empty() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_result_unwrap_or() {
     let results: Vec<Result<i64, String>> = vec![
@@ -180,6 +192,7 @@ fn xv_result_unwrap_or() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_option_unwrap_or() {
     let options: Vec<Option<i64>> = vec![
@@ -208,6 +221,7 @@ fn xv_option_unwrap_or() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn xv_option_ok_or() {
     let cases: Vec<(Option<i64>, String)> = vec![
