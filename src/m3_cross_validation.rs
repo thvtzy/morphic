@@ -716,6 +716,44 @@ mod xval3 {
         }
     }
 
+    // ── Phase 85 mirrors: the call/index forms ────────
+
+    fn rust_call_form(name: &str) -> Mirror {
+        match name {
+            "List" => Mirror::Int(1),
+            "None" => Mirror::Int(2),
+            "len" => Mirror::Int(3),
+            _ => Mirror::Int(0),
+        }
+    }
+
+    fn rust_call_len_form(argform: i64) -> Mirror {
+        Mirror::Int(if argform == 1 { 1 } else { 0 })
+    }
+
+    fn rust_call_len_text(arg: &str) -> Mirror {
+        Mirror::Owned(format!("({}).len() as i64", arg))
+    }
+
+    fn rust_call_len_char_text(arg: &str) -> Mirror {
+        Mirror::Owned(format!("({}).chars().count() as i64", arg))
+    }
+
+    fn rust_index_form(kind: i64, lit: i64) -> Mirror {
+        Mirror::Int(if kind == 28 || (kind == 9 && lit == 3) {
+            1
+        } else {
+            0
+        })
+    }
+
+    fn rust_index_char_text(coll: &str, idx: &str) -> Mirror {
+        Mirror::Owned(format!(
+            "({}).chars().nth(({}) as usize).unwrap_or('\\0')",
+            coll, idx
+        ))
+    }
+
     fn rust_expr_list_text(args: &str) -> Mirror {
         Mirror::Owned(format!("vec![{}]", args))
     }
@@ -1701,6 +1739,10 @@ mod xval3 {
             ("rust_fold_text", In::Str3(o, i, op)) => rust_fold_text(o, i, op),
             ("rust_sort_text", In::StrPair(c, m)) => rust_sort_text(c, m),
             ("rust_call_text", In::StrPair(f, a)) => rust_call_text(f, a),
+            ("rust_call_form", In::Text(s)) => rust_call_form(s),
+            ("rust_call_len_form", In::Int(a)) => rust_call_len_form(*a),
+            ("rust_call_len_text", In::Text(s)) => rust_call_len_text(s),
+            ("rust_call_len_char_text", In::Text(s)) => rust_call_len_char_text(s),
             ("rust_condition_text", In::IntStr(k, r)) => rust_condition_text(*k, r),
             ("rust_if_text", In::Str3(c, t, e)) => rust_if_text(c, t, e),
             ("rust_lambda_text", In::StrPair(p, b)) => rust_lambda_text(p, b),
@@ -1719,6 +1761,8 @@ mod xval3 {
             ("rust_loop_text", In::Text(s)) => rust_loop_text(s),
             ("rust_struct_def_text", In::Str3(n, f, b)) => rust_struct_def_text(n, f, b),
             ("rust_index_text", In::StrPair(c, i)) => rust_index_text(c, i),
+            ("rust_index_form", In::IntPair(k, l)) => rust_index_form(*k, *l),
+            ("rust_index_char_text", In::StrPair(c, i)) => rust_index_char_text(c, i),
             ("rust_field_access_text", In::StrPair(b, f)) => rust_field_access_text(b, f),
             ("rust_record_lit_text", In::StrPair(n, f)) => rust_record_lit_text(n, f),
             ("rust_try_text", In::Text(s)) => rust_try_text(s),
@@ -1862,7 +1906,7 @@ mod xval3 {
     /// join — 106 in total. Phase 62: rust_generic_param_text
     /// joins — 117 in total. Phase 78: the six new-kind
     /// specs join — 123 in total.)
-    const ALL_SPECS: [&str; 123] = [
+    const ALL_SPECS: [&str; 129] = [
         "rust_type_name",
         "rust_binop_symbol",
         "rust_unaryop_symbol",
@@ -1934,6 +1978,10 @@ mod xval3 {
         "rust_fold_text",
         "rust_sort_text",
         "rust_call_text",
+        "rust_call_form",
+        "rust_call_len_form",
+        "rust_call_len_text",
+        "rust_call_len_char_text",
         "rust_condition_text",
         "rust_if_text",
         "rust_lambda_text",
@@ -1946,6 +1994,8 @@ mod xval3 {
         "rust_loop_text",
         "rust_struct_def_text",
         "rust_index_text",
+        "rust_index_form",
+        "rust_index_char_text",
         "rust_field_access_text",
         "rust_record_lit_text",
         "rust_try_text",
@@ -2149,6 +2199,40 @@ mod xval3 {
         ("Token", "kind: 0"),
         ("Empty", ""),
         ("Outer", "inner: Inner { x: 1 }"),
+    ];
+
+    /// Names for the rust_call_form sweep (Phase 85):
+    /// the three special names (the vec form, the bare
+    /// constructor, the len dispatch), an ordinary
+    /// pseudo-call, a plain callee, a case near-miss,
+    /// and the empty key — the complete classification,
+    /// as the spec's own test set states it. Total, so
+    /// every case is pinned.
+    const CALL_FORM85_NAMES: [&str; 7] = [
+        "List", "None", "len", "Some", "peek", "Len", "",
+    ];
+
+    /// Argument texts for the rust_call_len_text sweep
+    /// (Phase 85): a variable, a field projection, and
+    /// a nested projection. Total equation; every case
+    /// pinned.
+    const LEN_TEXT_ARGS: [&str; 3] = ["xs", "state.tokens", "a.b"];
+
+    /// Argument texts for the rust_call_len_char_text
+    /// sweep (Phase 85): the tokenizer's own projection
+    /// and two further shapes. Total equation; every
+    /// case pinned.
+    const LEN_CHAR_ARGS: [&str; 3] = ["state.source", "s", "a.b"];
+
+    /// (collection, index) pairs for the
+    /// rust_index_char_text sweep (Phase 85): the
+    /// tokenizer's own shape, a literal base, and a
+    /// variable base. Total equation; every case
+    /// pinned.
+    const INDEX_CHAR_PAIRS: [(&str, &str); 3] = [
+        ("state.source", "state.pos"),
+        ("\"abc\"", "0"),
+        ("s", "i"),
     ];
 
     // ── Slice-3 sweep batteries ────────────────────────────
@@ -2836,6 +2920,17 @@ mod xval3 {
             "rust_call_text" => {
                 CALL_PAIRS.iter().map(|(f, a)| In::StrPair(f, a)).collect()
             }
+            "rust_call_form" => CALL_FORM85_NAMES
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            "rust_call_len_form" => ints(&[1, 0, 7]),
+            "rust_call_len_text" => {
+                LEN_TEXT_ARGS.iter().map(|s| In::Text(s)).collect()
+            }
+            "rust_call_len_char_text" => {
+                LEN_CHAR_ARGS.iter().map(|s| In::Text(s)).collect()
+            }
             "rust_condition_text" => {
                 // The whole kind band over one rendering
                 // (the classification is total, so every case
@@ -2886,6 +2981,11 @@ mod xval3 {
                 .map(|(n, f, b)| In::Str3(n, f, b))
                 .collect(),
             "rust_index_text" => INDEX_PAIRS
+                .iter()
+                .map(|(c, i)| In::StrPair(c, i))
+                .collect(),
+            "rust_index_form" => kind_lit_grid(),
+            "rust_index_char_text" => INDEX_CHAR_PAIRS
                 .iter()
                 .map(|(c, i)| In::StrPair(c, i))
                 .collect(),
@@ -3319,6 +3419,24 @@ mod xval3 {
             "rust_call_text" => {
                 vec![In::StrPair("add", "1, 2"), In::StrPair("f", "")]
             }
+            // tests: list-form, none-form, len-form,
+            // some-call, plain-call, case-form, empty-form
+            // (the spec's own in-spec tests — the complete
+            // classification, as rust_expr_call_form's
+            // test set states its)
+            "rust_call_form" => CALL_FORM85_NAMES
+                .iter()
+                .map(|s| In::Text(s))
+                .collect(),
+            // tests: string-shape, other-shape,
+            // off-table-shape
+            "rust_call_len_form" => ints(&[1, 0, 7]),
+            // tests: len-text, len-field-text
+            "rust_call_len_text" => {
+                vec![In::Text("xs"), In::Text("state.tokens")]
+            }
+            // test: len-char-text
+            "rust_call_len_char_text" => vec![In::Text("state.source")],
             // proof assertions (kind 10's case, rendered
             // "flag", rides the band sweep)
             "rust_condition_text" => vec![
@@ -3355,6 +3473,19 @@ mod xval3 {
                 vec![In::Str3("Point", "x: i64, y: i64", "origin")]
             }
             "rust_index_text" => vec![In::StrPair("xs", "i")],
+            // proof assertions (the classification's
+            // pinned cells and fallthroughs)
+            "rust_index_form" => vec![
+                In::IntPair(28, 0),
+                In::IntPair(9, 3),
+                In::IntPair(9, 0),
+                In::IntPair(0, 0),
+                In::IntPair(4, 0),
+            ],
+            // proof assertion
+            "rust_index_char_text" => {
+                vec![In::StrPair("state.source", "state.pos")]
+            }
             "rust_try_text" => vec![In::Text("load()")],
             "rust_assign_text" => vec![In::StrPair("x", "5")],
             "rust_return_text" => vec![In::Text("5")],
@@ -4095,7 +4226,7 @@ mod xval3 {
     // ─────────────────────────────────────────────────────────
 
     #[test]
-    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 123 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
+    #[ignore = "cross-validation harness: 3 randomized synthesis runs x 129 specs, compiles + executes winners; run explicitly with --ignored --nocapture"]
     fn m3_cross_validation() {
         let root = env!("CARGO_MANIFEST_DIR");
         let out_dir = format!("{}/target/m3-synthesis", root);
@@ -4478,8 +4609,12 @@ mod xval3 {
     /// six new specs join, each total over its battery:
     /// field_text 3, method_form 7, method_text 3,
     /// record_text 3, field_access_text 3,
-    /// record_lit_text 3.)
-    const PINNED_TOTALS: [(&str, usize); 123] = [
+    /// record_lit_text 3. Phase 85: the six new specs
+    /// join, each total over its battery: call_form 7,
+    /// call_len_form 3, call_len_text 3,
+    /// call_len_char_text 3, index_form 363 (the
+    /// kind x lit grid, total), index_char_text 3.)
+    const PINNED_TOTALS: [(&str, usize); 129] = [
         ("rust_type_name", 14),
         ("rust_binop_symbol", 17),
         ("rust_unaryop_symbol", 2),
@@ -4551,6 +4686,10 @@ mod xval3 {
         ("rust_fold_text", 2),
         ("rust_sort_text", 2),
         ("rust_call_text", 3),
+        ("rust_call_form", 7),
+        ("rust_call_len_form", 3),
+        ("rust_call_len_text", 3),
+        ("rust_call_len_char_text", 3),
         ("rust_condition_text", 36),
         ("rust_if_text", 3),
         ("rust_lambda_text", 3),
@@ -4563,6 +4702,8 @@ mod xval3 {
         ("rust_loop_text", 2),
         ("rust_struct_def_text", 2),
         ("rust_index_text", 2),
+        ("rust_index_form", 363),
+        ("rust_index_char_text", 3),
         ("rust_field_access_text", 3),
         ("rust_record_lit_text", 3),
         ("rust_try_text", 2),
@@ -4810,8 +4951,8 @@ mod xval3 {
             let (_, pinned, unpinned) = totals(name, &sw);
             assert_eq!((pinned, unpinned), (n, 0), "{}", name);
         }
-        // Grand totals across the module: 3939 cases per
-        // run, 3021 pinned, 911 spec-silent, 7 out of
+        // Grand totals across the module: 4321 cases per
+        // run, 3403 pinned, 911 spec-silent, 7 out of
         // contract. (Slices 1–3: 2196 cases, 1533 pinned,
         // 656 silent — Phase 29 moved the literal specs'
         // three special-contents cases each from pinned to
@@ -4841,11 +4982,15 @@ mod xval3 {
         // batteries (3 + 7 + 3 + 3 + 3 + 3) — and pins 2
         // already-swept cases: rust_expr_form's kinds
         // 13/14, spec-silent until their rows landed, so
-        // the silent total falls 913 → 911.)
+        // the silent total falls 913 → 911. Phase 85
+        // adds 382 cases, all pinned — the six new
+        // specs' batteries (7 + 3 + 3 + 3 + 363 + 3),
+        // each total over its battery, so the silent
+        // total stands.)
         let total_cases: usize = ALL_SPECS.iter().map(|n| sweep(n).len()).sum();
         let total_pinned: usize = PINNED_TOTALS.iter().map(|(_, t)| t).sum();
-        assert_eq!(total_cases, 3939);
-        assert_eq!(total_pinned, 3021);
+        assert_eq!(total_cases, 4321);
+        assert_eq!(total_pinned, 3403);
     }
 
     #[test]
@@ -5094,7 +5239,7 @@ mod xval3 {
         // below: its rows are String-equality leaves, the
         // same recorded unadmitted family as
         // rust_target_route's, unrecognized BY DESIGN.
-        const RECOGNIZED: [&str; 106] = [
+        const RECOGNIZED: [&str; 111] = [
             "rust_type_name", "rust_binop_symbol", "rust_unaryop_symbol",
             "rust_unaryop_method", "rust_unaryop_form", "rust_collection_form",
             "rust_keyword", "spec_binop_symbol", "rust_type_form",
@@ -5171,9 +5316,16 @@ mod xval3 {
             "rust_expr_field_text", "rust_expr_method_text",
             "rust_expr_record_text", "rust_field_access_text",
             "rust_record_lit_text",
+            // ── Phase 85: the three new `++` templates
+            // via equation, the len sub-dispatch via
+            // guard_table, the index classification via
+            // pair_guard_table ──
+            "rust_call_len_text", "rust_call_len_char_text",
+            "rust_index_char_text", "rust_call_len_form",
+            "rust_index_form",
         ];
         let functions = load_codegen_module();
-        assert_eq!(functions.len(), 123, "module spec count");
+        assert_eq!(functions.len(), 129, "module spec count");
         let index = engine::SpecIndex::from_specs(&functions);
         for func in &functions {
             if !RECOGNIZED.contains(&func.name.as_str()) {
@@ -5210,6 +5362,11 @@ mod xval3 {
             // same String-equality shape — four name rows
             // plus catch-alls — unrecognized by the same
             // design ──
+            "rust_call_form",
+            // ── Phase 85: the IR Call dispatch is the
+            // same String-equality shape — three name
+            // rows plus a catch-all — unrecognized by
+            // the same design ──
         ] {
             assert!(
                 index.callee_body(name).is_none(),

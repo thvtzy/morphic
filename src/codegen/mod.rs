@@ -578,9 +578,10 @@ fn ir_to_rust(node: &IRNode, indent: usize, fn_ret: &TypeRef) -> String {
             // expression statement — the unterminated form was a
             // syntax error whenever a statement followed. Value
             // positions never reach this arm: they route through
-            // ir_to_rust_tail, which emits the bare call.
-            let args_str: Vec<String> = args.iter().map(|a| ir_to_rust_expr(a)).collect();
-            format!("{}{}({});\n", pad, rust_ident(function), args_str.join(", "))
+            // ir_to_rust_tail, which emits the bare call. The
+            // call text itself is the expression walker's
+            // (Phase 85: one rendering per call shape).
+            format!("{}{};\n", pad, ir_call_text(function, args))
         }
 
         IRNode::Return(expr) => {
@@ -956,6 +957,51 @@ fn expr_in_condition_position(node: &IRNode) -> String {
     }
 }
 
+/// The text of an IR Call in expression position
+/// (Phase 85, M1 generation campaign Leg 1 — new forms
+/// only; every pre-existing name renders byte-identically
+/// to the plain call template). Three of the parser's
+/// pseudo-calls reach bodies as IR Calls and are not Rust
+/// functions at all: `List` is the list literal (the
+/// spec-Expr walker's Phase 55 form, mirrored here —
+/// `vec![...]`), `None` is the zero-argument constructor
+/// (a bare value, never `None()` — E0618), and `len` is
+/// the language's one pure builtin (interpreter:
+/// `eval_call`), whose result is an Int. Its rendering is
+/// keyed on the argument's shape, the only type evidence
+/// this walker carries: over a record's field projection
+/// or a string literal — the string-shaped positions, and
+/// the only ones any measured seed body carries (peek's
+/// and next_char's `len(state.source)`) — it is the CHAR
+/// count, the interpreter's `chars().count()` semantics
+/// (a byte count would misjudge every non-ASCII source:
+/// the battery's "é😀x" has 3 chars and 8 bytes); over
+/// every other shape it is the element count. Both forms
+/// cast to i64, the language's Int. Named boundary: a
+/// List-typed record field in the field-projection
+/// position would take the char form and fail loudly at
+/// rustc (a Vec has no `chars()`); no measured body
+/// carries that shape (the tokenize rows' `len` over
+/// `tokens` is a MethodCall, which lowers to a Hole and
+/// never reaches a body).
+fn ir_call_text(function: &str, args: &[IRNode]) -> String {
+    let args_str: Vec<String> = args.iter().map(|a| ir_to_rust_expr(a)).collect();
+    match function {
+        "List" => format!("vec![{}]", args_str.join(", ")),
+        "None" if args.is_empty() => "None".to_string(),
+        "len" if args.len() == 1 => {
+            let arg = &args[0];
+            match arg {
+                IRNode::FieldAccess { .. } | IRNode::Literal(IRLiteral::String(_)) => {
+                    format!("({}).chars().count() as i64", args_str[0])
+                }
+                _ => format!("({}).len() as i64", args_str[0]),
+            }
+        }
+        _ => format!("{}({})", rust_ident(function), args_str.join(", ")),
+    }
+}
+
 fn ir_to_rust_expr(node: &IRNode) -> String {
     match node {
         IRNode::Literal(lit) => match lit {
@@ -1024,10 +1070,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                 IRUnaryOp::Init => format!("({})[..({}).len() - 1].to_vec()", inner, inner),
             }
         }
-        IRNode::Call { function, args } => {
-            let args_str: Vec<String> = args.iter().map(|a| ir_to_rust_expr(a)).collect();
-            format!("{}({})", rust_ident(function), args_str.join(", "))
-        }
+        IRNode::Call { function, args } => ir_call_text(function, args),
         IRNode::If { condition, then_branch, else_branch } => {
             format!(
                 "if {} {{ {} }} else {{ {} }}",
@@ -1147,7 +1190,43 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
             )
         }
         IRNode::Index(coll, idx) => {
-            format!("({})[{}]", ir_to_rust_expr(coll), ir_to_rust_expr(idx))
+            // Phase 85 (M1 generation campaign, Leg 1 — a
+            // new arm case, the corpus shapes below it
+            // unchanged): indexing a STRING is scalar char
+            // access in this language (the interpreter's
+            // chars().nth(); the Z3 encoder's CharStr
+            // bridge, Phase 76). The walker carries no type
+            // information, so the string case is keyed on
+            // the base's shape — a record's field projection
+            // or a string literal, the string-shaped
+            // positions (peek's `state.source[state.pos]`
+            // is the measured carrier; it died E0277 under
+            // the bracket form). The index is cast to
+            // usize, and an out-of-bounds index totalizes
+            // to the NUL sentinel — the Rust-side analogue
+            // of the bridge's documented totalization (an
+            // out-of-bounds indexed char denotes the empty
+            // CharStr, which no real char equals in the
+            // comparisons the bridge supports; NUL is the
+            // sentinel a generated body can name — a
+            // genuine NUL in a source at an unguarded index
+            // is the recorded collision). Every other base
+            // shape keeps the standing bracket rendering,
+            // byte-identical (the M3 corpus pins it for Var
+            // and Call bases); a List-typed record field in
+            // the projection position would take the char
+            // form and fail loudly at rustc, the same named
+            // boundary as the len arm's.
+            match coll.as_ref() {
+                IRNode::FieldAccess { .. } | IRNode::Literal(IRLiteral::String(_)) => {
+                    format!(
+                        "({}).chars().nth(({}) as usize).unwrap_or('\\0')",
+                        ir_to_rust_expr(coll),
+                        ir_to_rust_expr(idx)
+                    )
+                }
+                _ => format!("({})[{}]", ir_to_rust_expr(coll), ir_to_rust_expr(idx)),
+            }
         }
         IRNode::TryPropagate(inner) => {
             format!("({})?", ir_to_rust_expr(inner))
@@ -1207,6 +1286,22 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
                     let value_text = match v {
                         IRNode::Literal(IRLiteral::String(s)) => {
                             format!("\"{}\".to_string()", escape_rust_str(s))
+                        }
+                        // Phase 85: a field projection is
+                        // not a fresh value — rendered bare
+                        // it MOVES the field out of the base
+                        // record, and a later field of the
+                        // same literal that projects the
+                        // same base again (next_char's
+                        // inlined peek guards re-read
+                        // `state.source` after the `source`
+                        // field) dies E0382. The Phase 39
+                        // Concat-Var treatment, at the one
+                        // position this arm controls: an
+                        // owned copy. The IR is pure, so the
+                        // clone is value-transparent.
+                        IRNode::FieldAccess { .. } => {
+                            format!("{}.clone()", ir_to_rust_expr(v))
                         }
                         _ => ir_to_rust_expr(v),
                     };
@@ -3900,9 +3995,16 @@ mod tests {
                 ),
             ],
         };
+        // Phase 85 re-statement: a FieldAccess field
+        // value now takes the clone form (a projection
+        // is not a fresh value — rendered bare it moves
+        // the field out of its base, E0382 when the base
+        // is read again; measured on next_char's body in
+        // the Phase 81 cross-validation). Phase 77 pinned
+        // the bare form.
         assert_eq!(
             ir_to_rust_expr(&state_lit),
-            "TokenizerState { source: state.source, pos: (state.pos + 1) }"
+            "TokenizerState { source: state.source.clone(), pos: (state.pos + 1) }"
         );
         // A bare string-literal field value takes the
         // owned form (the defect-4d rule — the field's
@@ -3931,7 +4033,7 @@ mod tests {
         );
         assert_eq!(
             ir_to_rust_tail(&state_lit, 0, &neutral, None),
-            "TokenizerState { source: state.source, pos: (state.pos + 1) }\n"
+            "TokenizerState { source: state.source.clone(), pos: (state.pos + 1) }\n"
         );
     }
 
@@ -4377,6 +4479,252 @@ pub type StepResult = Result<TokenizerState, String>;
         assert!(
             stdout.contains("keyword_spec") && stdout.contains("simple_spec"),
             "the failing tests must be the two token-producing ones:\n{}",
+            stdout
+        );
+    }
+
+    // ── Phase 85 (M1 generation campaign, Leg 1): the IR
+    // walker's renderings for the shapes the record-era
+    // seed bodies carry — the parser's pseudo-calls as IR
+    // Calls (List / None / len) and String indexing. Until
+    // this phase these rendered verbatim (`List(...)`,
+    // `None()`, `len(...)`, `(state.source)[state.pos]`)
+    // and every generated peek / next_char / tokenize body
+    // died at rustc (E0425 / E0618 / E0277 in the compiled
+    // cross-validation runner, Phases 77/81/84). The List
+    // and None forms mirror the spec-Expr walker's Phase
+    // 55 pseudo-call forms exactly; the len and Index
+    // forms carry the language's own semantics (the
+    // interpreter's chars().count() length; the Z3 CharStr
+    // bridge's scalar index, out-of-bounds totalized to
+    // the NUL sentinel — see the arms' comments).
+
+    #[test]
+    fn phase85_ir_call_and_index_renderings() {
+        let v = |n: &str| IRNode::Var(n.into());
+        let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+            base: Box::new(base),
+            field: field.into(),
+        };
+        let call = |name: &str, args: Vec<IRNode>| IRNode::Call {
+            function: name.into(),
+            args,
+        };
+        // List: the vec literal, as in the spec walker.
+        assert_eq!(
+            ir_to_rust_expr(&call(
+                "List",
+                vec![
+                    IRNode::Literal(IRLiteral::Int(1)),
+                    IRNode::Literal(IRLiteral::Int(2))
+                ]
+            )),
+            "vec![1, 2]"
+        );
+        assert_eq!(ir_to_rust_expr(&call("List", vec![])), "vec![]");
+        // None: the bare constructor value, never a call.
+        assert_eq!(ir_to_rust_expr(&call("None", vec![])), "None");
+        // Some / Ok / Err keep the plain call form (real
+        // Rust constructors).
+        assert_eq!(
+            ir_to_rust_expr(&call("Some", vec![IRNode::Literal(IRLiteral::Int(1))])),
+            "Some(1)"
+        );
+        // len over a record's String field: the char count
+        // as i64 (the interpreter's semantics — a byte
+        // count would misjudge every non-ASCII source).
+        assert_eq!(
+            ir_to_rust_expr(&call("len", vec![fa(v("state"), "source")])),
+            "(state.source).chars().count() as i64"
+        );
+        // len over a plain list variable: the element
+        // count as i64.
+        assert_eq!(
+            ir_to_rust_expr(&call("len", vec![v("items")])),
+            "(items).len() as i64"
+        );
+        // String indexing over a record field: scalar
+        // char access, index cast, NUL totalization.
+        assert_eq!(
+            ir_to_rust_expr(&IRNode::Index(
+                Box::new(fa(v("state"), "source")),
+                Box::new(fa(v("state"), "pos"))
+            )),
+            "(state.source).chars().nth((state.pos) as usize).unwrap_or('\\0')"
+        );
+        // The corpus-pinned list form is unchanged: a Var
+        // base keeps the bracket rendering.
+        assert_eq!(
+            ir_to_rust_expr(&IRNode::Index(
+                Box::new(v("items")),
+                Box::new(IRNode::Literal(IRLiteral::Int(0)))
+            )),
+            "(items)[0]"
+        );
+        // An ordinary spec-to-spec call is untouched.
+        assert_eq!(
+            ir_to_rust_expr(&call("peek", vec![v("state")])),
+            "peek(state)"
+        );
+    }
+
+    #[test]
+    fn phase85_peek_next_char_generated_rust_compiles_and_runs() {
+        use std::io::Write;
+        let Some(rustc) = rustc_path() else {
+            eprintln!("rustc not reachable; skipping Phase 85 fixture");
+            return;
+        };
+        let parsed = crate::spec::parser::parse(PHASE77_TOKENIZER_MODULE)
+            .expect("fixture module must parse");
+        let checked = crate::spec::typeck::check(parsed)
+            .expect("fixture module must typecheck");
+        let specs = checked.spec.functions;
+        let spec = |name: &str| {
+            specs
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("spec {name} must exist"))
+                .clone()
+        };
+        let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+            base: Box::new(base),
+            field: field.into(),
+        };
+        let v = |n: &str| IRNode::Var(n.into());
+        let int = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+        let call = |name: &str, args: Vec<IRNode>| IRNode::Call {
+            function: name.into(),
+            args,
+        };
+        // The Phase 81 complementary-guard seed body for
+        // peek, node for node as the cross-validation dump
+        // records it.
+        let peek_body = || IRNode::If {
+            condition: Box::new(IRNode::BinOp(
+                IRBinOp::Lt,
+                Box::new(fa(v("state"), "pos")),
+                Box::new(call("len", vec![fa(v("state"), "source")])),
+            )),
+            then_branch: Box::new(call(
+                "Some",
+                vec![IRNode::Index(
+                    Box::new(fa(v("state"), "source")),
+                    Box::new(fa(v("state"), "pos")),
+                )],
+            )),
+            else_branch: Box::new(call("None", vec![])),
+        };
+        // The Phase 81 record-completion seed body for
+        // next_char: peek's body inlined at both guard
+        // positions, as the seed constructs it.
+        let next_char_body = IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), fa(v("state"), "source")),
+                (
+                    "pos".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(fa(v("state"), "pos")),
+                        Box::new(int(1)),
+                    ),
+                ),
+                (
+                    "line".into(),
+                    IRNode::If {
+                        condition: Box::new(IRNode::BinOp(
+                            IRBinOp::Neq,
+                            Box::new(peek_body()),
+                            Box::new(call(
+                                "Some",
+                                vec![IRNode::Literal(IRLiteral::Char('\n'))],
+                            )),
+                        )),
+                        then_branch: Box::new(fa(v("state"), "line")),
+                        else_branch: Box::new(IRNode::BinOp(
+                            IRBinOp::Add,
+                            Box::new(fa(v("state"), "line")),
+                            Box::new(int(1)),
+                        )),
+                    },
+                ),
+                (
+                    "col".into(),
+                    IRNode::If {
+                        condition: Box::new(IRNode::BinOp(
+                            IRBinOp::Neq,
+                            Box::new(peek_body()),
+                            Box::new(call(
+                                "Some",
+                                vec![IRNode::Literal(IRLiteral::Char('\n'))],
+                            )),
+                        )),
+                        then_branch: Box::new(IRNode::BinOp(
+                            IRBinOp::Add,
+                            Box::new(fa(v("state"), "col")),
+                            Box::new(int(1)),
+                        )),
+                        else_branch: Box::new(int(1)),
+                    },
+                ),
+                ("tokens".into(), fa(v("state"), "tokens")),
+            ],
+        };
+        let mut file = String::from(PHASE77_PRELUDE);
+        for (name, body) in [("peek", peek_body()), ("next_char", next_char_body)] {
+            let cand = phase77_candidate(spec(name), body);
+            let generated = generate_rust(&cand).expect("generate fixture winner");
+            file.push_str(&format!("mod gen_{} {{\nuse super::*;\n", name));
+            file.push_str(&generated);
+            file.push_str("}\n\n");
+        }
+        assert!(
+            file.contains(".chars().nth(") && file.contains(".chars().count() as i64"),
+            "generated file must carry the Phase 85 renderings:\n{}",
+            file
+        );
+        assert!(
+            !file.contains("None()") && !file.contains("len(state.source)"),
+            "generated file must not carry the pre-Phase-85 forms:\n{}",
+            file
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "morphic_phase85_fixture_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("tokenizer_fixture85.rs");
+        let mut f = std::fs::File::create(&src).unwrap();
+        f.write_all(file.as_bytes()).unwrap();
+        drop(f);
+        let bin = dir.join("tokenizer_fixture85_test");
+        let compile = std::process::Command::new(&rustc)
+            .args(["--edition", "2021", "--test"])
+            .arg(&src)
+            .arg("-o")
+            .arg(&bin)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "Phase 85 fixture does not compile:\n{}\n--- file ---\n{}",
+            String::from_utf8_lossy(&compile.stderr),
+            file
+        );
+        let run = std::process::Command::new(&bin).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+        // peek's two in-spec tests and next_char's one all
+        // pass against the seed bodies — the Phase 81
+        // bodies, executed end-to-end for the first time.
+        assert!(
+            stdout.contains("3 passed; 0 failed"),
+            "fixture test outcomes differ from the measured expectation:\n{}",
             stdout
         );
     }

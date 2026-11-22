@@ -1335,6 +1335,115 @@ fn rust_sort_text(coll: &str, cmp: &str) -> String {
 
 /// Mirror of the Call rendering (src/codegen/mod.rs:810-813)
 /// over the rendered name and the pre-joined arguments.
+/// Mirror of `rust_call_form` (Phase 85): which
+/// rendering an IR Call takes, keyed by the EFFECTIVE
+/// name — 0 = plain call template, 1 = vec literal
+/// ("List"), 2 = bare constructor ("None"), 3 = the
+/// "len" builtin (sub-dispatched by
+/// rust_call_len_form). Total: every other name is
+/// family 0.
+fn rust_call_form(name: &str) -> i64 {
+    match name {
+        "List" => 1,
+        "None" => 2,
+        "len" => 3,
+        _ => 0,
+    }
+}
+
+/// Mirror of `rust_call_len_form` (Phase 85): the len
+/// sub-dispatch over the argument's shape — 1 = string
+/// projection / string literal (character count),
+/// 0 = every other shape (element count).
+fn rust_call_len_form(argform: i64) -> i64 {
+    if argform == 1 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Mirror of `rust_call_len_text` (Phase 85): the
+/// element-count len rendering.
+fn rust_call_len_text(arg: &str) -> String {
+    format!("({}).len() as i64", arg)
+}
+
+/// Mirror of `rust_call_len_char_text` (Phase 85):
+/// the character-count len rendering.
+fn rust_call_len_char_text(arg: &str) -> String {
+    format!("({}).chars().count() as i64", arg)
+}
+
+/// Mirror of `rust_index_form` (Phase 85): which
+/// rendering an IR Index takes, keyed by the
+/// collection's kind code and literal kind — 1 = the
+/// char-access template (FieldAccess base, kind 28;
+/// String literal base, kind 9 / lit 3), 0 = the
+/// bracket template.
+fn rust_index_form(kind: i64, lit: i64) -> i64 {
+    if kind == 28 || (kind == 9 && lit == 3) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Mirror of `rust_index_char_text` (Phase 85): the
+/// char-access rendering over a string base,
+/// totalized past the end to NUL.
+fn rust_index_char_text(coll: &str, idx: &str) -> String {
+    format!(
+        "({}).chars().nth(({}) as usize).unwrap_or('\\0')",
+        coll, idx
+    )
+}
+
+/// The assembled Call dispatch (Phase 85): the
+/// effective name (the argument-count fold) classifies
+/// through rust_call_form, family 3 sub-dispatches
+/// through rust_call_len_form over the argument's
+/// shape — the native ir_call_text's decision,
+/// composed from the mirrors exactly as the composed
+/// assembly composes it from the winners.
+fn ir_call_dispatched_mirror(name: &str, args: &[Expr]) -> String {
+    let eff = match name {
+        "None" if !args.is_empty() => "",
+        "len" if args.len() != 1 => "",
+        other => other,
+    };
+    match rust_call_form(eff) {
+        1 => rust_expr_list_text(
+            &args
+                .iter()
+                .map(ir_expr_assembled)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        2 => rust_ident_verbatim(name),
+        3 => {
+            let argform = match &args[0] {
+                Expr::FieldAccess(..) => 1,
+                Expr::Lit(Lit::Str(_)) => 1,
+                _ => 0,
+            };
+            if rust_call_len_form(argform) == 1 {
+                rust_call_len_char_text(&ir_expr_assembled(&args[0]))
+            } else {
+                rust_call_len_text(&ir_expr_assembled(&args[0]))
+            }
+        }
+        _ => rust_call_text(
+            &rust_ident_verbatim(name),
+            &args
+                .iter()
+                .map(ir_expr_assembled)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    }
+}
+
 fn rust_call_text(func: &str, args: &str) -> String {
     format!("{}({})", func, args)
 }
@@ -1992,10 +2101,7 @@ fn ir_expr_assembled(e: &Expr) -> String {
             _ => rust_binop_infix_text(*op, &ir_expr_assembled(l), &ir_expr_assembled(r)),
         },
         Expr::UnaryOp(op, inner) => rust_unary_text(*op, &ir_expr_assembled(inner)).unwrap(),
-        Expr::Call(name, args) => {
-            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
-            rust_call_text(&rust_ident_verbatim(name), &rendered.join(", "))
-        }
+        Expr::Call(name, args) => ir_call_dispatched_mirror(name, args),
         Expr::If(c, t, el) => rust_if_text(
             &rust_condition_text(expr_kind(c), &ir_expr_assembled(c)),
             &ir_expr_assembled(t),
@@ -2050,7 +2156,19 @@ fn ir_expr_assembled(e: &Expr) -> String {
             )
         }
         Expr::Index(coll, idx) => {
-            rust_index_text(&ir_expr_assembled(coll), &ir_expr_assembled(idx))
+            // Phase 85 dispatch (rust_index_form): a
+            // string-shaped base takes the char-access
+            // template; every other base the bracket
+            // template.
+            let (kind, lit) = match coll.as_ref() {
+                Expr::Lit(l) => (9, lit_kind(l)),
+                other => (expr_kind(other), 0),
+            };
+            if rust_index_form(kind, lit) == 1 {
+                rust_index_char_text(&ir_expr_assembled(coll), &ir_expr_assembled(idx))
+            } else {
+                rust_index_text(&ir_expr_assembled(coll), &ir_expr_assembled(idx))
+            }
         }
         Expr::FieldAccess(base, field) => {
             // The native arm: a record-literal base is
@@ -2069,6 +2187,12 @@ fn ir_expr_assembled(e: &Expr) -> String {
                 .map(|(n, v)| {
                     let value_text = match v {
                         Expr::Lit(Lit::Str(s)) => rust_string_literal_owned_text(s),
+                        // Phase 85: a FieldAccess value
+                        // takes the clone form
+                        // (rust_unary_text family Clone).
+                        Expr::FieldAccess(..) => {
+                            rust_unary_text(9, &ir_expr_assembled(v)).unwrap()
+                        }
                         _ => ir_expr_assembled(v),
                     };
                     format!("{}: {}", rust_ident_verbatim(n), value_text)
@@ -2272,8 +2396,22 @@ fn ir_stmt_assembled(s: &Stmt, indent: usize, fn_ret: i64) -> String {
             out
         }
         Stmt::Call(name, args) => {
-            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
-            rust_stmt_call_text(&pad, &rust_ident_verbatim(name), &rendered.join(", "))
+            // Phase 85: family 0 of rust_call_form
+            // keeps the standing statement template;
+            // the dispatched families terminate the
+            // expression rendering through
+            // rust_stmt_expr_text.
+            let eff = match *name {
+                "None" if !args.is_empty() => "",
+                "len" if args.len() != 1 => "",
+                other => other,
+            };
+            if rust_call_form(eff) == 0 {
+                let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
+                rust_stmt_call_text(&pad, &rust_ident_verbatim(name), &rendered.join(", "))
+            } else {
+                rust_stmt_expr_text(&pad, &ir_call_dispatched_mirror(name, args))
+            }
         }
         Stmt::Return(e) => rust_stmt_return_text(&pad, &ir_expr_typed_mirror(e, fn_ret)),
         Stmt::Alloc(name, ty, initial) => rust_stmt_alloc_text(
@@ -2318,10 +2456,7 @@ fn ir_stmt_assembled(s: &Stmt, indent: usize, fn_ret: i64) -> String {
 fn tail_expr_typed_text(s: &Stmt, expected: i64) -> String {
     match s {
         Stmt::Expr(e) => ir_expr_typed_mirror(e, expected),
-        Stmt::Call(name, args) => {
-            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
-            rust_call_text(&rust_ident_verbatim(name), &rendered.join(", "))
-        }
+        Stmt::Call(name, args) => ir_call_dispatched_mirror(name, args),
         Stmt::Collection(kind, elems) => {
             let rendered: Vec<String> = elems.iter().map(ir_expr_assembled).collect();
             format!(
@@ -4423,6 +4558,79 @@ mod golden_tests {
         assert_eq!(ir_expr_assembled(&Expr::Lit(Lit::Char('"'))), "'\"'");
     }
 
+    // ── Phase 85 golden: the call/index form dispatch ──
+
+    #[test]
+    fn phase85_call_index_form_goldens() {
+        // The classifications, complete over their keys.
+        assert_eq!(rust_call_form("List"), 1);
+        assert_eq!(rust_call_form("None"), 2);
+        assert_eq!(rust_call_form("len"), 3);
+        assert_eq!(rust_call_form("Some"), 0);
+        assert_eq!(rust_call_form("peek"), 0);
+        assert_eq!(rust_call_form("Len"), 0);
+        assert_eq!(rust_call_form(""), 0);
+        assert_eq!(rust_call_len_form(1), 1);
+        assert_eq!(rust_call_len_form(0), 0);
+        assert_eq!(rust_call_len_form(7), 0);
+        assert_eq!(rust_index_form(28, 0), 1);
+        assert_eq!(rust_index_form(9, 3), 1);
+        assert_eq!(rust_index_form(9, 0), 0);
+        assert_eq!(rust_index_form(0, 0), 0);
+        assert_eq!(rust_index_form(4, 0), 0);
+        // The templates.
+        assert_eq!(rust_call_len_text("xs"), "(xs).len() as i64");
+        assert_eq!(
+            rust_call_len_char_text("state.source"),
+            "(state.source).chars().count() as i64"
+        );
+        assert_eq!(
+            rust_index_char_text("state.source", "state.pos"),
+            "(state.source).chars().nth((state.pos) as usize).unwrap_or('\\0')"
+        );
+        // The assembled dispatch over mirror trees.
+        let fa = |field: &'static str| {
+            Expr::FieldAccess(Box::new(Expr::Var("state")), field)
+        };
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call(
+                "List",
+                vec![Expr::Lit(Lit::Int(1)), Expr::Lit(Lit::Int(2))],
+            )),
+            "vec![1, 2]"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call("None", vec![])),
+            "None"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call("len", vec![fa("source")])),
+            "(state.source).chars().count() as i64"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call("len", vec![Expr::Var("xs")])),
+            "(xs).len() as i64"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Index(Box::new(fa("source")), Box::new(fa("pos")))),
+            "(state.source).chars().nth((state.pos) as usize).unwrap_or('\\0')"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Index(
+                Box::new(Expr::Var("xs")),
+                Box::new(Expr::Lit(Lit::Int(0))),
+            )),
+            "(xs)[0]"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::RecordLit(
+                "S",
+                vec![("source", fa("source"))],
+            )),
+            "S { source: state.source.clone() }"
+        );
+    }
+
     // ── Slice 5 golden: the statement walker ──
 
     #[test]
@@ -5395,11 +5603,14 @@ spec bad {
         // plus the 6 Phase 78 specs (rust_expr_field_text,
         // rust_expr_method_form, rust_expr_method_text,
         // rust_expr_record_text, rust_field_access_text,
-        // rust_record_lit_text).
+        // rust_record_lit_text), plus the 6 Phase 85 specs
+        // (rust_call_form, rust_call_len_form, rust_call_len_text,
+        // rust_call_len_char_text, rust_index_form,
+        // rust_index_char_text).
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 123, "codegen.morph should declare 123 specs");
+        assert_eq!(spec_decls, 129, "codegen.morph should declare 129 specs");
         assert!(src.matches("test \"").count() >= 182, "codegen.morph should carry in-spec tests");
     }
 }

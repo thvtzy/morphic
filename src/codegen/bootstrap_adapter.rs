@@ -657,6 +657,54 @@ impl Adapter {
         ))
     }
 
+    /// Assembly of ir_call_text (src/codegen/mod.rs),
+    /// composed through the Phase 85 winners exactly as
+    /// the emitter decides then renders — the gate
+    /// assembly's helper, transcribed to direct calls.
+    /// Shared by the expression and statement walkers.
+    fn call_dispatched_text(
+        &self,
+        function: &str,
+        args: &[IRNode],
+    ) -> Result<String, String> {
+        let eff_name: &str = match function {
+            "None" if !args.is_empty() => "",
+            "len" if args.len() != 1 => "",
+            other => other,
+        };
+        let form = syn::rust_call_form::rust_call_form(eff_name.to_string());
+        Ok(match form {
+            1 => {
+                let rendered: Result<Vec<String>, String> =
+                    args.iter().map(|a| self.expr_text(a)).collect();
+                syn::rust_expr_list_text::rust_expr_list_text(rendered?.join(", "))
+            }
+            2 => rust_ident(function),
+            3 => {
+                let argform: i64 = match &args[0] {
+                    IRNode::FieldAccess { .. } => 1,
+                    IRNode::Literal(IRLiteral::String(_)) => 1,
+                    _ => 0,
+                };
+                let arg_text = self.expr_text(&args[0])?;
+                let len_form = syn::rust_call_len_form::rust_call_len_form(argform);
+                if len_form == 1 {
+                    syn::rust_call_len_char_text::rust_call_len_char_text(arg_text)
+                } else {
+                    syn::rust_call_len_text::rust_call_len_text(arg_text)
+                }
+            }
+            _ => {
+                let rendered: Result<Vec<String>, String> =
+                    args.iter().map(|a| self.expr_text(a)).collect();
+                syn::rust_call_text::rust_call_text(
+                    rust_ident(function),
+                    rendered?.join(", "),
+                )
+            }
+        })
+    }
+
     pub(crate) fn expr_text(&self, node: &IRNode) -> Result<String, String> {
         Ok(match node {
             IRNode::Literal(lit) => self.literal_text(lit)?,
@@ -687,14 +735,7 @@ impl Adapter {
                 unary_code(*op),
                 self.expr_text(inner)?,
             ),
-            IRNode::Call { function, args } => {
-                let rendered: Result<Vec<String>, String> =
-                    args.iter().map(|a| self.expr_text(a)).collect();
-                syn::rust_call_text::rust_call_text(
-                    rust_ident(function),
-                    rendered?.join(", "),
-                )
-            }
+            IRNode::Call { function, args } => self.call_dispatched_text(function, args)?,
             IRNode::If {
                 condition,
                 then_branch,
@@ -801,10 +842,22 @@ impl Adapter {
                     self.expr_text(body)?,
                 )
             }
-            IRNode::Index(coll, idx) => syn::rust_index_text::rust_index_text(
-                self.expr_text(coll)?,
-                self.expr_text(idx)?,
-            ),
+            IRNode::Index(coll, idx) => {
+                // Phase 85 dispatch (rust_index_form),
+                // exactly the gate assembly's decision.
+                let (kind, lit) = match coll.as_ref() {
+                    IRNode::Literal(l) => (9, lit_kind(l)),
+                    _ => (node_kind(coll), 0),
+                };
+                let form = syn::rust_index_form::rust_index_form(kind, lit);
+                let coll_text = self.expr_text(coll)?;
+                let idx_text = self.expr_text(idx)?;
+                if form == 1 {
+                    syn::rust_index_char_text::rust_index_char_text(coll_text, idx_text)
+                } else {
+                    syn::rust_index_text::rust_index_text(coll_text, idx_text)
+                }
+            }
             IRNode::TryPropagate(inner) => {
                 syn::rust_try_text::rust_try_text(self.expr_text(inner)?)
             }
@@ -856,6 +909,12 @@ impl Adapter {
                                 syn::rust_string_literal_owned_text::rust_string_literal_owned_text(
                                     self.literal_contents(s),
                                 )
+                            }
+                            // Phase 85: a FieldAccess value
+                            // takes the clone form through
+                            // rust_unary_text's Clone family.
+                            IRNode::FieldAccess { .. } => {
+                                syn::rust_unary_text::rust_unary_text(9, self.expr_text(v)?)
                             }
                             _ => self.expr_text(v)?,
                         };
@@ -994,13 +1053,29 @@ impl Adapter {
                 out
             }
             IRNode::Call { function, args } => {
-                let rendered: Result<Vec<String>, String> =
-                    args.iter().map(|a| self.expr_text(a)).collect();
-                syn::rust_stmt_call_text::rust_stmt_call_text(
-                    pad,
-                    rust_ident(function),
-                    rendered?.join(", "),
-                )
+                // Phase 85: family 0 keeps the standing
+                // statement template; the dispatched
+                // families terminate through
+                // rust_stmt_expr_text — the gate
+                // assembly's composition exactly.
+                let eff_name: &str = match function.as_str() {
+                    "None" if !args.is_empty() => "",
+                    "len" if args.len() != 1 => "",
+                    other => other,
+                };
+                let form = syn::rust_call_form::rust_call_form(eff_name.to_string());
+                if form == 0 {
+                    let rendered: Result<Vec<String>, String> =
+                        args.iter().map(|a| self.expr_text(a)).collect();
+                    syn::rust_stmt_call_text::rust_stmt_call_text(
+                        pad,
+                        rust_ident(function),
+                        rendered?.join(", "),
+                    )
+                } else {
+                    let rendered = self.call_dispatched_text(function, args)?;
+                    syn::rust_stmt_expr_text::rust_stmt_expr_text(pad, rendered)
+                }
             }
             IRNode::Return(inner) => syn::rust_stmt_return_text::rust_stmt_return_text(
                 pad,

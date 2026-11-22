@@ -728,7 +728,7 @@ fn harness_divergence_report_shape() {
 // rendered twice; the second render must hit the cache).
 
 #[test]
-#[ignore = "M4-S1: Codegen winner extraction (123 specs) + 4 example pipelines; run explicitly with --ignored --nocapture"]
+#[ignore = "M4-S1: Codegen winner extraction (129 specs) + 4 example pipelines; run explicitly with --ignored --nocapture"]
 fn m4_s1_examples_dual_render() {
     let root = env!("CARGO_MANIFEST_DIR");
     let out_dir = format!("{}/target/m4-harness", root);
@@ -739,8 +739,8 @@ fn m4_s1_examples_dual_render() {
     let winners = super::m3_gate::extract_winners(&codegen_functions);
     assert_eq!(
         winners.spec_count(),
-        123,
-        "the composed side must be the M3 winner set (123 Codegen specs)"
+        129,
+        "the composed side must be the M3 winner set (129 Codegen specs)"
     );
     let mut compiler = ComposedCompiler::new(&winners);
 
@@ -843,17 +843,17 @@ fn m4_s1_examples_dual_render() {
 // holds 117 specs and the corpus is 143 (derivation:
 // 142 + 1 new Codegen spec). Phase 78 re-record
 // (2026-11-22): the new-kind amendment adds six specs —
-// codegen.morph holds 123 specs and the corpus is 149
+// codegen.morph holds 129 specs and the corpus is 155
 // (derivation: 143 + 6 new Codegen specs). The tokenizer's
 // inclusion is sound on the harness's own terms: the dual
 // render judges rendering identity of whatever winner the
 // pipeline crowns for each spec, per extracted winner.
-// The Codegen module's own 123 specs ARE corpus members:
+// The Codegen module's own 129 specs ARE corpus members:
 // the gate demands 100+ byte-identical specs and the
 // non-Codegen corpus is only 26, so the arithmetic forces
 // inclusion; rendering a Codegen spec's winner through
 // the composed codegen is the M3 gate's own self-reference
-// (its item (iv) rendered all 123 winner files end-to-end
+// (its item (iv) rendered all 129 winner files end-to-end
 // through the composed driver), already proven there.
 // The composition judged is the mirror-completed one
 // (mode B), per the Phase 43 ledger: a strict-composition
@@ -879,7 +879,7 @@ fn m4_s1_examples_dual_render() {
 const EXPECTED_CORPUS: [(&str, usize); 8] = [
     ("examples/binary_search.morph", 1),
     ("examples/functional_tokenizer.morph", 8),
-    ("examples/self_host/codegen.morph", 123),
+    ("examples/self_host/codegen.morph", 129),
     ("examples/self_host/count_matching.morph", 1),
     ("examples/self_host/is_sorted.morph", 1),
     ("examples/self_host/printer.morph", 7),
@@ -934,7 +934,7 @@ pub(super) struct CorpusFile {
 /// that pass check (parse + typeck, `load_functions`),
 /// record the rest as excluded. Asserts the derived
 /// corpus IS the audited one — paths, per-file spec
-/// counts, the exclusion, and the 149-spec total.
+/// counts, the exclusion, and the 155-spec total.
 pub(super) fn enumerate_corpus() -> (Vec<CorpusFile>, Vec<String>) {
     let scanned = scan_morph_files();
     assert_eq!(
@@ -979,7 +979,7 @@ pub(super) fn enumerate_corpus() -> (Vec<CorpusFile>, Vec<String>) {
         );
         total += count;
     }
-    assert_eq!(total, 149, "the gate corpus must hold 149 specs");
+    assert_eq!(total, 155, "the gate corpus must hold 155 specs");
     (files, excluded)
 }
 
@@ -995,7 +995,7 @@ struct FileTally {
 }
 
 #[test]
-#[ignore = "M4 gate: corpus-scale dual render (149 specs, minutes); run explicitly with --ignored --nocapture m4_gate"]
+#[ignore = "M4 gate: corpus-scale dual render (155 specs, minutes); run explicitly with --ignored --nocapture m4_gate"]
 fn m4_gate_corpus_dual_render() {
     let started = std::time::Instant::now();
     let root = env!("CARGO_MANIFEST_DIR");
@@ -1013,13 +1013,13 @@ fn m4_gate_corpus_dual_render() {
     let winners = super::m3_gate::extract_winners(&codegen_functions);
     assert_eq!(
         winners.spec_count(),
-        123,
-        "the composed side must be the M3 winner set (123 Codegen specs)"
+        129,
+        "the composed side must be the M3 winner set (129 Codegen specs)"
     );
     let mut compiler = ComposedCompiler::new(&winners);
 
     let mut report = String::new();
-    report.push_str("# M4 gate report (Phase 46; corpus enlarged to the full 138-spec inventory in Phase 47; re-derived to 142 specs in Phase 56 after the Phase 55 codegen amendments; re-derived to 143 specs in Phase 62 after the Clone-bound amendment; re-derived to 149 specs in Phase 78 after the new-kind amendment)\n\n");
+    report.push_str("# M4 gate report (Phase 46; corpus enlarged to the full 138-spec inventory in Phase 47; re-derived to 142 specs in Phase 56 after the Phase 55 codegen amendments; re-derived to 143 specs in Phase 62 after the Clone-bound amendment; re-derived to 149 specs in Phase 78 after the new-kind amendment; re-derived to 155 specs in Phase 85 after the call/index-form amendment)\n\n");
     report.push_str(
         "Composition judged: original pipeline (parse → typeck → synthesize → verify → \
          select) with the M3 mirror-completed composed codegen (mode B) in \
@@ -1137,12 +1137,12 @@ fn m4_gate_corpus_dual_render() {
     // gate record's business (ROAD), not an assertion here:
     // a divergent record is evidence, not a harness failure.
     assert_eq!(
-        grand.attempted, 149,
+        grand.attempted, 155,
         "every corpus spec must produce a record"
     );
     assert_eq!(
         compiler.pipeline_runs(),
-        149,
+        155,
         "the pipeline must run exactly once per corpus spec"
     );
     assert!(
