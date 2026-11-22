@@ -671,28 +671,65 @@ impl Verifier {
         else {
             return done(false, None, Tri::Unknown);
         };
-        let Some(formula) = encode_constraint(&resolved, &env, &EvalCtx::root(&self.index)) else {
-            return done(false, None, Tri::Unknown);
-        };
-
-        let z3 = Z3Session::new(self.timeout_per_constraint_ms);
-        for fact in &call_facts {
-            z3.assert(fact);
-        }
         // D5a side conditions: every Char parameter (and
         // every Char nested in a record/Option/Result
         // parameter) ranges over the Unicode scalar values
         // — without these, a "Char" constant could be a
         // surrogate or beyond U+10FFFF and scalar-order
         // proofs would be proving a different type.
+        // Collected ahead of the encode branch: the W8
+        // fallback session below asserts them too.
+        let mut side: Vec<z3::ast::Bool> = Vec::new();
         for p in &spec.params {
             if let Some(sym) = param_env.get(&p.name) {
-                let mut conditions = Vec::new();
-                collect_char_conditions(sym, &mut conditions);
-                for cond in &conditions {
-                    z3.assert(cond);
-                }
+                collect_char_conditions(sym, &mut side);
             }
+        }
+        let Some(formula) = encode_constraint(&resolved, &env, &EvalCtx::root(&self.index)) else {
+            // Phase 97 (the W8 fix): the whole row
+            // declined — the literal-tag boundary (an
+            // `unwrap` over a literal Err output has no
+            // Ok payload to project, so the row encodes
+            // whole or not at all). Judge the row
+            // per-disjunct instead: the row's real
+            // formula is E ∨ D, where E is the disjuncts
+            // that encode and D the ones that declined;
+            // ¬(E ∨ D) ⊆ ¬E, so if E is already valid
+            // under the facts the row holds on this
+            // output no matter what D would say — the
+            // guard disjunct decided it, which is the
+            // language's own `||` reading (Phase 76: on
+            // the Err branch the disjunction is already
+            // satisfied). Proven on that basis alone;
+            // anything else stays Unknown — the fallback
+            // never Refutes, because a declined disjunct
+            // might be the true one. See
+            // `encode_disjunct_union`.
+            let Some(union) =
+                encode_disjunct_union(&resolved, &env, &EvalCtx::root(&self.index))
+            else {
+                return done(false, None, Tri::Unknown);
+            };
+            let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+            for fact in &call_facts {
+                z3.assert(fact);
+            }
+            for cond in &side {
+                z3.assert(cond);
+            }
+            z3.assert(&union.not());
+            return match z3.check() {
+                SmtResult::Unsat => done(true, None, Tri::Proven),
+                _ => done(false, None, Tri::Unknown),
+            };
+        };
+
+        let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+        for fact in &call_facts {
+            z3.assert(fact);
+        }
+        for cond in &side {
+            z3.assert(cond);
         }
         let negated = formula.not();
         z3.assert(&negated);
@@ -732,9 +769,11 @@ impl Verifier {
     ///   was cut off by the fuel bound);
     /// - **Unknown** otherwise: exhaustion reachable, a
     ///   solver Unknown anywhere, or the row unencodable
-    ///   on some path (the W8 literal-tag boundaries
-    ///   judge Unknown here exactly as in
-    ///   `verify_constraint`).
+    ///   on some path. (Phase 97: a row that declines
+    ///   whole on a path is first judged per-disjunct —
+    ///   the W8 literal-tag recovery in the path loop
+    ///   below; only a row no disjunct part of which can
+    ///   decide the path stays Unknown for that reason.)
     ///
     /// The verdict vocabulary is the same `Tri` /
     /// `VerificationStatus` the expression judge
@@ -802,10 +841,46 @@ impl Verifier {
             else {
                 return done(false, None, Tri::Unknown);
             };
-            let Some(formula) =
-                encode_constraint(&resolved, &env, &EvalCtx::root(&self.index))
-            else {
-                return done(false, None, Tri::Unknown);
+            let formula =
+                encode_constraint(&resolved, &env, &EvalCtx::root(&self.index));
+            let Some(formula) = formula else {
+                // Phase 97 (the W8 fix): the whole row
+                // declined on this path — the literal-tag
+                // boundary (the path's output is a literal
+                // Err and the row reads `output.unwrap()`).
+                // Judge the row per-disjunct on this path:
+                // if the disjuncts that encode are already
+                // valid under the path condition, the row
+                // holds here no matter what the declined
+                // disjuncts would say (¬(E ∨ D) ⊆ ¬E) —
+                // the path is decided. Otherwise the path
+                // is Unknown — never Refuted from the
+                // fallback, because a declined disjunct
+                // might be the true one. A row with no
+                // encodable disjunct part keeps the
+                // standing outcome. See
+                // `encode_disjunct_union` and
+                // `verify_constraint`'s twin fallback.
+                let Some(union) =
+                    encode_disjunct_union(&resolved, &env, &EvalCtx::root(&self.index))
+                else {
+                    return done(false, None, Tri::Unknown);
+                };
+                let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+                for cond in &side {
+                    z3.assert(cond);
+                }
+                for fact in &call_facts {
+                    z3.assert(fact);
+                }
+                z3.assert(pc);
+                z3.assert(&not_exhausted);
+                z3.assert(&union.not());
+                match z3.check() {
+                    SmtResult::Unsat => {}
+                    _ => any_unknown = true,
+                }
+                continue;
             };
             let z3 = Z3Session::new(self.timeout_per_constraint_ms);
             for cond in &side {
@@ -4248,6 +4323,88 @@ fn body_mentions_statements(node: &IRNode, index: &SpecIndex) -> bool {
 // to int 0 and any Or-rooted formula to `true`, which made
 // the verdict a function of constraint syntax alone).
 
+/// The top-level disjuncts of a row, when the row IS a
+/// disjunction: a `Constraint::Or`, or a boolean
+/// expression whose top node is `||` — the shape the
+/// parser gives a guarded row (`output.is_err() ||
+/// …unwrap()…`, a left-associative `Or` chain over the
+/// guard and the guarded reads). Structure below the
+/// top node is not split: each part is judged as a unit,
+/// exactly as the whole-row encoder would reach it.
+#[cfg(feature = "z3-support")]
+fn top_level_disjuncts(c: &Constraint) -> Option<Vec<Constraint>> {
+    fn flatten(e: &Expr, out: &mut Vec<Constraint>) {
+        match e {
+            Expr::BinOp(BinOp::Or, l, r) => {
+                flatten(l, out);
+                flatten(r, out);
+            }
+            _ => out.push(Constraint::Expr(e.clone())),
+        }
+    }
+    match c {
+        Constraint::Or(parts) if parts.len() >= 2 => Some(parts.clone()),
+        Constraint::Expr(e) => {
+            let mut parts = Vec::new();
+            flatten(e, &mut parts);
+            if parts.len() >= 2 {
+                Some(parts)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Phase 97 — the W8 recovery: the encodable part of a
+/// disjunctive row whose WHOLE-row encoding declined.
+/// Returns the disjunction E of exactly the disjuncts
+/// that encode, and only when at least one disjunct
+/// declined and at least one encoded — otherwise the
+/// fallback is not this row's business (nothing
+/// declined: the whole row would have encoded; nothing
+/// encoded: there is no decided part to lean on).
+///
+/// Soundness, stated once for both judges: the row's
+/// real formula is E ∨ D with D the declined
+/// disjuncts' meaning. A countermodel of the row under
+/// any asserted facts F satisfies F ∧ ¬E ∧ ¬D, hence
+/// F ∧ ¬E — so F ∧ ¬E UNSAT proves the row under F,
+/// whatever D is. The converse does not hold (D might
+/// be true where E fails), so the judges use E for
+/// Proven only and never draw a Refuted from it: a
+/// declined disjunct might be the true one. This is
+/// the short-circuit reading of the language's `||`
+/// that Phase 76's unwrap arm already names — on the
+/// branch where the guard disjunct holds, the guarded
+/// reads are never evaluated — made into a judging
+/// rule instead of an encoder totalization (a
+/// don't-care payload term would participate in the
+/// formula and could be CHOSEN by the solver to
+/// fabricate a refutation on an unguarded row; the
+/// Phase 97 tests measure exactly that hazard).
+#[cfg(feature = "z3-support")]
+fn encode_disjunct_union(c: &Constraint, env: &SymEnv, ctx: &EvalCtx) -> Option<z3::ast::Bool> {
+    let parts = top_level_disjuncts(c)?;
+    let mut encoded: Vec<z3::ast::Bool> = Vec::new();
+    let mut any_declined = false;
+    for p in &parts {
+        match encode_constraint(p, env, ctx) {
+            Some(f) => encoded.push(f),
+            None => any_declined = true,
+        }
+    }
+    if !any_declined || encoded.is_empty() {
+        return None;
+    }
+    let mut acc = z3::ast::Bool::from_bool(false);
+    for f in &encoded {
+        acc = z3::ast::Bool::or(&[&acc, f]);
+    }
+    Some(acc)
+}
+
 #[cfg(feature = "z3-support")]
 fn encode_constraint(c: &Constraint, env: &SymEnv, ctx: &EvalCtx) -> Option<z3::ast::Bool> {
     match c {
@@ -4501,7 +4658,13 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 // satisfied. When the receiver is a literal
                 // Err construction the payload slot is
                 // absent and there is nothing sound to
-                // project — unencodable, named here.
+                // project — unencodable, named here. The
+                // ENCODER still declines (Phase 97 keeps
+                // this arm exact — no don't-care term is
+                // invented); the two row judges recover
+                // the guarded case by judging the row
+                // per-disjunct — see
+                // `encode_disjunct_union`.
                 ("unwrap", Sym::Result { ok_payload, .. }) => {
                     ok_payload.map(|p| *p)
                 }
@@ -5758,6 +5921,15 @@ spec tokenize_all {
     ///     0 >= 4 is false on the output side now), and
     ///     the mirror's one-token output is Proven.
     ///
+    /// Phase 97 re-pin: the (A) and (B) literal-point
+    /// verdicts move once more, Unknown → Proven — the
+    /// whole-row encoding still declines on the OOB
+    /// index (the encoder is untouched), but the
+    /// judge's per-disjunct recovery decides both
+    /// points through the disjuncts that encode
+    /// (`is_ok()` in (A); the EOF disjunct in (B)).
+    /// The artifact is now a property of the encoder
+    /// alone, not of any verdict.
     /// The token lists are bound as ListLen(n): the rows
     /// observe them only through len, and ListLen is the
     /// encoder's own model of a list observed through
@@ -5890,11 +6062,14 @@ spec tokenize_all {
         // (A) The golden output: row 1 PROVEN — under A′
         // the truth is the OUTPUT-side disjunct (the
         // golden output's own pos 0 >= len("") = 0).
-        // Row 2 at this literal point is UNKNOWN: the α
-        // license mentions state.source[state.pos], and
-        // sym_index refuses the constant out-of-bounds
-        // index into the literal empty string (Phase
-        // 83's named artifact); the admission is proven
+        // Row 2's WHOLE encoding at this literal point
+        // declines: the α license mentions
+        // state.source[state.pos], and sym_index refuses
+        // the constant out-of-bounds index into the
+        // literal empty string (Phase 83's named
+        // artifact); since Phase 97 the judge decides
+        // the point per-disjunct (asserted Proven
+        // below), and the admission is also proven
         // symbolically in
         // phase84_symbolic_state_encodability.
         let golden = ok_of(state_of("", 0));
@@ -5918,9 +6093,13 @@ spec tokenize_all {
             &Some(golden),
         );
         assert!(
-            matches!(tri, Tri::Unknown),
-            "row 2 at the literal EOF point is the OOB-index artifact \
-             (its admission is proven on the symbolic path)"
+            matches!(tri, Tri::Proven),
+            "Phase 97: row 2 at the literal EOF point is PROVEN — the \
+             whole row still declines on the α license's OOB index \
+             (the artifact named here since Phase 84), but the \
+             per-disjunct judging decides the row through its \
+             `is_ok()` disjunct, true of the golden Ok output; the \
+             admission was already proven on the symbolic path"
         );
 
         // (B) A literal Err output at EOF: under
@@ -5929,7 +6108,11 @@ spec tokenize_all {
         // OOB-index artifact as in (A) — Unknown — and
         // the license (the row's own EOF disjunct) is
         // proven on the symbolic path in the companion
-        // test.
+        // test. Phase 97 re-pin: the point now judges
+        // Proven per-disjunct — the EOF disjunct
+        // (`state.pos >= len(state.source)`, 0 >= 0)
+        // encodes and decides it; the declining α
+        // disjunct is not needed.
         let err = Sym::Result {
             ok: Tag::False,
             ok_payload: None,
@@ -5945,10 +6128,11 @@ spec tokenize_all {
             &Some(err),
         );
         assert!(
-            matches!(tri, Tri::Unknown),
-            "row 2 at the literal EOF point is the OOB-index artifact \
-             for an Err output too (symbolic-path admission in the \
-             companion test)"
+            matches!(tri, Tri::Proven),
+            "Phase 97: row 2 at the literal EOF point is PROVEN for \
+             an Err output too — per-disjunct, through the EOF \
+             disjunct (the Phase 84 pin was Unknown, the OOB-index \
+             artifact; symbolic-path admission in the companion test)"
         );
 
         // (C) Round-2 row 1's satisfying set at EOF, by
@@ -6254,7 +6438,7 @@ spec tokenize_all {
     /// Per class (input at pos 0, no tokens; the
     /// mirror's output judged against both rows at the
     /// point):
-    ///   ""      EOF           Ok, no token   Proven / Unknown — row 1 admits; row 2's literal point is the OOB artifact (admission proven symbolically, companion test)
+    ///   ""      EOF           Ok, no token   Proven / Proven — row 1 admits; row 2's whole encoding at the literal point is the OOB artifact, decided per-disjunct since Phase 97 (admission also proven symbolically, companion test)
     ///   "spec"  ident         Ok, +1 token   Proven / Proven — admitted by the growth disjunct
     ///   "  spec" leading ws   Ok, +1 token   Proven / Proven — admitted by growth
     ///   "\n\nx" newline run   Ok, +1 token   Proven / Proven — admitted by growth
@@ -6376,7 +6560,12 @@ spec tokenize_all {
                 "",
                 ok_of(state_of("", 0, 0)),
                 Tri::Proven,
-                Tri::Unknown,
+                // Phase 97 re-pin: Proven (was Unknown —
+                // row 2's literal point was the OOB
+                // artifact; the per-disjunct judging now
+                // decides it through the `is_ok()` / EOF
+                // disjuncts that encode).
+                Tri::Proven,
             ),
             (
                 "ident",
@@ -7204,8 +7393,15 @@ spec tokenize_all {
             (" \u{A0}x", 1, 1, 2),
         ];
         // Mirror satisfaction at the battery points:
-        // (a) Proven everywhere except the two EOF
-        // outputs (the literal-point OOB artifact);
+        // (a) Proven at all 12 since Phase 97 — the two
+        // EOF outputs included: their whole-row encoding
+        // still declines on the literal-point OOB index
+        // in the second disjunct, but the first disjunct
+        // (`output.pos >= len(output.source)`) encodes
+        // and is true there, and the per-disjunct
+        // judging decides the point through it (the
+        // Phase 87–96 pin for those two points was
+        // Unknown — the literal-point OOB artifact);
         // (b) Proven at all 12.
         for (label, row) in [("a", &row_a), ("b", &row_b)] {
             let spec = strengthened(row);
@@ -7222,8 +7418,9 @@ spec tokenize_all {
                 );
                 match (label, i) {
                     ("a", 0) | ("a", 1) => assert!(
-                        matches!(tri, Tri::Unknown),
-                        "row (a) at EOF point {}: the OOB artifact judges Unknown, got {}",
+                        matches!(tri, Tri::Proven),
+                        "row (a) at EOF point {}: PROVEN since Phase 97 \
+                         (per-disjunct judging over the OOB artifact), got {}",
                         i,
                         match tri {
                             Tri::Proven => "Proven",
@@ -8341,6 +8538,22 @@ spec grow_first {
     /// with discharged proof obligations, and the
     /// teeth that remain — W8 — bite the faithful
     /// body itself.
+    ///
+    /// Phase 97 re-pin (the step half, completing the
+    /// arc): Inconclusive → Verified. The W8 fix is a
+    /// judging rule, not a denotation change: where
+    /// row 1's whole encoding declines on the
+    /// outcome's literal-Err path, the statement judge
+    /// now decides that path per-disjunct through the
+    /// row's own `is_err()` guard disjunct, and row 1
+    /// Proves on all twelve paths. The test's title
+    /// claim survives intact: the denotation
+    /// manufactures nothing — every verdict in this
+    /// test is earned by machinery discharged against
+    /// the spec's rows (invariants in Phase 96, the
+    /// β license's admission, the per-disjunct rule
+    /// here), and the teeth against wrong bodies are
+    /// pinned in the phases' own tests.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase92_statement_denotations_manufacture_no_verdicts() {
@@ -8377,7 +8590,10 @@ spec grow_first {
         // row 2 now Proves, and row 1's W8 literal-Err
         // encode boundary is the only remaining block —
         // the status is Inconclusive (measured and
-        // named in Phase 96's own tests).
+        // named in Phase 96's own tests). Phase 97
+        // re-pin: the W8 per-disjunct judging removes
+        // that block — both rows Prove and the status
+        // is Verified (see the doc re-pin above).
         let one = restored_spec(&module, "tokenize_one").clone();
         let step = index
             .callee_body("tokenize_one")
@@ -8389,10 +8605,11 @@ spec grow_first {
         let cand = candidate(&one, 9212, step);
         assert_eq!(
             verifier.verify_one(&cand, &one).status,
-            VerificationStatus::Inconclusive,
-            "Phase 96: the STEP denotation is no longer refuted under \
-             the amended rows — Inconclusive, blocked only by row 1's \
-             W8 literal-Err encode boundary"
+            VerificationStatus::Verified,
+            "Phase 97: the STEP denotation VERIFIES under the amended \
+             rows — row 2 Proven under R2 (Phase 96), row 1 Proven \
+             through the W8 per-disjunct judging on its literal-Err \
+             path (Phase 96 pin: Inconclusive, blocked only by W8)"
         );
     }
 
@@ -8564,9 +8781,12 @@ spec grow_first {
                 );
                 if is_err && j == 0 {
                     assert!(
-                        matches!(tri, Tri::Unknown),
-                        "point {} ({:?}) row 0 at an Err output must judge \
-                         Unknown (literal-Err unwrap boundary), got solver {} ms",
+                        matches!(tri, Tri::Proven),
+                        "point {} ({:?}) row 0 at an Err output is PROVEN \
+                         since Phase 97: the per-disjunct judging decides \
+                         the literal-Err path through the `is_err()` \
+                         guard disjunct (the Phase 92–96 pin was Unknown \
+                         — the literal-Err unwrap boundary), got solver {} ms",
                         i, input.source, res.solver_time_ms
                     );
                     continue;
@@ -8635,9 +8855,12 @@ spec grow_first {
             );
             if matches!(&mirror, Err(_)) {
                 assert!(
-                    matches!(tri, Tri::Unknown),
-                    "{:?}: tokenize_all's row at an Err output must judge \
-                     Unknown (literal-Err unwrap boundary), got solver {} ms",
+                    matches!(tri, Tri::Proven),
+                    "{:?}: tokenize_all's row at an Err output is PROVEN \
+                     since Phase 97 — the per-disjunct judging decides \
+                     the literal-Err path through the `is_err()` guard \
+                     (the Phase 92–96 pin was Unknown — the literal-Err \
+                     unwrap boundary), got solver {} ms",
                     src, res.solver_time_ms
                 );
             } else {
@@ -8832,6 +9055,10 @@ spec grow_first {
     /// points; at the Err point row 1 (index 0) judges
     /// Unknown (the W8 literal-Err unwrap boundary) and
     /// row 2 (index 1) Proven.
+    ///
+    /// Phase 97 re-pin: at the Err point row 1 is
+    /// Proven too (per-disjunct judging) — both rows
+    /// Prove at every point.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase93_stmt_step_points_battery() {
@@ -8893,10 +9120,12 @@ spec grow_first {
                 judge_ms += ms;
                 if is_err && j == 0 {
                     assert!(
-                        matches!(tri, Tri::Unknown),
-                        "point {} ({:?}) row 0 at an Err output must judge \
-                         Unknown through the statement judge (literal-Err \
-                         unwrap boundary)",
+                        matches!(tri, Tri::Proven),
+                        "point {} ({:?}) row 0 at an Err output is PROVEN \
+                         since Phase 97 through the statement judge's \
+                         per-disjunct judging — the `is_err()` disjunct \
+                         decides the literal-Err path (the Phase 93–96 \
+                         pin was Unknown — the literal-Err unwrap boundary)",
                         i, input.source
                     );
                     continue;
@@ -8922,6 +9151,11 @@ spec grow_first {
     /// mirror's, and tokenize_all's row judges Proven at
     /// Ok sources and Unknown at the Err source (W8)
     /// through the production statement judge.
+    ///
+    /// Phase 97 re-pin: the Err source now judges Proven
+    /// too — the per-disjunct judging decides the
+    /// literal-Err path through the `is_err()` disjunct,
+    /// so the row is Proven at every source.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase93_stmt_loop_points_battery() {
@@ -8971,10 +9205,11 @@ spec grow_first {
             );
             if matches!(&mirror, Err(_)) {
                 assert!(
-                    matches!(tri, Tri::Unknown),
-                    "{:?}: tokenize_all's row at an Err output must judge \
-                     Unknown through the statement judge (literal-Err \
-                     unwrap boundary)",
+                    matches!(tri, Tri::Proven),
+                    "{:?}: tokenize_all's row at an Err output is PROVEN \
+                     since Phase 97 through the statement judge's \
+                     per-disjunct judging (the Phase 93–96 pin was \
+                     Unknown — the literal-Err unwrap boundary)",
                     src
                 );
             } else {
@@ -9218,6 +9453,16 @@ spec grow_first {
     /// strengthened rows. The LOOP candidate stays
     /// Inconclusive (its row hits the same W8 boundary
     /// on the Err paths the LOOP body propagates).
+    ///
+    /// Phase 97 re-pin (reason recorded): the W8 fix
+    /// lands — row judging is per-disjunct where the
+    /// whole row declines on a literal-tag path, so
+    /// row 1 Proves on all 12 paths and the STEP
+    /// candidate is Verified; the LOOP candidate
+    /// Verifies by the same rule on its propagated Err
+    /// paths; the diagnostic point's row 1 flips
+    /// Unknown → Proven. Nothing else in this test
+    /// moves.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase93_stmt_step_symbolic_and_diag() {
@@ -9237,10 +9482,14 @@ spec grow_first {
         let (tri0, ms0) = p93_judge(&verifier, &spec.postconditions[0], &spec, &env, &outcome);
         let (tri1, ms1) = p93_judge(&verifier, &spec.postconditions[1], &spec, &env, &outcome);
         assert!(
-            matches!(tri0, Tri::Unknown),
-            "row 1 (index 0) must judge Unknown symbolically — since \
-             Phase 96 by the W8 literal-Err encode boundary on the \
-             outcome's Err path, NOT by exhaustion (asserted UNSAT below)"
+            matches!(tri0, Tri::Proven),
+            "row 1 (index 0) is PROVEN symbolically — Phase 97's W8 \
+             fix: the row declines whole only on the outcome's \
+             literal-Err path (the `output.unwrap()` reads), and \
+             there the per-disjunct judging decides it through the \
+             `is_err()` guard disjunct; exhaustion is UNSAT \
+             (asserted below), so Proven is the whole verdict. \
+             (Phase 93–96 pin: Unknown by that boundary.)"
         );
         assert_eq!(
             stmt_sat(&[outcome.exhausted.clone()], 5_000),
@@ -9267,21 +9516,23 @@ spec grow_first {
         let result = verifier.verify_one(&cand, &spec);
         assert_eq!(
             result.status,
-            VerificationStatus::Inconclusive,
-            "Phase 96: verify_one no longer REFUTES the STEP denotation \
-             (row 2 Proven under R2); row 1's W8 boundary keeps it \
-             Inconclusive"
+            VerificationStatus::Verified,
+            "Phase 97: with row 1 Proven through the W8 per-disjunct \
+             judging and row 2 Proven under R2, verify_one VERIFIES \
+             the STEP denotation — the last symbolic block on \
+             tokenize_one is gone. (Phase 96 pin: Inconclusive, \
+             blocked only by row 1's W8 boundary.)"
         );
         assert!(
             result.counterexample.is_none(),
             "no refutation, no counterexample"
         );
         assert!(
-            !result.constraint_results[0].holds && result.constraint_results[1].holds,
-            "row 1 does not hold (W8 Unknown), row 2 holds (Proven)"
+            result.constraint_results[0].holds && result.constraint_results[1].holds,
+            "both rows hold (row 1 via the W8 recovery, row 2 Proven)"
         );
         println!(
-            "P93|step-verify-one|status=Inconclusive|time_ms={}",
+            "P93|step-verify-one|status=Verified|time_ms={}",
             result.verification_time_ms
         );
         // The diagnostic point, through the production
@@ -9307,23 +9558,31 @@ spec grow_first {
         );
         let (tri, _) = p93_judge(&verifier, &spec.postconditions[0], &spec, &env, &outcome);
         assert!(
-            matches!(tri, Tri::Unknown),
-            "row 1 at the Err point judges Unknown (W8 literal-Err boundary)"
+            matches!(tri, Tri::Proven),
+            "Phase 97: row 1 at the Err point is PROVEN through the \
+             per-disjunct judging — the `is_err()` disjunct decides \
+             the literal-Err path (Phase 93–96 pin: Unknown, the W8 \
+             literal-Err boundary)"
         );
-        println!("P93|step-diag|\" 5\": row 2 Proven, row 1 Unknown (production judge)");
-        // The LOOP body as a candidate: Inconclusive.
+        println!("P93|step-diag|\" 5\": row 2 Proven, row 1 Proven (W8 recovery, production judge)");
+        // The LOOP body as a candidate: Verified since
+        // Phase 97 (its row's Err paths decide through
+        // the same per-disjunct judging).
         let all_spec = restored_spec(&module, "tokenize_all").clone();
         let loop_body = p90_template_body(&module, "tokenize_all");
         let cand = candidate(&all_spec, 9302, loop_body);
         let result = verifier.verify_one(&cand, &all_spec);
         assert_eq!(
             result.status,
-            VerificationStatus::Inconclusive,
-            "the LOOP body stays Inconclusive symbolically (row Unknown, \
-             nothing refuted)"
+            VerificationStatus::Verified,
+            "Phase 97: the LOOP body VERIFIES symbolically — its \
+             accumulation loop closed by invariant in Phase 96 and \
+             its row now decides on the propagated Err paths \
+             through the W8 per-disjunct judging (Phase 93–96 pin: \
+             Inconclusive, row Unknown by that boundary)"
         );
         println!(
-            "P93|loop-verify-one|status=Inconclusive|time_ms={}",
+            "P93|loop-verify-one|status=Verified|time_ms={}",
             result.verification_time_ms
         );
         // The skip denotation as a candidate: Verified
@@ -12360,18 +12619,23 @@ spec grow_first {
                 );
                 ms += res.solver_time_ms;
                 if is_err && j == 0 {
-                    // Row 1 at a literal Err output is
-                    // UNKNOWN, not Proven: its dead
+                    // Row 1 at a literal Err output: its
                     // `output.unwrap()` disjuncts are
                     // unencodable under a literal Err tag
-                    // (the Phase 76 unwrap boundary) — an
+                    // (the Phase 76 unwrap boundary), so
+                    // the whole row declines — but since
+                    // Phase 97 the judge recovers the path
+                    // per-disjunct: the `is_err()` guard
+                    // disjunct encodes and is true here, so
+                    // the row is PROVEN at the point. (The
+                    // Phase 90–96 pin was Unknown — an
                     // encoding limit at concrete points,
-                    // not a body fault. Symbolically (tag
-                    // Free) the row encodes fine.
+                    // not a body fault.)
                     assert!(
-                        matches!(tri, Tri::Unknown),
+                        matches!(tri, Tri::Proven),
                         "point {} ({:?}) row 0 at an Err output must judge \
-                         Unknown (literal-Err unwrap boundary), got solver {} ms",
+                         Proven since Phase 97 (per-disjunct judging over \
+                         the literal-Err path), got solver {} ms",
                         i, input.source, res.solver_time_ms
                     );
                     continue;
@@ -12414,10 +12678,11 @@ spec grow_first {
             &spec.postconditions[0], "p90@diag-row1", &spec, &env, &Some(out.clone()),
         );
         assert!(
-            matches!(tri, Tri::Unknown),
-            "row 1 at a literal Err output judges Unknown (the Phase 76 \
-             unwrap boundary); its is_err disjunct is what admits the Err \
-             symbolically"
+            matches!(tri, Tri::Proven),
+            "Phase 97: row 1 at a literal Err output is PROVEN — the \
+             whole row still declines at the Phase 76 unwrap boundary, \
+             but the judge's per-disjunct recovery decides it through \
+             the is_err disjunct (the Phase 90–96 pin was Unknown)"
         );
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[1], "p90@diag-row2", &spec, &env, &Some(out.clone()),
@@ -12497,7 +12762,7 @@ spec grow_first {
             Some(true),
             "the β-skip license REFUTES a fabricated Err at an identifier start"
         );
-        println!("P90|step-diag|\" 5\": row 1 Unknown (unwrap boundary), row 2 Refuted; β-skip license admits the Err and keeps its teeth");
+        println!("P90|step-diag|\" 5\": row 1 Proven (Phase 97 per-disjunct recovery), row 2 Proven (β-skip license, Phase 96); the license admits the Err and keeps its teeth");
     }
     /// Phase 90, Part 1 (symbolic) — the hand skip body
     /// against skip_whitespace's rows over a FREE state:
@@ -12791,13 +13056,18 @@ spec grow_first {
             if matches!(&mirror, Err(_)) {
                 // At a literal Err output the row's
                 // `output.unwrap()` is unencodable (the
-                // Phase 76 unwrap boundary): Unknown, an
+                // Phase 76 unwrap boundary), so the whole
+                // row declines — but since Phase 97 the
+                // judge recovers the point per-disjunct
+                // through the `is_err()` guard: PROVEN.
+                // (The Phase 90–96 pin was Unknown — an
                 // encoding limit at concrete points, not
-                // a body fault.
+                // a body fault.)
                 assert!(
-                    matches!(tri, Tri::Unknown),
+                    matches!(tri, Tri::Proven),
                     "{:?}: tokenize_all's row at an Err output must judge \
-                     Unknown (literal-Err unwrap boundary), got solver {} ms",
+                     Proven since Phase 97 (per-disjunct judging over \
+                     the literal-Err path), got solver {} ms",
                     src, res.solver_time_ms
                 );
             } else {
@@ -13360,6 +13630,14 @@ spec grow_first {
     /// verify_one therefore lands Inconclusive, and
     /// W8 is the whole of what Phase 97 inherits for
     /// both tokenize specs.
+    ///
+    /// Phase 97 re-pin: the ENCODER facts below are
+    /// unmoved (the row still encodes on the Ok paths
+    /// and declines whole on the Err paths — the fix is
+    /// judge-level, the encoder is untouched), but the
+    /// JUDGE now decides the Err paths per-disjunct
+    /// through the `is_err()` guard, so the row judges
+    /// Proven and verify_one Verifies the LOOP body.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase96_loop_tokenize_all_standing() {
@@ -13400,12 +13678,13 @@ spec grow_first {
         );
         let (tri, ms) = p93_judge(&verifier, row, &all_spec, &env, &outcome);
         assert!(
-            matches!(tri, Tri::Unknown),
-            "tokenize_all's row judges Unknown — W8 on the Err paths, \
-             nothing else"
+            matches!(tri, Tri::Proven),
+            "Phase 97: tokenize_all's row is PROVEN — the Err paths \
+             decide per-disjunct through the `is_err()` guard (the \
+             Phase 96 pin was Unknown, W8 on those paths, nothing else)"
         );
         println!(
-            "P96|inv|loop|eval_ms={}|paths={}|row=Unknown (W8)|judge_ms={}",
+            "P96|inv|loop|eval_ms={}|paths={}|row=Proven (W8 recovery)|judge_ms={}",
             eval_ms,
             outcome.paths.len(),
             ms
@@ -13414,13 +13693,421 @@ spec grow_first {
         let result = verifier.verify_one(&cand, &all_spec);
         assert_eq!(
             result.status,
-            VerificationStatus::Inconclusive,
-            "the LOOP body stays Inconclusive — blocked only by W8"
+            VerificationStatus::Verified,
+            "Phase 97: the LOOP body VERIFIES — W8 was its only block"
         );
         println!(
             "P96|inv|loop|verify_one_ms={}",
             result.verification_time_ms
         );
+    }
+
+    // ────────────────────────────────────────────────────
+    // Phase 97 — the W8 fix (WS1): per-disjunct row
+    // judging. The encoder is untouched (a row still
+    // encodes whole or not at all; `unwrap` of a literal
+    // Err still declines inside `encode_expr`); the two
+    // row judges gain a recovery for exactly the
+    // declining case: when a disjunctive row declines
+    // whole on an output/path, the disjuncts that DO
+    // encode are judged as a union — Proven if that
+    // union is already valid under the asserted facts
+    // (the real formula E ∨ D cannot fail where E
+    // cannot), Unknown otherwise, and never Refuted
+    // from the union (a declined disjunct might be the
+    // true one). Route (ii) — a totalized `unwrap`
+    // returning a don't-care term — was measured and
+    // rejected as a standalone encoder rule in
+    // `phase97_w8_totalized_unwrap_measured_and_rejected`:
+    // it decides exactly where this rule decides and
+    // fabricates verdicts where this rule abstains.
+    // ────────────────────────────────────────────────────
+
+    /// Phase 97, WS1 headline: tokenize_one's row 1
+    /// decides on ALL 12 STEP outcome paths — whole-row
+    /// encoding on 11 (Phase 96's count), the
+    /// per-disjunct recovery on the one literal-Err
+    /// path — and tokenize_all's row decides on every
+    /// LOOP outcome path the same way. Both bodies
+    /// Verify symbolically: W8 was their only block.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase97_w8_step_and_loop_rows_decide_on_every_path() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+
+        // ── STEP / tokenize_one ──
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let step = index
+            .callee_body("tokenize_one")
+            .expect("tokenize_one denotes after Phase 92");
+        let env = param_env(&spec, &index);
+        let ctx = StmtCtx::root(&index, STMT_VERIFY_FUEL, 5_000);
+        let outcome = sym_eval_stmt(&step, env.clone(), &ctx)
+            .expect("the STEP denotation evaluates symbolically");
+        assert_eq!(outcome.paths.len(), 12, "the STEP outcome's path count");
+        let row1 = &spec.postconditions[0];
+        let mut whole = 0usize;
+        let mut recovered = 0usize;
+        for (_, output) in &outcome.paths {
+            let mut penv = env.clone();
+            penv.insert("output".into(), output.clone());
+            if encode_constraint(row1, &penv, &EvalCtx::root(&index)).is_some() {
+                whole += 1;
+            } else {
+                assert!(
+                    matches!(output, Sym::Result { ok: Tag::False, .. }),
+                    "the declining path is the literal-Err path"
+                );
+                assert!(
+                    encode_disjunct_union(row1, &penv, &EvalCtx::root(&index)).is_some(),
+                    "the declining path carries an encodable disjunct part \
+                     (the `is_err()` guard)"
+                );
+                recovered += 1;
+            }
+        }
+        assert_eq!(whole, 11, "row 1 encodes whole on 11 of 12 paths (Phase 96's count)");
+        assert_eq!(recovered, 1, "exactly the literal-Err path is recovered per-disjunct");
+        let (tri, ms) = p93_judge(&verifier, row1, &spec, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Proven),
+            "row 1 is PROVEN symbolically (Phase 96: Unknown, W8 only)"
+        );
+        let cand = candidate(&spec, 9701, step);
+        let result = verifier.verify_one(&cand, &spec);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Verified,
+            "the STEP denotation VERIFIES — W8 was its only block"
+        );
+        println!(
+            "P97|w8|step|paths=12|whole=11|recovered=1|row1=Proven|judge_ms={}|verify_one_ms={}",
+            ms, result.verification_time_ms
+        );
+
+        // ── LOOP / tokenize_all ──
+        let all_spec = restored_spec(&module, "tokenize_all").clone();
+        let loop_body = p90_template_body(&module, "tokenize_all");
+        let env = param_env(&all_spec, &index);
+        let ctx = StmtCtx::root(&index, STMT_VERIFY_FUEL, 5_000);
+        let outcome = sym_eval_stmt(&loop_body, env.clone(), &ctx)
+            .expect("the LOOP body evaluates symbolically");
+        let row = &all_spec.postconditions[0];
+        let mut whole = 0usize;
+        let mut recovered = 0usize;
+        for (_, output) in &outcome.paths {
+            let mut penv = env.clone();
+            penv.insert("output".into(), output.clone());
+            if encode_constraint(row, &penv, &EvalCtx::root(&index)).is_some() {
+                whole += 1;
+            } else {
+                assert!(
+                    matches!(output, Sym::Result { ok: Tag::False, .. }),
+                    "a declining LOOP path is a propagated literal-Err path"
+                );
+                assert!(
+                    encode_disjunct_union(row, &penv, &EvalCtx::root(&index)).is_some(),
+                    "the declining path carries an encodable disjunct part"
+                );
+                recovered += 1;
+            }
+        }
+        assert!(
+            whole >= 1 && recovered >= 1,
+            "the LOOP row encodes on its Ok path(s) and declines on its \
+             Err path(s): whole={}, recovered={}",
+            whole, recovered
+        );
+        assert_eq!(
+            whole + recovered,
+            outcome.paths.len(),
+            "tokenize_all's row decides on every outcome path"
+        );
+        let (tri, ms) = p93_judge(&verifier, row, &all_spec, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Proven),
+            "tokenize_all's row is PROVEN symbolically (Phase 96: Unknown, W8 only)"
+        );
+        let cand = candidate(&all_spec, 9702, loop_body);
+        let result = verifier.verify_one(&cand, &all_spec);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Verified,
+            "the LOOP body VERIFIES — W8 was its only block"
+        );
+        println!(
+            "P97|w8|loop|paths={}|whole={}|recovered={}|row=Proven|judge_ms={}|verify_one_ms={}",
+            outcome.paths.len(), whole, recovered, ms, result.verification_time_ms
+        );
+    }
+
+    /// Phase 97, WS1 tooth: the per-disjunct recovery
+    /// buys nothing where there is no deciding disjunct.
+    /// A row that genuinely reads the unwrapped value on
+    /// an Err path WITHOUT a guarding disjunct — as the
+    /// whole row, or behind a guard that is false there —
+    /// still declines (Unknown): never admitted, and
+    /// never refuted by the machinery either. Where the
+    /// same rows DO encode (an Ok output), their
+    /// semantics are untouched: Proven and Refuted as
+    /// the values demand.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase97_w8_tooth_unguarded_unwrap_still_declines() {
+        let src = r#"
+W8Tooth {
+
+spec unguarded {
+    input: r: Result<Int, String>
+    output: Result<Int, String>
+    constraint: output.unwrap() == 3
+}
+
+spec false_guard {
+    input: r: Result<Int, String>
+    output: Result<Int, String>
+    constraint: output.is_ok() || output.unwrap() == 3
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("tooth probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("tooth probe typechecks")
+            .spec;
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let err = Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(Sym::Str(
+                z3::ast::String::from_str("boom").unwrap(),
+            ))),
+        };
+        let ok = |n: i64| Sym::Result {
+            ok: Tag::True,
+            ok_payload: Some(Box::new(Sym::Int(z3::ast::Int::from_i64(n)))),
+            err_payload: None,
+        };
+        let judge = |name: &str, output: &Sym| -> Tri {
+            let spec = restored_spec(&module, name);
+            let env = param_env(spec, &index);
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[0],
+                "p97@tooth",
+                spec,
+                &env,
+                &Some(output.clone()),
+            );
+            tri
+        };
+        // The unguarded read as the whole row, at a
+        // literal Err: not a disjunction — nothing for
+        // the recovery to decide with. Unknown.
+        assert!(
+            matches!(judge("unguarded", &err), Tri::Unknown),
+            "an unguarded `output.unwrap()` row at a literal Err must \
+             still decline (Unknown) — never admitted, never refuted"
+        );
+        // The same row where it encodes: semantics
+        // demand Proven at Ok(3) and Refuted at Ok(4),
+        // and the machinery delivers exactly those.
+        assert!(
+            matches!(judge("unguarded", &ok(3)), Tri::Proven),
+            "the unguarded row Proves where the value satisfies it"
+        );
+        assert!(
+            matches!(judge("unguarded", &ok(4)), Tri::Refuted),
+            "the unguarded row still REFUTES where it encodes and the \
+             value violates it — the recovery blunted nothing"
+        );
+        // A disjunctive row whose only guard is FALSE on
+        // the Err path: the union is that false disjunct
+        // alone, its negation is satisfiable, and the
+        // verdict is Unknown — the declined read is not
+        // laundered into a pass.
+        assert!(
+            matches!(judge("false_guard", &err), Tri::Unknown),
+            "a guard that is false on the Err path decides nothing: \
+             Unknown, not a pass"
+        );
+        assert!(
+            matches!(judge("false_guard", &ok(4)), Tri::Proven),
+            "the guarded row Proves on an Ok output through its guard"
+        );
+        println!("P97|w8|tooth|unguarded@Err=Unknown|unguarded@Ok(3)=Proven|unguarded@Ok(4)=Refuted|false_guard@Err=Unknown");
+
+        // The same tooth through the statement judge:
+        // the unguarded core of tokenize_one's row 1 —
+        // the growth read with NO `is_err()` disjunct —
+        // over the diagnostic point's outcome (the
+        // faithful Err path) judges Unknown, where the
+        // real guarded row 1 over the same outcome is
+        // Proven (Phase 93 diag, re-pinned in this phase).
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let step = index
+            .callee_body("tokenize_one")
+            .expect("tokenize_one denotes after Phase 92");
+        let diag = p90_st(" 5", 0, 1, 1);
+        let mut env = SymEnv::new();
+        env.insert("state".into(), p90_state_sym(&diag));
+        let ctx = StmtCtx::root(&index, 2, 5_000);
+        let outcome = sym_eval_stmt(&step, env.clone(), &ctx)
+            .expect("STEP evaluates at the diagnostic point");
+        let unguarded = p90_parse_row(
+            "len(output.unwrap().tokens) == len(state.tokens) + 1",
+        );
+        let (tri, _) = p93_judge(&verifier, &unguarded, &spec, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Unknown),
+            "the unguarded growth read on the faithful Err path must \
+             judge Unknown through the statement judge — there is no \
+             disjunct to decide it, and the recovery invents none"
+        );
+        println!("P97|w8|tooth|stmt|unguarded row 1 core @ \" 5\"=Unknown");
+    }
+
+    /// Phase 97, WS1 route measurement: the alternative
+    /// W8 route — a TOTALIZED `unwrap` that returns a
+    /// don't-care term for a literal Err's missing Ok
+    /// payload — measured against the real rows and
+    /// rejected as a standalone encoder rule.
+    ///
+    /// On the unguarded tooth row the substitution makes
+    /// the row encode as a formula over the invented
+    /// term, and the solver satisfies BOTH the formula
+    /// and its negation by choosing the term: a judge
+    /// built on it could return Proven or Refuted at
+    /// will — the verdict would be an artifact of the
+    /// term, not a fact about the row. On the real
+    /// guarded row the same substitution decides the
+    /// Err path — but only because the `is_err()`
+    /// disjunct already decides it for ANY payload term:
+    /// totalization's sound content is exactly the
+    /// per-disjunct rule, which is route (i), the one
+    /// implemented. The encoder therefore stays exact
+    /// (asserted below: it still declines on the
+    /// unsubstituted Err path).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase97_w8_totalized_unwrap_measured_and_rejected() {
+        // ── The hazard, on the tooth row ──
+        let src = r#"
+W8Total {
+
+spec unguarded {
+    input: r: Result<Int, String>
+    output: Result<Int, String>
+    constraint: output.unwrap() == 3
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("totalization probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("totalization probe typechecks")
+            .spec;
+        let index = SpecIndex::from_module(&module);
+        let spec = restored_spec(&module, "unguarded");
+        let dc = z3::ast::Int::new_const("w8_dont_care");
+        let mut env = SymEnv::new();
+        env.insert(
+            "output".into(),
+            Sym::Result {
+                ok: Tag::False,
+                ok_payload: Some(Box::new(Sym::Int(dc))),
+                err_payload: Some(Box::new(Sym::Str(
+                    z3::ast::String::from_str("boom").unwrap(),
+                ))),
+            },
+        );
+        let formula = encode_constraint(
+            &spec.postconditions[0],
+            &env,
+            &EvalCtx::root(&index),
+        )
+        .expect("under a don't-care payload the unguarded row encodes");
+        assert_eq!(
+            stmt_sat(&[formula.clone()], 5_000),
+            Some(true),
+            "the totalized formula is satisfiable by CHOOSING the \
+             don't-care term (dc = 3): a fabricated Proven"
+        );
+        assert_eq!(
+            stmt_sat(&[formula.not()], 5_000),
+            Some(true),
+            "its negation is satisfiable too (dc = 4): a fabricated \
+             Refuted — the verdict would be the term's, not the row's"
+        );
+        println!("P97|w8|totalization|tooth row: formula SAT and ¬formula SAT under the don't-care term");
+
+        // ── The benign face, on the real row 1 ──
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let step = index
+            .callee_body("tokenize_one")
+            .expect("tokenize_one denotes after Phase 92");
+        let env = param_env(&spec, &index);
+        let ctx = StmtCtx::root(&index, STMT_VERIFY_FUEL, 5_000);
+        let outcome = sym_eval_stmt(&step, env.clone(), &ctx)
+            .expect("the STEP denotation evaluates symbolically");
+        // The encoder, unsubstituted, still declines on
+        // the Err path — Phase 97 changed the judges,
+        // not the encoder.
+        let (err_pc, err_out) = outcome
+            .paths
+            .iter()
+            .find(|(_, o)| matches!(o, Sym::Result { ok: Tag::False, .. }))
+            .expect("the STEP outcome has a literal-Err path");
+        let row1 = &spec.postconditions[0];
+        let mut oenv = env.clone();
+        oenv.insert("output".into(), err_out.clone());
+        assert!(
+            encode_constraint(row1, &oenv, &EvalCtx::root(&index)).is_none(),
+            "the encoder still declines whole on the literal-Err path"
+        );
+        // Substitute a shape-correct don't-care payload
+        // (an Ok path's payload, cloned): the row
+        // encodes, and pc ∧ ¬row is UNSAT — the guard
+        // disjunct decides the path for ANY payload
+        // term, which is why the per-disjunct rule
+        // captures all of totalization's sound content.
+        let ok_payload = outcome
+            .paths
+            .iter()
+            .find_map(|(_, o)| match o {
+                Sym::Result {
+                    ok: Tag::True,
+                    ok_payload: Some(p),
+                    ..
+                } => Some((**p).clone()),
+                _ => None,
+            })
+            .expect("the STEP outcome has Ok paths");
+        let mut dc_out = err_out.clone();
+        if let Sym::Result {
+            ok_payload: slot, ..
+        } = &mut dc_out
+        {
+            *slot = Some(Box::new(ok_payload));
+        }
+        let mut penv = env.clone();
+        penv.insert("output".into(), dc_out);
+        let formula = encode_constraint(row1, &penv, &EvalCtx::root(&index))
+            .expect("with a don't-care payload the row encodes on the Err path");
+        assert_eq!(
+            stmt_sat(&[err_pc.clone(), formula.not()], 5_000),
+            Some(false),
+            "pc ∧ ¬row is UNSAT under the substituted term — the \
+             `is_err()` disjunct, not the term, decides the path"
+        );
+        println!("P97|w8|totalization|real row 1: pc ∧ ¬row UNSAT under any payload term — route (i) subsumes route (ii)");
     }
 }
 
