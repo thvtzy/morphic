@@ -5455,11 +5455,49 @@ fn tokenize_step_body(
         // Alloc first: Call arguments render untyped,
         // so a bare literal would reach Err as a &str
         // where String is expected (E0308).
+        // Phase 101 (the F2 payoff): the message is the
+        // mirror's full interpolated text, built in the
+        // shapes F2_DESIGN §1 prescribes — the literal
+        // prefix, the offending char Appended (a Char
+        // reaches a String only through Append), the
+        // literal infix Concatenated, and the post-skip
+        // state's line rendered by Phase 100's
+        // `int_to_str` builtin and Concatenated:
+        // "Unexpected character '<c>' at line <n>",
+        // byte-identical to the mirror's format!
+        // (tests/tokenizer_proof.rs:129). Before this
+        // phase the arm carried the constant
+        // "Unexpected character" — the template's one
+        // named deviation, closed here.
         let mut dispatch = IRNode::Block(vec![
             IRNode::Alloc {
                 name: "msg".to_string(),
                 ty: TypeRef::String,
-                initial: Box::new(lit_s("Unexpected character")),
+                initial: Box::new(lit_s("Unexpected character '")),
+            },
+            IRNode::BinOp(
+                IRBinOp::Append,
+                Box::new(v("msg")),
+                Box::new(v("c")),
+            ),
+            IRNode::Assign {
+                target: Box::new(v("msg")),
+                value: Box::new(IRNode::BinOp(
+                    IRBinOp::Concat,
+                    Box::new(v("msg")),
+                    Box::new(lit_s("' at line ")),
+                )),
+            },
+            IRNode::Assign {
+                target: Box::new(v("msg")),
+                value: Box::new(IRNode::BinOp(
+                    IRBinOp::Concat,
+                    Box::new(v("msg")),
+                    Box::new(call(
+                        "int_to_str",
+                        vec![fa(v("s"), "line")],
+                    )),
+                )),
             },
             IRNode::Return(Box::new(call("Err", vec![v("msg")]))),
         ]);
@@ -5560,15 +5598,19 @@ fn tokenize_step_body(
 /// by-value peek — see the body.) The token stamps
 /// the post-skip state's line/col (the D4a START rule)
 /// and the consumed state's fields close the step.
-/// The error arm's message is the constant
-/// "Unexpected character": the mirror's full text
-/// ('Unexpected character '<c>' at line <n>') is not
-/// expressible in IR — a Char reaches a String only
-/// through Append, and the line number is an Int,
-/// whose conversion to text is finding F2 — so the
-/// constant is this template's one named deviation
-/// from the mirror, itemized wherever the template
-/// is executed against the mirror batteries.
+/// The error arm's message is the mirror's full
+/// text ('Unexpected character '<c>' at line <n>'),
+/// built at the dispatch: the char reaches the
+/// String through Append and the line number
+/// through `int_to_str` (Phase 100's builtin — the
+/// F2 conversion). Through Phase 100 the arm
+/// carried the constant "Unexpected character"
+/// instead — the line's conversion was finding F2,
+/// then inexpressible — and that constant was this
+/// template's one named deviation from the mirror,
+/// itemized wherever the template was executed
+/// against the mirror batteries; Phase 101 closed
+/// it, and the batteries now agree in full.
 ///
 /// LOOP form (the spec returns Result<List<T>,
 /// String>): the step spec is found in the index by
