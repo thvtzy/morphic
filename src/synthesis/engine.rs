@@ -899,6 +899,18 @@ impl SynthesisEngine {
         if let Some(body) = record_completion_seed_body(spec, &self.spec_index) {
             admit("record_completion", body);
         }
+        // Phase 85 (M1 remainder (iii)): the tokenize
+        // template family, appended after the Phase 81
+        // families. Its territory is disjoint from
+        // every standing family by shape (a tokenizing
+        // step/loop over a state record, keyed on the
+        // amended rows' shape), so no standing seed
+        // moves; char_equation's right of first refusal
+        // is untouched (its classifiers' shape is
+        // disjoint from this one's).
+        if let Some(body) = tokenize_template_seed_body(spec, &self.spec_index) {
+            admit("tokenize_template", body);
+        }
         if let Some(body) = char_equation_seed_body(spec, &self.spec_index) {
             admit("char_equation", body);
         }
@@ -4931,6 +4943,581 @@ fn record_completion_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
     }
 }
 
+/// Follow alias/newtype names on a type reference to
+/// the type it denotes (bounded, cycle-safe). The
+/// tokenize template's keying reads signatures through
+/// the module's own aliases (`StepResult` for the
+/// step's Result, `TokenKind` for the token's kind).
+fn tokenize_resolve_alias(index: &SpecIndex, ty: &TypeRef) -> TypeRef {
+    let mut cur = ty.clone();
+    let mut seen = std::collections::HashSet::new();
+    while let TypeRef::Named(n) = &cur {
+        if !seen.insert(n.clone()) {
+            break;
+        }
+        match index.types.get(n).map(|td| &td.kind) {
+            Some(TypeKind::Alias(t)) | Some(TypeKind::Newtype(t)) => {
+                cur = t.clone()
+            }
+            _ => break,
+        }
+    }
+    cur
+}
+
+/// Whether an expression tree mentions a method call
+/// of any of the given names (the tokenize rows'
+/// shape evidence: the is_err/is_ok split and the
+/// unwrap projection, as the Phase 84 rows state
+/// them).
+fn tokenize_expr_has_method(e: &Expr, names: &[&str]) -> bool {
+    match e {
+        Expr::MethodCall { receiver, name, args } => {
+            names.contains(&name.as_str())
+                || tokenize_expr_has_method(receiver, names)
+                || args.iter().any(|a| tokenize_expr_has_method(a, names))
+        }
+        Expr::BinOp(_, l, r) => {
+            tokenize_expr_has_method(l, names)
+                || tokenize_expr_has_method(r, names)
+        }
+        Expr::UnaryOp(_, x) => tokenize_expr_has_method(x, names),
+        Expr::Call(_, args) => {
+            args.iter().any(|a| tokenize_expr_has_method(a, names))
+        }
+        Expr::Index(collection, index) => {
+            tokenize_expr_has_method(collection, names)
+                || tokenize_expr_has_method(index, names)
+        }
+        Expr::Field(object, _) => tokenize_expr_has_method(object, names),
+        Expr::Length(x) => tokenize_expr_has_method(x, names),
+        Expr::Lambda(_, body) => tokenize_expr_has_method(body, names),
+        Expr::Comprehension {
+            collection, body, ..
+        } => {
+            tokenize_expr_has_method(collection, names)
+                || tokenize_expr_has_method(body, names)
+        }
+        Expr::RecordLit { fields, .. } => fields
+            .iter()
+            .any(|(_, v)| tokenize_expr_has_method(v, names)),
+        _ => false,
+    }
+}
+
+/// The tokenize rows' shape: some postcondition
+/// mentions an is_err/is_ok method call (the Ok/Err
+/// split) and some postcondition mentions unwrap
+/// (the payload projection) — the amended rows'
+/// joint shape, and the only constraint evidence
+/// the template keys on.
+fn tokenize_rows_shape(spec: &FunctionSpec) -> bool {
+    let mut split = false;
+    let mut unwrap = false;
+    for c in &spec.postconditions {
+        if let Constraint::Expr(e) = c {
+            split |= tokenize_expr_has_method(e, &["is_err", "is_ok"]);
+            unwrap |= tokenize_expr_has_method(e, &["unwrap"]);
+        }
+    }
+    split && unwrap
+}
+
+/// The tokenizer-state shape the template keys on:
+/// the record R a spec's single parameter carries,
+/// its token record T, and the two declarations'
+/// names — or None when the shape is not the
+/// tokenizer's. Field evidence, all of it: R declares
+/// source: String, pos/line/col: Int and
+/// tokens: List<T>; T declares kind: Int (through
+/// aliases), lexeme: String, line/col: Int.
+struct TokenizeShape {
+    state_decl: String,
+    token_decl: String,
+    state_fields: Vec<(String, TypeRef)>,
+    token_fields: Vec<(String, TypeRef)>,
+}
+
+fn tokenize_shape(spec: &FunctionSpec, index: &SpecIndex) -> Option<TokenizeShape> {
+    if spec.params.len() != 1 {
+        return None;
+    }
+    let TypeRef::Named(state_name) = &spec.params[0].ty else {
+        return None;
+    };
+    let (state_decl, state_fields) = index.record_fields(state_name)?;
+    let field_ty = |fields: &[(String, TypeRef)], n: &str| {
+        fields.iter().find(|(f, _)| f == n).map(|(_, t)| t.clone())
+    };
+    if field_ty(&state_fields, "source") != Some(TypeRef::String) {
+        return None;
+    }
+    for f in ["pos", "line", "col"] {
+        if field_ty(&state_fields, f) != Some(TypeRef::Int) {
+            return None;
+        }
+    }
+    let Some(TypeRef::List(tok_ty)) = field_ty(&state_fields, "tokens") else {
+        return None;
+    };
+    let TypeRef::Named(tok_name) = tok_ty.as_ref() else {
+        return None;
+    };
+    let (token_decl, token_fields) = index.record_fields(tok_name)?;
+    let kind_ty = field_ty(&token_fields, "kind")?;
+    if tokenize_resolve_alias(index, &kind_ty) != TypeRef::Int {
+        return None;
+    }
+    if field_ty(&token_fields, "lexeme") != Some(TypeRef::String) {
+        return None;
+    }
+    for f in ["line", "col"] {
+        if field_ty(&token_fields, f) != Some(TypeRef::Int) {
+            return None;
+        }
+    }
+    Some(TokenizeShape {
+        state_decl,
+        token_decl,
+        state_fields,
+        token_fields,
+    })
+}
+
+/// A callee's signature against the state shape:
+/// one parameter of the state record, returning the
+/// resolved type `ret` — the template's callees are
+/// found by name (IR calls are by name; there is no
+/// other way to call them) and admitted only when
+/// their declared signatures are the tokenizer's.
+fn tokenize_callee(
+    index: &SpecIndex,
+    name: &str,
+    shape: &TokenizeShape,
+    ret: &TypeRef,
+) -> bool {
+    let Some(f) = index.get(name) else {
+        return false;
+    };
+    if f.params.len() != 1 {
+        return false;
+    }
+    let TypeRef::Named(pn) = &f.params[0].ty else {
+        return false;
+    };
+    let Some((pdecl, _)) = index.record_fields(pn) else {
+        return false;
+    };
+    pdecl == shape.state_decl
+        && tokenize_resolve_alias(index, &f.return_type) == *ret
+}
+
+/// A Char classifier callee's signature: one Char
+/// parameter, Bool return.
+fn tokenize_classifier(index: &SpecIndex, name: &str) -> bool {
+    let Some(f) = index.get(name) else {
+        return false;
+    };
+    f.params.len() == 1
+        && f.params[0].ty == TypeRef::Char
+        && tokenize_resolve_alias(index, &f.return_type) == TypeRef::Bool
+}
+
+/// The tokenize template seed (Phase 85, family
+/// `tokenize_template`): a hand-authored tokenizing
+/// step — and, composed over it, the tokenizing loop
+/// — for the one spec shape the Phase 80 record
+/// priced as remainder (iii): a single state-record
+/// parameter, the tokenizer's field shape, the
+/// amended rows' is_err/is_ok + unwrap shape, and
+/// the module's own step callees present with the
+/// tokenizer's signatures.
+///
+/// STEP form (the spec returns Result<R, String>):
+/// skip_whitespace, then a peek dispatch — None is
+/// the end-of-input Ok; an ident-start char consumes
+/// an identifier through the is_ident_continue loop;
+/// the seven punctuation chars stamp their mirror
+/// kinds (LPAREN 3, RPAREN 4, LBRACE 5, RBRACE 6,
+/// COLON 7, COMMA 9, LT 10, GT 11, EQ 12 — the
+/// mirror's table, stated here as data); anything
+/// else is the error arm. The token stamps the
+/// post-skip state's line/col (the D4a START rule)
+/// and the consumed state's fields close the step.
+/// The error arm's message is the constant
+/// "Unexpected character": the mirror's full text
+/// ('Unexpected character '<c>' at line <n>') is not
+/// expressible in IR — a Char reaches a String only
+/// through Append, and the line number is an Int,
+/// whose conversion to text is finding F2 — so the
+/// constant is this template's one named deviation
+/// from the mirror, itemized wherever the template
+/// is executed against the mirror batteries.
+///
+/// LOOP form (the spec returns Result<List<T>,
+/// String>): the step spec is found in the index by
+/// the STEP keying itself and called by its name;
+/// the loop runs while peek is not None, threading
+/// the state through the step's Ok payload
+/// (TryPropagate), and returns the final state's
+/// tokens.
+///
+/// Admission standard — stated, not smuggled: the
+/// bodies contain While, which the encoder has no
+/// arm for, so no encodability gate can pass them;
+/// like the char_equation family before the D5a
+/// encoding, this family is admitted knowing Z3
+/// cannot judge its bodies (their verdict is
+/// Inconclusive by construction), and its evidence
+/// standard is executed agreement against the
+/// mirror batteries, measured in the cross-
+/// validation harness. Names are load-bearing here
+/// in exactly one place: the callees are called by
+/// name because IR calls are by name — every other
+/// key (fields, signatures, the rows' shape) is
+/// structural.
+fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let shape = tokenize_shape(spec, index)?;
+    if !tokenize_rows_shape(spec) {
+        return None;
+    }
+    let param = spec.params[0].name.clone();
+    let state_ty = TypeRef::Named(shape.state_decl.clone());
+    let ret = tokenize_resolve_alias(index, &spec.return_type);
+    let v = |n: &str| IRNode::Var(n.to_string());
+    let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+        base: Box::new(base),
+        field: field.to_string(),
+    };
+    let call = |f: &str, args: Vec<IRNode>| IRNode::Call {
+        function: f.to_string(),
+        args,
+    };
+    // The generated callees take the state record by
+    // value: a call whose argument stays live after
+    // the call must pass a clone (the UnaryOp Clone
+    // rendering), or the generated code dies E0382.
+    // A call that reinitializes its argument
+    // (cur = next_char(cur)) moves it bare, legally.
+    let vc = |n: &str| {
+        IRNode::UnaryOp(IRUnaryOp::Clone, Box::new(IRNode::Var(n.to_string())))
+    };
+    let lit_i = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+    let lit_s = |s: &str| IRNode::Literal(IRLiteral::String(s.to_string()));
+    // A record of the state shape built from `base`'s
+    // fields, with the tokens field replaced.
+    let state_record = |base: &str, tokens: IRNode| {
+        let fields = shape
+            .state_fields
+            .iter()
+            .map(|(n, _)| {
+                let value = if n == "tokens" {
+                    tokens.clone()
+                } else {
+                    fa(v(base), n)
+                };
+                (n.clone(), value)
+            })
+            .collect();
+        IRNode::RecordLit {
+            type_name: shape.state_decl.clone(),
+            fields,
+        }
+    };
+    // A token of the token shape stamped at the
+    // post-skip state's position (D4a START).
+    let token_record = |kind: IRNode, lexeme: IRNode| {
+        let fields = shape
+            .token_fields
+            .iter()
+            .map(|(n, _)| {
+                let value = match n.as_str() {
+                    "kind" => kind.clone(),
+                    "lexeme" => lexeme.clone(),
+                    "line" => fa(v("s"), "line"),
+                    "col" => fa(v("s"), "col"),
+                    _ => lit_i(0),
+                };
+                (n.clone(), value)
+            })
+            .collect();
+        IRNode::RecordLit {
+            type_name: shape.token_decl.clone(),
+            fields,
+        }
+    };
+
+    let is_step_return = matches!(
+        &ret,
+        TypeRef::Result(ok, err)
+            if matches!(tokenize_resolve_alias(index, ok.as_ref()), TypeRef::Named(n) if n == shape.state_decl)
+                && tokenize_resolve_alias(index, err.as_ref()) == TypeRef::String
+    );
+    if is_step_return {
+        // The step callees, by name + signature.
+        if !tokenize_callee(index, "skip_whitespace", &shape, &state_ty)
+            || !tokenize_callee(
+                index,
+                "peek",
+                &shape,
+                &TypeRef::Option(Box::new(TypeRef::Char)),
+            )
+            || !tokenize_callee(index, "next_char", &shape, &state_ty)
+            || !tokenize_classifier(index, "is_ident_start")
+            || !tokenize_classifier(index, "is_ident_continue")
+        {
+            return None;
+        }
+        // The single-character arm for one punctuation
+        // char: consume it, stamp its kind, close.
+        let punct_arm = |kind: i64, ch: &str| {
+            IRNode::Block(vec![
+                IRNode::Alloc {
+                    name: "end".to_string(),
+                    ty: state_ty.clone(),
+                    initial: Box::new(call("next_char", vec![vc("s")])),
+                },
+                IRNode::Alloc {
+                    name: "toks".to_string(),
+                    ty: TypeRef::List(Box::new(TypeRef::Named(
+                        shape.token_decl.clone(),
+                    ))),
+                    initial: Box::new(fa(v("end"), "tokens")),
+                },
+                IRNode::BinOp(
+                    IRBinOp::Append,
+                    Box::new(v("toks")),
+                    Box::new(token_record(lit_i(kind), lit_s(ch))),
+                ),
+                IRNode::Return(Box::new(call(
+                    "Ok",
+                    vec![state_record("end", v("toks"))],
+                ))),
+            ])
+        };
+        // The identifier arm: consume while the
+        // classifiers continue, accumulating the
+        // lexeme a char at a time (the mirror's own
+        // loop shape), then stamp kind 0 (IDENT).
+        let peek_is_continue = IRNode::Match {
+            scrutinee: Box::new(call("peek", vec![vc("cur")])),
+            cases: vec![
+                (
+                    IRPattern::Constructor("None".to_string(), vec![]),
+                    IRNode::Literal(IRLiteral::Bool(false)),
+                ),
+                (
+                    IRPattern::Constructor(
+                        "Some".to_string(),
+                        vec![IRPattern::Variable("ch".to_string())],
+                    ),
+                    call("is_ident_continue", vec![v("ch")]),
+                ),
+            ],
+        };
+        let ident_arm = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "lexeme".to_string(),
+                ty: TypeRef::String,
+                initial: Box::new(lit_s("")),
+            },
+            IRNode::Alloc {
+                name: "cur".to_string(),
+                ty: state_ty.clone(),
+                initial: Box::new(vc("s")),
+            },
+            IRNode::While {
+                condition: Box::new(peek_is_continue),
+                body: Box::new(IRNode::Block(vec![IRNode::Match {
+                    scrutinee: Box::new(call("peek", vec![vc("cur")])),
+                    cases: vec![
+                        (
+                            IRPattern::Constructor("None".to_string(), vec![]),
+                            IRNode::Block(vec![]),
+                        ),
+                        (
+                            IRPattern::Constructor(
+                                "Some".to_string(),
+                                vec![IRPattern::Variable("ch".to_string())],
+                            ),
+                            IRNode::Block(vec![
+                                IRNode::BinOp(
+                                    IRBinOp::Append,
+                                    Box::new(v("lexeme")),
+                                    Box::new(v("ch")),
+                                ),
+                                IRNode::Assign {
+                                    target: Box::new(v("cur")),
+                                    value: Box::new(call(
+                                        "next_char",
+                                        vec![v("cur")],
+                                    )),
+                                },
+                            ]),
+                        ),
+                    ],
+                }])),
+                invariant: None,
+            },
+            IRNode::Alloc {
+                name: "toks".to_string(),
+                ty: TypeRef::List(Box::new(TypeRef::Named(
+                    shape.token_decl.clone(),
+                ))),
+                initial: Box::new(fa(v("cur"), "tokens")),
+            },
+            IRNode::BinOp(
+                IRBinOp::Append,
+                Box::new(v("toks")),
+                Box::new(token_record(lit_i(0), v("lexeme"))),
+            ),
+            IRNode::Return(Box::new(call(
+                "Ok",
+                vec![state_record("cur", v("toks"))],
+            ))),
+        ]);
+        // The dispatch: ident first (its classifier
+        // owns every ident-start char), then the
+        // punctuation table, then the error arm.
+        // The error arm binds its message in a typed
+        // Alloc first: Call arguments render untyped,
+        // so a bare literal would reach Err as a &str
+        // where String is expected (E0308).
+        let mut dispatch = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "msg".to_string(),
+                ty: TypeRef::String,
+                initial: Box::new(lit_s("Unexpected character")),
+            },
+            IRNode::Return(Box::new(call("Err", vec![v("msg")]))),
+        ]);
+        for (ch, kind) in [
+            ('=', 12),
+            ('>', 11),
+            ('<', 10),
+            (',', 9),
+            (':', 7),
+            ('}', 6),
+            ('{', 5),
+            (')', 4),
+            ('(', 3),
+        ] {
+            dispatch = IRNode::If {
+                condition: Box::new(IRNode::BinOp(
+                    IRBinOp::Eq,
+                    Box::new(v("c")),
+                    Box::new(IRNode::Literal(IRLiteral::Char(ch))),
+                )),
+                then_branch: Box::new(punct_arm(kind, &ch.to_string())),
+                else_branch: Box::new(dispatch),
+            };
+        }
+        dispatch = IRNode::If {
+            condition: Box::new(call("is_ident_start", vec![v("c")])),
+            then_branch: Box::new(ident_arm),
+            else_branch: Box::new(dispatch),
+        };
+        return Some(IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "s".to_string(),
+                ty: state_ty.clone(),
+                initial: Box::new(call("skip_whitespace", vec![v(&param)])),
+            },
+            IRNode::Return(Box::new(IRNode::Match {
+                scrutinee: Box::new(call("peek", vec![vc("s")])),
+                cases: vec![
+                    (
+                        IRPattern::Constructor("None".to_string(), vec![]),
+                        call("Ok", vec![v("s")]),
+                    ),
+                    (
+                        IRPattern::Constructor(
+                            "Some".to_string(),
+                            vec![IRPattern::Variable("c".to_string())],
+                        ),
+                        dispatch,
+                    ),
+                ],
+            })),
+        ]));
+    }
+
+    let is_loop_return = matches!(
+        &ret,
+        TypeRef::Result(ok, err)
+            if matches!(tokenize_resolve_alias(index, ok.as_ref()), TypeRef::List(t) if matches!(tokenize_resolve_alias(index, t.as_ref()), TypeRef::Named(n) if n == shape.token_decl))
+                && tokenize_resolve_alias(index, err.as_ref()) == TypeRef::String
+    );
+    if is_loop_return {
+        if !tokenize_callee(
+            index,
+            "peek",
+            &shape,
+            &TypeRef::Option(Box::new(TypeRef::Char)),
+        ) {
+            return None;
+        }
+        // The step spec: any OTHER spec in the index
+        // the STEP keying itself admits (same shape,
+        // step return, rows' shape, callees present) —
+        // called by its found name.
+        let mut step_candidates: Vec<&FunctionSpec> = index
+            .by_name
+            .values()
+            .filter(|f| {
+                f.name != spec.name
+                    && tokenize_shape(f, index).is_some_and(|s2| {
+                        s2.state_decl == shape.state_decl
+                            && s2.token_decl == shape.token_decl
+                    })
+                    && tokenize_rows_shape(f)
+                    && matches!(
+                        tokenize_resolve_alias(index, &f.return_type),
+                        TypeRef::Result(ref ok, ref err)
+                            if matches!(tokenize_resolve_alias(index, ok.as_ref()), TypeRef::Named(ref n) if *n == shape.state_decl)
+                                && tokenize_resolve_alias(index, err.as_ref()) == TypeRef::String
+                    )
+            })
+            .collect();
+        step_candidates.sort_by(|a, b| a.name.cmp(&b.name));
+        let step_name = step_candidates.first().map(|f| f.name.clone())?;
+        return Some(IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "s".to_string(),
+                ty: state_ty.clone(),
+                initial: Box::new(v(&param)),
+            },
+            IRNode::While {
+                condition: Box::new(IRNode::BinOp(
+                    IRBinOp::Neq,
+                    Box::new(call("peek", vec![vc("s")])),
+                    Box::new(call("None", vec![])),
+                )),
+                body: Box::new(IRNode::Block(vec![
+                    IRNode::Alloc {
+                        name: "step".to_string(),
+                        ty: state_ty.clone(),
+                        initial: Box::new(IRNode::TryPropagate(Box::new(call(
+                            &step_name,
+                            vec![v("s")],
+                        )))),
+                    },
+                    IRNode::Assign {
+                        target: Box::new(v("s")),
+                        value: Box::new(v("step")),
+                    },
+                ])),
+                invariant: None,
+            },
+            IRNode::Return(Box::new(call(
+                "Ok",
+                vec![fa(v("s"), "tokens")],
+            ))),
+        ]));
+    }
+    None
+}
+
 /// The Char-classifier tree validator: the number of
 /// comparison leaves in `node` when the tree is a pure
 /// classifier over the parameter `param` — `||` / `&&` /
@@ -8536,6 +9123,98 @@ spec exclaim {
     /// equation family admits them (same bodies, same
     /// executed behavior) and char_equation admits nothing.
     #[test]
+    /// Phase 85 (M1 remainder (iii)): the tokenize
+    /// template family fires on both tokenize specs —
+    /// the STEP form for tokenize_one, the LOOP form
+    /// for tokenize_all — and on nothing else in the
+    /// module.
+    #[test]
+    fn phase85_tokenize_template_fires_on_the_tokenize_pair() {
+        let module = load_tokenizer_spec();
+        let engine =
+            SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        for name in ["tokenize_one", "tokenize_all"] {
+            let spec = tokenizer_spec(&module.functions, name);
+            let kinds = engine.constraint_seed_kinds(&spec);
+            assert!(
+                kinds.iter().any(|k| k == "tokenize_template"),
+                "{}'s seed kinds must include tokenize_template, got {:?}",
+                name,
+                kinds
+            );
+        }
+        for name in [
+            "is_whitespace",
+            "is_ident_start",
+            "is_ident_continue",
+            "skip_whitespace",
+            "peek",
+            "next_char",
+        ] {
+            let spec = tokenizer_spec(&module.functions, name);
+            let kinds = engine.constraint_seed_kinds(&spec);
+            assert!(
+                !kinds.iter().any(|k| k == "tokenize_template"),
+                "{} must not gain a tokenize_template seed, got {:?}",
+                name,
+                kinds
+            );
+        }
+        // The STEP body is the mirror's shape: it opens
+        // with the skip allocation and returns the peek
+        // dispatch; the LOOP body loops over the step.
+        let one = tokenizer_spec(&module.functions, "tokenize_one");
+        let seed = constraint_seed(&engine, &one, "tokenize_template");
+        let text = format!("{:?}", seed.body);
+        assert!(
+            text.contains("skip_whitespace") && text.contains("is_ident_start"),
+            "the step body must call the skip and the ident classifier: {}",
+            text
+        );
+        let all = tokenizer_spec(&module.functions, "tokenize_all");
+        let seed = constraint_seed(&engine, &all, "tokenize_template");
+        let text = format!("{:?}", seed.body);
+        assert!(
+            text.contains("tokenize_one") && text.contains("TryPropagate"),
+            "the loop body must thread the step's Ok payload: {}",
+            text
+        );
+    }
+
+    /// Phase 85: the template's keying declines — a
+    /// state-shaped spec without the rows' shape, and
+    /// a rows-shaped spec without the module's step
+    /// callees, both get no seed.
+    #[test]
+    fn phase85_tokenize_template_declines() {
+        // (a) The full tokenizer module, but tokenize_one
+        // renamed into a spec whose rows lose the
+        // is_err/is_ok + unwrap shape: rebuild the module
+        // with tokenize_one's postconditions replaced by
+        // a single unrelated row.
+        let module = load_tokenizer_spec();
+        let engine =
+            SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        let mut stripped = tokenizer_spec(&module.functions, "tokenize_one");
+        stripped.postconditions = vec![Constraint::Expr(Expr::BoolLit(true))];
+        let kinds = engine.constraint_seed_kinds(&stripped);
+        assert!(
+            !kinds.iter().any(|k| k == "tokenize_template"),
+            "rows-shape decline failed, got {:?}",
+            kinds
+        );
+        // (b) tokenize_one alone in an index with no
+        // callees: the signature evidence is absent.
+        let lone = tokenizer_spec(&module.functions, "tokenize_one");
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let kinds = engine.constraint_seed_kinds(&lone);
+        assert!(
+            !kinds.iter().any(|k| k == "tokenize_template"),
+            "callee decline failed, got {:?}",
+            kinds
+        );
+    }
+
     fn classifier_shapes_admitted_by_equation_family() {
         // (a) Range conjunction over the param.
         let src = r#"

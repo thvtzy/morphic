@@ -1864,6 +1864,162 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         assert_eq!(eval_classifier_body(&resolved, '{'), Ok(false));
     }
 
+    /// Phase 85 (M1 remainder (iii)): the tokenize
+    /// template measured on its own terms — pool
+    /// presence, Z3 verdict and in-spec test outcomes
+    /// through the production synthesis path, and the
+    /// EXECUTED agreement of the template bodies
+    /// themselves against the mirror batteries, with
+    /// the module's callees assembled from their seed
+    /// winners (classifiers, peek, next_char) plus one
+    /// hand-supplied mirror body for skip_whitespace —
+    /// the one callee with no denotation, supplied
+    /// here exactly as Phase 76/81 hand-supplied
+    /// bodies for verification, and labeled as such
+    /// (Provenance::Template, never a seed).
+    #[test]
+    #[ignore = "phase85 template measurement: production synthesis + verify + compiled execution of the template bodies; run explicitly with --ignored --nocapture"]
+    fn phase85_tokenize_template_measurement() {
+        let (functions, module) = load_tokenizer_module();
+        let engine =
+            engine::SynthesisEngine::with_module_spec(engine::SynthesisConfig::default(), &module);
+
+        // (1) Pool presence, verdict, test outcomes.
+        for name in ["tokenize_one", "tokenize_all"] {
+            let func = functions.iter().find(|f| f.name == name).unwrap();
+            let candidates =
+                engine::synthesize_with_module_spec(func, 1, &module).unwrap();
+            let seed = candidates
+                .iter()
+                .find(|c| {
+                    matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == "tokenize_template")
+                })
+                .unwrap_or_else(|| panic!("{}: template must enter the pool", name));
+            let verified = verify::verifier::Verifier::with_module(&module)
+                .verify_all(vec![seed.clone()], func)
+                .unwrap();
+            println!(
+                "TOK85|{}|pool=true|verdict={:?}|tpr={:.3}",
+                name, verified[0].verification_status, seed.scores.test_pass_ratio
+            );
+        }
+
+        // (2) Executed agreement of the template bodies.
+        // Seed candidates are drawn from the production
+        // synthesis pools (seed_from_constraints is an
+        // engine-internal surface).
+        let pool_seed = |f: &FunctionSpec, kinds: &[&str]| {
+            let candidates =
+                engine::synthesize_with_module_spec(f, 1, &module).unwrap();
+            kinds.iter().find_map(|k| {
+                candidates.iter().find(|c| {
+                    matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == k)
+                }).cloned()
+            })
+        };
+        let mut winners: HashMap<String, CandidateImplementation> = HashMap::new();
+        for f in &functions {
+            let pick = match f.name.as_str() {
+                "skip_whitespace" => {
+                    // The hand-supplied mirror body: while
+                    // the peeked char is whitespace, advance.
+                    // Its candidate shell is cloned from
+                    // peek's seed (skip has no seed of its
+                    // own); body, spec and provenance are
+                    // replaced outright below.
+                    let mut hand = pool_seed(
+                        functions.iter().find(|g| g.name == "peek").unwrap(),
+                        &["complementary_guard"],
+                    )
+                    .unwrap();
+                    hand.spec_name = "skip_whitespace".to_string();
+                    hand.spec = f.clone();
+                    hand.provenance = Provenance::Template {
+                        template_name: "phase85_hand_mirror_skip".to_string(),
+                    };
+                    hand.body = {
+                        let v = |n: &str| IRNode::Var(n.to_string());
+                        let call = |fu: &str, args: Vec<IRNode>| IRNode::Call {
+                            function: fu.to_string(),
+                            args,
+                        };
+                        IRNode::Block(vec![
+                            IRNode::Alloc {
+                                name: "cur".to_string(),
+                                ty: crate::spec::ast::TypeRef::Named(
+                                    "TokenizerState".to_string(),
+                                ),
+                                initial: Box::new(v("state")),
+                            },
+                            IRNode::While {
+                                condition: Box::new(IRNode::Match {
+                                    scrutinee: Box::new(call(
+                                        "peek",
+                                        vec![IRNode::UnaryOp(
+                                            crate::synthesis::engine::IRUnaryOp::Clone,
+                                            Box::new(v("cur")),
+                                        )],
+                                    )),
+                                    cases: vec![
+                                        (
+                                            IRPattern::Constructor(
+                                                "None".to_string(),
+                                                vec![],
+                                            ),
+                                            IRNode::Literal(
+                                                crate::synthesis::engine::IRLiteral::Bool(false),
+                                            ),
+                                        ),
+                                        (
+                                            IRPattern::Constructor(
+                                                "Some".to_string(),
+                                                vec![IRPattern::Variable(
+                                                    "ch".to_string(),
+                                                )],
+                                            ),
+                                            call("is_whitespace", vec![v("ch")]),
+                                        ),
+                                    ],
+                                }),
+                                body: Box::new(IRNode::Block(vec![IRNode::Assign {
+                                    target: Box::new(v("cur")),
+                                    value: Box::new(call(
+                                        "next_char",
+                                        vec![v("cur")],
+                                    )),
+                                }])),
+                                invariant: None,
+                            },
+                            IRNode::Return(Box::new(v("cur"))),
+                        ])
+                    };
+                    hand
+                }
+                "tokenize_one" | "tokenize_all" => pool_seed(
+                    f,
+                    &["tokenize_template"],
+                )
+                .unwrap_or_else(|| panic!("{}: template seed missing", f.name)),
+                "peek" => pool_seed(f, &["complementary_guard"])
+                    .unwrap_or_else(|| panic!("peek: seed missing")),
+                "next_char" => pool_seed(f, &["record_completion"])
+                    .unwrap_or_else(|| panic!("next_char: seed missing")),
+                _ => pool_seed(f, &["equation", "char_equation"])
+                    .unwrap_or_else(|| panic!("{}: constraint seed missing", f.name)),
+            };
+            winners.insert(f.name.clone(), pick);
+        }
+        let module_names: Vec<String> =
+            functions.iter().map(|f| f.name.clone()).collect();
+        for name in ["tokenize_one", "tokenize_all"] {
+            let m = measure_record_spec(85, name, &winners, &module_names);
+            println!(
+                "TOK85|{}|template_agree={}/{}|exec={}|disagreements={:?}",
+                name, m.agree, m.total, m.exec, m.disagreements
+            );
+        }
+    }
+
     #[test]
     fn tok_runner_executes_and_detects() {
         let inputs = state_battery();
