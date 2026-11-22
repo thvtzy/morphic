@@ -4237,6 +4237,419 @@ spec tokenize_all {
         );
     }
 
+    /// Phase 87 — skip_whitespace strengthening
+    /// MEASUREMENT (workstream 2 of the road-B push;
+    /// scratch only: the examples file is NOT touched
+    /// and nothing measured here is ratified — the
+    /// Phase 88 gate re-run prices these rows from
+    /// this record). skip's spec states two invariants
+    /// (pos monotone, source length), and its crowned
+    /// winner satisfies them without performing the
+    /// skip (Phase 86 freeze: Verified, tpr 0.500,
+    /// mirror agreement 4/12, stated rows 12/12).
+    /// Candidate strengthenings, formulated in the
+    /// module dialect and measured through the
+    /// production encoder (Phase 83/84 method):
+    ///   (a) boundary — the output position is at EOF
+    ///       or the char there is not whitespace;
+    ///   (b) no-overshoot — an advanced output
+    ///       position's previous char is whitespace;
+    ///   (c) all-whitespace-between — a Forall over
+    ///       the skipped range.
+    ///
+    /// MEASURED (this test pins each claim):
+    ///   (a) ENCODES — symbolically (free state/output,
+    ///       the indexed char through the Phase 76
+    ///       CharStr bridge) and at literal points.
+    ///       The hand mirror's outputs satisfy it at
+    ///       10 of 12 battery points (Proven); the two
+    ///       EOF outputs ("" and " ") judge Unknown at
+    ///       literal points — the standing OOB
+    ///       artifact (the row's index term is out of
+    ///       range exactly where its first disjunct
+    ///       holds; the symbolic path carries the
+    ///       proof burden, as with R2-α in Phase 84).
+    ///       The crowned winner is REFUTED by (a)
+    ///       (VerificationFailed): the strengthening
+    ///       bites. But no constraint-seed family
+    ///       fires for the strengthened spec (kinds
+    ///       [] — the same as the current spec), and
+    ///       NO pool body is Verified under
+    ///       current+(a) (0 in the measured pool; the
+    ///       zero is structural — a Verified body is
+    ///       loop-free, and a loop-free body cannot
+    ///       cross an unbounded whitespace run): the
+    ///       only body that performs the skip is the
+    ///       hand mirror, whose While body is
+    ///       Inconclusive by construction, and no
+    ///       denotation exists for skip_whitespace
+    ///       (callee_body None, re-pinned here).
+    ///   (b) ENCODES (symbolically and at all 12
+    ///       points; the mirror satisfies it 12/12).
+    ///       The crowned winner SURVIVES it
+    ///       (Verified) — a body that barely advances
+    ///       satisfies a no-overshoot row vacuously —
+    ///       and pool bodies are Verified under
+    ///       current+(b) (11 in the measured pool).
+    ///       Alone, (b) changes nothing.
+    ///   (a)+(b) together still do NOT pin the skip:
+    ///       both rows PROVE at the overshoot points
+    ///       ("a b" from 0 landing at pos 2; "ab cd"
+    ///       from 0 landing at pos 3) — the rows pin
+    ///       the landing to A word boundary (never on
+    ///       whitespace, always just after one), not
+    ///       to THE first boundary. The exact pin is
+    ///       (c)'s content.
+    ///   (c) is STATABLE — the formulation parses to
+    ///       Constraint::Forall with the intended
+    ///       body — and UNENCODABLE: the production
+    ///       encoder returns None for Forall
+    ///       (verifier.rs: quantified formulas have no
+    ///       encoding here), confirming the Phase 80
+    ///       option-D boundary. Closing the skip
+    ///       clause exactly is therefore encoder
+    ///       research (the L–XL extension the owner
+    ///       did not commission), not a spec edit.
+    ///   No candidate reads line/col: even a
+    ///       hypothetical Verified body under (a)+(b)
+    ///       could mis-track them; golden/executed
+    ///       agreement remains their only judge.
+    ///
+    /// The priced statement for Phase 88: ratifying
+    /// (a) (with or without (b)) trades skip's
+    /// standing — a Verified winner that satisfies
+    /// the stated rows without skipping (golden
+    /// 4/12, partial BY SPEC STRENGTH) — for NO
+    /// Verified body at all, with the gate's skip
+    /// clause still unprovable exactly ((c)
+    /// unencodable, line/col unpinned). It buys a
+    /// refuted wrong winner and a spec that states
+    /// the boundary; it cannot buy a Verified
+    /// correct skip.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase87_skip_strengthening_measurement() {
+        use crate::spec::ast::Constraint;
+        use crate::synthesis::engine::{
+            synthesize_with_module_spec, SynthesisConfig, SynthesisEngine,
+        };
+        use crate::synthesis::selector::select_best;
+
+        let module = phase84_real_module();
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+
+        // Candidate rows parsed in the module dialect
+        // (the parser is syntactic; the encoder
+        // resolves the classifier call against the
+        // real module index, as it did for R2-α).
+        let parse_row = |text: &str| -> Constraint {
+            let src = format!(
+                "T {{\n spec probe {{\n input: state: TokenizerState\n output: TokenizerState\n constraint: {}\n }}\n}}",
+                text
+            );
+            let parsed = crate::spec::parser::parse(&src).expect("candidate row parses");
+            parsed.functions[0].postconditions[0].clone()
+        };
+        let row_a = parse_row(
+            "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
+        );
+        let row_b = parse_row(
+            "output.pos == state.pos || is_whitespace(output.source[output.pos - 1])",
+        );
+        let strengthened = |row: &Constraint| {
+            let mut s = skip.clone();
+            s.postconditions.push(row.clone());
+            s
+        };
+
+        // Point Syms in the Phase 84 shapes.
+        let state_sym = |source: &str, pos: i64, line: i64, col: i64| Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::from_str(source).unwrap()),
+                ),
+                ("pos".into(), Sym::Int(z3::ast::Int::from_i64(pos))),
+                ("line".into(), Sym::Int(z3::ast::Int::from_i64(line))),
+                ("col".into(), Sym::Int(z3::ast::Int::from_i64(col))),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::from_i64(0)),
+                ),
+            ],
+        };
+        // The mirror's skip, simulated on chars (the
+        // Phase 47 mirror semantics: whitespace is
+        // exactly ' ' '\t' '\n' '\r' — U+A0 is not —
+        // and next_char tracks line/col through
+        // newlines).
+        let mirror_skip = |source: &str, pos: i64, line: i64, col: i64| {
+            let chars: Vec<char> = source.chars().collect();
+            let (mut p, mut l, mut c) = (pos, line, col);
+            while (p as usize) < chars.len()
+                && matches!(chars[p as usize], ' ' | '\t' | '\n' | '\r')
+            {
+                if chars[p as usize] == '\n' {
+                    l += 1;
+                    c = 1;
+                } else {
+                    c += 1;
+                }
+                p += 1;
+            }
+            (p, l, c)
+        };
+        // The Phase 47 skip battery (xval skip_battery):
+        // (source, pos, line, col).
+        let battery: Vec<(&str, i64, i64, i64)> = vec![
+            ("", 0, 1, 1),
+            (" ", 0, 1, 1),
+            ("  \t\n x", 0, 1, 1),
+            ("no-ws", 0, 1, 1),
+            ("\n\nab", 0, 1, 1),
+            (" \u{A0}x", 0, 1, 1),
+            ("a b", 0, 1, 1),
+            ("\r\n\t", 0, 1, 1),
+            ("a b", 1, 1, 2),
+            ("  \t\n x", 2, 1, 3),
+            ("\n\nab", 1, 1, 2),
+            (" \u{A0}x", 1, 1, 2),
+        ];
+        // Mirror satisfaction at the battery points:
+        // (a) Proven everywhere except the two EOF
+        // outputs (the literal-point OOB artifact);
+        // (b) Proven at all 12.
+        for (label, row) in [("a", &row_a), ("b", &row_b)] {
+            let spec = strengthened(row);
+            for (i, (src, pos, line, col)) in battery.iter().enumerate() {
+                let (p, l, c) = mirror_skip(src, *pos, *line, *col);
+                let mut env = SymEnv::new();
+                env.insert("state".into(), state_sym(src, *pos, *line, *col));
+                let (_, tri) = verifier.verify_constraint(
+                    row,
+                    "phase87@point",
+                    &spec,
+                    &env,
+                    &Some(state_sym(src, p, l, c)),
+                );
+                match (label, i) {
+                    ("a", 0) | ("a", 1) => assert!(
+                        matches!(tri, Tri::Unknown),
+                        "row (a) at EOF point {}: the OOB artifact judges Unknown, got {}",
+                        i,
+                        match tri {
+                            Tri::Proven => "Proven",
+                            Tri::Refuted => "Refuted",
+                            Tri::Unknown => "Unknown",
+                        }
+                    ),
+                    _ => assert!(
+                        matches!(tri, Tri::Proven),
+                        "row ({}) at battery point {} ({:?} from {}): the mirror's \
+                         output must satisfy it, got {}",
+                        label,
+                        i,
+                        src,
+                        pos,
+                        match tri {
+                            Tri::Proven => "Proven",
+                            Tri::Refuted => "Refuted",
+                            Tri::Unknown => "Unknown",
+                        }
+                    ),
+                }
+            }
+        }
+
+        // The overshoot admissions: outputs that are
+        // NOT the mirror's (they jump a word) satisfy
+        // BOTH rows — (a)+(b) pin a word boundary, not
+        // the first one.
+        for (src, out_pos) in [("a b", 2), ("ab cd", 3)] {
+            for (label, row) in [("a", &row_a), ("b", &row_b)] {
+                let spec = strengthened(row);
+                let mut env = SymEnv::new();
+                env.insert("state".into(), state_sym(src, 0, 1, 1));
+                let (_, tri) = verifier.verify_constraint(
+                    row,
+                    "phase87@overshoot",
+                    &spec,
+                    &env,
+                    &Some(state_sym(src, out_pos, 1, 3)),
+                );
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "row ({}) must ADMIT the overshoot {:?} -> {} (the residual \
+                     freedom only the Forall would close)",
+                    label,
+                    src,
+                    out_pos
+                );
+            }
+        }
+
+        // Symbolic-path encodability: free state and
+        // free output records (the CharStr bridge form
+        // for the indexed char).
+        let free_record = |prefix: &str| Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::new_const(format!("{}.source", prefix))),
+                ),
+                (
+                    "pos".into(),
+                    Sym::Int(z3::ast::Int::new_const(format!("{}.pos", prefix))),
+                ),
+                (
+                    "line".into(),
+                    Sym::Int(z3::ast::Int::new_const(format!("{}.line", prefix))),
+                ),
+                (
+                    "col".into(),
+                    Sym::Int(z3::ast::Int::new_const(format!("{}.col", prefix))),
+                ),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::new_const(format!(
+                        "{}.tokens.len",
+                        prefix
+                    ))),
+                ),
+            ],
+        };
+        for (label, row) in [("a", &row_a), ("b", &row_b)] {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), free_record("state"));
+            env.insert("output".into(), free_record("output"));
+            let f = encode_constraint(row, &env, &EvalCtx::root(&index));
+            assert!(
+                f.is_some(),
+                "row ({}) ENCODES under a fully free state and output \
+                 (the CharStr bridge form)",
+                label
+            );
+        }
+
+        // The crowned winner under the CURRENT rows,
+        // judged against each strengthened spec: (a)
+        // refutes it, (b) does not, (a)+(b) refutes it
+        // through (a).
+        let pool = synthesize_with_module_spec(&skip, 1, &module)
+            .expect("skip synthesis under current rows");
+        let verified = verifier
+            .verify_all(pool, &skip)
+            .expect("verify pool under current rows");
+        let winner = select_best(verified, &skip).expect("a crowned winner exists");
+        assert!(
+            winner.verified,
+            "the standing winner is Verified under the current rows"
+        );
+        assert_eq!(
+            verifier.verify_one(&winner, &strengthened(&row_a)).status,
+            VerificationStatus::VerificationFailed,
+            "row (a) REFUTES the crowned winner: the strengthening bites"
+        );
+        assert_eq!(
+            verifier.verify_one(&winner, &strengthened(&row_b)).status,
+            VerificationStatus::Verified,
+            "row (b) alone leaves the crowned winner standing (vacuous bite)"
+        );
+        let mut both = skip.clone();
+        both.postconditions.push(row_a.clone());
+        both.postconditions.push(row_b.clone());
+        assert_eq!(
+            verifier.verify_one(&winner, &both).status,
+            VerificationStatus::VerificationFailed,
+            "(a)+(b) refute the winner through (a)"
+        );
+
+        // Seed existence + pool verdicts under each
+        // strengthened spec: no constraint-seed family
+        // fires (the current spec's kinds are the
+        // control), no body is Verified under
+        // current+(a), and bodies are Verified under
+        // current+(b) without performing the skip.
+        assert!(
+            index.callee_body("skip_whitespace").is_none(),
+            "no denotation exists for skip_whitespace: nothing to inline, \
+             no seed family can build the real skip from a callee body"
+        );
+        let engine = SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        assert!(
+            engine.constraint_seed_kinds(&skip).is_empty(),
+            "control: no constraint-seed kinds fire for the current spec either"
+        );
+        for (label, row, want_verified) in [("a", &row_a, Some(0usize)), ("b", &row_b, None)] {
+            let spec = strengthened(row);
+            assert!(
+                engine.constraint_seed_kinds(&spec).is_empty(),
+                "no constraint-seed kinds fire under strengthened row ({})",
+                label
+            );
+            let pool = synthesize_with_module_spec(&spec, 1, &module)
+                .expect("skip synthesis under strengthened rows");
+            let verified = verifier
+                .verify_all(pool, &spec)
+                .expect("verify pool under strengthened rows");
+            let n_verified = verified.iter().filter(|c| c.verified).count();
+            match want_verified {
+                // (a): exactly zero — structurally, not
+                // by luck of the draw: a Verified body
+                // must be loop-free (loops do not
+                // encode), and a loop-free body advances
+                // a bounded number of steps, so a
+                // whitespace run longer than that bound
+                // is a countermodel (it lands mid-run,
+                // on whitespace).
+                Some(want) => assert_eq!(
+                    n_verified, want,
+                    "Verified bodies under current+({})",
+                    label
+                ),
+                // (b): at least the standing winner's
+                // class verifies (it satisfies (b)
+                // already); the exact count is search
+                // dynamics, the existence is the claim.
+                None => assert!(
+                    n_verified >= 1,
+                    "bodies are Verified under current+(b) without \
+                     performing the skip ({} found)",
+                    n_verified
+                ),
+            }
+        }
+
+        // (c) The all-whitespace-between property as a
+        // Forall: statable in the dialect (the parser
+        // accepts the formulation), unencodable
+        // through the production encoder.
+        let forall_row = {
+            let src = "T {\n spec probe {\n input: state: TokenizerState\n output: TokenizerState\n constraint: forall i: Int in range(len(output.source)): i < state.pos || i >= output.pos || is_whitespace(output.source[i])\n }\n}";
+            let parsed = crate::spec::parser::parse(src).expect("forall row parses");
+            parsed.functions[0].postconditions[0].clone()
+        };
+        assert!(
+            matches!(forall_row, Constraint::Forall { .. }),
+            "the all-whitespace-between formulation is statable: it parses \
+             to a Forall, got {:?}",
+            forall_row
+        );
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_sym(" x", 0, 1, 1));
+        env.insert("output".into(), state_sym(" x", 2, 1, 3));
+        assert!(
+            encode_constraint(&forall_row, &env, &EvalCtx::root(&index)).is_none(),
+            "the Forall has NO encoding through the production encoder \
+             (quantified formulas are the encoder's stated boundary): \
+             the exact skip pin is encoder research, not a spec edit"
+        );
+    }
+
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase76_char_range_side_condition_is_decisive() {

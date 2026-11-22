@@ -1002,6 +1002,184 @@ fn ir_call_text(function: &str, args: &[IRNode]) -> String {
     }
 }
 
+/// Phase 87: the struct-update (FRU) shape test for
+/// the Rust RecordLit arm. Returns the base variable
+/// and the carried field names when the literal is a
+/// same-record REBUILD: it carries at least two
+/// fields straight from one base variable — a field
+/// is carried when its value is exactly the
+/// projection of the same-named field off that
+/// variable — and every non-carried field's value
+/// both uses the base only in screened positions
+/// (fru_use_ok) and is computed from the base at all
+/// (fru_reads_base). The screens are what make the
+/// variant sound without field-type knowledge: Rust
+/// evaluates the explicit field values first and
+/// moves the rest out of the base last, so an
+/// explicit value may READ any non-carried field (a
+/// projection, exactly as the clone rendering reads
+/// it), but it must not read a carried field (whose
+/// value the update form supplies from the base,
+/// after the explicit values have run) nor touch the
+/// base in any other position (a bare use, a call
+/// argument — positions that could move or borrow
+/// the whole record). Anything outside the screened
+/// shapes declines, and the standing clone rendering
+/// stands.
+fn fru_shape(fields: &[(String, IRNode)]) -> Option<(&str, Vec<&str>)> {
+    let mut by_base: Vec<(&str, Vec<&str>)> = Vec::new();
+    for (name, value) in fields {
+        if let IRNode::FieldAccess { base, field } = value {
+            if field == name {
+                if let IRNode::Var(b) = base.as_ref() {
+                    match by_base.iter_mut().find(|(bb, _)| *bb == b.as_str()) {
+                        Some((_, names)) => names.push(name.as_str()),
+                        None => by_base.push((b.as_str(), vec![name.as_str()])),
+                    }
+                }
+            }
+        }
+    }
+    let (base, carried) = by_base.into_iter().max_by_key(|(_, names)| names.len())?;
+    if carried.len() < 2 {
+        return None;
+    }
+    // A rebuild changes at least one field: a literal
+    // whose fields are ALL carries is a projection
+    // (it may well build a SMALLER record from the
+    // base — the proof corpus's record-lit-field-clone
+    // case, S { source, pos } off a wider state — and
+    // the update form, whose base must be the very
+    // same record, cannot express it).
+    if carried.len() == fields.len() {
+        return None;
+    }
+    for (name, value) in fields {
+        if carried.iter().any(|c| c == name) {
+            continue;
+        }
+        if !fru_use_ok(value, base, &carried) {
+            return None;
+        }
+        // The rebuild shape's second half: a computed
+        // field of a same-record rebuild is computed
+        // FROM the base — it reads the base through a
+        // projection (of a non-carried field, per the
+        // screen above). A literal whose computed
+        // fields never touch the base is a construction
+        // from parts, not a rebuild — the template's
+        // token record is the standing example: its
+        // line/col are projections of the tokenizer
+        // STATE, a different record, and updating a
+        // Token literal from a state base is a type
+        // error the clone rendering never risked.
+        if !fru_reads_base(value, base) {
+            return None;
+        }
+    }
+    Some((base, carried))
+}
+
+/// Does this tree project the base variable anywhere
+/// (a FieldAccess whose base is exactly the variable)?
+/// A search, not a screen: binder shadowing is the
+/// screen's concern (fru_use_ok declines binders named
+/// like the base), so finding a projection under one
+/// can only over-approve in combination with a screen
+/// that already declined.
+fn fru_reads_base(node: &IRNode, base: &str) -> bool {
+    match node {
+        IRNode::FieldAccess { base: fb, .. } => {
+            matches!(fb.as_ref(), IRNode::Var(n) if n == base) || fru_reads_base(fb, base)
+        }
+        IRNode::Var(_) | IRNode::Literal(_) => false,
+        IRNode::BinOp(_, l, r) => fru_reads_base(l, base) || fru_reads_base(r, base),
+        IRNode::UnaryOp(_, inner) => fru_reads_base(inner, base),
+        IRNode::Call { args, .. } => args.iter().any(|a| fru_reads_base(a, base)),
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            fru_reads_base(condition, base)
+                || fru_reads_base(then_branch, base)
+                || fru_reads_base(else_branch, base)
+        }
+        IRNode::Match { scrutinee, cases } => {
+            fru_reads_base(scrutinee, base)
+                || cases.iter().any(|(_, b)| fru_reads_base(b, base))
+        }
+        IRNode::Index(c, i) => fru_reads_base(c, base) || fru_reads_base(i, base),
+        IRNode::RecordLit { fields, .. } => fields.iter().any(|(_, v)| fru_reads_base(v, base)),
+        IRNode::Collection { elements, .. } => elements.iter().any(|e| fru_reads_base(e, base)),
+        IRNode::Typed { node, .. } => fru_reads_base(node, base),
+        IRNode::Let { value, body, .. } => {
+            fru_reads_base(value, base) || fru_reads_base(body, base)
+        }
+        _ => false,
+    }
+}
+
+/// The fru_shape screen: every occurrence of the base
+/// variable in a computed field's value is the base
+/// of a projection of a non-carried field. Binders
+/// named like the base decline (their occurrences
+/// would be the binder's, and telling them apart per
+/// occurrence is not this screen's business), as does
+/// any shape not listed.
+fn fru_use_ok(node: &IRNode, base: &str, carried: &[&str]) -> bool {
+    match node {
+        IRNode::Var(name) => name != base,
+        IRNode::Literal(_) => true,
+        IRNode::FieldAccess { base: fb, field } => {
+            if matches!(fb.as_ref(), IRNode::Var(n) if n == base) {
+                !carried.iter().any(|c| c == field)
+            } else {
+                fru_use_ok(fb, base, carried)
+            }
+        }
+        IRNode::BinOp(_, l, r) => fru_use_ok(l, base, carried) && fru_use_ok(r, base, carried),
+        IRNode::UnaryOp(_, inner) => fru_use_ok(inner, base, carried),
+        IRNode::Call { args, .. } => args.iter().all(|a| fru_use_ok(a, base, carried)),
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            fru_use_ok(condition, base, carried)
+                && fru_use_ok(then_branch, base, carried)
+                && fru_use_ok(else_branch, base, carried)
+        }
+        IRNode::Match { scrutinee, cases } => {
+            fru_use_ok(scrutinee, base, carried)
+                && cases.iter().all(|(pat, body)| {
+                    !fru_pattern_binds(pat, base) && fru_use_ok(body, base, carried)
+                })
+        }
+        IRNode::Index(c, i) => fru_use_ok(c, base, carried) && fru_use_ok(i, base, carried),
+        IRNode::RecordLit { fields, .. } => {
+            fields.iter().all(|(_, v)| fru_use_ok(v, base, carried))
+        }
+        IRNode::Collection { elements, .. } => {
+            elements.iter().all(|e| fru_use_ok(e, base, carried))
+        }
+        IRNode::Typed { node, .. } => fru_use_ok(node, base, carried),
+        IRNode::Let { name, value, body } => {
+            name != base && fru_use_ok(value, base, carried) && fru_use_ok(body, base, carried)
+        }
+        _ => false,
+    }
+}
+
+fn fru_pattern_binds(pat: &IRPattern, name: &str) -> bool {
+    match pat {
+        IRPattern::Variable(n) => n == name,
+        IRPattern::Constructor(_, subs) => subs.iter().any(|p| fru_pattern_binds(p, name)),
+        IRPattern::Guard(inner, _) => fru_pattern_binds(inner, name),
+        _ => false,
+    }
+}
+
 fn ir_to_rust_expr(node: &IRNode) -> String {
     match node {
         IRNode::Literal(lit) => match lit {
@@ -1280,33 +1458,59 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
         // this arm controls, exactly as the spec-Expr
         // RecordLit arm.
         IRNode::RecordLit { type_name, fields } => {
+            let render_value = |v: &IRNode| -> String {
+                match v {
+                    IRNode::Literal(IRLiteral::String(s)) => {
+                        format!("\"{}\".to_string()", escape_rust_str(s))
+                    }
+                    // Phase 85: a field projection is
+                    // not a fresh value — rendered bare
+                    // it MOVES the field out of the base
+                    // record, and a later field of the
+                    // same literal that projects the
+                    // same base again (next_char's
+                    // inlined peek guards re-read
+                    // `state.source` after the `source`
+                    // field) dies E0382. The Phase 39
+                    // Concat-Var treatment, at the one
+                    // position this arm controls: an
+                    // owned copy. The IR is pure, so the
+                    // clone is value-transparent.
+                    IRNode::FieldAccess { .. } => {
+                        format!("{}.clone()", ir_to_rust_expr(v))
+                    }
+                    _ => ir_to_rust_expr(v),
+                }
+            };
+            // Phase 87 (scoped unfreeze — a variant
+            // rendering of this arm only): the
+            // struct-update form, `R { <computed>, ..base }`,
+            // when the literal carries two or more fields
+            // straight from one base variable and every
+            // computed field's use of that base is a
+            // projection of a non-carried field (see
+            // fru_shape). The Phase 85 clone-per-carry
+            // rendering pays a full allocation-sized
+            // clone per carried field per construction —
+            // for next_char, the state String + token Vec
+            // on every character — and the Phase 87
+            // profile priced exactly that as the
+            // benchmark's largest remaining term. The
+            // update form moves the carried fields
+            // instead; the computed fields render exactly
+            // as above, so the value is unchanged.
+            if let Some((base, carried)) = fru_shape(fields) {
+                let mut parts: Vec<String> = fields
+                    .iter()
+                    .filter(|(n, _)| !carried.iter().any(|c| c == n))
+                    .map(|(n, v)| format!("{}: {}", rust_ident(n), render_value(v)))
+                    .collect();
+                parts.push(format!("..{}", rust_ident(base)));
+                return format!("{} {{ {} }}", rust_ident(type_name), parts.join(", "));
+            }
             let fields_str: Vec<String> = fields
                 .iter()
-                .map(|(n, v)| {
-                    let value_text = match v {
-                        IRNode::Literal(IRLiteral::String(s)) => {
-                            format!("\"{}\".to_string()", escape_rust_str(s))
-                        }
-                        // Phase 85: a field projection is
-                        // not a fresh value — rendered bare
-                        // it MOVES the field out of the base
-                        // record, and a later field of the
-                        // same literal that projects the
-                        // same base again (next_char's
-                        // inlined peek guards re-read
-                        // `state.source` after the `source`
-                        // field) dies E0382. The Phase 39
-                        // Concat-Var treatment, at the one
-                        // position this arm controls: an
-                        // owned copy. The IR is pure, so the
-                        // clone is value-transparent.
-                        IRNode::FieldAccess { .. } => {
-                            format!("{}.clone()", ir_to_rust_expr(v))
-                        }
-                        _ => ir_to_rust_expr(v),
-                    };
-                    format!("{}: {}", rust_ident(n), value_text)
-                })
+                .map(|(n, v)| format!("{}: {}", rust_ident(n), render_value(v)))
                 .collect();
             format!("{} {{ {} }}", rust_ident(type_name), fields_str.join(", "))
         }

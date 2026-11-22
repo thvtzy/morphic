@@ -4889,6 +4889,49 @@ fn record_completion_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNo
         return None;
     }
     let guard_ir = denotation_ir(guard?)?;
+    // Phase 87: when the one guard feeds two or more
+    // fields' Ifs, bind it once in a Let and let every
+    // If test the bound name. The Phase 85 shape
+    // cloned the guard tree into each guarded field,
+    // and for the measured shape (next_char: the
+    // guard is the inlined peek) that evaluates peek —
+    // a full source count + nth scan — once per
+    // guarded field per call; the Phase 87 profile
+    // priced the duplication at ≈0.78 of the ratio
+    // on the big workload. The name must be fresh:
+    // not a parameter, not `output`, and not
+    // mentioned in any postcondition (every denotation
+    // piece derives from those, so a name absent from
+    // all three cannot be captured or shadowed into
+    // a different meaning). A trivial guard (a bare
+    // Var or Literal) is not worth a binding. If no
+    // candidate name is fresh, the unshared body
+    // stands.
+    let guarded_fields = declared
+        .iter()
+        .filter(|(n, _)| {
+            on_true.contains_key(n.as_str()) || on_false.contains_key(n.as_str())
+        })
+        .count();
+    let shared_name: Option<String> =
+        if guarded_fields >= 2 && !matches!(guard_ir, IRNode::Var(_) | IRNode::Literal(_)) {
+            ["__rc_guard", "__rc_guard_2", "__rc_guard_3"]
+                .iter()
+                .find(|cand| {
+                    spec.params.iter().all(|p| p.name != **cand)
+                        && **cand != OUTPUT_VAR
+                        && spec.postconditions.iter().all(|c| {
+                            !matches!(c, Constraint::Expr(e) if expr_mentions_var(e, cand))
+                        })
+                })
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+    let cond_ir: IRNode = match &shared_name {
+        Some(n) => IRNode::Var(n.clone()),
+        None => guard_ir.clone(),
+    };
     let carry = |field: &str| IRNode::FieldAccess {
         base: Box::new(IRNode::Var(base.name.clone())),
         field: field.into(),
@@ -4900,17 +4943,17 @@ fn record_completion_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNo
         } else {
             match (on_true.get(name.as_str()), on_false.get(name.as_str())) {
                 (Some(t), Some(f)) => IRNode::If {
-                    condition: Box::new(guard_ir.clone()),
+                    condition: Box::new(cond_ir.clone()),
                     then_branch: Box::new(denotation_ir(t)?),
                     else_branch: Box::new(denotation_ir(f)?),
                 },
                 (Some(t), None) => IRNode::If {
-                    condition: Box::new(guard_ir.clone()),
+                    condition: Box::new(cond_ir.clone()),
                     then_branch: Box::new(denotation_ir(t)?),
                     else_branch: Box::new(carry(name)),
                 },
                 (None, Some(f)) => IRNode::If {
-                    condition: Box::new(guard_ir.clone()),
+                    condition: Box::new(cond_ir.clone()),
                     then_branch: Box::new(carry(name)),
                     else_branch: Box::new(denotation_ir(f)?),
                 },
@@ -4919,9 +4962,17 @@ fn record_completion_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNo
         };
         fields.push((name.clone(), value));
     }
-    Some(IRNode::RecordLit {
+    let record = IRNode::RecordLit {
         type_name: resolved,
         fields,
+    };
+    Some(match shared_name {
+        Some(n) => IRNode::Let {
+            name: n,
+            value: Box::new(guard_ir),
+            body: Box::new(record),
+        },
+        None => record,
     })
 }
 
@@ -5134,15 +5185,18 @@ fn tokenize_classifier(index: &SpecIndex, name: &str) -> bool {
 /// tokenizer's signatures.
 ///
 /// STEP form (the spec returns Result<R, String>):
-/// skip_whitespace, then a peek dispatch — None is
-/// the end-of-input Ok; an ident-start char consumes
-/// an identifier through the is_ident_continue loop;
-/// the seven punctuation chars stamp their mirror
-/// kinds (LPAREN 3, RPAREN 4, LBRACE 5, RBRACE 6,
-/// COLON 7, COMMA 9, LT 10, GT 11, EQ 12 — the
-/// mirror's table, stated here as data); anything
-/// else is the error arm. The token stamps the
-/// post-skip state's line/col (the D4a START rule)
+/// skip_whitespace, then a dispatch on the current
+/// char — end of input is the Ok arm; an ident-start
+/// char consumes an identifier through the
+/// is_ident_continue loop; the seven punctuation
+/// chars stamp their mirror kinds (LPAREN 3,
+/// RPAREN 4, LBRACE 5, RBRACE 6, COLON 7, COMMA 9,
+/// LT 10, GT 11, EQ 12 — the mirror's table, stated
+/// here as data); anything else is the error arm.
+/// (Phase 87: the dispatch reads the char by Index
+/// under a length test rather than matching on a
+/// by-value peek — see the body.) The token stamps
+/// the post-skip state's line/col (the D4a START rule)
 /// and the consumed state's fields close the step.
 /// The error arm's message is the constant
 /// "Unexpected character": the mirror's full text
@@ -5157,13 +5211,15 @@ fn tokenize_classifier(index: &SpecIndex, name: &str) -> bool {
 /// LOOP form (the spec returns Result<List<T>,
 /// String>): the step spec is found in the index by
 /// the STEP keying itself and called by its name;
-/// the loop runs while peek is not None, threading
-/// the state through the step's Ok payload
-/// (TryPropagate), and returns the final state's
-/// tokens.
+/// the loop threads the state through the step's Ok
+/// payload (TryPropagate) and returns the final
+/// state's tokens. Phase 87: the loop breaks on the
+/// step's position progress (see the body) rather
+/// than testing peek per token.
 ///
 /// Admission standard — stated, not smuggled: the
-/// bodies contain While, which the encoder has no
+/// bodies contain loops (While at Phase 85, Loop
+/// since Phase 87), which the encoder has no
 /// arm for, so no encodability gate can pass them;
 /// like the char_equation family before the D5a
 /// encoding, this family is admitted knowing Z3
@@ -5225,8 +5281,12 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
         }
     };
     // A token of the token shape stamped at the
-    // post-skip state's position (D4a START).
-    let token_record = |kind: IRNode, lexeme: IRNode| {
+    // post-skip state's position (D4a START). The
+    // stamp reads are the caller's to supply: the
+    // ident arm reads them off the post-skip state
+    // directly (it stays live), the punctuation arms
+    // bind them into locals first (below).
+    let token_record = |kind: IRNode, lexeme: IRNode, stamp_line: IRNode, stamp_col: IRNode| {
         let fields = shape
             .token_fields
             .iter()
@@ -5234,8 +5294,8 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
                 let value = match n.as_str() {
                     "kind" => kind.clone(),
                     "lexeme" => lexeme.clone(),
-                    "line" => fa(v("s"), "line"),
-                    "col" => fa(v("s"), "col"),
+                    "line" => stamp_line.clone(),
+                    "col" => stamp_col.clone(),
                     _ => lit_i(0),
                 };
                 (n.clone(), value)
@@ -5270,12 +5330,28 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
         }
         // The single-character arm for one punctuation
         // char: consume it, stamp its kind, close.
+        // Phase 87: the stamp (line/col) is bound into
+        // locals BEFORE the consume, so `next_char` is
+        // the post-skip state's last use and moves it
+        // bare — the Phase 85 shape cloned the whole
+        // state (String + token Vec) here because the
+        // token record still read `s` after the call.
         let punct_arm = |kind: i64, ch: &str| {
             IRNode::Block(vec![
                 IRNode::Alloc {
+                    name: "stamp_line".to_string(),
+                    ty: TypeRef::Int,
+                    initial: Box::new(fa(v("s"), "line")),
+                },
+                IRNode::Alloc {
+                    name: "stamp_col".to_string(),
+                    ty: TypeRef::Int,
+                    initial: Box::new(fa(v("s"), "col")),
+                },
+                IRNode::Alloc {
                     name: "end".to_string(),
                     ty: state_ty.clone(),
-                    initial: Box::new(call("next_char", vec![vc("s")])),
+                    initial: Box::new(call("next_char", vec![v("s")])),
                 },
                 IRNode::Alloc {
                     name: "toks".to_string(),
@@ -5287,7 +5363,12 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
                 IRNode::BinOp(
                     IRBinOp::Append,
                     Box::new(v("toks")),
-                    Box::new(token_record(lit_i(kind), lit_s(ch))),
+                    Box::new(token_record(
+                        lit_i(kind),
+                        lit_s(ch),
+                        v("stamp_line"),
+                        v("stamp_col"),
+                    )),
                 ),
                 IRNode::Return(Box::new(call(
                     "Ok",
@@ -5297,24 +5378,22 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
         };
         // The identifier arm: consume while the
         // classifiers continue, accumulating the
-        // lexeme a char at a time (the mirror's own
-        // loop shape), then stamp kind 0 (IDENT).
-        let peek_is_continue = IRNode::Match {
-            scrutinee: Box::new(call("peek", vec![vc("cur")])),
-            cases: vec![
-                (
-                    IRPattern::Constructor("None".to_string(), vec![]),
-                    IRNode::Literal(IRLiteral::Bool(false)),
-                ),
-                (
-                    IRPattern::Constructor(
-                        "Some".to_string(),
-                        vec![IRPattern::Variable("ch".to_string())],
-                    ),
-                    call("is_ident_continue", vec![v("ch")]),
-                ),
-            ],
-        };
+        // lexeme a char at a time, then stamp kind 0
+        // (IDENT). Phase 87: the loop reads the
+        // current char by Index (the Phase 85 index
+        // rendering: chars().nth off the state's own
+        // source/pos, totalized to the NUL sentinel
+        // out of range) instead of matching on
+        // peek(cur.clone()) — the by-value peek cloned
+        // the whole state on every char, and the
+        // profile priced those clones as the step's
+        // dominant remaining cost. The shapes agree
+        // wherever the mirror's peek does: out of
+        // range reads as the sentinel, which is not
+        // an ident-continue char, so the loop breaks
+        // at EOF exactly where peek's None breaks it;
+        // a genuine NUL char breaks it too, exactly
+        // where peek's Some('\0') fails the classifier.
         let ident_arm = IRNode::Block(vec![
             IRNode::Alloc {
                 name: "lexeme".to_string(),
@@ -5326,38 +5405,40 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
                 ty: state_ty.clone(),
                 initial: Box::new(vc("s")),
             },
-            IRNode::While {
-                condition: Box::new(peek_is_continue),
-                body: Box::new(IRNode::Block(vec![IRNode::Match {
-                    scrutinee: Box::new(call("peek", vec![vc("cur")])),
-                    cases: vec![
-                        (
-                            IRPattern::Constructor("None".to_string(), vec![]),
-                            IRNode::Block(vec![]),
-                        ),
-                        (
-                            IRPattern::Constructor(
-                                "Some".to_string(),
-                                vec![IRPattern::Variable("ch".to_string())],
+            IRNode::Loop {
+                body: Box::new(IRNode::Block(vec![
+                    IRNode::Alloc {
+                        name: "ch".to_string(),
+                        ty: TypeRef::Char,
+                        initial: Box::new(IRNode::Index(
+                            Box::new(fa(v("cur"), "source")),
+                            Box::new(fa(v("cur"), "pos")),
+                        )),
+                    },
+                    IRNode::If {
+                        condition: Box::new(call(
+                            "is_ident_continue",
+                            vec![v("ch")],
+                        )),
+                        then_branch: Box::new(IRNode::Block(vec![
+                            IRNode::BinOp(
+                                IRBinOp::Append,
+                                Box::new(v("lexeme")),
+                                Box::new(v("ch")),
                             ),
-                            IRNode::Block(vec![
-                                IRNode::BinOp(
-                                    IRBinOp::Append,
-                                    Box::new(v("lexeme")),
-                                    Box::new(v("ch")),
-                                ),
-                                IRNode::Assign {
-                                    target: Box::new(v("cur")),
-                                    value: Box::new(call(
-                                        "next_char",
-                                        vec![v("cur")],
-                                    )),
-                                },
-                            ]),
-                        ),
-                    ],
-                }])),
-                invariant: None,
+                            IRNode::Assign {
+                                target: Box::new(v("cur")),
+                                value: Box::new(call(
+                                    "next_char",
+                                    vec![v("cur")],
+                                )),
+                            },
+                        ])),
+                        else_branch: Box::new(IRNode::Block(vec![IRNode::Break {
+                            value: None,
+                        }])),
+                    },
+                ])),
             },
             IRNode::Alloc {
                 name: "toks".to_string(),
@@ -5369,7 +5450,12 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
             IRNode::BinOp(
                 IRBinOp::Append,
                 Box::new(v("toks")),
-                Box::new(token_record(lit_i(0), v("lexeme"))),
+                Box::new(token_record(
+                    lit_i(0),
+                    v("lexeme"),
+                    fa(v("s"), "line"),
+                    fa(v("s"), "col"),
+                )),
             ),
             IRNode::Return(Box::new(call(
                 "Ok",
@@ -5423,22 +5509,41 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
                 ty: state_ty.clone(),
                 initial: Box::new(call("skip_whitespace", vec![v(&param)])),
             },
-            IRNode::Return(Box::new(IRNode::Match {
-                scrutinee: Box::new(call("peek", vec![vc("s")])),
-                cases: vec![
-                    (
-                        IRPattern::Constructor("None".to_string(), vec![]),
-                        call("Ok", vec![v("s")]),
-                    ),
-                    (
-                        IRPattern::Constructor(
-                            "Some".to_string(),
-                            vec![IRPattern::Variable("c".to_string())],
-                        ),
-                        dispatch,
-                    ),
-                ],
-            })),
+            // Phase 87: the dispatch reads the current
+            // char by Index under an explicit EOF test
+            // instead of matching on peek(s.clone()) —
+            // the by-value peek cloned the whole state
+            // on every step (see the ident arm's note
+            // for the agreement argument: the length
+            // test takes the Ok arm exactly where
+            // peek's None does, and a genuine NUL char
+            // falls through every classifier and
+            // punctuation test to the error arm,
+            // exactly where peek's Some('\0') lands).
+            // The `len` call's argument is the source
+            // projection, so the Phase 85 len rendering
+            // gives it the char-count form.
+            IRNode::If {
+                condition: Box::new(IRNode::BinOp(
+                    IRBinOp::Ge,
+                    Box::new(fa(v("s"), "pos")),
+                    Box::new(call("len", vec![fa(v("s"), "source")])),
+                )),
+                then_branch: Box::new(IRNode::Block(vec![IRNode::Return(Box::new(
+                    call("Ok", vec![v("s")]),
+                ))])),
+                else_branch: Box::new(IRNode::Block(vec![
+                    IRNode::Alloc {
+                        name: "c".to_string(),
+                        ty: TypeRef::Char,
+                        initial: Box::new(IRNode::Index(
+                            Box::new(fa(v("s"), "source")),
+                            Box::new(fa(v("s"), "pos")),
+                        )),
+                    },
+                    dispatch,
+                ])),
+            },
         ]));
     }
 
@@ -5487,12 +5592,34 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
                 ty: state_ty.clone(),
                 initial: Box::new(v(&param)),
             },
-            IRNode::While {
-                condition: Box::new(IRNode::BinOp(
-                    IRBinOp::Neq,
-                    Box::new(call("peek", vec![vc("s")])),
-                    Box::new(call("None", vec![])),
-                )),
+            // Phase 87: the loop runs on a position-
+            // progress break instead of the Phase 85
+            // While over `peek(s.clone()) != None` —
+            // that condition cloned the whole state
+            // (String + the growing token Vec) and ran
+            // peek's source scan once per token, and
+            // the profile priced the clone as the loop
+            // form's dominant cost. The break is the
+            // same EOF test stated on the step's own
+            // contract: the step this builder keys on
+            // returns Ok with the position advanced
+            // exactly when it appended a token (its
+            // ident/punctuation arms consume a char;
+            // its EOF arm — reached after the skip, so
+            // trailing whitespace may still advance the
+            // position once, into the final no-progress
+            // step — changes nothing). A step that
+            // leaves the position unchanged is the EOF
+            // step; errors leave through TryPropagate
+            // before the test. (The peek-callee
+            // requirement above stands: the step this
+            // loop drives still keys on peek.)
+            IRNode::Alloc {
+                name: "prev".to_string(),
+                ty: TypeRef::Int,
+                initial: Box::new(fa(v("s"), "pos")),
+            },
+            IRNode::Loop {
                 body: Box::new(IRNode::Block(vec![
                     IRNode::Alloc {
                         name: "step".to_string(),
@@ -5506,8 +5633,22 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
                         target: Box::new(v("s")),
                         value: Box::new(v("step")),
                     },
+                    IRNode::If {
+                        condition: Box::new(IRNode::BinOp(
+                            IRBinOp::Eq,
+                            Box::new(fa(v("s"), "pos")),
+                            Box::new(v("prev")),
+                        )),
+                        then_branch: Box::new(IRNode::Block(vec![IRNode::Break {
+                            value: None,
+                        }])),
+                        else_branch: Box::new(IRNode::Block(vec![])),
+                    },
+                    IRNode::Assign {
+                        target: Box::new(v("prev")),
+                        value: Box::new(fa(v("s"), "pos")),
+                    },
                 ])),
-                invariant: None,
             },
             IRNode::Return(Box::new(call(
                 "Ok",
@@ -6401,6 +6542,22 @@ impl SpecIndex {
                     fields: out,
                 })
             }
+            // Phase 87 shape widening (see inline_rec's
+            // Phase 81 note): Let joins the resolver's
+            // set so a denotation may bind a shared
+            // subterm — the record-completion seed's
+            // shared guard (Phase 87) is its first
+            // consumer. The bound name is a binder:
+            // calls in the value resolve in the caller's
+            // context (the value sits outside the
+            // binder's scope), calls in the body under
+            // it; substitution below treats the name
+            // exactly like a match binder.
+            IRNode::Let { name, value, body } => Some(IRNode::Let {
+                name: name.clone(),
+                value: Box::new(self.inline_rec(value, visiting, depth)?),
+                body: Box::new(self.inline_rec(body, visiting, depth)?),
+            }),
             _ => None,
         }
     }
@@ -6478,6 +6635,15 @@ fn collect_pattern_binders<'a>(node: &'a IRNode, out: &mut Vec<&'a str>) {
                 collect_pattern_binders(v, out);
             }
         }
+        // Phase 87: a Let's name is a binder for the
+        // capture screen's purposes, exactly like a
+        // match variable — an argument mentioning it
+        // freely must not be substituted under it.
+        IRNode::Let { name, value, body } => {
+            out.push(name.as_str());
+            collect_pattern_binders(value, out);
+            collect_pattern_binders(body, out);
+        }
         _ => {}
     }
 }
@@ -6527,6 +6693,15 @@ fn collect_free_vars(node: &IRNode, out: &mut Vec<String>) -> Option<()> {
                 collect_free_vars(v, out)?;
             }
             Some(())
+        }
+        // Phase 87 shape widening (see inline_rec).
+        // The walk is the same over-approximation the
+        // Match arm makes: the bound name's uses in
+        // the body are collected as if free, which can
+        // only make the capture screen refuse more.
+        IRNode::Let { value, body, .. } => {
+            collect_free_vars(value, out)?;
+            collect_free_vars(body, out)
         }
         _ => None,
     }
@@ -6616,6 +6791,22 @@ fn substitute_rec(
             Some(IRNode::RecordLit {
                 type_name: type_name.clone(),
                 fields: out,
+            })
+        }
+        // Phase 87 shape widening (see inline_rec):
+        // the Let's value substitutes under the
+        // caller's shadowing; its body substitutes
+        // with the bound name shadowing, exactly like
+        // a match variable's arm above.
+        IRNode::Let { name, value, body } => {
+            let value = Box::new(substitute_rec(value, params, args, shadowed)?);
+            let mut inner = shadowed.to_vec();
+            inner.push(name.as_str());
+            let body = Box::new(substitute_rec(body, params, args, &inner)?);
+            Some(IRNode::Let {
+                name: name.clone(),
+                value,
+                body,
             })
         }
         _ => None,
@@ -9060,8 +9251,28 @@ spec exclaim {
         let spec = tokenizer_spec(&module.functions, "next_char");
         let body = record_completion_body(&spec, &index)
             .expect("next_char must complete after Phase 81");
-        let IRNode::RecordLit { type_name, fields } = &body else {
-            panic!("record completion must build a RecordLit, got {:?}", body);
+        // Phase 87 re-statement: the guard feeds two
+        // fields (line, col), so the builder binds it
+        // once in a Let and the fields test the bound
+        // name — the Phase 81 shape cloned the guard
+        // tree (the inlined peek: a full source scan)
+        // into every guarded field. Unwrap the Let to
+        // the construction it binds.
+        let IRNode::Let {
+            name: guard_name,
+            value: guard_value,
+            body: record,
+        } = &body
+        else {
+            panic!("record completion must bind the shared guard, got {:?}", body);
+        };
+        assert!(
+            format!("{:?}", guard_value).contains("peek"),
+            "the bound value must be the guard (with its peek call): {:?}",
+            guard_value
+        );
+        let IRNode::RecordLit { type_name, fields } = record.as_ref() else {
+            panic!("the Let's body must be the RecordLit, got {:?}", record);
         };
         assert_eq!(type_name, "TokenizerState");
         let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
@@ -9072,6 +9283,18 @@ spec exclaim {
         assert!(matches!(fields[1].1, IRNode::BinOp(..)));
         assert!(matches!(fields[2].1, IRNode::If { .. }));
         assert!(matches!(fields[3].1, IRNode::If { .. }));
+        // Phase 87: both guarded fields test the bound
+        // name, not a cloned guard tree.
+        for f in [&fields[2].1, &fields[3].1] {
+            let IRNode::If { condition, .. } = f else {
+                unreachable!()
+            };
+            assert!(
+                matches!(condition.as_ref(), IRNode::Var(n) if n == guard_name),
+                "a guarded field must test the Let's name: {:?}",
+                f
+            );
+        }
         assert!(matches!(fields[0].1, IRNode::FieldAccess { .. }));
         assert!(matches!(fields[4].1, IRNode::FieldAccess { .. }));
         // The seed resolves the guard's peek call and fires.
