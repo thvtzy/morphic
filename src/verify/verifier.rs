@@ -14109,5 +14109,313 @@ spec unguarded {
         );
         println!("P97|w8|totalization|real row 1: pc ∧ ¬row UNSAT under any payload term — route (i) subsumes route (ii)");
     }
+
+    // ── Phase 99 scratch probes (F2 audit) ──────────────
+    //
+    // MEASUREMENT ONLY: these tests add NO production
+    // encoder arm and change NO production behavior. They
+    // pin, for the F2 design record (F2_DESIGN.md):
+    //   (1) the SMT-LIB `int.to.str` semantics of the
+    //       bundled solver, measured through
+    //       `Solver::from_string` — the ONLY way to reach
+    //       the operator from this crate, because the
+    //       pinned z3 crate (0.20) exposes no term
+    //       constructor for it and its `Context` raw
+    //       handle is crate-private (`pub(crate)`);
+    //   (2) that both production encoders decline a
+    //       conversion call today;
+    //   (3) that the proposed encoder arm — literal fold
+    //       + uninterpreted function (UF) for symbolic
+    //       args — leaves tokenize_one's REAL rows fully
+    //       decisive (they never read the Err payload);
+    //   (4) the UF arm's exact completeness boundary: a
+    //       row that DOES read the payload is not
+    //       provable under UF, and is provable under the
+    //       literal fold;
+    //   (5) the Rust Display reference semantics the
+    //       feature must match.
+
+    /// Phase 99 probe (1): SMT-LIB `int.to.str`, ground
+    /// semantics. Positives and zero match Rust's
+    /// `format!("{}", n)` exactly, with no leading zeros;
+    /// NEGATIVES map to the empty string — the SMT-LIB
+    /// definition — which DIVERGES from Rust ("-42").
+    /// The sign-split formula `ite(n<0, "-" ++
+    /// int.to.str(-n), int.to.str(n))` expresses the Rust
+    /// semantics inside SMT-LIB: the solver CAN decide
+    /// the exact conversion; what the pinned safe API
+    /// lacks is the term constructor (probe 2's context).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase99_probe_int_to_str_smtlib_semantics() {
+        let check = |smt: &str| {
+            let solver = z3::Solver::new();
+            solver.from_string(smt.to_string());
+            solver.check()
+        };
+        assert_eq!(
+            check("(assert (= (int.to.str 0) \"0\"))"),
+            z3::SatResult::Sat,
+            "int.to.str 0 is \"0\""
+        );
+        assert_eq!(
+            check("(assert (= (int.to.str 42) \"42\"))"),
+            z3::SatResult::Sat
+        );
+        assert_eq!(
+            check("(assert (= (int.to.str 1000000) \"1000000\"))"),
+            z3::SatResult::Sat
+        );
+        assert_eq!(
+            check("(assert (= (int.to.str 42) \"042\"))"),
+            z3::SatResult::Unsat,
+            "no leading zeros"
+        );
+        assert_eq!(
+            check("(assert (= (int.to.str (- 42)) \"\"))"),
+            z3::SatResult::Sat,
+            "SMT-LIB: a negative maps to the empty string"
+        );
+        assert_eq!(
+            check("(assert (= (int.to.str (- 42)) \"-42\"))"),
+            z3::SatResult::Unsat,
+            "SMT-LIB int.to.str NEVER produces the Rust \"-42\""
+        );
+        // The sign-split formula, at the same ground point:
+        assert_eq!(
+            check(
+                "(assert (= (ite (< (- 42) 0) \
+                 (str.++ \"-\" (int.to.str (- (- 42)))) \
+                 (int.to.str (- 42))) \"-42\"))"
+            ),
+            z3::SatResult::Sat,
+            "sign-split expresses Rust Display in SMT-LIB"
+        );
+        assert_eq!(
+            check(
+                "(assert (= (ite (< 7 0) \
+                 (str.++ \"-\" (int.to.str (- 7))) \
+                 (int.to.str 7)) \"7\"))"
+            ),
+            z3::SatResult::Sat
+        );
+        println!(
+            "P99|int.to.str SMT-LIB: 0/positives Rust-exact, no leading \
+             zeros, negatives -> \"\" (diverges from Rust); sign-split \
+             formula expresses Rust semantics in the solver"
+        );
+    }
+
+    /// Phase 99 probe (5): the reference semantics —
+    /// Rust's `Display` for i64 (the compiled mirror's
+    /// `format!` at tests/tokenizer_proof.rs:129), which
+    /// the interpreter and every emitter must match,
+    /// negatives and extremes included.
+    #[test]
+    fn phase99_probe_rust_display_reference() {
+        assert_eq!(format!("{}", 0), "0");
+        assert_eq!(format!("{}", 7), "7");
+        assert_eq!(format!("{}", -1), "-1");
+        assert_eq!(format!("{}", -42), "-42");
+        assert_eq!(format!("{}", 1_000_000), "1000000");
+        assert_eq!(format!("{}", i64::MAX), "9223372036854775807");
+        assert_eq!(format!("{}", i64::MIN), "-9223372036854775808");
+        println!(
+            "P99|Rust Display reference: 0, positives plain, negatives \
+             carry '-', i64 extremes exact"
+        );
+    }
+
+    /// Phase 99 probe (2): today, a conversion call is
+    /// inexpressible in BOTH encoders — the body side
+    /// (`sym_call` falls through to `sym_invoke`, which
+    /// finds no such spec) and the constraint side
+    /// (`encode_expr`'s Call arm, same fall-through).
+    /// This is the exact decline the F2 build removes.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase99_probe_encoders_decline_conversion_today() {
+        let index = SpecIndex::empty();
+        let ctx = EvalCtx::root(&index);
+        let mut env = SymEnv::new();
+        let body = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![IRNode::Literal(IRLiteral::Int(42))],
+        };
+        assert!(
+            sym_eval(&body, &mut env, &ctx).is_none(),
+            "body-side encoder must decline the conversion today"
+        );
+        let expr = Expr::Call("int_to_str".into(), vec![Expr::IntLit(42)]);
+        assert!(
+            encode_expr(&expr, &env, &ctx).is_none(),
+            "constraint-side encoder must decline the conversion today"
+        );
+        println!(
+            "P99|today: sym_eval and encode_expr both decline \
+             Call(int_to_str) — the F2 gap, pinned"
+        );
+    }
+
+    /// Phase 99 probe (3): the proposed encoder arm —
+    /// UF for a symbolic argument — leaves tokenize_one's
+    /// REAL rows (examples module, as amended through
+    /// Phase 96) fully decisive, because neither row
+    /// reads the Err payload's content: row 1 reads the
+    /// tag + Ok payload, row 2 the tag + the input state.
+    /// The Err output below carries a message built
+    /// EXACTLY as the post-F2 body would build it —
+    /// literal prefix ++ indexed char ++ literal ++
+    /// conversion(line) — with the conversion as a UF
+    /// application over a FREE line constant.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase99_probe_uf_arm_rows_still_decide() {
+        let module = phase84_real_module();
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let verifier = Verifier::with_module(&module);
+        let uf = z3::FuncDecl::new(
+            "phase99_int_to_str",
+            &[&z3::Sort::int()],
+            &z3::Sort::string(),
+        );
+        let line = z3::ast::Int::fresh_const("p99_line");
+        let msg = z3::ast::String::concat(&[
+            &z3::ast::String::from_str("Unexpected character '5' at line ")
+                .unwrap(),
+            &uf.apply(&[&line as &dyn z3::ast::Ast])
+                .as_string()
+                .expect("UF range is String"),
+        ]);
+        let output = Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(Sym::Str(msg))),
+        };
+        // The faithful Err point " 5" (post-skip char '5'
+        // is no token start): BOTH rows must Prove with
+        // the UF payload — the payload term blocks
+        // nothing.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), phase84_state(" 5", 0, 0));
+        for (i, row) in spec.postconditions.iter().enumerate() {
+            let (_, tri) = verifier.verify_constraint(
+                row,
+                &format!("p99-row{}", i + 1),
+                &spec,
+                &env,
+                &Some(output.clone()),
+            );
+            assert!(
+                matches!(tri, Tri::Proven),
+                "row {} must Prove at the faithful Err point with a \
+                 UF-built message payload",
+                i + 1
+            );
+        }
+        // Teeth: the same UF-payload Err at "spec 5"
+        // (ident start at the post-skip position — no Err
+        // license) must stay REFUTED by row 2: the UF
+        // payload buys no admission.
+        let mut env2 = SymEnv::new();
+        env2.insert("state".into(), phase84_state("spec 5", 0, 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "p99-row2-teeth",
+            &spec,
+            &env2,
+            &Some(output),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row 2 must still refute an unlicensed Err with a UF payload"
+        );
+        println!(
+            "P99|UF arm: tokenize_one rows 1+2 Proven at \" 5\" with a \
+             UF-built Err message over a free line; row 2 still Refutes \
+             the unlicensed Err at \"spec 5\""
+        );
+    }
+
+    /// Phase 99 probe (4): the UF arm's completeness
+    /// boundary, stated as a measurement. A scratch row
+    /// that DOES read the payload — `output == Err("…
+    /// line 1")` — is NOT provable when the payload is a
+    /// UF application (even at the literal argument 1:
+    /// the solver may interpret the UF otherwise), and
+    /// IS provable when the payload is the literal fold
+    /// (the exact string). Soundness direction: UF can
+    /// only ever cost Proven verdicts (Unknown), never
+    /// manufacture them; and a Refuted drawn through a
+    /// UF term would be untrustworthy for the same
+    /// reason — the build's judge discipline must treat
+    /// UF-carrying refutations as Unknown (the Phase 97
+    /// per-disjunct precedent: the recovery never
+    /// Refutes).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase99_probe_uf_completeness_boundary() {
+        let index = SpecIndex::empty();
+        let ctx = EvalCtx::root(&index);
+        let exact = "Unexpected character '5' at line 1";
+        let row = Constraint::Eq(
+            Expr::Var("output".into()),
+            Expr::Call(
+                "Err".into(),
+                vec![Expr::StringLit(exact.into())],
+            ),
+        );
+        let uf = z3::FuncDecl::new(
+            "phase99_int_to_str_b",
+            &[&z3::Sort::int()],
+            &z3::Sort::string(),
+        );
+        let one = z3::ast::Int::from_i64(1);
+        let uf_msg = z3::ast::String::concat(&[
+            &z3::ast::String::from_str("Unexpected character '5' at line ")
+                .unwrap(),
+            &uf.apply(&[&one as &dyn z3::ast::Ast])
+                .as_string()
+                .expect("UF range is String"),
+        ]);
+        let mk_out = |payload: z3::ast::String| Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(Sym::Str(payload))),
+        };
+        // UF payload: pc ∧ ¬row is SAT — the row is not
+        // provable (the honest verdict would be Unknown).
+        let mut env = SymEnv::new();
+        env.insert("output".into(), mk_out(uf_msg));
+        let formula = encode_constraint(&row, &env, &ctx)
+            .expect("the scratch row encodes");
+        let solver = z3::Solver::new();
+        solver.assert(&formula.not());
+        assert_eq!(
+            solver.check(),
+            z3::SatResult::Sat,
+            "a payload-reading row must NOT be provable under a UF payload"
+        );
+        // Literal-fold payload: pc ∧ ¬row is UNSAT —
+        // the row Proves.
+        let mut env2 = SymEnv::new();
+        env2.insert(
+            "output".into(),
+            mk_out(z3::ast::String::from_str(exact).unwrap()),
+        );
+        let formula2 = encode_constraint(&row, &env2, &ctx)
+            .expect("the scratch row encodes");
+        let solver2 = z3::Solver::new();
+        solver2.assert(&formula2.not());
+        assert_eq!(
+            solver2.check(),
+            z3::SatResult::Unsat,
+            "the same row must Prove under the literal-fold payload"
+        );
+        println!(
+            "P99|UF boundary: payload-reading row unprovable under UF \
+             (SAT countermodel), provable under the literal fold (UNSAT)"
+        );
+    }
 }
 
