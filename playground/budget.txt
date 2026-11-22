@@ -1,4 +1,4 @@
-673792
+771072
 # Morphic playground bundle budget (v0.6 W4, Phase 69).
 #
 # The number on the first line is the maximum permitted size,
@@ -12,6 +12,18 @@
 # KiB: ceil(611,728 * 1.10 / 1024) * 1024 = 673,792.
 # History: W1 baseline 546,229 B; W2 547,342 B (+0.20%);
 # W3 611,728 B (+11.8%, synthesis renders); W4 611,728 B.
+#
+# Re-baselined 2026-11-22 (Phase 89, the M1-features merge):
+# the bundle stands measured at 700,674 B (the Phase 85
+# rebuild — the M1 language features: method calls, IR field
+# access, record literals, the Z3 Char encoding — pulled
+# into the WASM graph; corpus agreement 13/13 check + 5/5
+# synthesis at that size). Same formula as W4:
+# ceil(700,674 * 1.10 / 1024) * 1024 = 771,072.
+# Owner-ratified as part of the 2026-11-22 merge decision
+# (merge the M1-features stack now, the M1 gate formally
+# open at its two named deviations). Previous figure:
+# 673,792 B.
 #
 # Enforced by .github/workflows/playground.yml on every
 # push/PR that touches the playground path. Re-baselining
