@@ -1340,13 +1340,14 @@ fn rust_sort_text(coll: &str, cmp: &str) -> String {
 /// name — 0 = plain call template, 1 = vec literal
 /// ("List"), 2 = bare constructor ("None"), 3 = the
 /// "len" builtin (sub-dispatched by
-/// rust_call_len_form). Total: every other name is
-/// family 0.
+/// rust_call_len_form), 4 = the "int_to_str" builtin
+/// (Phase 102). Total: every other name is family 0.
 fn rust_call_form(name: &str) -> i64 {
     match name {
         "List" => 1,
         "None" => 2,
         "len" => 3,
+        "int_to_str" => 4,
         _ => 0,
     }
 }
@@ -1373,6 +1374,13 @@ fn rust_call_len_text(arg: &str) -> String {
 /// the character-count len rendering.
 fn rust_call_len_char_text(arg: &str) -> String {
     format!("({}).chars().count() as i64", arg)
+}
+
+/// Mirror of `rust_call_int_to_str_text` (Phase 102):
+/// the decimal-text rendering of the 'int_to_str'
+/// builtin.
+fn rust_call_int_to_str_text(arg: &str) -> String {
+    format!("({}).to_string()", arg)
 }
 
 /// Mirror of `rust_index_form` (Phase 85): which
@@ -1403,13 +1411,16 @@ fn rust_index_char_text(coll: &str, idx: &str) -> String {
 /// effective name (the argument-count fold) classifies
 /// through rust_call_form, family 3 sub-dispatches
 /// through rust_call_len_form over the argument's
-/// shape — the native ir_call_text's decision,
-/// composed from the mirrors exactly as the composed
-/// assembly composes it from the winners.
+/// shape, family 4 (Phase 102) renders through
+/// rust_call_int_to_str_text — the native
+/// ir_call_text's decision, composed from the mirrors
+/// exactly as the composed assembly composes it from
+/// the winners.
 fn ir_call_dispatched_mirror(name: &str, args: &[Expr]) -> String {
     let eff = match name {
         "None" if !args.is_empty() => "",
         "len" if args.len() != 1 => "",
+        "int_to_str" if args.len() != 1 => "",
         other => other,
     };
     match rust_call_form(eff) {
@@ -1421,6 +1432,7 @@ fn ir_call_dispatched_mirror(name: &str, args: &[Expr]) -> String {
                 .join(", "),
         ),
         2 => rust_ident_verbatim(name),
+        4 => rust_call_int_to_str_text(&ir_expr_assembled(&args[0])),
         3 => {
             let argform = match &args[0] {
                 Expr::FieldAccess(..) => 1,
@@ -2404,6 +2416,7 @@ fn ir_stmt_assembled(s: &Stmt, indent: usize, fn_ret: i64) -> String {
             let eff = match *name {
                 "None" if !args.is_empty() => "",
                 "len" if args.len() != 1 => "",
+                "int_to_str" if args.len() != 1 => "",
                 other => other,
             };
             if rust_call_form(eff) == 0 {
@@ -4566,6 +4579,10 @@ mod golden_tests {
         assert_eq!(rust_call_form("List"), 1);
         assert_eq!(rust_call_form("None"), 2);
         assert_eq!(rust_call_form("len"), 3);
+        // Phase 102: family 4 joins the classification,
+        // with its own case near-miss.
+        assert_eq!(rust_call_form("int_to_str"), 4);
+        assert_eq!(rust_call_form("Int_to_str"), 0);
         assert_eq!(rust_call_form("Some"), 0);
         assert_eq!(rust_call_form("peek"), 0);
         assert_eq!(rust_call_form("Len"), 0);
@@ -4583,6 +4600,10 @@ mod golden_tests {
         assert_eq!(
             rust_call_len_char_text("state.source"),
             "(state.source).chars().count() as i64"
+        );
+        assert_eq!(
+            rust_call_int_to_str_text("state.line"),
+            "(state.line).to_string()"
         );
         assert_eq!(
             rust_index_char_text("state.source", "state.pos"),
@@ -4610,6 +4631,20 @@ mod golden_tests {
         assert_eq!(
             ir_expr_assembled(&Expr::Call("len", vec![Expr::Var("xs")])),
             "(xs).len() as i64"
+        );
+        // Phase 102: the int_to_str dispatch — the
+        // faithful form over a projection, and the
+        // wrong-arity fold back to the plain template.
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call("int_to_str", vec![fa("line")])),
+            "(state.line).to_string()"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call(
+                "int_to_str",
+                vec![Expr::Var("a"), Expr::Var("b")]
+            )),
+            "int_to_str(a, b)"
         );
         assert_eq!(
             ir_expr_assembled(&Expr::Index(Box::new(fa("source")), Box::new(fa("pos")))),
@@ -5606,11 +5641,12 @@ spec bad {
         // rust_record_lit_text), plus the 6 Phase 85 specs
         // (rust_call_form, rust_call_len_form, rust_call_len_text,
         // rust_call_len_char_text, rust_index_form,
-        // rust_index_char_text).
+        // rust_index_char_text), plus the 1 Phase 102 spec
+        // (rust_call_int_to_str_text).
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 129, "codegen.morph should declare 129 specs");
+        assert_eq!(spec_decls, 130, "codegen.morph should declare 130 specs");
         assert!(src.matches("test \"").count() >= 182, "codegen.morph should carry in-spec tests");
     }
 }

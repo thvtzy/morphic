@@ -661,7 +661,11 @@ impl Adapter {
     /// composed through the Phase 85 winners exactly as
     /// the emitter decides then renders — the gate
     /// assembly's helper, transcribed to direct calls.
-    /// Shared by the expression and statement walkers.
+    /// Family 4 (Phase 102: the 'int_to_str' builtin)
+    /// renders through the synthesized
+    /// rust_call_int_to_str_text winner over the single
+    /// argument. Shared by the expression and statement
+    /// walkers.
     fn call_dispatched_text(
         &self,
         function: &str,
@@ -670,6 +674,7 @@ impl Adapter {
         let eff_name: &str = match function {
             "None" if !args.is_empty() => "",
             "len" if args.len() != 1 => "",
+            "int_to_str" if args.len() != 1 => "",
             other => other,
         };
         let form = syn::rust_call_form::rust_call_form(eff_name.to_string());
@@ -680,6 +685,9 @@ impl Adapter {
                 syn::rust_expr_list_text::rust_expr_list_text(rendered?.join(", "))
             }
             2 => rust_ident(function),
+            4 => syn::rust_call_int_to_str_text::rust_call_int_to_str_text(
+                self.expr_text(&args[0])?,
+            ),
             3 => {
                 let argform: i64 = match &args[0] {
                     IRNode::FieldAccess { .. } => 1,
@@ -1061,6 +1069,7 @@ impl Adapter {
                 let eff_name: &str = match function.as_str() {
                     "None" if !args.is_empty() => "",
                     "len" if args.len() != 1 => "",
+                    "int_to_str" if args.len() != 1 => "",
                     other => other,
                 };
                 let form = syn::rust_call_form::rust_call_form(eff_name.to_string());
