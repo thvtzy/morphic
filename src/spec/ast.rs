@@ -228,6 +228,34 @@ pub enum Expr {
         collection: Box<Expr>,
         body: Box<Expr>,
     },
+    /// Method call: receiver.name(args...) (Phase 73, M1
+    /// feature 1, decision D1a). Appended at the END of this
+    /// enum and of the SpecExpr kind-code table the Codegen
+    /// specs pin (0–12 through Comprehension; CharLit holds
+    /// no code — the F4 dedicated-arm precedent): this
+    /// variant is kind 13 and no existing code moves.
+    /// The node is native (no parse-time desugar); which
+    /// methods exist is a closed builtin table the typechecker
+    /// owns (Phase 74): Result::{is_ok, is_err, unwrap},
+    /// List::len. The args vec is general even though every
+    /// ratified builtin is zero-argument.
+    MethodCall {
+        receiver: Box<Expr>,
+        name: String,
+        args: Vec<Expr>,
+    },
+    /// Record literal: TypeName { field: value, ... }
+    /// (Phase 73, M1 feature 3, decision D3a — named
+    /// construction; the bare `{ ... }` form was not
+    /// ratified). Appended at the END of this enum: kind 14
+    /// in the SpecExpr kind-code table. The type name is part
+    /// of the syntax, so the literal is self-describing; the
+    /// field set is validated against the declared record
+    /// type by the typechecker (Phase 74).
+    RecordLit {
+        type_name: String,
+        fields: Vec<(String, Expr)>,
+    },
 }
 
 /// Binary arithmetic/comparison operators

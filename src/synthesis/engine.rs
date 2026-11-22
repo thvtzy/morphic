@@ -321,6 +321,33 @@ pub enum IRNode {
     /// Try-operand: if Result is Err, propagate it up
     /// Equivalent to Rust's `?` operator
     TryPropagate(Box<IRNode>),
+
+    // ── M1 feature additions (Phase 73) ────────────────────
+
+    /// Field access on a record value: base.field
+    /// (M1 feature 2, decision D2a). Appended at the END of
+    /// this enum: kind 28 in the IRNode kind-code table the
+    /// Codegen specs pin (0–27 through TryPropagate); no
+    /// existing code moves. The interpreter's record value
+    /// lands in Phase 75 and the Z3 record encoding in
+    /// Phase 76 — until then the evaluation/encoding arms
+    /// are honest NotEvaluable/unencodable arms, named as
+    /// such at each site.
+    FieldAccess {
+        base: Box<IRNode>,
+        field: String,
+    },
+
+    /// Record construction: TypeName { field: value, ... }
+    /// (M1 feature 3, decision D3a — the IR half of the spec
+    /// level Expr::RecordLit). Appended at the END: kind 29.
+    /// Field order is the literal's written order; the
+    /// declared field order is a typechecker concern
+    /// (Phase 74).
+    RecordLit {
+        type_name: String,
+        fields: Vec<(String, IRNode)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -533,6 +560,20 @@ impl SynthesisEngine {
     pub fn with_module(config: SynthesisConfig, specs: &[FunctionSpec]) -> Self {
         let mut engine = Self::new(config);
         engine.spec_index = SpecIndex::from_specs(specs);
+        engine
+    }
+
+    /// An engine that knows the whole module INCLUDING its
+    /// type declarations (Phase 81): the record-era seed
+    /// families read declared record fields from the index
+    /// (the record-completion builder, remainder (i-b)),
+    /// exactly as the verifier's `with_module` index does
+    /// since Phase 76. Modules declaring no record types
+    /// behave identically under either constructor — the
+    /// declarations are inert for every other family.
+    pub fn with_module_spec(config: SynthesisConfig, module: &Spec) -> Self {
+        let mut engine = Self::new(config);
+        engine.spec_index = SpecIndex::from_module(module);
         engine
     }
 
@@ -844,6 +885,31 @@ impl SynthesisEngine {
         }
         if let Some(body) = mixed_pair_guard_table_seed_body(spec, &self.spec_index) {
             admit("mixed_pair_guard_table", body);
+        }
+        // Phase 81 (M1 remainders (i) + (i-b)): the two
+        // record-era families, appended after every
+        // standing family. Their territories are disjoint
+        // from all of the above by shape (a two-row
+        // complementary-guard spec over a computed guard;
+        // a record-returning spec stated as partial field
+        // equations), so no standing seed moves.
+        if let Some(body) = complementary_guard_seed_body(spec, &self.spec_index) {
+            admit("complementary_guard", body);
+        }
+        if let Some(body) = record_completion_seed_body(spec, &self.spec_index) {
+            admit("record_completion", body);
+        }
+        // Phase 85 (M1 remainder (iii)): the tokenize
+        // template family, appended after the Phase 81
+        // families. Its territory is disjoint from
+        // every standing family by shape (a tokenizing
+        // step/loop over a state record, keyed on the
+        // amended rows' shape), so no standing seed
+        // moves; char_equation's right of first refusal
+        // is untouched (its classifiers' shape is
+        // disjoint from this one's).
+        if let Some(body) = tokenize_template_seed_body(spec, &self.spec_index) {
+            admit("tokenize_template", body);
         }
         if let Some(body) = char_equation_seed_body(spec, &self.spec_index) {
             admit("char_equation", body);
@@ -1460,6 +1526,20 @@ pub fn synthesize_with_module(
 ) -> Result<Vec<CandidateImplementation>, SynthesisError> {
     let config = SynthesisConfig::from_opt_level(opt_level);
     let mut engine = SynthesisEngine::with_module(config, specs);
+    engine.run(spec)
+}
+
+/// `synthesize_with_module` over a whole parsed module, so
+/// the engine's index carries the module's type
+/// declarations as well as its specs (Phase 81; see
+/// `SynthesisEngine::with_module_spec`).
+pub fn synthesize_with_module_spec(
+    spec: &FunctionSpec,
+    opt_level: u8,
+    module: &Spec,
+) -> Result<Vec<CandidateImplementation>, SynthesisError> {
+    let config = SynthesisConfig::from_opt_level(opt_level);
+    let mut engine = SynthesisEngine::with_module_spec(config, module);
     engine.run(spec)
 }
 
@@ -2863,6 +2943,15 @@ fn expr_mentions_var(expr: &Expr, name: &str) -> bool {
         Expr::Length(inner) => expr_mentions_var(inner, name),
         Expr::Comprehension { collection, body, .. } => {
             expr_mentions_var(collection, name) || expr_mentions_var(body, name)
+        }
+        // M1 features (Phase 73): structural recursion over
+        // the new forms.
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_mentions_var(receiver, name)
+                || args.iter().any(|a| expr_mentions_var(a, name))
+        }
+        Expr::RecordLit { fields, .. } => {
+            fields.iter().any(|(_, v)| expr_mentions_var(v, name))
         }
     }
 }
@@ -4325,6 +4414,1251 @@ fn mixed_pair_guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> O
     }
 }
 
+/// Are two guard expressions STRUCTURAL complements — one
+/// holds exactly where the other fails, by syntax alone?
+/// The admitted pairs: `Not(G)` against `G` (either side),
+/// and a complementary comparison — Lt/Ge, Le/Gt, Eq/Neq,
+/// in either order — over `expr_same` operands IN THE SAME
+/// ORDER. Anything else (swapped operands, different
+/// operands, a non-comparison shape) is not a complement
+/// this module will state: complement detection stays
+/// syntactic and exact (Phase 80 remainder (i), whose
+/// pricing names the mispaired-denotation risk: a wrong
+/// complement would change what a call MEANS in
+/// verification, so the pattern is deliberately narrower
+/// than most standing builders).
+fn guards_complementary(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::UnaryOp(UnaryOp::Not, inner), other)
+        | (other, Expr::UnaryOp(UnaryOp::Not, inner)) => expr_same(inner.as_ref(), other),
+        (Expr::BinOp(o1, l1, r1), Expr::BinOp(o2, l2, r2)) => {
+            let complementary = matches!(
+                (o1, o2),
+                (BinOp::Lt, BinOp::Ge)
+                    | (BinOp::Ge, BinOp::Lt)
+                    | (BinOp::Le, BinOp::Gt)
+                    | (BinOp::Gt, BinOp::Le)
+                    | (BinOp::Eq, BinOp::Neq)
+                    | (BinOp::Neq, BinOp::Eq)
+            );
+            complementary && expr_same(l1, l2) && expr_same(r1, r2)
+        }
+        _ => false,
+    }
+}
+
+/// `len(x)` in a spec expression reaches the IR as a
+/// `Call` to the builtin — the form the verifier's `len`
+/// arm and the Phase 76 mirror body both use. The parser
+/// may state it as `Expr::Length`, which `expr_to_ir`
+/// lowers to a Hole; the Phase 81 builders therefore
+/// rewrite `Length` to the call form before lowering, so
+/// their denotations carry no hole for a stated length.
+/// Every other shape passes through untouched.
+fn len_as_call(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Length(inner) => Expr::Call("len".into(), vec![len_as_call(inner)]),
+        Expr::Field(inner, f) => Expr::Field(Box::new(len_as_call(inner)), f.clone()),
+        Expr::Index(c, i) => Expr::Index(Box::new(len_as_call(c)), Box::new(len_as_call(i))),
+        Expr::Call(n, args) => Expr::Call(
+            n.clone(),
+            args.iter().map(len_as_call).collect(),
+        ),
+        Expr::BinOp(op, l, r) => Expr::BinOp(
+            *op,
+            Box::new(len_as_call(l)),
+            Box::new(len_as_call(r)),
+        ),
+        Expr::UnaryOp(op, inner) => Expr::UnaryOp(*op, Box::new(len_as_call(inner))),
+        Expr::Lambda(params, body) => {
+            Expr::Lambda(params.clone(), Box::new(len_as_call(body)))
+        }
+        Expr::Comprehension {
+            binder,
+            collection,
+            body,
+        } => Expr::Comprehension {
+            binder: binder.clone(),
+            collection: Box::new(len_as_call(collection)),
+            body: Box::new(len_as_call(body)),
+        },
+        Expr::MethodCall {
+            receiver,
+            name,
+            args,
+        } => Expr::MethodCall {
+            receiver: Box::new(len_as_call(receiver)),
+            name: name.clone(),
+            args: args.iter().map(len_as_call).collect(),
+        },
+        Expr::RecordLit { type_name, fields } => Expr::RecordLit {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(n, v)| (n.clone(), len_as_call(v)))
+                .collect(),
+        },
+        leaf => leaf.clone(),
+    }
+}
+
+/// Lower a spec expression for a Phase 81 denotation: the
+/// `len` rewrite, then the standing `expr_to_ir`. None when
+/// the lowered tree carries a Hole — a holed denotation is
+/// not the spec's body (the `equation_rhs` rule).
+fn denotation_ir(expr: &Expr) -> Option<IRNode> {
+    let body = expr_to_ir(&len_as_call(expr));
+    if count_holes(&body) > 0 {
+        None
+    } else {
+        Some(body)
+    }
+}
+
+/// One complementary-guard row read as (guard, pin): a
+/// postcondition that is an Or of exactly two leaves, one
+/// an `output == E` pin (either orientation) and the other
+/// the guard. Neither side may mention `output` (the guard
+/// states an input condition; a pin mentioning `output`
+/// is not a value the body can denote). Any other shape —
+/// not an Or, not exactly two leaves, two pins, no pin, a
+/// `Constraint` that is not an `Expr` — is not a row of
+/// this family.
+fn complementary_row_parts(c: &Constraint) -> Option<(&Expr, &Expr)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let mut leaves = Vec::new();
+    flatten_or(expr, &mut leaves);
+    if leaves.len() != 2 {
+        return None;
+    }
+    let mut guard: Option<&Expr> = None;
+    let mut pin: Option<&Expr> = None;
+    for leaf in leaves {
+        if let Expr::BinOp(BinOp::Eq, l, r) = leaf {
+            let side = if matches!(l.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(r.as_ref())
+            } else if matches!(r.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(l.as_ref())
+            } else {
+                None
+            };
+            if let Some(side) = side {
+                if pin.is_some() {
+                    return None; // two output pins: ambiguous
+                }
+                pin = Some(side);
+                continue;
+            }
+        }
+        if guard.is_some() {
+            return None; // two guard leaves: not this family's row
+        }
+        guard = Some(leaf);
+    }
+    let (guard, pin) = (guard?, pin?);
+    if expr_mentions_var(guard, OUTPUT_VAR) || expr_mentions_var(pin, OUTPUT_VAR) {
+        return None;
+    }
+    Some((guard, pin))
+}
+
+/// The complementary-guard body (Phase 81, remainder (i)
+/// of the Phase 80 gate re-run): a spec whose
+/// postconditions are EXACTLY two rows `G || output == E`
+/// with structurally complementary guards denotes the
+/// conditional `If(G1, E2, E1)` — where G1 holds, the
+/// first row is satisfied vacuously and the second row's
+/// pin must hold; where G1 fails, the first row's pin
+/// must. The measured shape is the tokenizer's `peek`:
+/// `state.pos<len(state.source)||output==None()` and
+/// `state.pos>=len(state.source)||output==Some(state.source[state.pos])`
+/// — two rows over a computed comparison guard, neither an
+/// equation nor a key-indexed guard table, which is why
+/// every earlier builder returned None for it and
+/// `next_char`'s postconditions (which call `peek(state)`)
+/// could not be inlined by the verifier.
+///
+/// Exactly two postconditions, both rows of this shape,
+/// or no denotation: a third postcondition of ANY shape
+/// is a statement this body would not honor, so the
+/// builder declines rather than skipping it (the
+/// deviation discipline of the guard families, tightened
+/// to the whole spec because the denotation claims to be
+/// the spec's whole meaning). Complement detection is
+/// `guards_complementary` — syntactic and exact.
+///
+/// Registered at the END of the `SpecIndex::callee_body`
+/// chain: it fires only where all eight predecessors
+/// return None, so no existing denotation moves.
+fn complementary_guard_body(spec: &FunctionSpec) -> Option<IRNode> {
+    if spec.postconditions.len() != 2 {
+        return None;
+    }
+    let (g1, e1) = complementary_row_parts(&spec.postconditions[0])?;
+    let (g2, e2) = complementary_row_parts(&spec.postconditions[1])?;
+    if !guards_complementary(g1, g2) {
+        return None;
+    }
+    Some(IRNode::If {
+        condition: Box::new(denotation_ir(g1)?),
+        then_branch: Box::new(denotation_ir(e2)?),
+        else_branch: Box::new(denotation_ir(e1)?),
+    })
+}
+
+/// The complementary-guard seed's body: the denotation,
+/// with any spec-to-spec calls resolved against the module
+/// (the composition-guard seed's admission precedent),
+/// admitted when the verifier can encode the resolved body
+/// in the module context. A body calling NO indexed spec
+/// needs no resolution; where `inline_calls` refuses it on
+/// shape grounds alone it is admitted raw — the
+/// encodability gate is the admission standard either way.
+fn complementary_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = complementary_guard_body(spec)?;
+    let body = match index.inline_calls(&raw) {
+        Some(body) => body,
+        None => {
+            if body_calls_indexed(&raw, index) {
+                return None;
+            }
+            raw
+        }
+    };
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+/// Does an IR body call any spec the index holds? (Builtin
+/// and constructor calls — `len`, `Some`, `Ok` — are not
+/// indexed specs and do not count.)
+fn body_calls_indexed(node: &IRNode, index: &SpecIndex) -> bool {
+    match node {
+        IRNode::Call { function, args } => {
+            index.get(function).is_some()
+                || args.iter().any(|a| body_calls_indexed(a, index))
+        }
+        IRNode::BinOp(_, l, r) => {
+            body_calls_indexed(l, index) || body_calls_indexed(r, index)
+        }
+        IRNode::UnaryOp(_, inner) => body_calls_indexed(inner, index),
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            body_calls_indexed(condition, index)
+                || body_calls_indexed(then_branch, index)
+                || body_calls_indexed(else_branch, index)
+        }
+        IRNode::Index(c, i) => {
+            body_calls_indexed(c, index) || body_calls_indexed(i, index)
+        }
+        IRNode::FieldAccess { base, .. } => body_calls_indexed(base, index),
+        IRNode::RecordLit { fields, .. } => {
+            fields.iter().any(|(_, v)| body_calls_indexed(v, index))
+        }
+        IRNode::Match { scrutinee, cases } => {
+            body_calls_indexed(scrutinee, index)
+                || cases.iter().any(|(_, b)| body_calls_indexed(b, index))
+        }
+        _ => false,
+    }
+}
+
+/// One record-completion row read as (guard leaf, field,
+/// pin): an Or of exactly two leaves — one guard leaf and
+/// one pin of the form `output.<field> == <rhs>` (either
+/// orientation), the rhs not mentioning `output`. Any
+/// other shape is not a row of this family.
+fn record_completion_row_parts(c: &Constraint) -> Option<(&Expr, &str, &Expr)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let mut leaves = Vec::new();
+    flatten_or(expr, &mut leaves);
+    if leaves.len() != 2 {
+        return None;
+    }
+    let mut guard: Option<&Expr> = None;
+    let mut pin: Option<(&str, &Expr)> = None;
+    for leaf in leaves {
+        if let Expr::BinOp(BinOp::Eq, l, r) = leaf {
+            let side = match (l.as_ref(), r.as_ref()) {
+                (Expr::Field(base, f), rhs)
+                    if matches!(base.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) =>
+                {
+                    Some((f.as_str(), rhs))
+                }
+                (rhs, Expr::Field(base, f))
+                    if matches!(base.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) =>
+                {
+                    Some((f.as_str(), rhs))
+                }
+                _ => None,
+            };
+            if let Some(side) = side {
+                if pin.is_some() {
+                    return None; // two field pins in one row
+                }
+                pin = Some(side);
+                continue;
+            }
+        }
+        if guard.is_some() {
+            return None; // two guard leaves: not this family's row
+        }
+        guard = Some(leaf);
+    }
+    let (guard, (field, rhs)) = (guard?, pin?);
+    if expr_mentions_var(guard, OUTPUT_VAR) || expr_mentions_var(rhs, OUTPUT_VAR) {
+        return None;
+    }
+    Some((guard, field, rhs))
+}
+
+/// An unconditional field equation read as (field, rhs):
+/// a postcondition that is exactly `output.<field> ==
+/// <rhs>` (either orientation), the rhs not mentioning
+/// `output`. (An Or postcondition is a row, not an
+/// equation, and is refused here by shape.)
+fn record_completion_equation(c: &Constraint) -> Option<(&str, &Expr)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let Expr::BinOp(BinOp::Eq, l, r) = expr else {
+        return None;
+    };
+    let (field, rhs) = match (l.as_ref(), r.as_ref()) {
+        (Expr::Field(base, f), rhs)
+            if matches!(base.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) =>
+        {
+            (f.as_str(), rhs)
+        }
+        (rhs, Expr::Field(base, f))
+            if matches!(base.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) =>
+        {
+            (f.as_str(), rhs)
+        }
+        _ => return None,
+    };
+    if expr_mentions_var(rhs, OUTPUT_VAR) {
+        return None;
+    }
+    Some((field, rhs))
+}
+
+/// The record-completion body (Phase 81, remainder (i-b)
+/// of the Phase 80 gate re-run): a seed — NOT a
+/// `callee_body` denotation — that builds a record
+/// construction from a spec's partial field equations, so
+/// a spec like the tokenizer's `next_char` can be
+/// CROWNED, not only hand-verified.
+///
+/// The exact rule. The spec's return type must resolve
+/// (through the index's declarations) to a record type R,
+/// and exactly one parameter — the base — must have that
+/// same record type. Every postcondition must classify as
+/// one of:
+///   - an unconditional field equation `output.f == rhs`;
+///   - a guard row `G' || output.f == rhs` whose single
+///     guard leaf is either `expr_same` to the family's
+///     one guard G or its structural complement
+///     (`guards_complementary`). The first row's leaf
+///     defines G. A row's pin holds where its guard leaf
+///     FAILS: a leaf `expr_same` to G pins its field on
+///     the G-false side; a complementary leaf pins on the
+///     G-true side.
+/// At least one unconditional equation AND at least one
+/// guard row are required (a spec with only equations is
+/// an equation-family shape stated fieldwise; a spec with
+/// only rows states no unconditional field).
+///
+/// The constructed body is `R { … }` over the DECLARED
+/// fields, in declared order. Each field's value:
+///   - its unconditional rhs, if it has one;
+///   - `If(G, rhs_true, rhs_false)` when pinned on both
+///     sides;
+///   - `If(G, rhs, base.f)` / `If(G, base.f, rhs)` when
+///     pinned on one side only — the unpinned side CARRIES
+///     the base record's field, which is the rule the
+///     module's own spec comment states ("Fields no row
+///     pins … are carried over unchanged");
+///   - `base.f` (carried) when no equation names it.
+///
+/// Decline conditions (any one returns None): the return
+/// type is not a declared record, or the index carries no
+/// declarations; the base parameter is not unique; a
+/// postcondition classifies as neither shape; a pin names
+/// a field R does not declare; a field is pinned twice on
+/// the same side (or unconditionally) with non-`expr_same`
+/// right-hand sides; a field carries both an unconditional
+/// equation and guard pins; a guard leaf is neither
+/// `expr_same` to G nor its complement; a guard or rhs
+/// mentions `output`; any lowered piece carries a Hole.
+/// The measured shape is `next_char`: `output.pos ==
+/// state.pos + 1` unconditionally; `line` pinned on the
+/// newline side only (carried otherwise); `col` pinned on
+/// both sides (`1` at a newline, `state.col + 1` past
+/// one); `source`/`tokens` carried — the mirror body,
+/// derived from the spec alone.
+fn record_completion_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let TypeRef::Named(ret_name) = &spec.return_type else {
+        return None;
+    };
+    let (resolved, declared) = index.record_fields(ret_name)?;
+    let mut bases: Vec<&Param> = Vec::new();
+    for p in &spec.params {
+        if let TypeRef::Named(n) = &p.ty {
+            if let Some((r, _)) = index.record_fields(n) {
+                if r == resolved {
+                    bases.push(p);
+                }
+            }
+        }
+    }
+    if bases.len() != 1 {
+        return None;
+    }
+    let base = bases[0];
+    let declared_names: Vec<&str> = declared.iter().map(|(n, _)| n.as_str()).collect();
+
+    let mut uncond: HashMap<&str, &Expr> = HashMap::new();
+    let mut on_true: HashMap<&str, &Expr> = HashMap::new();
+    let mut on_false: HashMap<&str, &Expr> = HashMap::new();
+    let mut guard: Option<&Expr> = None;
+    let mut n_equations = 0usize;
+    let mut n_rows = 0usize;
+    for c in &spec.postconditions {
+        if let Some((field, rhs)) = record_completion_equation(c) {
+            if !declared_names.contains(&field) {
+                return None;
+            }
+            if on_true.contains_key(field) || on_false.contains_key(field) {
+                return None; // unconditional AND guarded: two statements of one field
+            }
+            match uncond.get(field) {
+                Some(existing) if !expr_same(existing, rhs) => return None,
+                Some(_) => {}
+                None => {
+                    uncond.insert(field, rhs);
+                }
+            }
+            n_equations += 1;
+            continue;
+        }
+        if let Some((leaf, field, rhs)) = record_completion_row_parts(c) {
+            if !declared_names.contains(&field) {
+                return None;
+            }
+            if uncond.contains_key(field) {
+                return None; // unconditional AND guarded
+            }
+            let g = match guard {
+                None => {
+                    guard = Some(leaf);
+                    leaf
+                }
+                Some(g) => g,
+            };
+            let slot = if expr_same(leaf, g) {
+                &mut on_false // the pin holds where the leaf fails
+            } else if guards_complementary(leaf, g) {
+                &mut on_true // the pin holds where G holds
+            } else {
+                return None; // a second, unrelated guard: not one guard's rows
+            };
+            match slot.get(field) {
+                Some(existing) if !expr_same(existing, rhs) => return None,
+                Some(_) => {}
+                None => {
+                    slot.insert(field, rhs);
+                }
+            }
+            n_rows += 1;
+            continue;
+        }
+        return None; // a postcondition of neither shape: this body would not honor it
+    }
+    if n_equations == 0 || n_rows == 0 {
+        return None;
+    }
+    let guard_ir = denotation_ir(guard?)?;
+    // Phase 87: when the one guard feeds two or more
+    // fields' Ifs, bind it once in a Let and let every
+    // If test the bound name. The Phase 85 shape
+    // cloned the guard tree into each guarded field,
+    // and for the measured shape (next_char: the
+    // guard is the inlined peek) that evaluates peek —
+    // a full source count + nth scan — once per
+    // guarded field per call; the Phase 87 profile
+    // priced the duplication at ≈0.78 of the ratio
+    // on the big workload. The name must be fresh:
+    // not a parameter, not `output`, and not
+    // mentioned in any postcondition (every denotation
+    // piece derives from those, so a name absent from
+    // all three cannot be captured or shadowed into
+    // a different meaning). A trivial guard (a bare
+    // Var or Literal) is not worth a binding. If no
+    // candidate name is fresh, the unshared body
+    // stands.
+    let guarded_fields = declared
+        .iter()
+        .filter(|(n, _)| {
+            on_true.contains_key(n.as_str()) || on_false.contains_key(n.as_str())
+        })
+        .count();
+    let shared_name: Option<String> =
+        if guarded_fields >= 2 && !matches!(guard_ir, IRNode::Var(_) | IRNode::Literal(_)) {
+            ["__rc_guard", "__rc_guard_2", "__rc_guard_3"]
+                .iter()
+                .find(|cand| {
+                    spec.params.iter().all(|p| p.name != **cand)
+                        && **cand != OUTPUT_VAR
+                        && spec.postconditions.iter().all(|c| {
+                            !matches!(c, Constraint::Expr(e) if expr_mentions_var(e, cand))
+                        })
+                })
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+    let cond_ir: IRNode = match &shared_name {
+        Some(n) => IRNode::Var(n.clone()),
+        None => guard_ir.clone(),
+    };
+    let carry = |field: &str| IRNode::FieldAccess {
+        base: Box::new(IRNode::Var(base.name.clone())),
+        field: field.into(),
+    };
+    let mut fields: Vec<(String, IRNode)> = Vec::with_capacity(declared.len());
+    for (name, _) in &declared {
+        let value = if let Some(rhs) = uncond.get(name.as_str()) {
+            denotation_ir(rhs)?
+        } else {
+            match (on_true.get(name.as_str()), on_false.get(name.as_str())) {
+                (Some(t), Some(f)) => IRNode::If {
+                    condition: Box::new(cond_ir.clone()),
+                    then_branch: Box::new(denotation_ir(t)?),
+                    else_branch: Box::new(denotation_ir(f)?),
+                },
+                (Some(t), None) => IRNode::If {
+                    condition: Box::new(cond_ir.clone()),
+                    then_branch: Box::new(denotation_ir(t)?),
+                    else_branch: Box::new(carry(name)),
+                },
+                (None, Some(f)) => IRNode::If {
+                    condition: Box::new(cond_ir.clone()),
+                    then_branch: Box::new(carry(name)),
+                    else_branch: Box::new(denotation_ir(f)?),
+                },
+                (None, None) => carry(name),
+            }
+        };
+        fields.push((name.clone(), value));
+    }
+    let record = IRNode::RecordLit {
+        type_name: resolved,
+        fields,
+    };
+    Some(match shared_name {
+        Some(n) => IRNode::Let {
+            name: n,
+            value: Box::new(guard_ir),
+            body: Box::new(record),
+        },
+        None => record,
+    })
+}
+
+/// The record-completion seed's body: the construction,
+/// with spec-to-spec calls resolved against the module —
+/// resolution is REQUIRED here (the guard of the measured
+/// shape calls `peek(state)`, and a raw call body could
+/// not be executed by the interpreter or emitted
+/// standalone: the composition-guard seed's precedent) —
+/// admitted when the verifier can encode the resolved body
+/// in the module context.
+fn record_completion_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = record_completion_body(spec, index)?;
+    let body = index.inline_calls(&raw)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+/// Follow alias/newtype names on a type reference to
+/// the type it denotes (bounded, cycle-safe). The
+/// tokenize template's keying reads signatures through
+/// the module's own aliases (`StepResult` for the
+/// step's Result, `TokenKind` for the token's kind).
+fn tokenize_resolve_alias(index: &SpecIndex, ty: &TypeRef) -> TypeRef {
+    let mut cur = ty.clone();
+    let mut seen = std::collections::HashSet::new();
+    while let TypeRef::Named(n) = &cur {
+        if !seen.insert(n.clone()) {
+            break;
+        }
+        match index.types.get(n).map(|td| &td.kind) {
+            Some(TypeKind::Alias(t)) | Some(TypeKind::Newtype(t)) => {
+                cur = t.clone()
+            }
+            _ => break,
+        }
+    }
+    cur
+}
+
+/// Whether an expression tree mentions a method call
+/// of any of the given names (the tokenize rows'
+/// shape evidence: the is_err/is_ok split and the
+/// unwrap projection, as the Phase 84 rows state
+/// them).
+fn tokenize_expr_has_method(e: &Expr, names: &[&str]) -> bool {
+    match e {
+        Expr::MethodCall { receiver, name, args } => {
+            names.contains(&name.as_str())
+                || tokenize_expr_has_method(receiver, names)
+                || args.iter().any(|a| tokenize_expr_has_method(a, names))
+        }
+        Expr::BinOp(_, l, r) => {
+            tokenize_expr_has_method(l, names)
+                || tokenize_expr_has_method(r, names)
+        }
+        Expr::UnaryOp(_, x) => tokenize_expr_has_method(x, names),
+        Expr::Call(_, args) => {
+            args.iter().any(|a| tokenize_expr_has_method(a, names))
+        }
+        Expr::Index(collection, index) => {
+            tokenize_expr_has_method(collection, names)
+                || tokenize_expr_has_method(index, names)
+        }
+        Expr::Field(object, _) => tokenize_expr_has_method(object, names),
+        Expr::Length(x) => tokenize_expr_has_method(x, names),
+        Expr::Lambda(_, body) => tokenize_expr_has_method(body, names),
+        Expr::Comprehension {
+            collection, body, ..
+        } => {
+            tokenize_expr_has_method(collection, names)
+                || tokenize_expr_has_method(body, names)
+        }
+        Expr::RecordLit { fields, .. } => fields
+            .iter()
+            .any(|(_, v)| tokenize_expr_has_method(v, names)),
+        _ => false,
+    }
+}
+
+/// The tokenize rows' shape: some postcondition
+/// mentions an is_err/is_ok method call (the Ok/Err
+/// split) and some postcondition mentions unwrap
+/// (the payload projection) — the amended rows'
+/// joint shape, and the only constraint evidence
+/// the template keys on.
+fn tokenize_rows_shape(spec: &FunctionSpec) -> bool {
+    let mut split = false;
+    let mut unwrap = false;
+    for c in &spec.postconditions {
+        if let Constraint::Expr(e) = c {
+            split |= tokenize_expr_has_method(e, &["is_err", "is_ok"]);
+            unwrap |= tokenize_expr_has_method(e, &["unwrap"]);
+        }
+    }
+    split && unwrap
+}
+
+/// The tokenizer-state shape the template keys on:
+/// the record R a spec's single parameter carries,
+/// its token record T, and the two declarations'
+/// names — or None when the shape is not the
+/// tokenizer's. Field evidence, all of it: R declares
+/// source: String, pos/line/col: Int and
+/// tokens: List<T>; T declares kind: Int (through
+/// aliases), lexeme: String, line/col: Int.
+struct TokenizeShape {
+    state_decl: String,
+    token_decl: String,
+    state_fields: Vec<(String, TypeRef)>,
+    token_fields: Vec<(String, TypeRef)>,
+}
+
+fn tokenize_shape(spec: &FunctionSpec, index: &SpecIndex) -> Option<TokenizeShape> {
+    if spec.params.len() != 1 {
+        return None;
+    }
+    let TypeRef::Named(state_name) = &spec.params[0].ty else {
+        return None;
+    };
+    let (state_decl, state_fields) = index.record_fields(state_name)?;
+    let field_ty = |fields: &[(String, TypeRef)], n: &str| {
+        fields.iter().find(|(f, _)| f == n).map(|(_, t)| t.clone())
+    };
+    if field_ty(&state_fields, "source") != Some(TypeRef::String) {
+        return None;
+    }
+    for f in ["pos", "line", "col"] {
+        if field_ty(&state_fields, f) != Some(TypeRef::Int) {
+            return None;
+        }
+    }
+    let Some(TypeRef::List(tok_ty)) = field_ty(&state_fields, "tokens") else {
+        return None;
+    };
+    let TypeRef::Named(tok_name) = tok_ty.as_ref() else {
+        return None;
+    };
+    let (token_decl, token_fields) = index.record_fields(tok_name)?;
+    let kind_ty = field_ty(&token_fields, "kind")?;
+    if tokenize_resolve_alias(index, &kind_ty) != TypeRef::Int {
+        return None;
+    }
+    if field_ty(&token_fields, "lexeme") != Some(TypeRef::String) {
+        return None;
+    }
+    for f in ["line", "col"] {
+        if field_ty(&token_fields, f) != Some(TypeRef::Int) {
+            return None;
+        }
+    }
+    Some(TokenizeShape {
+        state_decl,
+        token_decl,
+        state_fields,
+        token_fields,
+    })
+}
+
+/// A callee's signature against the state shape:
+/// one parameter of the state record, returning the
+/// resolved type `ret` — the template's callees are
+/// found by name (IR calls are by name; there is no
+/// other way to call them) and admitted only when
+/// their declared signatures are the tokenizer's.
+fn tokenize_callee(
+    index: &SpecIndex,
+    name: &str,
+    shape: &TokenizeShape,
+    ret: &TypeRef,
+) -> bool {
+    let Some(f) = index.get(name) else {
+        return false;
+    };
+    if f.params.len() != 1 {
+        return false;
+    }
+    let TypeRef::Named(pn) = &f.params[0].ty else {
+        return false;
+    };
+    let Some((pdecl, _)) = index.record_fields(pn) else {
+        return false;
+    };
+    pdecl == shape.state_decl
+        && tokenize_resolve_alias(index, &f.return_type) == *ret
+}
+
+/// A Char classifier callee's signature: one Char
+/// parameter, Bool return.
+fn tokenize_classifier(index: &SpecIndex, name: &str) -> bool {
+    let Some(f) = index.get(name) else {
+        return false;
+    };
+    f.params.len() == 1
+        && f.params[0].ty == TypeRef::Char
+        && tokenize_resolve_alias(index, &f.return_type) == TypeRef::Bool
+}
+
+/// The tokenize template seed (Phase 85, family
+/// `tokenize_template`): a hand-authored tokenizing
+/// step — and, composed over it, the tokenizing loop
+/// — for the one spec shape the Phase 80 record
+/// priced as remainder (iii): a single state-record
+/// parameter, the tokenizer's field shape, the
+/// amended rows' is_err/is_ok + unwrap shape, and
+/// the module's own step callees present with the
+/// tokenizer's signatures.
+///
+/// STEP form (the spec returns Result<R, String>):
+/// skip_whitespace, then a dispatch on the current
+/// char — end of input is the Ok arm; an ident-start
+/// char consumes an identifier through the
+/// is_ident_continue loop; the seven punctuation
+/// chars stamp their mirror kinds (LPAREN 3,
+/// RPAREN 4, LBRACE 5, RBRACE 6, COLON 7, COMMA 9,
+/// LT 10, GT 11, EQ 12 — the mirror's table, stated
+/// here as data); anything else is the error arm.
+/// (Phase 87: the dispatch reads the char by Index
+/// under a length test rather than matching on a
+/// by-value peek — see the body.) The token stamps
+/// the post-skip state's line/col (the D4a START rule)
+/// and the consumed state's fields close the step.
+/// The error arm's message is the constant
+/// "Unexpected character": the mirror's full text
+/// ('Unexpected character '<c>' at line <n>') is not
+/// expressible in IR — a Char reaches a String only
+/// through Append, and the line number is an Int,
+/// whose conversion to text is finding F2 — so the
+/// constant is this template's one named deviation
+/// from the mirror, itemized wherever the template
+/// is executed against the mirror batteries.
+///
+/// LOOP form (the spec returns Result<List<T>,
+/// String>): the step spec is found in the index by
+/// the STEP keying itself and called by its name;
+/// the loop threads the state through the step's Ok
+/// payload (TryPropagate) and returns the final
+/// state's tokens. Phase 87: the loop breaks on the
+/// step's position progress (see the body) rather
+/// than testing peek per token.
+///
+/// Admission standard — stated, not smuggled: the
+/// bodies contain loops (While at Phase 85, Loop
+/// since Phase 87), which the encoder has no
+/// arm for, so no encodability gate can pass them;
+/// like the char_equation family before the D5a
+/// encoding, this family is admitted knowing Z3
+/// cannot judge its bodies (their verdict is
+/// Inconclusive by construction), and its evidence
+/// standard is executed agreement against the
+/// mirror batteries, measured in the cross-
+/// validation harness. Names are load-bearing here
+/// in exactly one place: the callees are called by
+/// name because IR calls are by name — every other
+/// key (fields, signatures, the rows' shape) is
+/// structural.
+fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let shape = tokenize_shape(spec, index)?;
+    if !tokenize_rows_shape(spec) {
+        return None;
+    }
+    let param = spec.params[0].name.clone();
+    let state_ty = TypeRef::Named(shape.state_decl.clone());
+    let ret = tokenize_resolve_alias(index, &spec.return_type);
+    let v = |n: &str| IRNode::Var(n.to_string());
+    let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+        base: Box::new(base),
+        field: field.to_string(),
+    };
+    let call = |f: &str, args: Vec<IRNode>| IRNode::Call {
+        function: f.to_string(),
+        args,
+    };
+    // The generated callees take the state record by
+    // value: a call whose argument stays live after
+    // the call must pass a clone (the UnaryOp Clone
+    // rendering), or the generated code dies E0382.
+    // A call that reinitializes its argument
+    // (cur = next_char(cur)) moves it bare, legally.
+    let vc = |n: &str| {
+        IRNode::UnaryOp(IRUnaryOp::Clone, Box::new(IRNode::Var(n.to_string())))
+    };
+    let lit_i = |n: i64| IRNode::Literal(IRLiteral::Int(n));
+    let lit_s = |s: &str| IRNode::Literal(IRLiteral::String(s.to_string()));
+    // A record of the state shape built from `base`'s
+    // fields, with the tokens field replaced.
+    let state_record = |base: &str, tokens: IRNode| {
+        let fields = shape
+            .state_fields
+            .iter()
+            .map(|(n, _)| {
+                let value = if n == "tokens" {
+                    tokens.clone()
+                } else {
+                    fa(v(base), n)
+                };
+                (n.clone(), value)
+            })
+            .collect();
+        IRNode::RecordLit {
+            type_name: shape.state_decl.clone(),
+            fields,
+        }
+    };
+    // A token of the token shape stamped at the
+    // post-skip state's position (D4a START). The
+    // stamp reads are the caller's to supply: the
+    // ident arm reads them off the post-skip state
+    // directly (it stays live), the punctuation arms
+    // bind them into locals first (below).
+    let token_record = |kind: IRNode, lexeme: IRNode, stamp_line: IRNode, stamp_col: IRNode| {
+        let fields = shape
+            .token_fields
+            .iter()
+            .map(|(n, _)| {
+                let value = match n.as_str() {
+                    "kind" => kind.clone(),
+                    "lexeme" => lexeme.clone(),
+                    "line" => stamp_line.clone(),
+                    "col" => stamp_col.clone(),
+                    _ => lit_i(0),
+                };
+                (n.clone(), value)
+            })
+            .collect();
+        IRNode::RecordLit {
+            type_name: shape.token_decl.clone(),
+            fields,
+        }
+    };
+
+    let is_step_return = matches!(
+        &ret,
+        TypeRef::Result(ok, err)
+            if matches!(tokenize_resolve_alias(index, ok.as_ref()), TypeRef::Named(n) if n == shape.state_decl)
+                && tokenize_resolve_alias(index, err.as_ref()) == TypeRef::String
+    );
+    if is_step_return {
+        // The step callees, by name + signature.
+        if !tokenize_callee(index, "skip_whitespace", &shape, &state_ty)
+            || !tokenize_callee(
+                index,
+                "peek",
+                &shape,
+                &TypeRef::Option(Box::new(TypeRef::Char)),
+            )
+            || !tokenize_callee(index, "next_char", &shape, &state_ty)
+            || !tokenize_classifier(index, "is_ident_start")
+            || !tokenize_classifier(index, "is_ident_continue")
+        {
+            return None;
+        }
+        // The single-character arm for one punctuation
+        // char: consume it, stamp its kind, close.
+        // Phase 87: the stamp (line/col) is bound into
+        // locals BEFORE the consume, so `next_char` is
+        // the post-skip state's last use and moves it
+        // bare — the Phase 85 shape cloned the whole
+        // state (String + token Vec) here because the
+        // token record still read `s` after the call.
+        let punct_arm = |kind: i64, ch: &str| {
+            IRNode::Block(vec![
+                IRNode::Alloc {
+                    name: "stamp_line".to_string(),
+                    ty: TypeRef::Int,
+                    initial: Box::new(fa(v("s"), "line")),
+                },
+                IRNode::Alloc {
+                    name: "stamp_col".to_string(),
+                    ty: TypeRef::Int,
+                    initial: Box::new(fa(v("s"), "col")),
+                },
+                IRNode::Alloc {
+                    name: "end".to_string(),
+                    ty: state_ty.clone(),
+                    initial: Box::new(call("next_char", vec![v("s")])),
+                },
+                IRNode::Alloc {
+                    name: "toks".to_string(),
+                    ty: TypeRef::List(Box::new(TypeRef::Named(
+                        shape.token_decl.clone(),
+                    ))),
+                    initial: Box::new(fa(v("end"), "tokens")),
+                },
+                IRNode::BinOp(
+                    IRBinOp::Append,
+                    Box::new(v("toks")),
+                    Box::new(token_record(
+                        lit_i(kind),
+                        lit_s(ch),
+                        v("stamp_line"),
+                        v("stamp_col"),
+                    )),
+                ),
+                IRNode::Return(Box::new(call(
+                    "Ok",
+                    vec![state_record("end", v("toks"))],
+                ))),
+            ])
+        };
+        // The identifier arm: consume while the
+        // classifiers continue, accumulating the
+        // lexeme a char at a time, then stamp kind 0
+        // (IDENT). Phase 87: the loop reads the
+        // current char by Index (the Phase 85 index
+        // rendering: chars().nth off the state's own
+        // source/pos, totalized to the NUL sentinel
+        // out of range) instead of matching on
+        // peek(cur.clone()) — the by-value peek cloned
+        // the whole state on every char, and the
+        // profile priced those clones as the step's
+        // dominant remaining cost. The shapes agree
+        // wherever the mirror's peek does: out of
+        // range reads as the sentinel, which is not
+        // an ident-continue char, so the loop breaks
+        // at EOF exactly where peek's None breaks it;
+        // a genuine NUL char breaks it too, exactly
+        // where peek's Some('\0') fails the classifier.
+        let ident_arm = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "lexeme".to_string(),
+                ty: TypeRef::String,
+                initial: Box::new(lit_s("")),
+            },
+            IRNode::Alloc {
+                name: "cur".to_string(),
+                ty: state_ty.clone(),
+                initial: Box::new(vc("s")),
+            },
+            IRNode::Loop {
+                body: Box::new(IRNode::Block(vec![
+                    IRNode::Alloc {
+                        name: "ch".to_string(),
+                        ty: TypeRef::Char,
+                        initial: Box::new(IRNode::Index(
+                            Box::new(fa(v("cur"), "source")),
+                            Box::new(fa(v("cur"), "pos")),
+                        )),
+                    },
+                    IRNode::If {
+                        condition: Box::new(call(
+                            "is_ident_continue",
+                            vec![v("ch")],
+                        )),
+                        then_branch: Box::new(IRNode::Block(vec![
+                            IRNode::BinOp(
+                                IRBinOp::Append,
+                                Box::new(v("lexeme")),
+                                Box::new(v("ch")),
+                            ),
+                            IRNode::Assign {
+                                target: Box::new(v("cur")),
+                                value: Box::new(call(
+                                    "next_char",
+                                    vec![v("cur")],
+                                )),
+                            },
+                        ])),
+                        else_branch: Box::new(IRNode::Block(vec![IRNode::Break {
+                            value: None,
+                        }])),
+                    },
+                ])),
+            },
+            IRNode::Alloc {
+                name: "toks".to_string(),
+                ty: TypeRef::List(Box::new(TypeRef::Named(
+                    shape.token_decl.clone(),
+                ))),
+                initial: Box::new(fa(v("cur"), "tokens")),
+            },
+            IRNode::BinOp(
+                IRBinOp::Append,
+                Box::new(v("toks")),
+                Box::new(token_record(
+                    lit_i(0),
+                    v("lexeme"),
+                    fa(v("s"), "line"),
+                    fa(v("s"), "col"),
+                )),
+            ),
+            IRNode::Return(Box::new(call(
+                "Ok",
+                vec![state_record("cur", v("toks"))],
+            ))),
+        ]);
+        // The dispatch: ident first (its classifier
+        // owns every ident-start char), then the
+        // punctuation table, then the error arm.
+        // The error arm binds its message in a typed
+        // Alloc first: Call arguments render untyped,
+        // so a bare literal would reach Err as a &str
+        // where String is expected (E0308).
+        let mut dispatch = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "msg".to_string(),
+                ty: TypeRef::String,
+                initial: Box::new(lit_s("Unexpected character")),
+            },
+            IRNode::Return(Box::new(call("Err", vec![v("msg")]))),
+        ]);
+        for (ch, kind) in [
+            ('=', 12),
+            ('>', 11),
+            ('<', 10),
+            (',', 9),
+            (':', 7),
+            ('}', 6),
+            ('{', 5),
+            (')', 4),
+            ('(', 3),
+        ] {
+            dispatch = IRNode::If {
+                condition: Box::new(IRNode::BinOp(
+                    IRBinOp::Eq,
+                    Box::new(v("c")),
+                    Box::new(IRNode::Literal(IRLiteral::Char(ch))),
+                )),
+                then_branch: Box::new(punct_arm(kind, &ch.to_string())),
+                else_branch: Box::new(dispatch),
+            };
+        }
+        dispatch = IRNode::If {
+            condition: Box::new(call("is_ident_start", vec![v("c")])),
+            then_branch: Box::new(ident_arm),
+            else_branch: Box::new(dispatch),
+        };
+        return Some(IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "s".to_string(),
+                ty: state_ty.clone(),
+                initial: Box::new(call("skip_whitespace", vec![v(&param)])),
+            },
+            // Phase 87: the dispatch reads the current
+            // char by Index under an explicit EOF test
+            // instead of matching on peek(s.clone()) —
+            // the by-value peek cloned the whole state
+            // on every step (see the ident arm's note
+            // for the agreement argument: the length
+            // test takes the Ok arm exactly where
+            // peek's None does, and a genuine NUL char
+            // falls through every classifier and
+            // punctuation test to the error arm,
+            // exactly where peek's Some('\0') lands).
+            // The `len` call's argument is the source
+            // projection, so the Phase 85 len rendering
+            // gives it the char-count form.
+            IRNode::If {
+                condition: Box::new(IRNode::BinOp(
+                    IRBinOp::Ge,
+                    Box::new(fa(v("s"), "pos")),
+                    Box::new(call("len", vec![fa(v("s"), "source")])),
+                )),
+                then_branch: Box::new(IRNode::Block(vec![IRNode::Return(Box::new(
+                    call("Ok", vec![v("s")]),
+                ))])),
+                else_branch: Box::new(IRNode::Block(vec![
+                    IRNode::Alloc {
+                        name: "c".to_string(),
+                        ty: TypeRef::Char,
+                        initial: Box::new(IRNode::Index(
+                            Box::new(fa(v("s"), "source")),
+                            Box::new(fa(v("s"), "pos")),
+                        )),
+                    },
+                    dispatch,
+                ])),
+            },
+        ]));
+    }
+
+    let is_loop_return = matches!(
+        &ret,
+        TypeRef::Result(ok, err)
+            if matches!(tokenize_resolve_alias(index, ok.as_ref()), TypeRef::List(t) if matches!(tokenize_resolve_alias(index, t.as_ref()), TypeRef::Named(n) if n == shape.token_decl))
+                && tokenize_resolve_alias(index, err.as_ref()) == TypeRef::String
+    );
+    if is_loop_return {
+        if !tokenize_callee(
+            index,
+            "peek",
+            &shape,
+            &TypeRef::Option(Box::new(TypeRef::Char)),
+        ) {
+            return None;
+        }
+        // The step spec: any OTHER spec in the index
+        // the STEP keying itself admits (same shape,
+        // step return, rows' shape, callees present) —
+        // called by its found name.
+        let mut step_candidates: Vec<&FunctionSpec> = index
+            .by_name
+            .values()
+            .filter(|f| {
+                f.name != spec.name
+                    && tokenize_shape(f, index).is_some_and(|s2| {
+                        s2.state_decl == shape.state_decl
+                            && s2.token_decl == shape.token_decl
+                    })
+                    && tokenize_rows_shape(f)
+                    && matches!(
+                        tokenize_resolve_alias(index, &f.return_type),
+                        TypeRef::Result(ref ok, ref err)
+                            if matches!(tokenize_resolve_alias(index, ok.as_ref()), TypeRef::Named(ref n) if *n == shape.state_decl)
+                                && tokenize_resolve_alias(index, err.as_ref()) == TypeRef::String
+                    )
+            })
+            .collect();
+        step_candidates.sort_by(|a, b| a.name.cmp(&b.name));
+        let step_name = step_candidates.first().map(|f| f.name.clone())?;
+        return Some(IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "s".to_string(),
+                ty: state_ty.clone(),
+                initial: Box::new(v(&param)),
+            },
+            // Phase 87: the loop runs on a position-
+            // progress break instead of the Phase 85
+            // While over `peek(s.clone()) != None` —
+            // that condition cloned the whole state
+            // (String + the growing token Vec) and ran
+            // peek's source scan once per token, and
+            // the profile priced the clone as the loop
+            // form's dominant cost. The break is the
+            // same EOF test stated on the step's own
+            // contract: the step this builder keys on
+            // returns Ok with the position advanced
+            // exactly when it appended a token (its
+            // ident/punctuation arms consume a char;
+            // its EOF arm — reached after the skip, so
+            // trailing whitespace may still advance the
+            // position once, into the final no-progress
+            // step — changes nothing). A step that
+            // leaves the position unchanged is the EOF
+            // step; errors leave through TryPropagate
+            // before the test. (The peek-callee
+            // requirement above stands: the step this
+            // loop drives still keys on peek.)
+            IRNode::Alloc {
+                name: "prev".to_string(),
+                ty: TypeRef::Int,
+                initial: Box::new(fa(v("s"), "pos")),
+            },
+            IRNode::Loop {
+                body: Box::new(IRNode::Block(vec![
+                    IRNode::Alloc {
+                        name: "step".to_string(),
+                        ty: state_ty.clone(),
+                        initial: Box::new(IRNode::TryPropagate(Box::new(call(
+                            &step_name,
+                            vec![v("s")],
+                        )))),
+                    },
+                    IRNode::Assign {
+                        target: Box::new(v("s")),
+                        value: Box::new(v("step")),
+                    },
+                    IRNode::If {
+                        condition: Box::new(IRNode::BinOp(
+                            IRBinOp::Eq,
+                            Box::new(fa(v("s"), "pos")),
+                            Box::new(v("prev")),
+                        )),
+                        then_branch: Box::new(IRNode::Block(vec![IRNode::Break {
+                            value: None,
+                        }])),
+                        else_branch: Box::new(IRNode::Block(vec![])),
+                    },
+                    IRNode::Assign {
+                        target: Box::new(v("prev")),
+                        value: Box::new(fa(v("s"), "pos")),
+                    },
+                ])),
+            },
+            IRNode::Return(Box::new(call(
+                "Ok",
+                vec![fa(v("s"), "tokens")],
+            ))),
+        ]));
+    }
+    None
+}
+
 /// The Char-classifier tree validator: the number of
 /// comparison leaves in `node` when the tree is a pure
 /// classifier over the parameter `param` — `||` / `&&` /
@@ -4402,6 +5736,22 @@ fn char_classifier_tree_leaves(node: &IRNode, param: &str) -> Option<usize> {
 /// with it all 54 measured equation bodies — literally
 /// untouched; the golden fixture and the resolver-visible
 /// body diff prove no prior spec's seed moved.
+///
+/// ── Phase 76 addendum (D5a): the premise above is
+/// retired. Char now encodes as its Unicode scalar value,
+/// so every classifier tree this builder's validator
+/// accepts (||/&&/! over param-vs-CharLit comparisons) is
+/// encodable, and by the precedence below the equation
+/// family owns every one of them — this builder's
+/// territory is empty in practice, and the classifiers'
+/// seeds are equation seeds with Z3 verdicts (Verified),
+/// their executed agreement re-measured as a cross-check.
+/// The builder and its precedence stay in place as the
+/// recorded fallback: it would admit exactly a classifier
+/// tree the equation family still cannot encode, should
+/// the encoder's Char fragment ever narrow again. The
+/// family's separate existence is now a historical record
+/// of the pre-D5a admission standard, not a live one.
 ///
 /// Territory disjointness is by construction, on two
 /// independent discriminators. The signature — exactly
@@ -4868,6 +6218,18 @@ fn expr_calls_indexed(expr: &Expr, index: &SpecIndex) -> bool {
         Expr::Comprehension {
             collection, body, ..
         } => expr_calls_indexed(collection, index) && expr_calls_indexed(body, index),
+        // M1 features (Phase 73): a method call is not a spec
+        // call — its name resolves against the D1a builtin
+        // table (Phase 74), never the module index — so only
+        // the receiver and arguments are walked. A record
+        // literal walks its field values.
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_calls_indexed(receiver, index)
+                && args.iter().all(|a| expr_calls_indexed(a, index))
+        }
+        Expr::RecordLit { fields, .. } => {
+            fields.iter().all(|(_, v)| expr_calls_indexed(v, index))
+        }
     }
 }
 
@@ -4899,6 +6261,28 @@ fn expr_same(a: &Expr, b: &Expr) -> bool {
         }
         (Expr::UnaryOp(o1, x), Expr::UnaryOp(o2, y)) => o1 == o2 && expr_same(x, y),
         (Expr::Length(x), Expr::Length(y)) => expr_same(x, y),
+        // M1 features (Phase 73): structural equality is
+        // well-defined for both new forms (names, then
+        // subexpressions in order).
+        (
+            Expr::MethodCall { receiver: r1, name: n1, args: a1 },
+            Expr::MethodCall { receiver: r2, name: n2, args: a2 },
+        ) => {
+            n1 == n2
+                && expr_same(r1, r2)
+                && a1.len() == a2.len()
+                && a1.iter().zip(a2.iter()).all(|(x, y)| expr_same(x, y))
+        }
+        (
+            Expr::RecordLit { type_name: t1, fields: f1 },
+            Expr::RecordLit { type_name: t2, fields: f2 },
+        ) => {
+            t1 == t2
+                && f1.len() == f2.len()
+                && f1.iter().zip(f2.iter()).all(|((n1, v1), (n2, v2))| {
+                    n1 == n2 && expr_same(v1, v2)
+                })
+        }
         _ => false,
     }
 }
@@ -4941,6 +6325,13 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 8;
 #[derive(Debug, Clone, Default)]
 pub struct SpecIndex {
     by_name: HashMap<String, FunctionSpec>,
+    /// The module's type declarations, by name — carried
+    /// only when the index is built from a whole module
+    /// (`from_module`); `from_specs` leaves it empty, and
+    /// consumers that need declarations (the verifier's
+    /// record binding, Phase 76) degrade honestly to their
+    /// pre-declaration behavior when it is.
+    types: HashMap<String, TypeDef>,
 }
 
 impl SpecIndex {
@@ -4949,6 +6340,24 @@ impl SpecIndex {
             by_name: specs
                 .iter()
                 .map(|s| (s.name.clone(), s.clone()))
+                .collect(),
+            types: HashMap::new(),
+        }
+    }
+
+    /// An index over a whole parsed module: its specs AND
+    /// its type declarations.
+    pub fn from_module(module: &Spec) -> Self {
+        Self {
+            by_name: module
+                .functions
+                .iter()
+                .map(|s| (s.name.clone(), s.clone()))
+                .collect(),
+            types: module
+                .types
+                .iter()
+                .map(|t| (t.name.clone(), t.clone()))
                 .collect(),
         }
     }
@@ -4959,6 +6368,37 @@ impl SpecIndex {
 
     pub fn get(&self, name: &str) -> Option<&FunctionSpec> {
         self.by_name.get(name)
+    }
+
+    /// The declared fields of the record a name denotes,
+    /// following alias/newtype names to the declaration —
+    /// the typechecker's `declared_record_fields` reading,
+    /// as an Option: the resolved declaration's name and
+    /// its fields, or None when the name is undeclared,
+    /// cyclic, or not a record. Needs the declarations
+    /// (`from_module`); a `from_specs` index answers None.
+    pub fn record_fields(
+        &self,
+        name: &str,
+    ) -> Option<(String, Vec<(String, TypeRef)>)> {
+        let mut current = name;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let td = self.types.get(current)?;
+            match &td.kind {
+                TypeKind::Record { fields } => {
+                    return Some((td.name.clone(), fields.clone()));
+                }
+                TypeKind::Alias(TypeRef::Named(next))
+                | TypeKind::Newtype(TypeRef::Named(next)) => {
+                    if !seen.insert(current.to_string()) {
+                        return None;
+                    }
+                    current = next;
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// The body a call to `name` denotes: the callee's first
@@ -4983,6 +6423,7 @@ impl SpecIndex {
             .or_else(|| expr_pin_guard_body(spec, self))
             .or_else(|| pair_guard_table_body(spec))
             .or_else(|| mixed_pair_guard_table_body(spec))
+            .or_else(|| complementary_guard_body(spec))
     }
 
     /// IR-level inlining: replace every call to an indexed
@@ -5063,6 +6504,60 @@ impl SpecIndex {
                 visiting.push(function.clone());
                 self.inline_rec(&substituted, &visiting, depth + 1)
             }
+            // Phase 81: the resolver's shape set is widened
+            // to the Phase 73–77 nodes (If was always an IR
+            // node but outside this set; FieldAccess, Index
+            // and RecordLit are the record-era shapes). The
+            // widening only turns shape-refusals into
+            // resolutions — a body whose calls could not
+            // resolve for any other reason (cycle, depth,
+            // arity, capture) still returns None — and the
+            // record-completion seed (remainder (i-b)) is
+            // its first consumer: its guard calls a callee
+            // whose denotation is an If over an Index.
+            IRNode::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => Some(IRNode::If {
+                condition: Box::new(self.inline_rec(condition, visiting, depth)?),
+                then_branch: Box::new(self.inline_rec(then_branch, visiting, depth)?),
+                else_branch: Box::new(self.inline_rec(else_branch, visiting, depth)?),
+            }),
+            IRNode::FieldAccess { base, field } => Some(IRNode::FieldAccess {
+                base: Box::new(self.inline_rec(base, visiting, depth)?),
+                field: field.clone(),
+            }),
+            IRNode::Index(coll, idx) => Some(IRNode::Index(
+                Box::new(self.inline_rec(coll, visiting, depth)?),
+                Box::new(self.inline_rec(idx, visiting, depth)?),
+            )),
+            IRNode::RecordLit { type_name, fields } => {
+                let mut out = Vec::with_capacity(fields.len());
+                for (name, value) in fields {
+                    out.push((name.clone(), self.inline_rec(value, visiting, depth)?));
+                }
+                Some(IRNode::RecordLit {
+                    type_name: type_name.clone(),
+                    fields: out,
+                })
+            }
+            // Phase 87 shape widening (see inline_rec's
+            // Phase 81 note): Let joins the resolver's
+            // set so a denotation may bind a shared
+            // subterm — the record-completion seed's
+            // shared guard (Phase 87) is its first
+            // consumer. The bound name is a binder:
+            // calls in the value resolve in the caller's
+            // context (the value sits outside the
+            // binder's scope), calls in the body under
+            // it; substitution below treats the name
+            // exactly like a match binder.
+            IRNode::Let { name, value, body } => Some(IRNode::Let {
+                name: name.clone(),
+                value: Box::new(self.inline_rec(value, visiting, depth)?),
+                body: Box::new(self.inline_rec(body, visiting, depth)?),
+            }),
             _ => None,
         }
     }
@@ -5118,6 +6613,37 @@ fn collect_pattern_binders<'a>(node: &'a IRNode, out: &mut Vec<&'a str>) {
                 collect_pattern_binders(a, out);
             }
         }
+        // Phase 81 shape widening (see inline_rec): these
+        // shapes bind nothing, but the walk must reach the
+        // whole tree.
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_pattern_binders(condition, out);
+            collect_pattern_binders(then_branch, out);
+            collect_pattern_binders(else_branch, out);
+        }
+        IRNode::FieldAccess { base, .. } => collect_pattern_binders(base, out),
+        IRNode::Index(c, i) => {
+            collect_pattern_binders(c, out);
+            collect_pattern_binders(i, out);
+        }
+        IRNode::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                collect_pattern_binders(v, out);
+            }
+        }
+        // Phase 87: a Let's name is a binder for the
+        // capture screen's purposes, exactly like a
+        // match variable — an argument mentioning it
+        // freely must not be substituted under it.
+        IRNode::Let { name, value, body } => {
+            out.push(name.as_str());
+            collect_pattern_binders(value, out);
+            collect_pattern_binders(body, out);
+        }
         _ => {}
     }
 }
@@ -5146,6 +6672,36 @@ fn collect_free_vars(node: &IRNode, out: &mut Vec<String>) -> Option<()> {
                 collect_free_vars(body, out)?;
             }
             Some(())
+        }
+        // Phase 81 shape widening (see inline_rec).
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_free_vars(condition, out)?;
+            collect_free_vars(then_branch, out)?;
+            collect_free_vars(else_branch, out)
+        }
+        IRNode::FieldAccess { base, .. } => collect_free_vars(base, out),
+        IRNode::Index(c, i) => {
+            collect_free_vars(c, out)?;
+            collect_free_vars(i, out)
+        }
+        IRNode::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                collect_free_vars(v, out)?;
+            }
+            Some(())
+        }
+        // Phase 87 shape widening (see inline_rec).
+        // The walk is the same over-approximation the
+        // Match arm makes: the bound name's uses in
+        // the body are collected as if free, which can
+        // only make the capture screen refuse more.
+        IRNode::Let { value, body, .. } => {
+            collect_free_vars(value, out)?;
+            collect_free_vars(body, out)
         }
         _ => None,
     }
@@ -5204,6 +6760,53 @@ fn substitute_rec(
             Some(IRNode::Match {
                 scrutinee,
                 cases: out,
+            })
+        }
+        // Phase 81 shape widening (see inline_rec).
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => Some(IRNode::If {
+            condition: Box::new(substitute_rec(condition, params, args, shadowed)?),
+            then_branch: Box::new(substitute_rec(then_branch, params, args, shadowed)?),
+            else_branch: Box::new(substitute_rec(else_branch, params, args, shadowed)?),
+        }),
+        IRNode::FieldAccess { base, field } => Some(IRNode::FieldAccess {
+            base: Box::new(substitute_rec(base, params, args, shadowed)?),
+            field: field.clone(),
+        }),
+        IRNode::Index(coll, idx) => Some(IRNode::Index(
+            Box::new(substitute_rec(coll, params, args, shadowed)?),
+            Box::new(substitute_rec(idx, params, args, shadowed)?),
+        )),
+        IRNode::RecordLit { type_name, fields } => {
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                out.push((
+                    name.clone(),
+                    substitute_rec(value, params, args, shadowed)?,
+                ));
+            }
+            Some(IRNode::RecordLit {
+                type_name: type_name.clone(),
+                fields: out,
+            })
+        }
+        // Phase 87 shape widening (see inline_rec):
+        // the Let's value substitutes under the
+        // caller's shadowing; its body substitutes
+        // with the bound name shadowing, exactly like
+        // a match variable's arm above.
+        IRNode::Let { name, value, body } => {
+            let value = Box::new(substitute_rec(value, params, args, shadowed)?);
+            let mut inner = shadowed.to_vec();
+            inner.push(name.as_str());
+            let body = Box::new(substitute_rec(body, params, args, &inner)?);
+            Some(IRNode::Let {
+                name: name.clone(),
+                value,
+                body,
             })
         }
         _ => None,
@@ -5481,6 +7084,40 @@ pub(crate) fn expr_to_ir(expr: &Expr) -> IRNode {
             unaryop_to_ir(*op),
             Box::new(expr_to_ir(inner)),
         ),
+        // M1 features (Phase 73): Field and Index lower for
+        // real now — before this phase both fell into the Hole
+        // arm below, which is the direct cause of Phase 48's
+        // 24/24 seedless record-spec runs (audit section 2.1).
+        // IRNode::Index existed all along; only the lowering
+        // refused it. FieldAccess is the new kind 28 (D2a).
+        Expr::Field(base, field) => IRNode::FieldAccess {
+            base: Box::new(expr_to_ir(base)),
+            field: field.clone(),
+        },
+        Expr::Index(base, idx) => IRNode::Index(
+            Box::new(expr_to_ir(base)),
+            Box::new(expr_to_ir(idx)),
+        ),
+        // Record construction (D3a): the IR half of the spec
+        // literal, kind 29. Field values lower recursively.
+        Expr::RecordLit { type_name, fields } => IRNode::RecordLit {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(name, value)| (name.clone(), expr_to_ir(value)))
+                .collect(),
+        },
+        // MethodCall lowering is the Hole, by design
+        // (re-pinned in Phase 76): the IR kind table has no
+        // method-call kind (the audit's section 4 appends
+        // only FieldAccess/RecordLit), and method semantics
+        // land where the node is consumed — the
+        // typechecker's D1a builtin table (Phase 74) and
+        // the Z3 encoder's Result/Option forms (Phase 76),
+        // both of which work on the spec Expr directly.
+        // Pinned by
+        // expr_to_ir_method_call_lowers_to_hole_no_ir_kind.
+        Expr::MethodCall { .. } => IRNode::Hole { id: 0, expected_type: None },
         _ => IRNode::Hole { id: 0, expected_type: None },
     }
 }
@@ -5618,6 +7255,11 @@ fn ast_depth(node: &IRNode) -> usize {
         IRNode::Break { value } => 1 + value.as_ref().map(|v| ast_depth(v)).unwrap_or(0),
         IRNode::StructDef { body, .. } => 1 + ast_depth(body),
         IRNode::TryPropagate(inner) => 1 + ast_depth(inner),
+        // M1 features (Phase 73).
+        IRNode::FieldAccess { base, .. } => 1 + ast_depth(base),
+        IRNode::RecordLit { fields, .. } => {
+            1 + fields.iter().map(|(_, v)| ast_depth(v)).max().unwrap_or(0)
+        }
     }
 }
 
@@ -5690,6 +7332,11 @@ fn ast_node_count(node: &IRNode) -> usize {
         IRNode::Break { value } => 1 + value.as_ref().map(|v| ast_node_count(v)).unwrap_or(0),
         IRNode::StructDef { body, .. } => 1 + ast_node_count(body),
         IRNode::TryPropagate(inner) => 1 + ast_node_count(inner),
+        // M1 features (Phase 73).
+        IRNode::FieldAccess { base, .. } => 1 + ast_node_count(base),
+        IRNode::RecordLit { fields, .. } => {
+            1 + fields.iter().map(|(_, v)| ast_node_count(v)).sum::<usize>()
+        }
     }
 }
 
@@ -7171,7 +8818,12 @@ spec exclaim {
     // char_equation_diagnosis_why_the_eight_families_refuse
     // below (every assertion in it holds before AND after
     // this phase — it documents the other families, which do
-    // not change):
+    // not change): [Phase 76: this framing is superseded —
+    // the test is re-stated as
+    // d5a_diagnosis_equation_family_now_admits_classifiers,
+    // and the equation bullet below is the pre-D5a record;
+    // see the Phase 76 re-statement at the end of this
+    // section.]
     //
     //  - equation: the shape MATCHES — equation_rhs converts
     //    each postcondition (CharLit → IR Char literal,
@@ -7242,6 +8894,28 @@ spec exclaim {
     // through. The body is the postcondition's own
     // right-hand side with spec calls inlined — the
     // equation family's body, verbatim.
+    //
+    // ── Phase 76 re-statement (D5a landed): the Char
+    // scalar encoding retires this family's premise. The
+    // three classifiers' bodies are now encodable, so the
+    // equation family's admission gate opens for them and
+    // — by char_equation's own precedence rule — the
+    // equation family owns them: their seeds are kind
+    // "equation", and Z3's verdict on them is Verified,
+    // not Inconclusive-by-construction. Every tree
+    // char_classifier_tree_leaves accepts is a Bool tree
+    // over param-vs-CharLit comparisons, all encodable
+    // under D5a, so char_equation's territory is empty in
+    // practice; the builder remains as the recorded
+    // fallback for a classifier tree the equation family
+    // cannot encode. The tests below were re-stated
+    // accordingly (the diagnosis's encodability assertions
+    // flipped; the seed-kind and verdict assertions moved
+    // to the equation family; the 774/774 executed
+    // agreement re-measured on the verified seed as a
+    // cross-check, per the audit's D5a terms — re-measured,
+    // not assumed carried). The seven row/key families'
+    // filter refusals are unchanged and still pinned.
 
     fn load_tokenizer_module() -> Vec<FunctionSpec> {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -7273,15 +8947,17 @@ spec exclaim {
         }
     }
 
-    /// The diagnosis, as measured (see the section comment):
-    /// for each classifier, the equation shape converts and
-    /// inlines, the encodability gate is the equation
-    /// family's refusal point, and every other family's raw
-    /// builder refuses on its stated filter. These facts are
-    /// about the OTHER families and hold after this phase
-    /// exactly as before it.
+    /// The diagnosis, as measured (see the section
+    /// comment). Phase 76 (D5a) flipped exactly one half of
+    /// it: the equation family's refusal point is GONE —
+    /// the classifier bodies now encode (Char is a scalar
+    /// sort), the equation family admits them, and
+    /// char_equation's precedence rule therefore leaves it
+    /// nothing. The seven row/key families' refusals are
+    /// the Phase 49 facts, unchanged: they refuse on their
+    /// stated filters, not on encodability.
     #[test]
-    fn char_equation_diagnosis_why_the_eight_families_refuse() {
+    fn d5a_diagnosis_equation_family_now_admits_classifiers() {
         let module = load_tokenizer_module();
         let index = SpecIndex::from_specs(&module);
         for name in ["is_whitespace", "is_ident_start", "is_ident_continue"] {
@@ -7292,17 +8968,24 @@ spec exclaim {
             let inlined = index
                 .inline_calls(&raw)
                 .unwrap_or_else(|| panic!("{}: calls must resolve", name));
-            // The refusal is the Z3-encodability gate:
-            // Char is Opaque, comparisons over Opaque do
-            // not encode.
+            // D5a: the body is encodable now — Char binds
+            // as its scalar value and Char comparisons
+            // encode (the Phase 49 gate is retired).
             assert!(
-                !crate::verify::verifier::body_is_encodable_with(&spec, &inlined, &index),
-                "{}: classifier body must be unencodable (Char is Opaque)",
+                crate::verify::verifier::body_is_encodable_with(&spec, &inlined, &index),
+                "{}: classifier body must be encodable after D5a",
                 name
             );
             assert!(
-                equation_seed_body(&spec, &index).is_none(),
-                "{}: equation family must refuse at the encodability gate",
+                equation_seed_body(&spec, &index).is_some(),
+                "{}: equation family must admit at its (now open) gate",
+                name
+            );
+            // char_equation's precedence leaves it nothing:
+            // the equation family owns every classifier tree.
+            assert!(
+                char_equation_seed_body(&spec, &index).is_none(),
+                "{}: char_equation must yield to the equation family",
                 name
             );
             // Every other family refuses on its stated
@@ -7330,16 +9013,16 @@ spec exclaim {
         }
     }
 
-    /// The three classifiers each gain exactly one seed,
-    /// of kind char_equation, whose body is the
-    /// postcondition's own right-hand side (calls inlined).
-    /// Z3's verdict on the seed is Inconclusive — Char is
-    /// Opaque, so the verifier cannot judge it; that is the
-    /// family's recorded admission standard, not a defect:
-    /// the evidence for these seeds is executed agreement
-    /// (next test), never a proof.
+    /// The three classifiers each gain exactly one seed —
+    /// since Phase 76 (D5a), of kind equation: the
+    /// postcondition's own right-hand side (calls inlined),
+    /// admitted at the equation family's Z3 gate and
+    /// Verified by it. (Phase 49's form of this test pinned
+    /// the char_equation kind and an Inconclusive verdict —
+    /// the pre-D5a admission standard, retired; see the
+    /// section comment.)
     #[test]
-    fn char_equation_seed_for_tokenizer_classifiers() {
+    fn equation_seed_for_tokenizer_classifiers_is_verified() {
         let module = load_tokenizer_module();
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
         for name in ["is_whitespace", "is_ident_start", "is_ident_continue"] {
@@ -7348,16 +9031,45 @@ spec exclaim {
             assert_eq!(
                 seeds.len(),
                 1,
-                "{}: exactly the char_equation seed",
+                "{}: exactly the equation seed",
                 name
             );
-            let seed = constraint_seed(&engine, &spec, "char_equation");
+            assert!(
+                !seeds.iter().any(|c| matches!(
+                    &c.provenance,
+                    Provenance::ConstraintInduced { kind } if kind == "char_equation"
+                )),
+                "{}: no char_equation seed after D5a",
+                name
+            );
+            let seed = constraint_seed(&engine, &spec, "equation");
             assert_eq!(count_holes(&seed.body), 0, "{}: seed must be hole-free", name);
-            let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
+            // Module-aware, as the pipeline judges:
+            // is_ident_continue's constraint calls
+            // is_ident_start, which only the module index
+            // can inline on the constraint side.
+            let result =
+                crate::verify::verifier::Verifier::with_specs(&module)
+                    .verify_one(&seed, &spec);
+            // The verdict is configuration-shaped, per the
+            // standing pattern: with Z3 the seed is proven;
+            // the no-Z3 build returns the honest
+            // Inconclusive (the playground contract) — the
+            // seed itself is admitted in both, because
+            // admission runs on the pure encodability
+            // predicate.
+            #[cfg(feature = "z3-support")]
+            assert_eq!(
+                result.status,
+                crate::verify::verifier::VerificationStatus::Verified,
+                "{}: Z3 must verify the classifier seed after D5a",
+                name
+            );
+            #[cfg(not(feature = "z3-support"))]
             assert_eq!(
                 result.status,
                 crate::verify::verifier::VerificationStatus::Inconclusive,
-                "{}: Z3 cannot judge a Char classifier (Opaque) — Inconclusive expected",
+                "{}: the no-Z3 build must stay honestly Inconclusive",
                 name
             );
         }
@@ -7366,7 +9078,7 @@ spec exclaim {
         let index = SpecIndex::from_specs(&module);
         for name in ["is_whitespace", "is_ident_start"] {
             let spec = tokenizer_spec(&module, name);
-            let seed = constraint_seed(&engine, &spec, "char_equation");
+            let seed = constraint_seed(&engine, &spec, "equation");
             assert_eq!(
                 format!("{:?}", seed.body),
                 format!("{:?}", index.callee_body(name).unwrap()),
@@ -7378,7 +9090,7 @@ spec exclaim {
         // tree — is_ident_start's disjunction substituted
         // for the call, the digit range appended.
         let spec = tokenizer_spec(&module, "is_ident_continue");
-        let seed = constraint_seed(&engine, &spec, "char_equation");
+        let seed = constraint_seed(&engine, &spec, "equation");
         let ch = |c: char| IRNode::Literal(IRLiteral::Char(c));
         let var = || IRNode::Var("c".to_string());
         let bin = |op: IRBinOp, l: IRNode, r: IRNode| {
@@ -7404,12 +9116,17 @@ spec exclaim {
         );
     }
 
-    /// The family's evidence standard: executed agreement
-    /// over the full 774-char battery. Each classifier's
-    /// seed, executed on the IR interpreter, agrees with
-    /// the hand mirror on every battery char.
+    /// Executed agreement over the full 774-char battery,
+    /// re-measured after D5a (the audit's terms: the
+    /// standing result is re-measured, not assumed
+    /// carried). The seed is now the equation family's and
+    /// carries a Z3 proof (previous test); this battery is
+    /// the cross-check that the VERIFIED body also agrees
+    /// with the hand mirror on every executed char — a
+    /// Verified claim contradicted here would be a
+    /// soundness bug, not a statistic.
     #[test]
-    fn char_equation_seed_executes_exactly_over_char_battery() {
+    fn equation_seed_executes_exactly_over_char_battery() {
         let module = load_tokenizer_module();
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
         let battery = phase49_char_battery();
@@ -7421,7 +9138,7 @@ spec exclaim {
         ];
         for (name, mirror) in mirrors {
             let spec = tokenizer_spec(&module, name);
-            let seed = constraint_seed(&engine, &spec, "char_equation");
+            let seed = constraint_seed(&engine, &spec, "equation");
             let agree = battery
                 .iter()
                 .filter(|&&c| eval_char_body(&seed.body, c) == mirror(c))
@@ -7436,12 +9153,292 @@ spec exclaim {
         }
     }
 
+    fn load_tokenizer_spec() -> crate::spec::ast::Spec {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/functional_tokenizer.morph", root);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        crate::spec::typeck::check(parsed).unwrap().spec
+    }
+
+    /// Phase 81 (M1 remainder (i)): the complementary-guard
+    /// builder denotes `peek` — the two-row spec over a
+    /// computed comparison guard that every earlier builder
+    /// returned None for — and the denotation enters peek's
+    /// synthesis pool as a seed.
+    #[test]
+    fn phase81_complementary_guard_denotes_peek_and_seeds() {
+        let module = load_tokenizer_spec();
+        let index = SpecIndex::from_module(&module);
+        let body = index
+            .callee_body("peek")
+            .expect("peek must denote after Phase 81");
+        assert!(
+            matches!(body, IRNode::If { .. }),
+            "peek's denotation must be the complementary-guard If, got {:?}",
+            body
+        );
+        let engine =
+            SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        let peek = tokenizer_spec(&module.functions, "peek");
+        let kinds = engine.constraint_seed_kinds(&peek);
+        assert!(
+            kinds.iter().any(|k| k == "complementary_guard"),
+            "peek's seed kinds must include complementary_guard, got {:?}",
+            kinds
+        );
+    }
+
+    /// Phase 81: complement detection stays syntactic and
+    /// exact — the decline side of the builder.
+    #[test]
+    fn phase81_complementary_guard_declines() {
+        let spec_of = |src: &str| {
+            crate::spec::parser::parse(src)
+                .unwrap()
+                .functions
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        // Non-complementary guards (both Lt): no denotation.
+        let spec = spec_of(
+            "T { spec f { input: x: Int output: Int \
+             constraint: x<0||output==1 constraint: x<5||output==2 } }",
+        );
+        assert!(complementary_guard_body(&spec).is_none());
+        // Swapped operands are NOT expr_same operands: the
+        // complement of `x<0` stated as `0>=x` is declined.
+        let spec = spec_of(
+            "T { spec f { input: x: Int output: Int \
+             constraint: x<0||output==1 constraint: 0>=x||output==2 } }",
+        );
+        assert!(complementary_guard_body(&spec).is_none());
+        // Three rows: not exactly two postconditions.
+        let spec = spec_of(
+            "T { spec f { input: x: Int output: Int \
+             constraint: x<0||output==1 constraint: x>=0||output==2 \
+             constraint: output==output } }",
+        );
+        assert!(complementary_guard_body(&spec).is_none());
+        // The Not pair is a complement at the AST level
+        // (the Phase 80 pricing admits it). It is not
+        // reachable from parsed text today — the parser
+        // hoists a leading `!` to a constraint-level Not
+        // and rejects `!(…)` in guard-leaf position — so it
+        // is pinned here on constructed expressions, and
+        // the reachable complement forms are the comparison
+        // pairs (peek's Lt/Ge, next_char's Eq/Neq).
+        let g = Expr::BinOp(
+            BinOp::Lt,
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::IntLit(0)),
+        );
+        let not_g = Expr::UnaryOp(UnaryOp::Not, Box::new(g.clone()));
+        assert!(guards_complementary(&not_g, &g));
+        assert!(guards_complementary(&g, &not_g));
+        assert!(!guards_complementary(&g, &g));
+    }
+
+    /// Phase 81 (M1 remainder (i-b)): the record-completion
+    /// builder constructs next_char's body from its partial
+    /// field equations, and its seed — with the peek call in
+    /// the guard resolved — enters next_char's pool.
+    #[test]
+    fn phase81_record_completion_builds_next_char() {
+        let module = load_tokenizer_spec();
+        let index = SpecIndex::from_module(&module);
+        let spec = tokenizer_spec(&module.functions, "next_char");
+        let body = record_completion_body(&spec, &index)
+            .expect("next_char must complete after Phase 81");
+        // Phase 87 re-statement: the guard feeds two
+        // fields (line, col), so the builder binds it
+        // once in a Let and the fields test the bound
+        // name — the Phase 81 shape cloned the guard
+        // tree (the inlined peek: a full source scan)
+        // into every guarded field. Unwrap the Let to
+        // the construction it binds.
+        let IRNode::Let {
+            name: guard_name,
+            value: guard_value,
+            body: record,
+        } = &body
+        else {
+            panic!("record completion must bind the shared guard, got {:?}", body);
+        };
+        assert!(
+            format!("{:?}", guard_value).contains("peek"),
+            "the bound value must be the guard (with its peek call): {:?}",
+            guard_value
+        );
+        let IRNode::RecordLit { type_name, fields } = record.as_ref() else {
+            panic!("the Let's body must be the RecordLit, got {:?}", record);
+        };
+        assert_eq!(type_name, "TokenizerState");
+        let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["source", "pos", "line", "col", "tokens"]);
+        // pos carries the unconditional equation (an Add);
+        // line and col are guard conditionals; source and
+        // tokens are carried field projections.
+        assert!(matches!(fields[1].1, IRNode::BinOp(..)));
+        assert!(matches!(fields[2].1, IRNode::If { .. }));
+        assert!(matches!(fields[3].1, IRNode::If { .. }));
+        // Phase 87: both guarded fields test the bound
+        // name, not a cloned guard tree.
+        for f in [&fields[2].1, &fields[3].1] {
+            let IRNode::If { condition, .. } = f else {
+                unreachable!()
+            };
+            assert!(
+                matches!(condition.as_ref(), IRNode::Var(n) if n == guard_name),
+                "a guarded field must test the Let's name: {:?}",
+                f
+            );
+        }
+        assert!(matches!(fields[0].1, IRNode::FieldAccess { .. }));
+        assert!(matches!(fields[4].1, IRNode::FieldAccess { .. }));
+        // The seed resolves the guard's peek call and fires.
+        let engine =
+            SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        let kinds = engine.constraint_seed_kinds(&spec);
+        assert!(
+            kinds.iter().any(|k| k == "record_completion"),
+            "next_char's seed kinds must include record_completion, got {:?}",
+            kinds
+        );
+        let seed = constraint_seed(&engine, &spec, "record_completion");
+        assert!(
+            !body_calls_indexed(&seed.body, &index),
+            "the record-completion seed must not carry a raw peek call"
+        );
+    }
+
+    /// Phase 81: the record-completion builder's decline
+    /// side — no declarations in the index, and a record
+    /// spec stated with ordering postconditions instead of
+    /// field equations.
+    #[test]
+    fn phase81_record_completion_declines() {
+        let module = load_tokenizer_spec();
+        let spec = tokenizer_spec(&module.functions, "next_char");
+        let bare = SpecIndex::from_specs(&module.functions);
+        assert!(
+            record_completion_body(&spec, &bare).is_none(),
+            "without type declarations the builder must decline"
+        );
+        let index = SpecIndex::from_module(&module);
+        let skip = tokenizer_spec(&module.functions, "skip_whitespace");
+        assert!(
+            record_completion_body(&skip, &index).is_none(),
+            "skip_whitespace states orderings, not field equations: decline"
+        );
+        // peek returns Option<Char>, not the record: decline.
+        let peek = tokenizer_spec(&module.functions, "peek");
+        assert!(record_completion_body(&peek, &index).is_none());
+    }
+
     /// Admitted synthetic shapes: the range conjunction
     /// (Phase 45's is_digit shape), literal-on-the-left
     /// leaves, != and ! connectives, and a call composition
-    /// whose callee is itself a classifier.
+    /// whose callee is itself a classifier. Phase 49 pinned
+    /// these as char_equation admissions; since Phase 76
+    /// (D5a) every one of them is encodable, so the
+    /// equation family admits them (same bodies, same
+    /// executed behavior) and char_equation admits nothing.
     #[test]
-    fn char_equation_admitted_shapes() {
+    /// Phase 85 (M1 remainder (iii)): the tokenize
+    /// template family fires on both tokenize specs —
+    /// the STEP form for tokenize_one, the LOOP form
+    /// for tokenize_all — and on nothing else in the
+    /// module.
+    #[test]
+    fn phase85_tokenize_template_fires_on_the_tokenize_pair() {
+        let module = load_tokenizer_spec();
+        let engine =
+            SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        for name in ["tokenize_one", "tokenize_all"] {
+            let spec = tokenizer_spec(&module.functions, name);
+            let kinds = engine.constraint_seed_kinds(&spec);
+            assert!(
+                kinds.iter().any(|k| k == "tokenize_template"),
+                "{}'s seed kinds must include tokenize_template, got {:?}",
+                name,
+                kinds
+            );
+        }
+        for name in [
+            "is_whitespace",
+            "is_ident_start",
+            "is_ident_continue",
+            "skip_whitespace",
+            "peek",
+            "next_char",
+        ] {
+            let spec = tokenizer_spec(&module.functions, name);
+            let kinds = engine.constraint_seed_kinds(&spec);
+            assert!(
+                !kinds.iter().any(|k| k == "tokenize_template"),
+                "{} must not gain a tokenize_template seed, got {:?}",
+                name,
+                kinds
+            );
+        }
+        // The STEP body is the mirror's shape: it opens
+        // with the skip allocation and returns the peek
+        // dispatch; the LOOP body loops over the step.
+        let one = tokenizer_spec(&module.functions, "tokenize_one");
+        let seed = constraint_seed(&engine, &one, "tokenize_template");
+        let text = format!("{:?}", seed.body);
+        assert!(
+            text.contains("skip_whitespace") && text.contains("is_ident_start"),
+            "the step body must call the skip and the ident classifier: {}",
+            text
+        );
+        let all = tokenizer_spec(&module.functions, "tokenize_all");
+        let seed = constraint_seed(&engine, &all, "tokenize_template");
+        let text = format!("{:?}", seed.body);
+        assert!(
+            text.contains("tokenize_one") && text.contains("TryPropagate"),
+            "the loop body must thread the step's Ok payload: {}",
+            text
+        );
+    }
+
+    /// Phase 85: the template's keying declines — a
+    /// state-shaped spec without the rows' shape, and
+    /// a rows-shaped spec without the module's step
+    /// callees, both get no seed.
+    #[test]
+    fn phase85_tokenize_template_declines() {
+        // (a) The full tokenizer module, but tokenize_one
+        // renamed into a spec whose rows lose the
+        // is_err/is_ok + unwrap shape: rebuild the module
+        // with tokenize_one's postconditions replaced by
+        // a single unrelated row.
+        let module = load_tokenizer_spec();
+        let engine =
+            SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        let mut stripped = tokenizer_spec(&module.functions, "tokenize_one");
+        stripped.postconditions = vec![Constraint::Expr(Expr::BoolLit(true))];
+        let kinds = engine.constraint_seed_kinds(&stripped);
+        assert!(
+            !kinds.iter().any(|k| k == "tokenize_template"),
+            "rows-shape decline failed, got {:?}",
+            kinds
+        );
+        // (b) tokenize_one alone in an index with no
+        // callees: the signature evidence is absent.
+        let lone = tokenizer_spec(&module.functions, "tokenize_one");
+        let engine = SynthesisEngine::new(SynthesisConfig::default());
+        let kinds = engine.constraint_seed_kinds(&lone);
+        assert!(
+            !kinds.iter().any(|k| k == "tokenize_template"),
+            "callee decline failed, got {:?}",
+            kinds
+        );
+    }
+
+    fn classifier_shapes_admitted_by_equation_family() {
         // (a) Range conjunction over the param.
         let src = r#"
         T {
@@ -7454,7 +9451,7 @@ spec exclaim {
         "#;
         let module = crate::spec::parser::parse(src).unwrap().functions;
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
-        let seed = constraint_seed(&engine, &module[0], "char_equation");
+        let seed = constraint_seed(&engine, &module[0], "equation");
         assert!((0..=0x2FFu32)
             .filter_map(char::from_u32)
             .all(|c| eval_char_body(&seed.body, c) == c.is_ascii_digit()));
@@ -7472,7 +9469,7 @@ spec exclaim {
         "#;
         let module = crate::spec::parser::parse(src).unwrap().functions;
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
-        let seed = constraint_seed(&engine, &module[0], "char_equation");
+        let seed = constraint_seed(&engine, &module[0], "equation");
         assert!((0..=0x2FFu32).filter_map(char::from_u32).all(|c| {
             eval_char_body(&seed.body, c)
                 == (('a'..='z').contains(&c) && c != 'x' && c != 'm')
@@ -7497,7 +9494,7 @@ spec exclaim {
         let module = crate::spec::parser::parse(src).unwrap().functions;
         let engine = SynthesisEngine::with_module(SynthesisConfig::default(), &module);
         let caller = module.iter().find(|f| f.name == "is_vowel_or_digit").unwrap();
-        let seed = constraint_seed(&engine, caller, "char_equation");
+        let seed = constraint_seed(&engine, caller, "equation");
         assert!(
             !format!("{:?}", seed.body).contains("Call"),
             "caller seed must be fully inlined: {:?}",
@@ -8150,6 +10147,31 @@ spec exclaim {
     /// byte-identical below, unchanged (rust_generics_text's
     /// own body did not change — only its doc and its
     /// driver's join elements did).
+    ///
+    /// Phase 78 extension (2026-11-22): the M1-features
+    /// kind-row amendments. Two bodies are REPLACED in
+    /// place — rust_expr_form (Field leaves the fallback
+    /// family for family 8; MethodCall and RecordLit join
+    /// as families 9 and 10) and rust_expr_fixed_text (the
+    /// Field row is gone, the MethodCall fallback row is
+    /// in) — the Phase 55 replacement precedent for amended
+    /// specs. Six bodies are APPENDED: the phase's five new
+    /// equation templates (rust_expr_field_text,
+    /// rust_expr_method_text, rust_expr_record_text,
+    /// rust_field_access_text, rust_record_lit_text) and
+    /// rust_tail_form, whose guard-table body this phase
+    /// amended (the FieldAccess/RecordLit value rows) and
+    /// which joins by the Phase 37 precedent for bodies a
+    /// phase corrects: 52 Codegen bodies, 69 total. The
+    /// other 61 bodies are asserted byte-identical below,
+    /// unchanged. (rust_expr_method_form, the phase's sixth
+    /// new spec, has no seed body — String-equality guards
+    /// are the recorded unadmitted family, like
+    /// rust_expr_call_form, rust_target_route and
+    /// rust_ident_empty, which are likewise absent.
+    /// rust_stmt_form's constraints did not move — its
+    /// amendment is doc and tests only — so it has no
+    /// fixture consequence.)
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");
@@ -8162,7 +10184,7 @@ spec exclaim {
             let (file, name) = key.split_once("::").expect("golden key shape");
             expected.insert((file.to_string(), name.to_string()), body.to_string());
         }
-        assert_eq!(expected.len(), 63, "46 Codegen + 14 M2 + 3 tokenizer golden bodies");
+        assert_eq!(expected.len(), 69, "52 Codegen + 14 M2 + 3 tokenizer golden bodies");
         let mut modules: Vec<(String, Vec<FunctionSpec>)> = ["validator", "printer", "codegen"]
             .iter()
             .map(|f| (f.to_string(), load_m2_module(f)))
@@ -11485,6 +13507,11 @@ spec exclaim {
             }
             IRNode::StructDef { body, .. } => assert_vars_in_scope(body, scope),
             IRNode::TryPropagate(e) => assert_vars_in_scope(e, scope),
+            // M1 features (Phase 73).
+            IRNode::FieldAccess { base, .. } => assert_vars_in_scope(base, scope),
+            IRNode::RecordLit { fields, .. } => {
+                fields.iter().for_each(|(_, v)| assert_vars_in_scope(v, scope))
+            }
             IRNode::Hole { .. } | IRNode::Literal(_) => {}
         }
     }
@@ -12023,6 +14050,9 @@ spec exclaim {
     /// tails determine is 0, the catch-all's cells all pin
     /// the wildcard's own value and materialize no arm, and
     /// the single-value rows arm in row order as always.
+    /// (Phase 78: rust_tail_form's expected body carries the
+    /// amendment's two new arms — kinds 28/29 pin 1 by their
+    /// own rows, appended in row order after kind 27's.)
     #[test]
     #[cfg(feature = "z3-support")] // Z3 verdict assertion (Phase 66 config gate)
     fn constraint_guard_table_catch_all_at_default_unchanged() {
@@ -12049,6 +14079,7 @@ spec exclaim {
         let mut cases: Vec<(IRPattern, IRNode)> = [
             (1, 2), (22, 3), (7, 1), (9, 1), (10, 1), (11, 1), (12, 1), (13, 1),
             (14, 1), (15, 1), (16, 1), (17, 1), (18, 1), (19, 1), (23, 1), (27, 1),
+            (28, 1), (29, 1),
         ]
         .into_iter()
         .map(|(k, v)| {
@@ -12440,6 +14471,115 @@ spec exclaim {
         assert!(
             legacy_shapes > 0,
             "legacy generator produced no type-blind shapes in 200 draws — the untyped path changed"
+        );
+    }
+
+    // ── expr_to_ir lowerings for the M1 features (Phase 73) ──
+    //
+    // Before Phase 73, `expr_to_ir` lowered Field and Index
+    // into the Hole arm — the direct cause of Phase 48's
+    // "no constraint seed reached any pool (24/24 seedless)"
+    // for the record specs (M1_FEATURES_AUDIT section 2.1).
+    // Under D2a/D3a the lowering is now real for Field (to
+    // IRNode::FieldAccess, kind 28), Index (to the existing
+    // IRNode::Index, kind 23 — the node existed; only the
+    // lowering refused it) and RecordLit (to IRNode::RecordLit,
+    // kind 29). MethodCall lowering stays a Hole this phase:
+    // the IR kind table has no method-call kind (audit section
+    // 4 appends only 28/29), and method semantics land in the
+    // typechecker (Phase 74) and the Z3 encoder (Phase 76),
+    // which both work on the spec Expr directly. The Hole is
+    // pinned here so the deferral is a recorded fact, not a
+    // silent drop.
+
+    #[test]
+    fn expr_to_ir_lowers_field_access() {
+        let expr = Expr::Field(Box::new(Expr::Var("state".into())), "pos".into());
+        let ir = expr_to_ir(&expr);
+        assert!(
+            matches!(&ir, IRNode::FieldAccess { base, field }
+                if field == "pos" && matches!(&**base, IRNode::Var(v) if v == "state")),
+            "state.pos must lower to FieldAccess, got {:?}",
+            ir
+        );
+    }
+
+    #[test]
+    fn expr_to_ir_lowers_index_over_field() {
+        // state.source[state.pos] — peek's indexing shape:
+        // Index over a FieldAccess over a Var, with a
+        // FieldAccess index.
+        let expr = Expr::Index(
+            Box::new(Expr::Field(Box::new(Expr::Var("state".into())), "source".into())),
+            Box::new(Expr::Field(Box::new(Expr::Var("state".into())), "pos".into())),
+        );
+        let ir = expr_to_ir(&expr);
+        assert!(
+            matches!(&ir, IRNode::Index(coll, idx)
+                if matches!(&**coll, IRNode::FieldAccess { field, .. } if field == "source")
+                    && matches!(&**idx, IRNode::FieldAccess { field, .. } if field == "pos")),
+            "state.source[state.pos] must lower to Index(FieldAccess, FieldAccess), got {:?}",
+            ir
+        );
+    }
+
+    #[test]
+    fn expr_to_ir_lowers_record_literal() {
+        let expr = Expr::RecordLit {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), Expr::IntLit(0)),
+                ("lexeme".into(), Expr::StringLit("spec".into())),
+            ],
+        };
+        let ir = expr_to_ir(&expr);
+        let IRNode::RecordLit { type_name, fields } = &ir else {
+            panic!("record literal must lower to IRNode::RecordLit, got {:?}", ir);
+        };
+        assert_eq!(type_name, "Token");
+        assert_eq!(fields.len(), 2);
+        assert!(
+            matches!(&fields[0].1, IRNode::Literal(IRLiteral::Int(0))),
+            "kind field must lower to an Int literal, got {:?}",
+            fields[0].1
+        );
+        assert!(
+            matches!(&fields[1].1, IRNode::Literal(IRLiteral::String(s)) if s == "spec"),
+            "lexeme field must lower to a String literal, got {:?}",
+            fields[1].1
+        );
+    }
+
+    #[test]
+    fn expr_to_ir_method_call_lowers_to_hole_no_ir_kind() {
+        // STANDING, re-pinned by Phase 76 (was
+        // `..._pending_74_76`): the deferral it named is
+        // complete — the typechecker resolves methods
+        // against the D1a table (Phase 74) and the Z3
+        // encoder encodes MethodCall on the spec Expr
+        // against the Result/Option tag+payload forms
+        // (Phase 76), as does the interpreter's
+        // value_of_expr (Phase 75). The lowering STILL
+        // produces the Hole, now as a design fact rather
+        // than a deferral: the IR kind table has no
+        // method-call kind (the audit's section 4 appended
+        // only FieldAccess/RecordLit, kinds 28/29), and
+        // every consumer of method semantics works on the
+        // spec Expr directly. A constraint-derived seed
+        // built from a method-call constraint therefore
+        // carries a hole where the call was — recorded
+        // here so a future phase that adds an IR
+        // method-call kind updates this test deliberately.
+        let expr = Expr::MethodCall {
+            receiver: Box::new(Expr::Var("output".into())),
+            name: "is_err".into(),
+            args: vec![],
+        };
+        let ir = expr_to_ir(&expr);
+        assert!(
+            matches!(ir, IRNode::Hole { .. }),
+            "method call lowering is the Hole (no IR kind), got {:?}",
+            ir
         );
     }
 }

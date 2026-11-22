@@ -26,9 +26,24 @@
 //    re-record (2026-11-21): the Clone-bound amendment adds
 //    rust_generic_param_text — the module holds 117 specs
 //    and the fixed set is 114 constraint seeds + the same 3
-//    by-design pool winners.
+//    by-design pool winners. Phase 78 re-record
+//    (2026-11-22): the new-kind amendment adds six specs —
+//    the module holds 123 specs and the fixed set is 119
+//    constraint seeds + 4 by-design pool winners (the
+//    Phase 55 trio plus rust_expr_method_form, the
+//    MethodCall dispatch: String-equality guards like
+//    call_form's, its complete exemplar test set stating
+//    the classification the pool's winning Match body
+//    verifies against). Phase 85 re-record
+//    (2026-11-22): the call/index-form amendment adds
+//    six specs — the module holds 129 specs and the
+//    fixed set is 124 constraint seeds + 5 by-design
+//    pool winners (rust_call_form joins the seedless
+//    set: the IR Call dispatch, String-equality guards
+//    and a complete exemplar test set, like its
+//    spec-side twin).
 //
-//  * The synthesized-codegen ARTIFACT is the 117 winners
+//  * The synthesized-codegen ARTIFACT is the 129 winners
 //    rendered through the ORIGINAL `generate` into one Rust
 //    module (each winner file wrapped in its own `mod`, so
 //    the per-file `mod tests` cannot collide), compiled with
@@ -96,7 +111,7 @@
 //          output, and the harness asserts the ORIGINAL side
 //          reproduces it, so a transcription slip stops the
 //          gate loudly instead of manufacturing a mismatch;
-//          (ii)  every M3 winner body (117) and every M2 winner
+//          (ii)  every M3 winner body (129) and every M2 winner
 //          body (14), plus every unique subtree of those
 //          bodies, each rendered three ways (expression,
 //          statement, tail) by both emitters;
@@ -169,6 +184,13 @@ fn node_kind(node: &IRNode) -> i64 {
         Break { .. } => 25,
         StructDef { .. } => 26,
         TryPropagate(_) => 27,
+        // M1 features (Phase 73): appended at the end, never
+        // renumbered (audit section 4). The Codegen specs
+        // gain the 28/29 rows in Phase 78; until then the
+        // composed emitter's classifications are total over
+        // these codes by their standing default arms.
+        FieldAccess { .. } => 28,
+        RecordLit { .. } => 29,
     }
 }
 
@@ -644,6 +666,19 @@ fn rebuild_children(
             body: Box::new(f(body)?),
         },
         TryPropagate(inner) => TryPropagate(Box::new(f(inner)?)),
+        // M1 features (Phase 73): structural rebuild, like
+        // every other node with children.
+        FieldAccess { base, field } => FieldAccess {
+            base: Box::new(f(base)?),
+            field: field.clone(),
+        },
+        RecordLit { type_name, fields } => RecordLit {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(n, v)| Ok((n.clone(), f(v)?)))
+                .collect::<Result<Vec<_>, String>>()?,
+        },
     })
 }
 
@@ -1084,14 +1119,85 @@ impl<'a> Composed<'a> {
                     ],
                 )?
             }
+            // Field projection (Phase 78): the template
+            // winner renders the dot; the field name passes
+            // through the same rust_ident glue the Var arm
+            // uses, exactly as the original's Field arm.
+            SpecExpr::Field(base, field) => self.w.call_text(
+                "rust_expr_field_text",
+                &[
+                    v_text(&self.sexpr_text(base)?),
+                    v_text(&rust_ident(field)),
+                ],
+            )?,
+            // Method calls (Phase 78, decision D1a): the
+            // dispatch winner classifies the EFFECTIVE name
+            // — the walker folds the argument count into
+            // the key (a call carrying arguments passes the
+            // empty name, itself off-table), exactly the
+            // fold the spec's doc records and the original's
+            // args.is_empty() guard makes. The closed table
+            // renders through the method template on the
+            // rendered receiver; everything else takes the
+            // fixed-text table's kind-13 row, the standing
+            // "??".
+            SpecExpr::MethodCall {
+                receiver,
+                name,
+                args,
+            } => {
+                let key = if args.is_empty() { name.as_str() } else { "" };
+                let form = self
+                    .w
+                    .call_int("rust_expr_method_form", &[v_text(key)])?;
+                match form {
+                    0 => self.w.call_text(
+                        "rust_expr_method_text",
+                        &[
+                            v_text(&self.sexpr_text(receiver)?),
+                            v_text(name),
+                        ],
+                    )?,
+                    _ => self.text1("rust_expr_fixed_text", v_int(13))?,
+                }
+            }
+            // Record literals (Phase 78, decision D3a):
+            // fields in written order; a bare string-literal
+            // field value takes the owned form through its
+            // winner (the defect-4d rule, as the original's
+            // arm applies it); the frame is the record
+            // template winner's, the type name through the
+            // rust_ident glue as in the original.
+            SpecExpr::RecordLit { type_name, fields } => {
+                let rendered: Result<Vec<String>, String> = fields
+                    .iter()
+                    .map(|(n, v)| {
+                        let value_text = match v {
+                            SpecExpr::StringLit(s) => self.text1(
+                                "rust_string_literal_owned_text",
+                                v_text(&self.literal_contents(s)),
+                            )?,
+                            _ => self.sexpr_text(v)?,
+                        };
+                        Ok(format!("{}: {}", rust_ident(n), value_text))
+                    })
+                    .collect();
+                self.w.call_text(
+                    "rust_expr_record_text",
+                    &[
+                        v_text(&rust_ident(type_name)),
+                        v_text(&rendered?.join(", ")),
+                    ],
+                )?
+            }
             // Every kind without an arm: the fixed text the
             // rust_expr_fixed_text table pins ("??"). (Kind
             // 10, Lambda, left this table in Phase 55 — it
-            // has its own arm above.)
+            // has its own arm above; kinds 5, 13 and 14 left
+            // in Phase 78 the same way.)
             other => {
                 let kind = match other {
                     SpecExpr::FloatLit(_) => 2,
-                    SpecExpr::Field(..) => 5,
                     SpecExpr::Index(..) => 6,
                     SpecExpr::UnaryOp(..) => 9,
                     SpecExpr::Length(_) => 11,
@@ -1217,6 +1323,61 @@ impl<'a> Composed<'a> {
         )
     }
 
+    /// Assembly of ir_call_text (src/codegen/mod.rs),
+    /// composed through the Phase 85 winners exactly as
+    /// the emitter decides then renders: the effective
+    /// name (the argument-count fold) classifies through
+    /// rust_call_form; family 3 sub-dispatches through
+    /// rust_call_len_form over the argument's shape.
+    /// Shared by the expression and statement walkers.
+    fn call_dispatched_text(
+        &self,
+        function: &str,
+        args: &[IRNode],
+    ) -> Result<String, String> {
+        let eff_name: &str = match function {
+            "None" if !args.is_empty() => "",
+            "len" if args.len() != 1 => "",
+            other => other,
+        };
+        let form = self.w.call_int("rust_call_form", &[v_text(eff_name)])?;
+        match form {
+            1 => {
+                let rendered: Result<Vec<String>, String> =
+                    args.iter().map(|a| self.expr_text(a)).collect();
+                self.w
+                    .call_text("rust_expr_list_text", &[v_text(&rendered?.join(", "))])
+            }
+            2 => Ok(rust_ident(function)),
+            3 => {
+                let argform: i64 = match &args[0] {
+                    IRNode::FieldAccess { .. } => 1,
+                    IRNode::Literal(IRLiteral::String(_)) => 1,
+                    _ => 0,
+                };
+                let arg_text = self.expr_text(&args[0])?;
+                let len_form = self
+                    .w
+                    .call_int("rust_call_len_form", &[v_int(argform)])?;
+                if len_form == 1 {
+                    self.w
+                        .call_text("rust_call_len_char_text", &[v_text(&arg_text)])
+                } else {
+                    self.w
+                        .call_text("rust_call_len_text", &[v_text(&arg_text)])
+                }
+            }
+            _ => {
+                let rendered: Result<Vec<String>, String> =
+                    args.iter().map(|a| self.expr_text(a)).collect();
+                self.w.call_text(
+                    "rust_call_text",
+                    &[v_text(&rust_ident(function)), v_text(&rendered?.join(", "))],
+                )
+            }
+        }
+    }
+
     fn expr_text(&self, node: &IRNode) -> Result<String, String> {
         Ok(match node {
             IRNode::Literal(lit) => self.literal_text(lit)?,
@@ -1255,14 +1416,7 @@ impl<'a> Composed<'a> {
                 "rust_unary_text",
                 &[v_int(unary_code(*op)), v_text(&self.expr_text(inner)?)],
             )?,
-            IRNode::Call { function, args } => {
-                let rendered: Result<Vec<String>, String> =
-                    args.iter().map(|a| self.expr_text(a)).collect();
-                self.w.call_text(
-                    "rust_call_text",
-                    &[v_text(&rust_ident(function)), v_text(&rendered?.join(", "))],
-                )?
-            }
+            IRNode::Call { function, args } => self.call_dispatched_text(function, args)?,
             IRNode::If {
                 condition,
                 then_branch,
@@ -1393,13 +1547,34 @@ impl<'a> Composed<'a> {
                     ],
                 )?
             }
-            IRNode::Index(coll, idx) => self.w.call_text(
-                "rust_index_text",
-                &[
-                    v_text(&self.expr_text(coll)?),
-                    v_text(&self.expr_text(idx)?),
-                ],
-            )?,
+            IRNode::Index(coll, idx) => {
+                // Phase 85 dispatch (rust_index_form):
+                // a string-shaped base (FieldAccess, or a
+                // String literal) takes the char-access
+                // template; every other base keeps the
+                // bracket template — exactly the native
+                // arm's decision.
+                let (kind, lit) = match coll.as_ref() {
+                    IRNode::Literal(l) => (9, lit_kind(l)),
+                    _ => (node_kind(coll), 0),
+                };
+                let form = self
+                    .w
+                    .call_int("rust_index_form", &[v_int(kind), v_int(lit)])?;
+                let coll_text = self.expr_text(coll)?;
+                let idx_text = self.expr_text(idx)?;
+                if form == 1 {
+                    self.w.call_text(
+                        "rust_index_char_text",
+                        &[v_text(&coll_text), v_text(&idx_text)],
+                    )?
+                } else {
+                    self.w.call_text(
+                        "rust_index_text",
+                        &[v_text(&coll_text), v_text(&idx_text)],
+                    )?
+                }
+            }
             IRNode::TryPropagate(inner) => {
                 self.text1("rust_try_text", v_text(&self.expr_text(inner)?))?
             }
@@ -1425,6 +1600,61 @@ impl<'a> Composed<'a> {
             IRNode::Hole { .. } => self.text1("rust_hole_text", v_int(0))?,
             IRNode::Alloc { .. } => {
                 self.text1("rust_unsupported_text", v_text("Alloc"))?
+            }
+            // M1 features (Phase 78, decisions D2a/D3a):
+            // field projection renders through its template
+            // winner — the base through the condition
+            // position, a record-literal base parenthesized
+            // first, exactly the original's discipline; the
+            // field name through the rust_ident glue.
+            IRNode::FieldAccess { base, field } => {
+                let base_text = match base.as_ref() {
+                    IRNode::RecordLit { .. } => {
+                        format!("({})", self.expr_text(base)?)
+                    }
+                    _ => self.condition_text(base)?,
+                };
+                self.w.call_text(
+                    "rust_field_access_text",
+                    &[v_text(&base_text), v_text(&rust_ident(field))],
+                )?
+            }
+            // Record construction: fields in written order,
+            // a bare string-literal field value owned
+            // through its winner (the defect-4d rule), the
+            // frame the record template winner's.
+            IRNode::RecordLit { type_name, fields } => {
+                let rendered: Result<Vec<String>, String> = fields
+                    .iter()
+                    .map(|(n, v)| {
+                        let value_text = match v {
+                            IRNode::Literal(IRLiteral::String(s)) => self
+                                .text1(
+                                    "rust_string_literal_owned_text",
+                                    v_text(&self.literal_contents(s)),
+                                )?,
+                            // Phase 85: a FieldAccess value
+                            // takes the clone form (the
+                            // native arm's rule, through
+                            // rust_unary_text's Clone
+                            // family) — a projection is not
+                            // a fresh value.
+                            IRNode::FieldAccess { .. } => self.w.call_text(
+                                "rust_unary_text",
+                                &[v_int(9), v_text(&self.expr_text(v)?)],
+                            )?,
+                            _ => self.expr_text(v)?,
+                        };
+                        Ok(format!("{}: {}", rust_ident(n), value_text))
+                    })
+                    .collect();
+                self.w.call_text(
+                    "rust_record_lit_text",
+                    &[
+                        v_text(&rust_ident(type_name)),
+                        v_text(&rendered?.join(", ")),
+                    ],
+                )?
             }
             IRNode::Typed { node, ty } => self.expr_typed_text(node, Some(ty))?,
         })
@@ -1573,16 +1803,36 @@ impl<'a> Composed<'a> {
                 out
             }
             IRNode::Call { function, args } => {
-                let rendered: Result<Vec<String>, String> =
-                    args.iter().map(|a| self.expr_text(a)).collect();
-                self.w.call_text(
-                    "rust_stmt_call_text",
-                    &[
-                        v_text(&pad),
-                        v_text(&rust_ident(function)),
-                        v_text(&rendered?.join(", ")),
-                    ],
-                )?
+                // Phase 85: family 0 of rust_call_form
+                // keeps the standing statement template;
+                // the dispatched families terminate the
+                // expression rendering through
+                // rust_stmt_expr_text — the native arm's
+                // composition exactly.
+                let eff_name: &str = match function.as_str() {
+                    "None" if !args.is_empty() => "",
+                    "len" if args.len() != 1 => "",
+                    other => other,
+                };
+                let form = self.w.call_int("rust_call_form", &[v_text(eff_name)])?;
+                if form == 0 {
+                    let rendered: Result<Vec<String>, String> =
+                        args.iter().map(|a| self.expr_text(a)).collect();
+                    self.w.call_text(
+                        "rust_stmt_call_text",
+                        &[
+                            v_text(&pad),
+                            v_text(&rust_ident(function)),
+                            v_text(&rendered?.join(", ")),
+                        ],
+                    )?
+                } else {
+                    let rendered = self.call_dispatched_text(function, args)?;
+                    self.w.call_text(
+                        "rust_stmt_expr_text",
+                        &[v_text(&pad), v_text(&rendered)],
+                    )?
+                }
             }
             IRNode::Return(inner) => self.w.call_text(
                 "rust_stmt_return_text",
@@ -2197,9 +2447,113 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             "??",
         ),
         (
-            "field-fallback",
+            // RE-STATED in Phase 78 (was "field-fallback",
+            // expected "??"): Field has its own rendering
+            // row now, on both sides together.
+            "field",
             SpecExpr::Field(Box::new(SpecExpr::Var("x".to_string())), "f".to_string()),
+            "x.f",
+        ),
+        (
+            "field-nested",
+            SpecExpr::Field(
+                Box::new(SpecExpr::Field(
+                    Box::new(SpecExpr::Var("a".to_string())),
+                    "b".to_string(),
+                )),
+                "c".to_string(),
+            ),
+            "a.b.c",
+        ),
+        (
+            "method-is-err",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::Var("output".to_string())),
+                name: "is_err".to_string(),
+                args: vec![],
+            },
+            "output.is_err()",
+        ),
+        (
+            // The Phase 77 pinned consequence, now whole:
+            // a method on a field receiver.
+            "method-on-field",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::Field(
+                    Box::new(SpecExpr::Var("state".to_string())),
+                    "tokens".to_string(),
+                )),
+                name: "len".to_string(),
+                args: vec![],
+            },
+            "state.tokens.len()",
+        ),
+        (
+            "method-unwrap-len",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::MethodCall {
+                    receiver: Box::new(SpecExpr::Var("output".to_string())),
+                    name: "unwrap".to_string(),
+                    args: vec![],
+                }),
+                name: "len".to_string(),
+                args: vec![],
+            },
+            "output.unwrap().len()",
+        ),
+        (
+            "method-fallback-name",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::Var("x".to_string())),
+                name: "tokens".to_string(),
+                args: vec![],
+            },
             "??",
+        ),
+        (
+            "method-fallback-args",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::Var("output".to_string())),
+                name: "is_ok".to_string(),
+                args: vec![SpecExpr::IntLit(1)],
+            },
+            "??",
+        ),
+        (
+            "record-lit",
+            SpecExpr::RecordLit {
+                type_name: "Token".to_string(),
+                fields: vec![
+                    ("kind".to_string(), SpecExpr::IntLit(0)),
+                    (
+                        "lexeme".to_string(),
+                        SpecExpr::StringLit("spec".to_string()),
+                    ),
+                ],
+            },
+            "Token { kind: 0, lexeme: \"spec\".to_string() }",
+        ),
+        (
+            "record-lit-empty",
+            SpecExpr::RecordLit {
+                type_name: "Empty".to_string(),
+                fields: vec![],
+            },
+            "Empty {  }",
+        ),
+        (
+            "record-lit-nested",
+            SpecExpr::RecordLit {
+                type_name: "Outer".to_string(),
+                fields: vec![(
+                    "inner".to_string(),
+                    SpecExpr::RecordLit {
+                        type_name: "Inner".to_string(),
+                        fields: vec![("x".to_string(), SpecExpr::IntLit(1))],
+                    },
+                )],
+            },
+            "Outer { inner: Inner { x: 1 } }",
         ),
         (
             "comprehension-fallback",
@@ -2682,6 +3036,168 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             IRNode::Literal(IRLiteral::Char('"')),
             "'\"'",
         ),
+        // ── Phase 78: the new IR kinds in expression
+        // position ──
+        (
+            "field-access",
+            IRNode::FieldAccess {
+                base: Box::new(vr("state")),
+                field: "pos".to_string(),
+            },
+            "state.pos",
+        ),
+        (
+            "field-access-nested",
+            IRNode::FieldAccess {
+                base: Box::new(IRNode::FieldAccess {
+                    base: Box::new(vr("a")),
+                    field: "b".to_string(),
+                }),
+                field: "c".to_string(),
+            },
+            "a.b.c",
+        ),
+        (
+            "field-access-record-base",
+            IRNode::FieldAccess {
+                base: Box::new(IRNode::RecordLit {
+                    type_name: "Token".to_string(),
+                    fields: vec![("kind".to_string(), li(0))],
+                }),
+                field: "kind".to_string(),
+            },
+            "(Token { kind: 0 }).kind",
+        ),
+        (
+            "field-access-call-base",
+            IRNode::FieldAccess {
+                base: Box::new(call("get", vec![vr("i")])),
+                field: "tokens".to_string(),
+            },
+            "get(i).tokens",
+        ),
+        (
+            "record-lit",
+            IRNode::RecordLit {
+                type_name: "Token".to_string(),
+                fields: vec![
+                    ("kind".to_string(), li(0)),
+                    ("lexeme".to_string(), ls("spec")),
+                ],
+            },
+            "Token { kind: 0, lexeme: \"spec\".to_string() }",
+        ),
+        (
+            "record-lit-empty",
+            IRNode::RecordLit {
+                type_name: "Empty".to_string(),
+                fields: vec![],
+            },
+            "Empty {  }",
+        ),
+        (
+            "record-lit-nested",
+            IRNode::RecordLit {
+                type_name: "Outer".to_string(),
+                fields: vec![(
+                    "inner".to_string(),
+                    IRNode::RecordLit {
+                        type_name: "Inner".to_string(),
+                        fields: vec![("x".to_string(), li(1))],
+                    },
+                )],
+            },
+            "Outer { inner: Inner { x: 1 } }",
+        ),
+        // ── Phase 85: the call/index form dispatch ──
+        (
+            "call-list-lit",
+            call("List", vec![li(1), li(2)]),
+            "vec![1, 2]",
+        ),
+        (
+            "call-list-empty",
+            call("List", vec![]),
+            "vec![]",
+        ),
+        (
+            "call-none-bare",
+            call("None", vec![]),
+            "None",
+        ),
+        (
+            "call-none-with-arg",
+            call("None", vec![li(1)]),
+            "None(1)",
+        ),
+        (
+            "call-len-field",
+            call(
+                "len",
+                vec![IRNode::FieldAccess {
+                    base: Box::new(vr("state")),
+                    field: "source".to_string(),
+                }],
+            ),
+            "(state.source).chars().count() as i64",
+        ),
+        (
+            "call-len-var",
+            call("len", vec![vr("xs")]),
+            "(xs).len() as i64",
+        ),
+        (
+            "call-len-lit",
+            call("len", vec![ls("abc")]),
+            "(\"abc\").chars().count() as i64",
+        ),
+        (
+            "call-len-two-args",
+            call("len", vec![vr("a"), vr("b")]),
+            "len(a, b)",
+        ),
+        (
+            "index-field-string",
+            IRNode::Index(
+                Box::new(IRNode::FieldAccess {
+                    base: Box::new(vr("state")),
+                    field: "source".to_string(),
+                }),
+                Box::new(IRNode::FieldAccess {
+                    base: Box::new(vr("state")),
+                    field: "pos".to_string(),
+                }),
+            ),
+            "(state.source).chars().nth((state.pos) as usize).unwrap_or('\\0')",
+        ),
+        (
+            "index-lit-string",
+            IRNode::Index(Box::new(ls("abc")), Box::new(li(0))),
+            "(\"abc\").chars().nth((0) as usize).unwrap_or('\\0')",
+        ),
+        (
+            "record-lit-field-clone",
+            IRNode::RecordLit {
+                type_name: "S".to_string(),
+                fields: vec![
+                    (
+                        "source".to_string(),
+                        IRNode::FieldAccess {
+                            base: Box::new(vr("state")),
+                            field: "source".to_string(),
+                        },
+                    ),
+                    (
+                        "pos".to_string(),
+                        IRNode::FieldAccess {
+                            base: Box::new(vr("state")),
+                            field: "pos".to_string(),
+                        },
+                    ),
+                ],
+            },
+            "S { source: state.source.clone(), pos: state.pos.clone() }",
+        ),
     ];
     for (label, node, expected) in exprs {
         let original = ir_to_rust_expr(&node);
@@ -2788,6 +3304,29 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             "    vec![1];\n",
         ),
         ("stmt-call", call("f", vec![li(1)]), 1, TypeRef::Int, "    f(1);\n"),
+        // Phase 85: statement-position calls in the
+        // dispatched families terminate the expression
+        // rendering (rust_stmt_expr_text).
+        (
+            "stmt-call-len",
+            call(
+                "len",
+                vec![IRNode::FieldAccess {
+                    base: Box::new(vr("state")),
+                    field: "source".to_string(),
+                }],
+            ),
+            0,
+            TypeRef::Int,
+            "(state.source).chars().count() as i64;\n",
+        ),
+        (
+            "stmt-call-list",
+            call("List", vec![li(1)]),
+            0,
+            TypeRef::Int,
+            "vec![1];\n",
+        ),
         (
             "stmt-map",
             IRNode::Map {
@@ -2982,6 +3521,30 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             TypeRef::Int,
             None,
             "\"s\".to_string()\n",
+        ),
+        // ── Phase 78: the new kinds are bare-expression
+        // tails (rust_tail_form rows 28/29) ──
+        (
+            "tail-field-access",
+            IRNode::FieldAccess {
+                base: Box::new(vr("state")),
+                field: "pos".to_string(),
+            },
+            1,
+            TypeRef::Int,
+            None,
+            "    state.pos\n",
+        ),
+        (
+            "tail-record-lit",
+            IRNode::RecordLit {
+                type_name: "Token".to_string(),
+                fields: vec![("kind".to_string(), li(0))],
+            },
+            1,
+            TypeRef::Int,
+            None,
+            "    Token { kind: 0 }\n",
         ),
     ];
     for (label, node, indent, ret, expected_ty, expected) in tails {
@@ -3581,7 +4144,7 @@ fn run_corpus(
 // ── The gate ──────────────────────────────────────────────
 
 #[test]
-#[ignore = "M3 gate: 2 randomized synthesis passes x 117 specs + corpus execution; run explicitly with --ignored --nocapture"]
+#[ignore = "M3 gate: 2 randomized synthesis passes x 123 specs + corpus execution; run explicitly with --ignored --nocapture"]
 fn m3_gate() {
     let root = env!("CARGO_MANIFEST_DIR");
     let out_dir = format!("{}/target/m3-gate", root);
@@ -3595,7 +4158,7 @@ fn m3_gate() {
 
     // ── 1. Winner extraction, twice (reproducibility) ──
     let functions3 = load_module("codegen.morph");
-    assert_eq!(functions3.len(), 117, "Codegen module spec count");
+    assert_eq!(functions3.len(), 129, "Codegen module spec count");
     let pass1 = extract_winners(&functions3);
     let pass2 = extract_winners(&functions3);
     for name in &pass1.order {
@@ -3628,11 +4191,17 @@ fn m3_gate() {
         "GATE3|winners|seeds={}|pool={:?}",
         seed_count, pool
     ));
-    assert_eq!(seed_count, 114, "Phase 62 measured 114 constraint seeds (Phase 55: 113; + rust_generic_param_text, equation)");
+    assert_eq!(seed_count, 124, "Phase 85 measured 124 constraint seeds (Phase 78: 119; + three equation templates, the len guard table, the index pair guard table)");
     assert_eq!(
         pool,
-        vec!["rust_expr_call_form", "rust_ident_empty", "rust_target_route"],
-        "the by-design seedless trio"
+        vec![
+            "rust_expr_call_form",
+            "rust_expr_method_form",
+            "rust_ident_empty",
+            "rust_call_form",
+            "rust_target_route"
+        ],
+        "the by-design seedless quintet"
     );
     for name in &pool {
         assert_eq!(
@@ -3709,7 +4278,7 @@ fn m3_gate() {
             name, out, spec.return_type
         );
     }
-    writelnr("GATE3|executor-smoke|117/117 winners execute on canonical inputs");
+    writelnr("GATE3|executor-smoke|129/129 winners execute on canonical inputs");
 
     // ── 2. M2 winners (corpus sources) ──
     let mut m2_sets: Vec<(&str, WinnerSet)> = Vec::new();
@@ -3735,7 +4304,7 @@ fn m3_gate() {
     // ── 3. The synthesized-codegen artifact ──
     let mut module_text = String::new();
     module_text.push_str(
-        "// The synthesized codegen: the Codegen module's 117 winners,\n\
+        "// The synthesized codegen: the Codegen module's 129 winners,\n\
          // each rendered by the original `generate` and wrapped in its\n\
          // own module (so the per-file `mod tests` cannot collide).\n\
          // Judged by the M3 gate harness (src/codegen/m3_gate.rs).\n\n",

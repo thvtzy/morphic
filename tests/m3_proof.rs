@@ -380,7 +380,10 @@ fn rust_expr_form(kind: i64) -> Option<i64> {
         7 => Some(4),       // Call
         8 => Some(5),       // BinOp
         10 => Some(7),      // Lambda — closure template (Phase 55)
-        2 | 5 | 6 | 9 | 11 | 12 => Some(6), // FloatLit, Field, Index, UnaryOp, Length, Comprehension
+        5 => Some(8),       // Field — projection template (Phase 78)
+        13 => Some(9),      // MethodCall — method template (Phase 78)
+        14 => Some(10),     // RecordLit — record template (Phase 78)
+        2 | 6 | 9 | 11 | 12 => Some(6), // FloatLit, Index, UnaryOp, Length, Comprehension
         _ => None,
     }
 }
@@ -388,10 +391,12 @@ fn rust_expr_form(kind: i64) -> Option<i64> {
 /// Mirror of the catch-all of `expr_to_rust`
 /// (src/codegen/mod.rs:1199): every kind without an arm
 /// renders "??". Lambda (10) left this table in the
-/// Phase 55 amendment (2026-11-21).
+/// Phase 55 amendment (2026-11-21); Field (5) left it in
+/// the Phase 78 amendment (2026-11-22), whose amendment
+/// also added the MethodCall fallback row (13).
 fn rust_expr_fixed_text(kind: i64) -> Option<&'static str> {
     match kind {
-        2 | 5 | 6 | 9 | 11 | 12 => Some("??"),
+        2 | 6 | 9 | 11 | 12 | 13 => Some("??"),
         _ => None,
     }
 }
@@ -427,6 +432,41 @@ fn rust_expr_tuple_text(args: &str) -> String {
 /// parameter names and the walker's body rendering.
 fn rust_expr_lambda_text(params: &str, body: &str) -> String {
     format!("|{}| {}", params, body)
+}
+
+/// Mirror of `rust_expr_field_text` (Phase 78): the
+/// projection template over the rendered receiver and
+/// the field name.
+fn rust_expr_field_text(receiver: &str, field: &str) -> String {
+    format!("{}.{}", receiver, field)
+}
+
+/// Mirror of `rust_expr_method_form` (Phase 78): which
+/// rendering a MethodCall takes, keyed by the EFFECTIVE
+/// method name — 0 = the verbatim template (the closed
+/// D1a table), 1 = the fallback. The walker folds the
+/// argument count into the key (a call carrying
+/// arguments passes the empty name), exactly as the
+/// spec's doc records. Total.
+fn rust_expr_method_form(key: &str) -> i64 {
+    match key {
+        "is_ok" | "is_err" | "unwrap" | "len" => 0,
+        _ => 1,
+    }
+}
+
+/// Mirror of `rust_expr_method_text` (Phase 78): the
+/// verbatim method template over the rendered receiver
+/// and the method name.
+fn rust_expr_method_text(receiver: &str, name: &str) -> String {
+    format!("{}.{}()", receiver, name)
+}
+
+/// Mirror of `rust_expr_record_text` (Phase 78): the
+/// struct-literal frame over the type name and the
+/// pre-rendered, pre-joined fields.
+fn rust_expr_record_text(name: &str, fields: &str) -> String {
+    format!("{} {{ {} }}", name, fields)
 }
 
 /// Mirror of the rendering-family classification of
@@ -925,7 +965,9 @@ fn ir_pattern_assembled(pat: &Pat) -> String {
 /// `expr_to_rust` mirror. The fallback variants carry no
 /// payload: their content is irrelevant, all render "??".
 /// Lambda carries its parameter names and body since the
-/// Phase 55 amendment gave it the closure template.
+/// Phase 55 amendment gave it the closure template;
+/// Field, MethodCall and RecordLit carry theirs since
+/// the Phase 78 amendment gave them their templates.
 #[allow(dead_code)]
 enum SExpr {
     Var(&'static str),
@@ -933,7 +975,7 @@ enum SExpr {
     FloatLit(f64),
     BoolLit(bool),
     StringLit(&'static str),
-    Field,
+    Field(Box<SExpr>, &'static str),
     Index,
     Call(&'static str, Vec<SExpr>),
     BinOp(i64, Box<SExpr>, Box<SExpr>),
@@ -941,6 +983,8 @@ enum SExpr {
     Lambda(Vec<&'static str>, Box<SExpr>),
     Length,
     Comprehension,
+    MethodCall(Box<SExpr>, &'static str, Vec<SExpr>),
+    RecordLit(&'static str, Vec<(&'static str, SExpr)>),
 }
 
 /// Faithful assembly of `expr_to_rust`
@@ -949,8 +993,14 @@ enum SExpr {
 /// dispatch from the rust_expr_call_form mirror (Phase 55:
 /// 'List' renders as the vec literal, '__tuple__' as a Rust
 /// tuple, 'None' as the bare constructor), the Lambda arm
-/// as the rust_expr_lambda_text template, and "??" for
-/// every kind without an arm.
+/// as the rust_expr_lambda_text template, the Phase 78
+/// arms (Field as the rust_expr_field_text template,
+/// MethodCall through the rust_expr_method_form dispatch
+/// into the rust_expr_method_text template or the "??"
+/// fallback, RecordLit as the rust_expr_record_text frame
+/// over the walker's per-field renderings — a bare string
+/// literal taking the owned form, as the native arm
+/// applies it), and "??" for every kind without an arm.
 fn expr_to_rust_assembled(expr: &SExpr) -> String {
     match expr {
         SExpr::Var(name) => name.to_string(),
@@ -976,6 +1026,32 @@ fn expr_to_rust_assembled(expr: &SExpr) -> String {
         ),
         SExpr::Lambda(params, body) => {
             rust_expr_lambda_text(&params.join(", "), &expr_to_rust_assembled(body))
+        }
+        SExpr::Field(base, field) => {
+            rust_expr_field_text(&expr_to_rust_assembled(base), field)
+        }
+        SExpr::MethodCall(receiver, name, args) => {
+            // The effective-key fold (the spec's doc): a
+            // call carrying arguments classifies under the
+            // empty name and falls back.
+            let key = if args.is_empty() { *name } else { "" };
+            match rust_expr_method_form(key) {
+                0 => rust_expr_method_text(&expr_to_rust_assembled(receiver), name),
+                _ => "??".to_string(),
+            }
+        }
+        SExpr::RecordLit(name, fields) => {
+            let rendered: Vec<String> = fields
+                .iter()
+                .map(|(n, v)| {
+                    let value_text = match v {
+                        SExpr::StringLit(s) => format!("\"{}\".to_string()", s),
+                        _ => expr_to_rust_assembled(v),
+                    };
+                    format!("{}: {}", n, value_text)
+                })
+                .collect();
+            rust_expr_record_text(name, &rendered.join(", "))
         }
         _ => "??".to_string(),
     }
@@ -1259,6 +1335,115 @@ fn rust_sort_text(coll: &str, cmp: &str) -> String {
 
 /// Mirror of the Call rendering (src/codegen/mod.rs:810-813)
 /// over the rendered name and the pre-joined arguments.
+/// Mirror of `rust_call_form` (Phase 85): which
+/// rendering an IR Call takes, keyed by the EFFECTIVE
+/// name — 0 = plain call template, 1 = vec literal
+/// ("List"), 2 = bare constructor ("None"), 3 = the
+/// "len" builtin (sub-dispatched by
+/// rust_call_len_form). Total: every other name is
+/// family 0.
+fn rust_call_form(name: &str) -> i64 {
+    match name {
+        "List" => 1,
+        "None" => 2,
+        "len" => 3,
+        _ => 0,
+    }
+}
+
+/// Mirror of `rust_call_len_form` (Phase 85): the len
+/// sub-dispatch over the argument's shape — 1 = string
+/// projection / string literal (character count),
+/// 0 = every other shape (element count).
+fn rust_call_len_form(argform: i64) -> i64 {
+    if argform == 1 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Mirror of `rust_call_len_text` (Phase 85): the
+/// element-count len rendering.
+fn rust_call_len_text(arg: &str) -> String {
+    format!("({}).len() as i64", arg)
+}
+
+/// Mirror of `rust_call_len_char_text` (Phase 85):
+/// the character-count len rendering.
+fn rust_call_len_char_text(arg: &str) -> String {
+    format!("({}).chars().count() as i64", arg)
+}
+
+/// Mirror of `rust_index_form` (Phase 85): which
+/// rendering an IR Index takes, keyed by the
+/// collection's kind code and literal kind — 1 = the
+/// char-access template (FieldAccess base, kind 28;
+/// String literal base, kind 9 / lit 3), 0 = the
+/// bracket template.
+fn rust_index_form(kind: i64, lit: i64) -> i64 {
+    if kind == 28 || (kind == 9 && lit == 3) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Mirror of `rust_index_char_text` (Phase 85): the
+/// char-access rendering over a string base,
+/// totalized past the end to NUL.
+fn rust_index_char_text(coll: &str, idx: &str) -> String {
+    format!(
+        "({}).chars().nth(({}) as usize).unwrap_or('\\0')",
+        coll, idx
+    )
+}
+
+/// The assembled Call dispatch (Phase 85): the
+/// effective name (the argument-count fold) classifies
+/// through rust_call_form, family 3 sub-dispatches
+/// through rust_call_len_form over the argument's
+/// shape — the native ir_call_text's decision,
+/// composed from the mirrors exactly as the composed
+/// assembly composes it from the winners.
+fn ir_call_dispatched_mirror(name: &str, args: &[Expr]) -> String {
+    let eff = match name {
+        "None" if !args.is_empty() => "",
+        "len" if args.len() != 1 => "",
+        other => other,
+    };
+    match rust_call_form(eff) {
+        1 => rust_expr_list_text(
+            &args
+                .iter()
+                .map(ir_expr_assembled)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+        2 => rust_ident_verbatim(name),
+        3 => {
+            let argform = match &args[0] {
+                Expr::FieldAccess(..) => 1,
+                Expr::Lit(Lit::Str(_)) => 1,
+                _ => 0,
+            };
+            if rust_call_len_form(argform) == 1 {
+                rust_call_len_char_text(&ir_expr_assembled(&args[0]))
+            } else {
+                rust_call_len_text(&ir_expr_assembled(&args[0]))
+            }
+        }
+        _ => rust_call_text(
+            &rust_ident_verbatim(name),
+            &args
+                .iter()
+                .map(ir_expr_assembled)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    }
+}
+
 fn rust_call_text(func: &str, args: &str) -> String {
     format!("{}({})", func, args)
 }
@@ -1358,6 +1543,20 @@ fn rust_index_text(coll: &str, idx: &str) -> String {
     format!("({})[{}]", coll, idx)
 }
 
+/// Mirror of the FieldAccess rendering (Phase 78):
+/// the projection over the condition-rendered base
+/// and the field name.
+fn rust_field_access_text(base: &str, field: &str) -> String {
+    format!("{}.{}", base, field)
+}
+
+/// Mirror of the RecordLit rendering (Phase 78): the
+/// struct-literal frame over the type name and the
+/// pre-rendered, pre-joined fields.
+fn rust_record_lit_text(name: &str, fields: &str) -> String {
+    format!("{} {{ {} }}", name, fields)
+}
+
 /// Mirror of the TryPropagate rendering
 /// (src/codegen/mod.rs:939-941).
 fn rust_try_text(inner: &str) -> String {
@@ -1410,7 +1609,7 @@ fn rust_unsupported_text(shape: &str) -> String {
 /// 3 If, 4 While, 5 For, 6 Match, 7 Call, 8 Return,
 /// 9 Alloc, 10 Assign, 11 Collection, 12 Map, 13 Filter,
 /// 14 Fold, 15 Sort, 16 Typed, 17 the expression fallback.
-/// Total over the 28 kinds (the fallback arm catches the
+/// Total over the 30 kinds (the fallback arm catches the
 /// rest, exactly the original's `_`); None off-domain.
 fn rust_stmt_form(kind: i64) -> Option<i64> {
     match kind {
@@ -1431,9 +1630,10 @@ fn rust_stmt_form(kind: i64) -> Option<i64> {
         20 => Some(9),  // Alloc
         21 => Some(10), // Assign
         22 => Some(16), // Typed
-        0..=27 => Some(17), // Literal, Var, BinOp, UnaryOp, Lambda,
+        0..=29 => Some(17), // Literal, Var, BinOp, UnaryOp, Lambda,
                         // Closure, Index, Loop, Break, StructDef,
-                        // TryPropagate — the fallback
+                        // TryPropagate, FieldAccess, RecordLit
+                        // — the fallback
         _ => None,
     }
 }
@@ -1441,16 +1641,18 @@ fn rust_stmt_form(kind: i64) -> Option<i64> {
 /// Mirror of the dispatch of `ir_to_rust_tail`
 /// (src/codegen/mod.rs:507-541): 0 = statement
 /// fallthrough, 1 = bare expression, 2 = Block split,
-/// 3 = Typed re-entry. Total over the 28 kinds; None
+/// 3 = Typed re-entry. Total over the 30 kinds; None
 /// off-domain.
 fn rust_tail_form(kind: i64) -> Option<i64> {
     match kind {
         1 => Some(2),  // Block
         22 => Some(3), // Typed
-        7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 23 | 27 => {
+        7 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 23 | 27 | 28 | 29 => {
             Some(1) // Call, Literal, Var, BinOp, UnaryOp, Lambda,
             // Closure, Collection, Map, Filter, Fold, Sort,
-            // Index, TryPropagate
+            // Index, TryPropagate, FieldAccess, RecordLit
+            // (Phase 78: the spec rows for the Phase 77
+            // native value list)
         }
         0..=27 => Some(0), // Hole, Let, If, While, For, Match,
                            // Return, Alloc, Assign, Loop, Break,
@@ -1791,6 +1993,8 @@ enum Expr {
     LoopText(&'static str),
     StructDef(&'static str, Vec<(&'static str, &'static str)>, Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    FieldAccess(Box<Expr>, &'static str),
+    RecordLit(&'static str, Vec<(&'static str, Expr)>),
     Try(Box<Expr>),
     Assign(Box<Expr>, Box<Expr>),
     Return(Box<Expr>),
@@ -1821,6 +2025,8 @@ fn expr_kind(e: &Expr) -> i64 {
         Expr::Alloc => 20,
         Expr::Assign(..) => 21,
         Expr::Index(..) => 23,
+        Expr::FieldAccess(..) => 28,
+        Expr::RecordLit(..) => 29,
         Expr::LoopText(_) => 24,
         Expr::Break(_) => 25,
         Expr::StructDef(..) => 26,
@@ -1895,10 +2101,7 @@ fn ir_expr_assembled(e: &Expr) -> String {
             _ => rust_binop_infix_text(*op, &ir_expr_assembled(l), &ir_expr_assembled(r)),
         },
         Expr::UnaryOp(op, inner) => rust_unary_text(*op, &ir_expr_assembled(inner)).unwrap(),
-        Expr::Call(name, args) => {
-            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
-            rust_call_text(&rust_ident_verbatim(name), &rendered.join(", "))
-        }
+        Expr::Call(name, args) => ir_call_dispatched_mirror(name, args),
         Expr::If(c, t, el) => rust_if_text(
             &rust_condition_text(expr_kind(c), &ir_expr_assembled(c)),
             &ir_expr_assembled(t),
@@ -1953,7 +2156,49 @@ fn ir_expr_assembled(e: &Expr) -> String {
             )
         }
         Expr::Index(coll, idx) => {
-            rust_index_text(&ir_expr_assembled(coll), &ir_expr_assembled(idx))
+            // Phase 85 dispatch (rust_index_form): a
+            // string-shaped base takes the char-access
+            // template; every other base the bracket
+            // template.
+            let (kind, lit) = match coll.as_ref() {
+                Expr::Lit(l) => (9, lit_kind(l)),
+                other => (expr_kind(other), 0),
+            };
+            if rust_index_form(kind, lit) == 1 {
+                rust_index_char_text(&ir_expr_assembled(coll), &ir_expr_assembled(idx))
+            } else {
+                rust_index_text(&ir_expr_assembled(coll), &ir_expr_assembled(idx))
+            }
+        }
+        Expr::FieldAccess(base, field) => {
+            // The native arm: a record-literal base is
+            // parenthesized by the walker itself; every
+            // other base renders through the condition-
+            // position discipline.
+            let base_text = match base.as_ref() {
+                Expr::RecordLit(..) => format!("({})", ir_expr_assembled(base)),
+                _ => condition_mirror(base),
+            };
+            rust_field_access_text(&base_text, &rust_ident_verbatim(field))
+        }
+        Expr::RecordLit(name, fields) => {
+            let rendered: Vec<String> = fields
+                .iter()
+                .map(|(n, v)| {
+                    let value_text = match v {
+                        Expr::Lit(Lit::Str(s)) => rust_string_literal_owned_text(s),
+                        // Phase 85: a FieldAccess value
+                        // takes the clone form
+                        // (rust_unary_text family Clone).
+                        Expr::FieldAccess(..) => {
+                            rust_unary_text(9, &ir_expr_assembled(v)).unwrap()
+                        }
+                        _ => ir_expr_assembled(v),
+                    };
+                    format!("{}: {}", rust_ident_verbatim(n), value_text)
+                })
+                .collect();
+            rust_record_lit_text(&rust_ident_verbatim(name), &rendered.join(", "))
         }
         Expr::Try(inner) => rust_try_text(&ir_expr_assembled(inner)),
         Expr::Assign(t, v) => {
@@ -2151,8 +2396,22 @@ fn ir_stmt_assembled(s: &Stmt, indent: usize, fn_ret: i64) -> String {
             out
         }
         Stmt::Call(name, args) => {
-            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
-            rust_stmt_call_text(&pad, &rust_ident_verbatim(name), &rendered.join(", "))
+            // Phase 85: family 0 of rust_call_form
+            // keeps the standing statement template;
+            // the dispatched families terminate the
+            // expression rendering through
+            // rust_stmt_expr_text.
+            let eff = match *name {
+                "None" if !args.is_empty() => "",
+                "len" if args.len() != 1 => "",
+                other => other,
+            };
+            if rust_call_form(eff) == 0 {
+                let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
+                rust_stmt_call_text(&pad, &rust_ident_verbatim(name), &rendered.join(", "))
+            } else {
+                rust_stmt_expr_text(&pad, &ir_call_dispatched_mirror(name, args))
+            }
         }
         Stmt::Return(e) => rust_stmt_return_text(&pad, &ir_expr_typed_mirror(e, fn_ret)),
         Stmt::Alloc(name, ty, initial) => rust_stmt_alloc_text(
@@ -2197,10 +2456,7 @@ fn ir_stmt_assembled(s: &Stmt, indent: usize, fn_ret: i64) -> String {
 fn tail_expr_typed_text(s: &Stmt, expected: i64) -> String {
     match s {
         Stmt::Expr(e) => ir_expr_typed_mirror(e, expected),
-        Stmt::Call(name, args) => {
-            let rendered: Vec<String> = args.iter().map(ir_expr_assembled).collect();
-            rust_call_text(&rust_ident_verbatim(name), &rendered.join(", "))
-        }
+        Stmt::Call(name, args) => ir_call_dispatched_mirror(name, args),
         Stmt::Collection(kind, elems) => {
             let rendered: Vec<String> = elems.iter().map(ir_expr_assembled).collect();
             format!(
@@ -3118,19 +3374,32 @@ mod golden_tests {
         assert_eq!(rust_expr_fixed_text(9), Some("??"));
         // Lambda left the fixed-text table in Phase 55
         assert_eq!(rust_expr_fixed_text(10), None);
-        // The fallback family and the fixed-text table coincide
+        // Phase 78: Field takes the projection template
+        // (family 8) and leaves the fixed-text table;
+        // MethodCall takes family 9 with its fallback row
+        // (13) IN the table; RecordLit takes family 10 and
+        // never falls back
+        assert_eq!(rust_expr_form(5), Some(8));
+        assert_eq!(rust_expr_form(13), Some(9));
+        assert_eq!(rust_expr_form(14), Some(10));
+        assert_eq!(rust_expr_fixed_text(5), None);
+        assert_eq!(rust_expr_fixed_text(13), Some("??"));
+        assert_eq!(rust_expr_fixed_text(14), None);
+        // The fallback family and the fixed-text table
+        // coincide on the pre-Phase-73 kinds except Field,
+        // which the Phase 78 amendment moved out of both
         for kind in 0..=12 {
             assert_eq!(
                 rust_expr_form(kind) == Some(6),
-                rust_expr_fixed_text(kind) == Some("??"),
+                rust_expr_fixed_text(kind) == Some("??") && kind != 5,
                 "kind {}",
                 kind
             );
         }
         // Off-range
-        assert_eq!(rust_expr_form(13), None);
+        assert_eq!(rust_expr_form(15), None);
         assert_eq!(rust_expr_form(-1), None);
-        assert_eq!(rust_expr_fixed_text(13), None);
+        assert_eq!(rust_expr_fixed_text(15), None);
     }
 
     #[test]
@@ -3165,7 +3434,6 @@ mod golden_tests {
         // structural kinds
         assert_eq!(expr_to_rust_assembled(&SExpr::FloatLit(1.5)), "??");
         assert_eq!(expr_to_rust_assembled(&SExpr::UnaryOp), "??");
-        assert_eq!(expr_to_rust_assembled(&SExpr::Field), "??");
         assert_eq!(expr_to_rust_assembled(&SExpr::Comprehension), "??");
         // Call template: joined args, empty args
         assert_eq!(
@@ -3247,6 +3515,73 @@ mod golden_tests {
                 Box::new(SExpr::BoolLit(true))
             )),
             "((a == 1) && true)"
+        );
+        // The Phase 78 arms: Field projects, MethodCall
+        // renders the closed table verbatim (and falls
+        // back off it), RecordLit builds the struct
+        // literal with the owned-string rule
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::Field(Box::new(SExpr::Var("state")), "tokens")),
+            "state.tokens"
+        );
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::MethodCall(
+                Box::new(SExpr::Field(Box::new(SExpr::Var("state")), "tokens")),
+                "len",
+                vec![]
+            )),
+            "state.tokens.len()"
+        );
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::MethodCall(
+                Box::new(SExpr::MethodCall(
+                    Box::new(SExpr::Var("output")),
+                    "unwrap",
+                    vec![]
+                )),
+                "len",
+                vec![]
+            )),
+            "output.unwrap().len()"
+        );
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::MethodCall(
+                Box::new(SExpr::Var("output")),
+                "is_err",
+                vec![]
+            )),
+            "output.is_err()"
+        );
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::MethodCall(
+                Box::new(SExpr::Var("output")),
+                "bogus",
+                vec![]
+            )),
+            "??"
+        );
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::MethodCall(
+                Box::new(SExpr::Var("output")),
+                "is_ok",
+                vec![SExpr::IntLit(1)]
+            )),
+            "??"
+        );
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::RecordLit(
+                "Token",
+                vec![
+                    ("kind", SExpr::IntLit(0)),
+                    ("lexeme", SExpr::StringLit("spec")),
+                    ("line", SExpr::IntLit(1)),
+                ]
+            )),
+            "Token { kind: 0, lexeme: \"spec\".to_string(), line: 1 }"
+        );
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::RecordLit("Empty", vec![])),
+            "Empty {  }"
         );
     }
 
@@ -4223,41 +4558,223 @@ mod golden_tests {
         assert_eq!(ir_expr_assembled(&Expr::Lit(Lit::Char('"'))), "'\"'");
     }
 
+    // ── Phase 85 golden: the call/index form dispatch ──
+
+    #[test]
+    fn phase85_call_index_form_goldens() {
+        // The classifications, complete over their keys.
+        assert_eq!(rust_call_form("List"), 1);
+        assert_eq!(rust_call_form("None"), 2);
+        assert_eq!(rust_call_form("len"), 3);
+        assert_eq!(rust_call_form("Some"), 0);
+        assert_eq!(rust_call_form("peek"), 0);
+        assert_eq!(rust_call_form("Len"), 0);
+        assert_eq!(rust_call_form(""), 0);
+        assert_eq!(rust_call_len_form(1), 1);
+        assert_eq!(rust_call_len_form(0), 0);
+        assert_eq!(rust_call_len_form(7), 0);
+        assert_eq!(rust_index_form(28, 0), 1);
+        assert_eq!(rust_index_form(9, 3), 1);
+        assert_eq!(rust_index_form(9, 0), 0);
+        assert_eq!(rust_index_form(0, 0), 0);
+        assert_eq!(rust_index_form(4, 0), 0);
+        // The templates.
+        assert_eq!(rust_call_len_text("xs"), "(xs).len() as i64");
+        assert_eq!(
+            rust_call_len_char_text("state.source"),
+            "(state.source).chars().count() as i64"
+        );
+        assert_eq!(
+            rust_index_char_text("state.source", "state.pos"),
+            "(state.source).chars().nth((state.pos) as usize).unwrap_or('\\0')"
+        );
+        // The assembled dispatch over mirror trees.
+        let fa = |field: &'static str| {
+            Expr::FieldAccess(Box::new(Expr::Var("state")), field)
+        };
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call(
+                "List",
+                vec![Expr::Lit(Lit::Int(1)), Expr::Lit(Lit::Int(2))],
+            )),
+            "vec![1, 2]"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call("None", vec![])),
+            "None"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call("len", vec![fa("source")])),
+            "(state.source).chars().count() as i64"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Call("len", vec![Expr::Var("xs")])),
+            "(xs).len() as i64"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Index(Box::new(fa("source")), Box::new(fa("pos")))),
+            "(state.source).chars().nth((state.pos) as usize).unwrap_or('\\0')"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::Index(
+                Box::new(Expr::Var("xs")),
+                Box::new(Expr::Lit(Lit::Int(0))),
+            )),
+            "(xs)[0]"
+        );
+        assert_eq!(
+            ir_expr_assembled(&Expr::RecordLit(
+                "S",
+                vec![("source", fa("source"))],
+            )),
+            "S { source: state.source.clone() }"
+        );
+    }
+
     // ── Slice 5 golden: the statement walker ──
 
     #[test]
     fn stmt_form_total() {
-        // The full dispatch of ir_to_rust over the 28 kinds.
-        let expected: [(i64, i64); 28] = [
+        // The full dispatch of ir_to_rust over the 30 kinds
+        // (28/29 = FieldAccess/RecordLit, in the fallback
+        // family since Phase 73; named here in Phase 78).
+        let expected: [(i64, i64); 30] = [
             (0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7),
             (8, 8), (9, 17), (10, 17), (11, 17), (12, 17), (13, 17),
             (14, 17), (15, 11), (16, 12), (17, 13), (18, 14), (19, 15),
             (20, 9), (21, 10), (22, 16), (23, 17), (24, 17), (25, 17),
-            (26, 17), (27, 17),
+            (26, 17), (27, 17), (28, 17), (29, 17),
         ];
         for (kind, arm) in expected {
             assert_eq!(rust_stmt_form(kind), Some(arm), "kind {}", kind);
         }
         assert_eq!(rust_stmt_form(-1), None);
-        assert_eq!(rust_stmt_form(28), None);
+        assert_eq!(rust_stmt_form(30), None);
     }
 
     #[test]
     fn tail_form_total() {
-        // The full dispatch of ir_to_rust_tail over the 28
+        // The full dispatch of ir_to_rust_tail over the 30
         // kinds: 0 statement fallthrough, 1 bare expression,
-        // 2 Block split, 3 Typed re-entry.
-        let expected: [(i64, i64); 28] = [
+        // 2 Block split, 3 Typed re-entry. Kinds 28/29
+        // (FieldAccess/RecordLit) are bare expressions —
+        // the Phase 77 native value list, specced in
+        // Phase 78.
+        let expected: [(i64, i64); 30] = [
             (0, 0), (1, 2), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 1),
             (8, 0), (9, 1), (10, 1), (11, 1), (12, 1), (13, 1), (14, 1),
             (15, 1), (16, 1), (17, 1), (18, 1), (19, 1), (20, 0), (21, 0),
             (22, 3), (23, 1), (24, 0), (25, 0), (26, 0), (27, 1),
+            (28, 1), (29, 1),
         ];
         for (kind, form) in expected {
             assert_eq!(rust_tail_form(kind), Some(form), "kind {}", kind);
         }
         assert_eq!(rust_tail_form(-1), None);
-        assert_eq!(rust_tail_form(28), None);
+        assert_eq!(rust_tail_form(30), None);
+    }
+
+    #[test]
+    fn expr_new_kind_templates() {
+        // The Phase 78 templates and the method dispatch,
+        // at the mirrors' own level (.morph side: the
+        // multi-input specs carry no in-spec tests; these
+        // are their goldens).
+        assert_eq!(rust_expr_field_text("state", "tokens"), "state.tokens");
+        assert_eq!(rust_expr_field_text("a.b", "c"), "a.b.c");
+        assert_eq!(rust_field_access_text("state", "pos"), "state.pos");
+        assert_eq!(rust_expr_method_text("output", "is_err"), "output.is_err()");
+        assert_eq!(rust_expr_method_text("output.unwrap()", "len"), "output.unwrap().len()");
+        assert_eq!(
+            rust_expr_record_text("Token", "kind: 0, lexeme: \"spec\".to_string()"),
+            "Token { kind: 0, lexeme: \"spec\".to_string() }"
+        );
+        assert_eq!(rust_expr_record_text("Empty", ""), "Empty {  }");
+        assert_eq!(rust_record_lit_text("Token", "kind: 0"), "Token { kind: 0 }");
+        assert_eq!(rust_record_lit_text("Empty", ""), "Empty {  }");
+        // The method dispatch over effective keys: the
+        // closed table is the verbatim form; everything
+        // else falls back (case-sensitive, as the native
+        // match). The empty key — where the walker folds
+        // every call that carries arguments — falls back
+        // too, which is what makes the fold exact.
+        for name in ["is_ok", "is_err", "unwrap", "len"] {
+            assert_eq!(rust_expr_method_form(name), 0, "{}", name);
+        }
+        assert_eq!(rust_expr_method_form("tokens"), 1);
+        assert_eq!(rust_expr_method_form("Len"), 1);
+        assert_eq!(rust_expr_method_form(""), 1);
+    }
+
+    #[test]
+    fn expr_walker_new_kinds() {
+        // FieldAccess over a plain base: no wrapping
+        let e = Expr::FieldAccess(Box::new(Expr::Var("state")), "pos");
+        assert_eq!(ir_expr_assembled(&e), "state.pos");
+        // Nested projections compose
+        let e = Expr::FieldAccess(
+            Box::new(Expr::FieldAccess(Box::new(Expr::Var("a")), "b")),
+            "c",
+        );
+        assert_eq!(ir_expr_assembled(&e), "a.b.c");
+        // A record-literal base is parenthesized by the
+        // walker itself
+        let e = Expr::FieldAccess(
+            Box::new(Expr::RecordLit(
+                "Token",
+                vec![("kind", Expr::Lit(Lit::Int(0)))],
+            )),
+            "kind",
+        );
+        assert_eq!(ir_expr_assembled(&e), "(Token { kind: 0 }).kind");
+        // A block-like base goes through the condition
+        // discipline and wraps
+        let e = Expr::FieldAccess(
+            Box::new(Expr::If(
+                Box::new(Expr::Var("c")),
+                Box::new(Expr::Lit(Lit::Int(1))),
+                Box::new(Expr::Lit(Lit::Int(2))),
+            )),
+            "x",
+        );
+        assert_eq!(ir_expr_assembled(&e), "(if c { 1 } else { 2 }).x");
+        // RecordLit: written order, the owned-string rule
+        // on a bare string field, nesting, the empty form
+        let e = Expr::RecordLit(
+            "Token",
+            vec![
+                ("kind", Expr::Lit(Lit::Int(0))),
+                ("lexeme", Expr::Lit(Lit::Str("spec"))),
+                ("line", Expr::Lit(Lit::Int(1))),
+            ],
+        );
+        assert_eq!(
+            ir_expr_assembled(&e),
+            "Token { kind: 0, lexeme: \"spec\".to_string(), line: 1 }"
+        );
+        let e = Expr::RecordLit("Empty", vec![]);
+        assert_eq!(ir_expr_assembled(&e), "Empty {  }");
+        let e = Expr::RecordLit(
+            "Outer",
+            vec![(
+                "inner",
+                Expr::RecordLit("Inner", vec![("x", Expr::Lit(Lit::Int(1)))]),
+            )],
+        );
+        assert_eq!(ir_expr_assembled(&e), "Outer { inner: Inner { x: 1 } }");
+        // Tail position: both kinds yield their value
+        // (rust_tail_form family 1 — no semicolon)
+        let s = Stmt::Expr(Expr::FieldAccess(Box::new(Expr::Var("state")), "pos"));
+        assert_eq!(ir_tail_assembled(&s, 1, 0, 26), "    state.pos\n");
+        let s = Stmt::Expr(Expr::RecordLit(
+            "Token",
+            vec![("kind", Expr::Lit(Lit::Int(0)))],
+        ));
+        assert_eq!(ir_tail_assembled(&s, 1, 0, 26), "    Token { kind: 0 }\n");
+        // Statement position: the fallback arm terminates
+        // the expression rendering with ';'
+        let s = Stmt::Expr(Expr::FieldAccess(Box::new(Expr::Var("state")), "pos"));
+        assert_eq!(ir_stmt_assembled(&s, 1, 0), "    state.pos;\n");
     }
 
     #[test]
@@ -5082,11 +5599,18 @@ spec bad {
         // plus the 24 slice-2 specs (20 + the 4 Phase 55 specs)
         // plus the 16 slice-3 specs plus
         // the 35 slice-4 specs plus the 27 slice-5 specs plus the
-        // 6 slice-6 specs, plus rust_generic_param_text (Phase 62).
+        // 6 slice-6 specs, plus rust_generic_param_text (Phase 62),
+        // plus the 6 Phase 78 specs (rust_expr_field_text,
+        // rust_expr_method_form, rust_expr_method_text,
+        // rust_expr_record_text, rust_field_access_text,
+        // rust_record_lit_text), plus the 6 Phase 85 specs
+        // (rust_call_form, rust_call_len_form, rust_call_len_text,
+        // rust_call_len_char_text, rust_index_form,
+        // rust_index_char_text).
         let src = std::fs::read_to_string("examples/self_host/codegen.morph").unwrap();
         assert!(src.contains("Codegen"), "missing module Codegen");
         let spec_decls = src.lines().filter(|l| l.starts_with("spec ")).count();
-        assert_eq!(spec_decls, 117, "codegen.morph should declare 117 specs");
-        assert!(src.matches("test \"").count() >= 174, "codegen.morph should carry in-spec tests");
+        assert_eq!(spec_decls, 129, "codegen.morph should declare 129 specs");
+        assert!(src.matches("test \"").count() >= 182, "codegen.morph should carry in-spec tests");
     }
 }

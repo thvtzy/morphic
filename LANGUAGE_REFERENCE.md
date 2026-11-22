@@ -408,6 +408,8 @@ Expressions appear in constraints, tests, and type annotations.
 | Boolean literal | `true`, `false` |
 | String literal | `"hello"` |
 | Function call | `len(list)`, `is_sorted(arr)` |
+| Method call | `output.is_err()`, `list.len()` |
+| Record literal | `Point { x: 1.0, y: 2.0 }` |
 
 ### Binary Operations
 
@@ -436,6 +438,68 @@ Expressions appear in constraints, tests, and type annotations.
 point.x               // Field access
 list[i]               // Index access
 matrix[i][j]          // Nested index
+```
+
+Field access, indexing, and method calls are *postfix* forms:
+they chain after any primary expression — a variable, a function
+call result, a parenthesized expression, a literal — and compose
+with each other, left to right:
+
+```morphic
+output.unwrap().tokens      // method call, then field access
+(state.tokens)[0].kind      // index after parentheses, then field
+make(state).pos             // field access on a call result
+```
+
+### Method Calls
+
+A method call is a postfix form: `receiver.method(args)`. The
+set of methods is a **closed builtin table**, keyed by the
+receiver's type:
+
+| Receiver | Method | Result |
+|---|---|---|
+| `Result<T, E>` | `is_ok()` | `Bool` — true when the value is `Ok` |
+| `Result<T, E>` | `is_err()` | `Bool` — true when the value is `Err` |
+| `Result<T, E>` | `unwrap()` | `T` — the `Ok` payload |
+| `List<T>` | `len()` | `Int` — the method spelling of `len(list)` |
+
+```morphic
+constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+constraint: output.is_ok() || state.pos >= len(state.source)
+constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
+```
+
+Calling any other method is an error naming the method. There
+are no user-defined methods; generalizing method resolution to
+module specs whose first parameter matches the receiver (UFCS)
+is a recorded future extension, not part of the language today.
+
+### Record Literals
+
+A record value is constructed by naming its declared record
+type (section 14) and giving every field a value:
+
+```morphic
+Point { x: 1.0, y: 2.0 }
+Token { kind: 0, lexeme: "spec", line: 1, col: 1 }
+TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
+```
+
+The type name is part of the syntax — the literal is
+self-describing, and the bare `{ field: value, ... }` form
+without a type name is **not** part of the language. The field
+set must match the declaration exactly (a missing, extra, or
+duplicated field is an error naming the field), and each field
+value is checked against its declared type. A record literal
+is a general expression form — it may appear in constraints,
+in tests, and nested inside other literals and constructor
+calls:
+
+```morphic
+expect: Ok(TokenizerState { source: "spec", pos: 4, line: 1, col: 5, tokens: [
+    Token { kind: 0, lexeme: "spec", line: 1, col: 1 }
+] })
 ```
 
 ### Lambda Expressions
@@ -526,6 +590,10 @@ type Person = {
     email: Option<String>
 }
 ```
+
+Values of a record type are constructed with the named
+record-literal form, `Person { name: ..., age: ..., email: ... }`
+— see *Record Literals* in section 11.
 
 ### Type Aliases
 

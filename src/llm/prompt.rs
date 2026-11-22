@@ -213,6 +213,19 @@ fn format_expr(expr: &Expr) -> String {
             };
             format!("({}{})", op_str, format_expr(inner))
         }
+        // M1 features (Phase 73): the new spec forms render
+        // back to their source syntax, like every other arm.
+        Expr::MethodCall { receiver, name, args } => {
+            let a: Vec<String> = args.iter().map(format_expr).collect();
+            format!("{}.{}({})", format_expr(receiver), name, a.join(", "))
+        }
+        Expr::RecordLit { type_name, fields } => {
+            let f: Vec<String> = fields
+                .iter()
+                .map(|(name, value)| format!("{}: {}", name, format_expr(value)))
+                .collect();
+            format!("{} {{ {} }}", type_name, f.join(", "))
+        }
         _ => format!("{:?}", expr),
     }
 }

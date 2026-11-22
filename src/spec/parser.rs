@@ -619,6 +619,61 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
+    /// Call argument list; the `(` is already consumed.
+    /// Extracted verbatim from the identifier arm's inline
+    /// loop (Phase 73) so method calls parse their arguments
+    /// with exactly the call grammar.
+    fn parse_call_args(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut args = Vec::new();
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.peek() == Some(')') { self.advance(); break; }
+            args.push(self.parse_expr()?);
+            if self.peek() == Some(',') { self.advance(); continue; }
+        }
+        Ok(args)
+    }
+
+    /// Postfix chain (Phase 73): `.field`, `.method(args)` and
+    /// `[index]` compose after ANY primary — a call result, a
+    /// parenthesized expression, a literal, a record literal —
+    /// not only after a bare variable. The pre-73 loop ran
+    /// only on the variable path, so `output.unwrap().tokens`
+    /// was unparseable (nothing after a call result could
+    /// postfix) and `output.is_err()` parsed `.is_err` as a
+    /// field and stranded on the `()`. A `.name` followed by
+    /// `(` is a method call (Expr::MethodCall, decision D1a);
+    /// a `.name` not followed by `(` is a field access.
+    fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.peek() == Some('.') {
+                self.advance();
+                let name = self.parse_identifier()?;
+                self.skip_whitespace_and_comments();
+                if self.peek() == Some('(') {
+                    self.advance();
+                    let args = self.parse_call_args()?;
+                    expr = Expr::MethodCall {
+                        receiver: Box::new(expr),
+                        name,
+                        args,
+                    };
+                } else {
+                    expr = Expr::Field(Box::new(expr), name);
+                }
+            } else if self.peek() == Some('[') {
+                self.advance();
+                let idx = self.parse_expr()?;
+                self.expect_char(']')?;
+                expr = Expr::Index(Box::new(expr), Box::new(idx));
+            } else {
+                break;
+            }
+        }
+        Ok(expr)
+    }
+
     fn parse_expr_atom(&mut self) -> Result<Expr, ParseError> {
         self.skip_whitespace_and_comments();
 
@@ -637,13 +692,13 @@ impl<'a> Parser<'a> {
         // Integer literal
         if self.is_digit(self.peek()) {
             let n = self.parse_integer()?;
-            return Ok(Expr::IntLit(n));
+            return self.parse_postfix(Expr::IntLit(n));
         }
 
         // String literal
         if self.peek() == Some('"') {
             let s = self.parse_string_literal_value()?;
-            return Ok(Expr::StringLit(s));
+            return self.parse_postfix(Expr::StringLit(s));
         }
 
         // Char literal (Phase 45, finding F4): the reference
@@ -652,20 +707,20 @@ impl<'a> Parser<'a> {
         // only this arm was missing.
         if self.peek() == Some('\'') {
             let c = self.parse_char_literal_value()?;
-            return Ok(Expr::CharLit(c));
+            return self.parse_postfix(Expr::CharLit(c));
         }
 
         // Boolean literal
         if self.peek() == Some('t') {
             if self.peek_n(4) == "true" {
                 self.eat_ident("true");
-                return Ok(Expr::BoolLit(true));
+                return self.parse_postfix(Expr::BoolLit(true));
             }
         }
         if self.peek() == Some('f') {
             if self.peek_n(5) == "false" {
                 self.eat_ident("false");
-                return Ok(Expr::BoolLit(false));
+                return self.parse_postfix(Expr::BoolLit(false));
             }
         }
 
@@ -681,7 +736,7 @@ impl<'a> Parser<'a> {
                 if self.peek() == Some(',') { self.advance(); continue; }
             }
             // Return as Call to List constructor
-            return Ok(Expr::Call("List".into(), items));
+            return self.parse_postfix(Expr::Call("List".into(), items));
         }
 
         // Parenthesized expression or tuple
@@ -697,10 +752,10 @@ impl<'a> Parser<'a> {
                     parts.push(self.parse_expr()?);
                 }
                 self.expect_char(')')?;
-                return Ok(Expr::Call("__tuple__".into(), parts));
+                return self.parse_postfix(Expr::Call("__tuple__".into(), parts));
             }
             self.expect_char(')')?;
-            return Ok(inner);
+            return self.parse_postfix(inner);
         }
 
         // Lambda: |x, y| -> body
@@ -724,42 +779,50 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Lambda(params, Box::new(body)));
         }
 
-        // Identifier — could be variable, function call, or field access
+        // Identifier — could be a variable, a function call,
+        // or a record literal; all three take the shared
+        // postfix chain (field / method / index) afterwards.
         if self.is_ident_start(self.peek()) {
-            let mut ident = self.parse_identifier()?;
+            let ident = self.parse_identifier()?;
 
             // Check for function call: ident(args...)
             self.skip_whitespace_and_comments();
             if self.peek() == Some('(') {
                 self.advance();
-                let mut args = Vec::new();
-                loop {
-                    self.skip_whitespace_and_comments();
-                    if self.peek() == Some(')') { self.advance(); break; }
-                    args.push(self.parse_expr()?);
-                    if self.peek() == Some(',') { self.advance(); continue; }
-                }
-                return Ok(Expr::Call(ident, args));
+                let args = self.parse_call_args()?;
+                return self.parse_postfix(Expr::Call(ident, args));
             }
 
-            // Field access: ident.field.subfield
-            let mut expr = Expr::Var(ident);
-            loop {
-                self.skip_whitespace_and_comments();
-                if self.peek() == Some('.') {
-                    self.advance();
-                    let field = self.parse_identifier()?;
-                    expr = Expr::Field(Box::new(expr), field);
-                } else if self.peek() == Some('[') {
-                    self.advance();
-                    let idx = self.parse_expr()?;
-                    self.expect_char(']')?;
-                    expr = Expr::Index(Box::new(expr), Box::new(idx));
-                } else {
-                    break;
+            // Record literal: TypeName { field: value, ... }
+            // (Phase 73, decision D3a — named construction).
+            // In expression position an identifier followed by
+            // `{` has no other reading in this grammar: blocks
+            // are not expressions, and the spec / type / test
+            // braces are consumed by their own parsers before
+            // any expression is parsed. The bare `{ ... }`
+            // form (the unratified D3b) still falls to the
+            // "Expected expression" error below — a leading
+            // `{` never reaches this arm.
+            if self.peek() == Some('{') {
+                self.advance();
+                let mut fields = Vec::new();
+                loop {
+                    self.skip_whitespace_and_comments();
+                    if self.peek() == Some('}') { self.advance(); break; }
+                    let fname = self.parse_identifier()?;
+                    self.expect_char(':')?;
+                    let value = self.parse_expr()?;
+                    fields.push((fname, value));
+                    self.skip_whitespace_and_comments();
+                    if self.peek() == Some(',') { self.advance(); continue; }
                 }
+                return self.parse_postfix(Expr::RecordLit {
+                    type_name: ident,
+                    fields,
+                });
             }
-            return Ok(expr);
+
+            return self.parse_postfix(Expr::Var(ident));
         }
 
         Err(self.simple_error("Expected expression"))
@@ -2128,5 +2191,400 @@ mod tests {
                 result.map(|s| s.name)
             );
         }
+    }
+
+    // ── Method calls + record literals (Phase 73, M1 features) ──
+    //
+    // The tokenizer's dropped constraints and mirror-only tests
+    // (M1_FEATURES_AUDIT sections 1.1 and 3.1, recovered verbatim
+    // from commit acda3f9) wait on exactly two expression forms
+    // the parser could not produce: method calls (there was no
+    // MethodCall AST variant — `output.is_err()` parsed `.is_err`
+    // as a field and stranded on the `()`) and record literals
+    // (no `{` arm in expression position). Ratified designs:
+    // D1a (native MethodCall node, closed builtin table — the
+    // table itself is Phase 74) and D3a (named construction
+    // `Type { field: value, ... }`). These tests pin the surface
+    // syntax; the record literals below are the acda3f9 tests
+    // re-authored into the D3a named form (the FORM change D3a
+    // prices; the bare `{ ... }` form stays a parse error).
+
+    /// Every method-call node in an expression tree, in
+    /// traversal order, as (receiver description, name) — the
+    /// receiver description is the variant tag of the receiver
+    /// expression, enough to pin the chain shapes.
+    fn expr_method_calls(expr: &Expr, out: &mut Vec<String>) {
+        match expr {
+            Expr::MethodCall { receiver, name, args } => {
+                expr_method_calls(receiver, out);
+                out.push(name.clone());
+                for a in args {
+                    expr_method_calls(a, out);
+                }
+            }
+            Expr::BinOp(_, l, r) => {
+                expr_method_calls(l, out);
+                expr_method_calls(r, out);
+            }
+            Expr::UnaryOp(_, inner) => expr_method_calls(inner, out),
+            Expr::Call(_, args) => {
+                for a in args {
+                    expr_method_calls(a, out);
+                }
+            }
+            Expr::Field(base, _) => expr_method_calls(base, out),
+            Expr::Index(base, idx) => {
+                expr_method_calls(base, out);
+                expr_method_calls(idx, out);
+            }
+            Expr::Length(inner) => expr_method_calls(inner, out),
+            Expr::RecordLit { fields, .. } => {
+                for (_, v) in fields {
+                    expr_method_calls(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn constraint_method_calls(c: &Constraint, out: &mut Vec<String>) {
+        match c {
+            Constraint::Eq(l, r) | Constraint::Order(_, l, r) => {
+                expr_method_calls(l, out);
+                expr_method_calls(r, out);
+            }
+            Constraint::Expr(e) => expr_method_calls(e, out),
+            Constraint::And(parts) | Constraint::Or(parts) => {
+                for p in parts {
+                    constraint_method_calls(p, out);
+                }
+            }
+            Constraint::Not(inner) => constraint_method_calls(inner, out),
+            Constraint::Implies(l, r) => {
+                constraint_method_calls(l, out);
+                constraint_method_calls(r, out);
+            }
+            Constraint::Predicate(_, args) => {
+                for a in args {
+                    expr_method_calls(a, out);
+                }
+            }
+            Constraint::Forall { body, .. } | Constraint::Exists { body, .. } => {
+                constraint_method_calls(body, out)
+            }
+            Constraint::True => {}
+        }
+    }
+
+    #[test]
+    fn parse_method_call_constraints_tokenize_one() {
+        // The two dropped tokenize_one constraints, verbatim
+        // from acda3f9 (audit section 1.1). Before Phase 73 the
+        // first stranded the parser on the `()` of `is_err()`.
+        let src = r#"
+        T {
+        type TokenizerState = {
+            source: String,
+            pos: Int,
+            line: Int,
+            col: Int,
+            tokens: List<Token>
+        }
+        type Token = {
+            kind: Int,
+            lexeme: String,
+            line: Int,
+            col: Int
+        }
+        type StepResult = Result<TokenizerState, String>;
+        spec tokenize_one {
+            input: state: TokenizerState
+            output: StepResult
+            constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+            constraint: output.is_ok() || state.pos >= len(state.source)
+        }
+        }
+        "#;
+        let spec = parse(src).expect("method-call constraints must parse");
+        let func = &spec.functions[0];
+        assert_eq!(func.postconditions.len(), 2);
+        let mut calls = Vec::new();
+        for post in &func.postconditions {
+            constraint_method_calls(post, &mut calls);
+        }
+        assert_eq!(calls, vec!["is_err", "unwrap", "is_ok"]);
+
+        // The chain shape, pinned structurally: the `.tokens`
+        // field access sits ON the unwrap() method call, and the
+        // whole chain is the argument of the free function len.
+        let Constraint::Expr(Expr::BinOp(BinOp::Or, lhs, rhs)) = &func.postconditions[0]
+        else {
+            panic!("constraint 0 must be a disjunction, got {:?}", func.postconditions[0]);
+        };
+        assert!(
+            matches!(&**lhs, Expr::MethodCall { name, .. } if name == "is_err"),
+            "left disjunct must be output.is_err(), got {:?}", lhs
+        );
+        let Expr::BinOp(BinOp::Eq, eq_l, _) = &**rhs else {
+            panic!("right disjunct must be an equality, got {:?}", rhs);
+        };
+        let Expr::Call(len_name, len_args) = &**eq_l else {
+            panic!("equality left side must be a len(...) call, got {:?}", eq_l);
+        };
+        assert_eq!(len_name, "len");
+        assert_eq!(len_args.len(), 1);
+        let Expr::Field(field_base, field_name) = &len_args[0] else {
+            panic!("len argument must be a field access, got {:?}", len_args[0]);
+        };
+        assert_eq!(field_name, "tokens");
+        assert!(
+            matches!(&**field_base, Expr::MethodCall { name, receiver, .. }
+                if name == "unwrap"
+                    && matches!(&**receiver, Expr::Var(v) if v == "output")),
+            "field base must be output.unwrap(), got {:?}",
+            field_base
+        );
+    }
+
+    #[test]
+    fn parse_method_call_on_unwrapped_list_tokenize_all() {
+        // tokenize_all's dropped constraint (acda3f9): a method
+        // call (.len()) chained on another method call
+        // (output.unwrap()) — postfix composition after a call
+        // result, the shape the old parser could not produce at
+        // all (nothing after a call result could postfix).
+        let src = r#"
+        T {
+        spec tokenize_all {
+            input: state: TokenizerState
+            output: Result<List<Token>, String>
+            constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
+        }
+        }
+        "#;
+        let spec = parse(src).expect("chained method calls must parse");
+        let func = &spec.functions[0];
+        let Constraint::Expr(Expr::BinOp(BinOp::Or, _, rhs)) = &func.postconditions[0]
+        else {
+            panic!("constraint must be a disjunction, got {:?}", func.postconditions[0]);
+        };
+        let Expr::BinOp(BinOp::Ge, ge_l, _) = &**rhs else {
+            panic!("right disjunct must be a >= comparison, got {:?}", rhs);
+        };
+        assert!(
+            matches!(&**ge_l, Expr::MethodCall { name, receiver, .. }
+                if name == "len"
+                    && matches!(&**receiver, Expr::MethodCall { name: inner, .. } if inner == "unwrap")),
+            "left side must be output.unwrap().len(), got {:?}",
+            ge_l
+        );
+    }
+
+    #[test]
+    fn parse_postfix_chains_after_calls_and_parens() {
+        // Postfix composition is uniform after Phase 73: field,
+        // index and method postfixes chain after call results
+        // and parenthesized expressions, not only after bare
+        // variables (the pre-73 postfix loop ran only on the
+        // variable path).
+        let src = r#"
+        T {
+        spec f {
+            input: state: TokenizerState
+            output: Int
+            constraint: output == peek(state).len() + (state.tokens)[0].kind + make(state).pos
+        }
+        }
+        "#;
+        let spec = parse(src).expect("postfix chains after calls/parens must parse");
+        let func = &spec.functions[0];
+        let Constraint::Expr(Expr::BinOp(BinOp::Eq, _, rhs)) = &func.postconditions[0]
+        else {
+            panic!("constraint must be an equality, got {:?}", func.postconditions[0]);
+        };
+        // rhs: (peek(state).len() + (state.tokens)[0].kind) + make(state).pos
+        let Expr::BinOp(BinOp::Add, add_l, add_r) = &**rhs else {
+            panic!("rhs must be an addition chain, got {:?}", rhs);
+        };
+        assert!(
+            matches!(&**add_r, Expr::Field(base, f) if f == "pos"
+                && matches!(&**base, Expr::Call(n, _) if n == "make")),
+            "last term must be make(state).pos, got {:?}",
+            add_r
+        );
+        let Expr::BinOp(BinOp::Add, mid_l, mid_r) = &**add_l else {
+            panic!("left of the outer + must be an addition, got {:?}", add_l);
+        };
+        assert!(
+            matches!(&**mid_l, Expr::MethodCall { name, receiver, .. } if name == "len"
+                && matches!(&**receiver, Expr::Call(n, _) if n == "peek")),
+            "first term must be peek(state).len(), got {:?}",
+            mid_l
+        );
+        assert!(
+            matches!(&**mid_r, Expr::Field(base, f) if f == "kind"
+                && matches!(&**base, Expr::Index(..))),
+            "middle term must be (state.tokens)[0].kind, got {:?}",
+            mid_r
+        );
+    }
+
+    #[test]
+    fn parse_record_literals_named_form() {
+        // The 9 mirror-only tests of acda3f9, re-authored into
+        // the D3a named form (three of them here — the shapes
+        // are the full set: state literal as input, state
+        // literal inside Ok(...) as expected output, Token
+        // literals nested in a list inside a state literal, and
+        // Token literals in a bare list inside Ok(...)).
+        let src = r#"
+        T {
+        type Token = {
+            kind: Int,
+            lexeme: String,
+            line: Int,
+            col: Int
+        }
+        type TokenizerState = {
+            source: String,
+            pos: Int,
+            line: Int,
+            col: Int,
+            tokens: List<Token>
+        }
+        type StepResult = Result<TokenizerState, String>;
+        spec peek {
+            input: state: TokenizerState
+            output: Option<Char>
+            test "non-empty" { input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }; expect: Some('h') }
+        }
+        spec tokenize_one {
+            input: state: TokenizerState
+            output: StepResult
+            test "keyword-spec" {
+                input: TokenizerState { source: "spec", pos: 0, line: 1, col: 1, tokens: [] };
+                expect: Ok(TokenizerState { source: "spec", pos: 4, line: 1, col: 5, tokens: [
+                    Token { kind: 0, lexeme: "spec", line: 1, col: 1 }
+                ] })
+            }
+        }
+        spec tokenize_all {
+            input: state: TokenizerState
+            output: Result<List<Token>, String>
+            test "simple-spec" {
+                input: TokenizerState { source: "spec sort", pos: 0, line: 1, col: 1, tokens: [] };
+                expect: Ok([
+                    Token { kind: 0, lexeme: "spec", line: 1, col: 1 },
+                    Token { kind: 0, lexeme: "sort", line: 1, col: 6 }
+                ])
+            }
+        }
+        }
+        "#;
+        let spec = parse(src).expect("named record literals must parse");
+
+        // peek's input: the named state literal, fields in
+        // written order, the empty list as the parser's List
+        // pseudo-call.
+        let peek_test = &spec.functions[0].tests[0];
+        let Expr::RecordLit { type_name, fields } = &peek_test.input else {
+            panic!("peek input must be a record literal, got {:?}", peek_test.input);
+        };
+        assert_eq!(type_name, "TokenizerState");
+        let field_names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(field_names, vec!["source", "pos", "line", "col", "tokens"]);
+        assert!(matches!(&fields[0].1, Expr::StringLit(s) if s == "hi"));
+        assert!(matches!(&fields[4].1, Expr::Call(n, args) if n == "List" && args.is_empty()));
+
+        // tokenize_one's expected output: Ok(TokenizerState {
+        // ..., tokens: [Token { ... }] }) — the nested Token
+        // literal inside the list inside the state literal.
+        let one_test = &spec.functions[1].tests[0];
+        let Expr::Call(ok_name, ok_args) = &one_test.expected_output else {
+            panic!("expected output must be an Ok(...) call, got {:?}", one_test.expected_output);
+        };
+        assert_eq!(ok_name, "Ok");
+        let Expr::RecordLit { type_name, fields } = &ok_args[0] else {
+            panic!("Ok argument must be a record literal, got {:?}", ok_args[0]);
+        };
+        assert_eq!(type_name, "TokenizerState");
+        let Expr::Call(list_name, token_lits) = &fields[4].1 else {
+            panic!("tokens field must be a list literal, got {:?}", fields[4].1);
+        };
+        assert_eq!(list_name, "List");
+        assert_eq!(token_lits.len(), 1);
+        let Expr::RecordLit { type_name, fields } = &token_lits[0] else {
+            panic!("list element must be a Token record literal, got {:?}", token_lits[0]);
+        };
+        assert_eq!(type_name, "Token");
+        assert!(matches!(&fields[1].1, Expr::StringLit(s) if s == "spec"));
+
+        // tokenize_all's expected output: Ok([Token, Token]).
+        let all_test = &spec.functions[2].tests[0];
+        let Expr::Call(_, ok_args) = &all_test.expected_output else {
+            panic!("expected output must be an Ok(...) call, got {:?}", all_test.expected_output);
+        };
+        let Expr::Call(_, token_lits) = &ok_args[0] else {
+            panic!("Ok argument must be a list literal, got {:?}", ok_args[0]);
+        };
+        assert_eq!(token_lits.len(), 2);
+        assert!(
+            matches!(&token_lits[1], Expr::RecordLit { type_name, fields }
+                if type_name == "Token"
+                    && matches!(&fields[3].1, Expr::IntLit(6))),
+            "second token must stamp col 6 (START, D4a), got {:?}",
+            token_lits[1]
+        );
+    }
+
+    #[test]
+    fn parse_record_literal_in_constraint_position() {
+        // Record literals are a general expression form, not
+        // test-only sugar (audit section 3.1: synthesized bodies
+        // must construct records — next_char's output equation
+        // is the shape).
+        let src = r#"
+        T {
+        spec next_char {
+            input: state: TokenizerState
+            output: TokenizerState
+            constraint: output == TokenizerState { source: "ab", pos: 1, line: 1, col: 2, tokens: [] }
+        }
+        }
+        "#;
+        let spec = parse(src).expect("record literal in a constraint must parse");
+        let func = &spec.functions[0];
+        let Constraint::Expr(Expr::BinOp(BinOp::Eq, _, rhs)) = &func.postconditions[0]
+        else {
+            panic!("constraint must be an equality, got {:?}", func.postconditions[0]);
+        };
+        assert!(
+            matches!(&**rhs, Expr::RecordLit { type_name, .. } if type_name == "TokenizerState"),
+            "rhs must be a TokenizerState record literal, got {:?}",
+            rhs
+        );
+    }
+
+    #[test]
+    fn parse_bare_record_literal_still_rejected() {
+        // D3a ratified the NAMED form only. The bare
+        // `{ field: value }` form of acda3f9 (design D3b) was
+        // NOT ratified: a leading `{` in expression position
+        // stays a parse error, never a guessed record type.
+        let src = r#"
+        T {
+        spec peek {
+            input: state: TokenizerState
+            output: Option<Char>
+            test "t" { input: { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }; expect: Some('h') }
+        }
+        }
+        "#;
+        let result = parse(src);
+        assert!(
+            result.is_err(),
+            "bare record literal must stay a parse error under D3a, got: {:?}",
+            result.map(|s| s.name)
+        );
     }
 }

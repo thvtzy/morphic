@@ -65,6 +65,15 @@ impl Verifier {
         }
     }
 
+    /// A verifier that knows the whole module the spec
+    /// belongs to — specs AND type declarations — so
+    /// record-typed parameters bind symbolically
+    /// (Phase 76, `Sym::Record`) in addition to spec-to-spec
+    /// inlining.
+    pub fn with_module(module: &Spec) -> Self {
+        Self::with_index(SpecIndex::from_module(module))
+    }
+
     pub fn verify_all(
         &self,
         candidates: Vec<CandidateImplementation>,
@@ -114,7 +123,7 @@ impl Verifier {
         // this implementation. `None` = the body is outside the
         // encodable subset; every constraint is then Unknown and
         // the candidate can only be Inconclusive, never Verified.
-        let param_env = param_env(spec);
+        let param_env = param_env(spec, &self.index);
         let output = sym_eval(
             &candidate.body,
             &mut param_env.clone(),
@@ -243,6 +252,21 @@ impl Verifier {
         };
 
         let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+        // D5a side conditions: every Char parameter (and
+        // every Char nested in a record/Option/Result
+        // parameter) ranges over the Unicode scalar values
+        // — without these, a "Char" constant could be a
+        // surrogate or beyond U+10FFFF and scalar-order
+        // proofs would be proving a different type.
+        for p in &spec.params {
+            if let Some(sym) = param_env.get(&p.name) {
+                let mut conditions = Vec::new();
+                collect_char_conditions(sym, &mut conditions);
+                for cond in &conditions {
+                    z3.assert(cond);
+                }
+            }
+        }
         let negated = formula.not();
         z3.assert(&negated);
 
@@ -287,9 +311,10 @@ enum Tri {
 //
 //   Literal, Var, BinOp, UnaryOp (Neg/Not/Abs/Len), If, Match
 //   (literal/variable/wildcard patterns), Let, Block, Return,
-//   Call ("len", the "List" literal, and — when the verifier
-//   carries the module — calls to other specs, inlined),
-//   Collection, Index, Typed.
+//   Call ("len", the "List" literal, the Ok/Err/Some/None
+//   constructors, and — when the verifier carries the module —
+//   calls to other specs, inlined), Collection, Index, Typed,
+//   FieldAccess, RecordLit (Phase 76).
 //
 // Anything else — holes, loops, mutation, lambdas and other
 // function values, higher-order combinators, calls that do
@@ -299,10 +324,50 @@ enum Tri {
 //
 // Representable sorts are Int, Bool and String, plus literal
 // lists of representable values (needed for len/Index over
-// collection literals). Floats and Chars have no honest Z3
-// sort here (IEEE floats are not Z3 reals), so they are
-// `Opaque`: bindable and discardable, but any use that needs
-// a concrete sort makes the body unencodable.
+// collection literals), records (per-field values), the
+// Result/Option tag+payload forms, and Char (Phase 76, D5a:
+// a Char is its Unicode scalar value on the Int sort; a Char
+// PARAM binds with the scalar range side-condition asserted
+// at check time — see `char_range_condition`). Floats have
+// no honest Z3 sort here (IEEE floats are not Z3 reals), so
+// they are `Opaque`: bindable and discardable, but any use
+// that needs a concrete sort makes the body unencodable.
+
+/// A sum-type constructor tag. Literal tags arise from
+/// constructor calls (`Ok(...)` is `Tag::True`); a symbolic
+/// tag arises from a parameter binding or an `ite` merge.
+/// The distinction is load-bearing for equality: comparing
+/// against a literal `None`/`Err` needs no payload term at
+/// all (see `sym_option_eq` / `sym_result_eq`).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg(feature = "z3-support")]
+enum Tag {
+    True,
+    False,
+    Free(z3::ast::Bool),
+}
+
+#[cfg(feature = "z3-support")]
+impl Tag {
+    fn term(&self) -> z3::ast::Bool {
+        match self {
+            Tag::True => z3::ast::Bool::from_bool(true),
+            Tag::False => z3::ast::Bool::from_bool(false),
+            Tag::Free(b) => b.clone(),
+        }
+    }
+
+    /// The tag of `if cond { a } else { b }` over two tagged
+    /// values: a shared literal survives; anything else is
+    /// the free ite term.
+    fn merge(cond: &z3::ast::Bool, a: &Tag, b: &Tag) -> Tag {
+        if a == b {
+            a.clone()
+        } else {
+            Tag::Free(cond.ite(&a.term(), &b.term()))
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 #[cfg(feature = "z3-support")]
@@ -311,6 +376,65 @@ enum Sym {
     Bool(z3::ast::Bool),
     Str(z3::ast::String),
     List(Vec<Sym>),
+    /// A list whose elements are unmodelled but whose
+    /// LENGTH is this Int term — the binding of a List-typed
+    /// parameter or record field (Phase 76). `len` reads the
+    /// term; element access and list equality are
+    /// unencodable (a length is not the list).
+    ListLen(z3::ast::Int),
+    /// A Char as its Unicode scalar value (Phase 76, D5a).
+    /// Deliberately NOT `Sym::Int`: sort-strictness — a
+    /// Char never compares or computes as an Int. A Char
+    /// term built from a literal is a Z3 numeral; a Char
+    /// parameter is a free constant carrying the range
+    /// side-condition.
+    Char(z3::ast::Int),
+    /// The character at a string index, as a length-≤1
+    /// string term (`s.at(i)`) — the String-index→Char
+    /// bridge (Phase 76). The safe z3 API exposes `str.at`
+    /// but no `str.to_code`, and the raw context handle the
+    /// FFI would need is not public, so the indexed char
+    /// cannot be joined to the scalar sort in general. What
+    /// this form supports, soundly: equality/order against
+    /// another indexed char (identical or not — Z3 string
+    /// order on length-≤1 strings IS scalar order, with the
+    /// out-of-bounds empty string sorting below every real
+    /// char) and against a CONSTANT Char (converted to its
+    /// one-char string). Against a SYMBOLIC Char parameter
+    /// it is unencodable — that is the bridge's named
+    /// boundary. Out-of-bounds is totalized as the empty
+    /// string: unequal to every real char, below every real
+    /// char — the same documented totalization class as
+    /// Z3's Div/Mod (the interpreter fails there instead).
+    /// A CONSTANT index into a LITERAL string stays exact
+    /// (the real scalar, or unencodable out of bounds).
+    CharStr(z3::ast::String),
+    /// A record value (Phase 76, D2a): the resolved
+    /// declaration name plus per-field values. A record
+    /// parameter binds as a record of per-field fresh values
+    /// (`fresh_sym` over the declared field types).
+    Record {
+        type_name: String,
+        fields: Vec<(String, Sym)>,
+    },
+    /// An Option value (Phase 76): constructor tag plus the
+    /// Some payload. Invariant: the payload is absent ONLY
+    /// when the tag is the literal `Tag::False` (a `None`
+    /// construction, possibly merged with itself) — a tag
+    /// that can be true always carries a payload.
+    Option {
+        some: Tag,
+        payload: Option<Box<Sym>>,
+    },
+    /// A Result value (Phase 76): constructor tag plus the
+    /// per-constructor payloads. Invariants mirror Option:
+    /// the Ok payload is absent only under a literal Err
+    /// tag, the Err payload only under a literal Ok tag.
+    Result {
+        ok: Tag,
+        ok_payload: Option<Box<Sym>>,
+        err_payload: Option<Box<Sym>>,
+    },
     Opaque,
 }
 
@@ -404,30 +528,165 @@ impl SymFlow {
     }
 }
 
-/// The initial symbolic environment: one free constant per
-/// spec parameter, of the parameter's sort. Parameters whose
-/// type has no representable sort are Opaque.
+/// The initial symbolic environment: one free symbolic
+/// value per spec parameter, built from the parameter's
+/// TYPE by `fresh_sym`. Parameters whose type has no
+/// representable sort are Opaque.
 #[cfg(feature = "z3-support")]
-fn param_env(spec: &FunctionSpec) -> SymEnv {
+fn param_env(spec: &FunctionSpec, index: &SpecIndex) -> SymEnv {
     let mut env = SymEnv::new();
     for p in &spec.params {
-        let sym = match &p.ty {
-            TypeRef::Int
-            | TypeRef::I8
-            | TypeRef::I16
-            | TypeRef::I32
-            | TypeRef::I64
-            | TypeRef::U8
-            | TypeRef::U16
-            | TypeRef::U32
-            | TypeRef::U64 => Sym::Int(z3::ast::Int::new_const(p.name.as_str())),
-            TypeRef::Bool => Sym::Bool(z3::ast::Bool::new_const(p.name.as_str())),
-            TypeRef::String => Sym::Str(z3::ast::String::new_const(p.name.as_str())),
-            _ => Sym::Opaque,
-        };
+        let sym = fresh_sym(&p.ty, &p.name, index, 0);
         env.insert(p.name.clone(), sym);
     }
     env
+}
+
+/// Recursion bound for `fresh_sym`: a self-referential
+/// record (`Node { next: Option<Node> }`) would otherwise
+/// expand forever. Past the bound the value binds Opaque —
+/// honest, and far deeper than any module in the tree.
+#[cfg(feature = "z3-support")]
+const MAX_FRESH_DEPTH: usize = 8;
+
+/// A fresh symbolic value of a type: the parameter-binding
+/// half of the Phase 76 representations. `path` names the
+/// Z3 constants after the value's position (`state`,
+/// `state.pos`, `output.is_ok`, …) so counterexamples read
+/// in the spec's own vocabulary. Record fields recurse over
+/// the DECLARED field types (the index must carry the
+/// module's declarations — `SpecIndex::from_module`; with a
+/// declarations-less index a record type binds Opaque,
+/// exactly the pre-Phase-76 behavior). A List binds its
+/// length only (`Sym::ListLen`): elements are unmodelled.
+#[cfg(feature = "z3-support")]
+fn fresh_sym(ty: &TypeRef, path: &str, index: &SpecIndex, depth: usize) -> Sym {
+    if depth > MAX_FRESH_DEPTH {
+        return Sym::Opaque;
+    }
+    match ty {
+        TypeRef::Int
+        | TypeRef::I8
+        | TypeRef::I16
+        | TypeRef::I32
+        | TypeRef::I64
+        | TypeRef::U8
+        | TypeRef::U16
+        | TypeRef::U32
+        | TypeRef::U64 => Sym::Int(z3::ast::Int::new_const(path)),
+        TypeRef::Bool => Sym::Bool(z3::ast::Bool::new_const(path)),
+        TypeRef::String => Sym::Str(z3::ast::String::new_const(path)),
+        TypeRef::Char => Sym::Char(z3::ast::Int::new_const(path)),
+        TypeRef::List(_) => {
+            Sym::ListLen(z3::ast::Int::new_const(format!("{path}.len").as_str()))
+        }
+        TypeRef::Option(inner) => Sym::Option {
+            some: Tag::Free(z3::ast::Bool::new_const(
+                format!("{path}.is_some").as_str(),
+            )),
+            payload: Some(Box::new(fresh_sym(
+                inner,
+                &format!("{path}.some"),
+                index,
+                depth + 1,
+            ))),
+        },
+        TypeRef::Result(ok_ty, err_ty) => Sym::Result {
+            ok: Tag::Free(z3::ast::Bool::new_const(
+                format!("{path}.is_ok").as_str(),
+            )),
+            ok_payload: Some(Box::new(fresh_sym(
+                ok_ty,
+                &format!("{path}.ok"),
+                index,
+                depth + 1,
+            ))),
+            err_payload: Some(Box::new(fresh_sym(
+                err_ty,
+                &format!("{path}.err"),
+                index,
+                depth + 1,
+            ))),
+        },
+        TypeRef::Named(name) => match index.record_fields(name) {
+            Some((resolved, fields)) => Sym::Record {
+                type_name: resolved,
+                fields: fields
+                    .iter()
+                    .map(|(fname, fty)| {
+                        (
+                            fname.clone(),
+                            fresh_sym(
+                                fty,
+                                &format!("{path}.{fname}"),
+                                index,
+                                depth + 1,
+                            ),
+                        )
+                    })
+                    .collect(),
+            },
+            None => Sym::Opaque,
+        },
+        // Float, Unit, tuples, sets/maps, function types,
+        // generics, references, streams: no representable
+        // sort in this encoder.
+        _ => Sym::Opaque,
+    }
+}
+
+/// The D5a range side-condition for one Char term: a
+/// Unicode scalar value — 0 ≤ c ≤ 0x10FFFF, excluding the
+/// surrogate gap U+D800..=U+DFFF.
+#[cfg(feature = "z3-support")]
+fn char_range_condition(c: &z3::ast::Int) -> z3::ast::Bool {
+    let zero = z3::ast::Int::from_i64(0);
+    let max = z3::ast::Int::from_i64(0x10FFFF);
+    let gap_lo = z3::ast::Int::from_i64(0xD800);
+    let gap_hi = z3::ast::Int::from_i64(0xDFFF);
+    let in_range = z3::ast::Bool::and(&[&c.ge(&zero), &c.le(&max)]);
+    let in_gap = z3::ast::Bool::and(&[&c.ge(&gap_lo), &c.le(&gap_hi)]);
+    z3::ast::Bool::and(&[&in_range, &in_gap.not()])
+}
+
+/// Collect the range side-conditions owed by every Char
+/// term inside a bound parameter value (Char fields of
+/// record parameters and Char payloads of Option/Result
+/// parameters included — they are Char parameters in every
+/// sense that matters to scalar reasoning).
+#[cfg(feature = "z3-support")]
+fn collect_char_conditions(sym: &Sym, out: &mut Vec<z3::ast::Bool>) {
+    match sym {
+        Sym::Char(c) => out.push(char_range_condition(c)),
+        Sym::List(items) => {
+            for item in items {
+                collect_char_conditions(item, out);
+            }
+        }
+        Sym::Record { fields, .. } => {
+            for (_, v) in fields {
+                collect_char_conditions(v, out);
+            }
+        }
+        Sym::Option { payload, .. } => {
+            if let Some(p) = payload {
+                collect_char_conditions(p, out);
+            }
+        }
+        Sym::Result {
+            ok_payload,
+            err_payload,
+            ..
+        } => {
+            if let Some(p) = ok_payload {
+                collect_char_conditions(p, out);
+            }
+            if let Some(p) = err_payload {
+                collect_char_conditions(p, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(feature = "z3-support")]
@@ -519,6 +778,47 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<SymFl
             Some(SymFlow::Normal(sym_index(coll, idx)?))
         }
 
+        IRNode::FieldAccess { base, field } => {
+            // Projection by name (Phase 76, D2a): the base
+            // must be a record value and the field must be
+            // one of its fields — an unknown field or a
+            // non-record base is unencodable, never a guess.
+            match sym_eval(base, env, ctx)? {
+                Sym::Record { fields, .. } => fields
+                    .into_iter()
+                    .find(|(name, _)| name == field)
+                    .map(|(_, v)| SymFlow::Normal(v)),
+                _ => None,
+            }
+        }
+
+        IRNode::RecordLit { type_name, fields } => {
+            // Construction (Phase 76, D3a's IR half): fields
+            // evaluate in written order; a `Return` inside a
+            // field value unwinds the whole evaluation,
+            // exactly as inside a Collection. The stored type
+            // name is the RESOLVED declaration name when the
+            // index carries the module's declarations, so a
+            // constructed record compares equal to a
+            // parameter-bound one even when the literal was
+            // written through an alias.
+            let mut values = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                match sym_eval_flow(value, env, ctx)? {
+                    SymFlow::Returned(v) => return Some(SymFlow::Returned(v)),
+                    SymFlow::Normal(v) => values.push((name.clone(), v)),
+                }
+            }
+            let type_name = match ctx.index.record_fields(type_name) {
+                Some((resolved, _)) => resolved,
+                None => type_name.clone(),
+            };
+            Some(SymFlow::Normal(Sym::Record {
+                type_name,
+                fields: values,
+            }))
+        }
+
         IRNode::Typed { node, .. } => sym_eval_flow(node, env, ctx),
 
         // Everything below is outside the encodable subset,
@@ -551,9 +851,11 @@ fn sym_literal(lit: &IRLiteral) -> Option<Sym> {
         IRLiteral::String(s) => {
             Some(Sym::Str(z3::ast::String::from_str(s).ok()?))
         }
-        // Float, Char, Unit: no honest Z3 sort in this encoder.
-        IRLiteral::Float(_) | IRLiteral::Char(_) | IRLiteral::Unit => {
-            Some(Sym::Opaque)
+        // Float, Unit: no honest Z3 sort in this encoder.
+        // Char (Phase 76, D5a): its Unicode scalar value.
+        IRLiteral::Float(_) | IRLiteral::Unit => Some(Sym::Opaque),
+        IRLiteral::Char(c) => {
+            Some(Sym::Char(z3::ast::Int::from_i64(*c as u32 as i64)))
         }
     }
 }
@@ -651,10 +953,25 @@ fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
                 Err(_) => PatternCond::Undecidable,
             }
         }
+        // A Char scrutinee against a Char literal pattern:
+        // scalar equality (Phase 76). An indexed char
+        // (CharStr) compares as its one-char string.
+        (Sym::Char(a), IRLiteral::Char(c)) => {
+            PatternCond::Eq(a.eq(&z3::ast::Int::from_i64(*c as u32 as i64)))
+        }
+        (Sym::CharStr(a), IRLiteral::Char(c)) => {
+            match z3::ast::String::from_str(&c.to_string()) {
+                Ok(lit) => PatternCond::Eq(a.eq(&lit)),
+                Err(_) => PatternCond::Undecidable,
+            }
+        }
         // A list scrutinee has no literal patterns; an Opaque
         // scrutinee cannot be compared at all.
         (Sym::List(_), _) | (Sym::Opaque, _) => PatternCond::Undecidable,
-        // Remaining pairs are provably disjoint sorts.
+        // Remaining pairs are provably disjoint sorts —
+        // records, tagged values and list-lengths never equal
+        // a literal pattern, and a Char never equals an Int,
+        // Float, Bool or String literal.
         _ => PatternCond::Never,
     }
 }
@@ -673,6 +990,28 @@ fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv, ctx: &EvalCtx) ->
         }
         // The one pure builtin the specs and templates rely on.
         "len" if args.len() == 1 => sym_len(sym_eval(&args[0], env, ctx)?),
+        // The Result/Option constructors (Phase 76): they
+        // build the tag+payload forms. Exact arity, as in
+        // the interpreter's eval_call — a wrong-arity
+        // constructor call is unencodable, not inlined.
+        "Ok" if args.len() == 1 => Some(Sym::Result {
+            ok: Tag::True,
+            ok_payload: Some(Box::new(sym_eval(&args[0], env, ctx)?)),
+            err_payload: None,
+        }),
+        "Err" if args.len() == 1 => Some(Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(sym_eval(&args[0], env, ctx)?)),
+        }),
+        "Some" if args.len() == 1 => Some(Sym::Option {
+            some: Tag::True,
+            payload: Some(Box::new(sym_eval(&args[0], env, ctx)?)),
+        }),
+        "None" if args.is_empty() => Some(Sym::Option {
+            some: Tag::False,
+            payload: None,
+        }),
         // A call to another spec resolves by inlining the
         // callee's body (see sym_invoke); template-internal
         // pseudo-calls and unknown names resolve to nothing
@@ -692,7 +1031,28 @@ fn sym_len(v: Sym) -> Option<Sym> {
     match v {
         Sym::List(items) => Some(Sym::Int(z3::ast::Int::from_i64(items.len() as i64))),
         Sym::Str(s) => Some(Sym::Int(s.length())),
+        Sym::ListLen(n) => Some(Sym::Int(n)),
         _ => None,
+    }
+}
+
+/// Whether a Str term IS a string literal, and its value.
+/// `as_string()` alone does not answer this: measured on
+/// z3 0.20, it returns `Some("")` for a free constant and
+/// for a concatenation — only a genuine literal returns
+/// its own value. Z3 hash-conses literals, so a literal
+/// compares equal (AST identity) to a fresh build of its
+/// value, and nothing else does; that equality is the
+/// exact test. This is the fact the pure mirror tracks as
+/// `StrVal::Known`.
+#[cfg(feature = "z3-support")]
+fn str_literal(s: &z3::ast::String) -> Option<String> {
+    let value = s.as_string()?;
+    let rebuilt = z3::ast::String::from_str(&value).ok()?;
+    if *s == rebuilt {
+        Some(value)
+    } else {
+        None
     }
 }
 
@@ -711,20 +1071,46 @@ fn sym_index(coll: Sym, idx: Sym) -> Option<Sym> {
             items.into_iter().nth(n as usize)
         }
         (Sym::Str(s), Sym::Int(i)) => {
-            // A character of a literal string at a constant
-            // in-range index: a Char value (Opaque sort).
-            let n = i.as_i64()?;
-            if n < 0 {
-                return None;
+            // The String-index→Char bridge (Phase 76).
+            // CONSTANT index into a LITERAL string: exact —
+            // the character's scalar value, and an
+            // out-of-bounds index is unencodable, mirroring
+            // the interpreter's evaluation failure (no
+            // totalization where the value is known).
+            if let (Some(lit), Some(n)) = (str_literal(&s), i.as_i64()) {
+                if n < 0 {
+                    return None;
+                }
+                return lit
+                    .chars()
+                    .nth(n as usize)
+                    .map(|c| Sym::Char(z3::ast::Int::from_i64(c as u32 as i64)));
             }
-            let lit = s.as_string()?;
-            if lit.chars().nth(n as usize).is_some() {
-                Some(Sym::Opaque)
-            } else {
-                None
-            }
+            // The general case: `str.at` — the character as
+            // a length-≤1 string (Sym::CharStr; see its doc
+            // for the sound fragment and the named boundary).
+            Some(Sym::CharStr(s.at(i)))
         }
         _ => None,
+    }
+}
+
+/// Merge an Option/Result payload slot across an `ite`:
+/// a slot present on either side is observed only under
+/// the tag that side carries, so a one-sided payload is
+/// the merged payload; two present payloads merge by
+/// `sym_ite` (and can fail, failing the whole merge).
+#[cfg(feature = "z3-support")]
+fn sym_ite_payload(
+    cond: &z3::ast::Bool,
+    a: Option<Box<Sym>>,
+    b: Option<Box<Sym>>,
+) -> Option<Option<Box<Sym>>> {
+    match (a, b) {
+        (None, None) => Some(None),
+        (Some(x), None) => Some(Some(x)),
+        (None, Some(y)) => Some(Some(y)),
+        (Some(x), Some(y)) => sym_ite(cond, *x, *y).map(|v| Some(Box::new(v))),
     }
 }
 
@@ -734,7 +1120,67 @@ fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
         (Sym::Int(x), Sym::Int(y)) => Some(Sym::Int(cond.ite(&x, &y))),
         (Sym::Bool(x), Sym::Bool(y)) => Some(Sym::Bool(cond.ite(&x, &y))),
         (Sym::Str(x), Sym::Str(y)) => Some(Sym::Str(cond.ite(&x, &y))),
+        (Sym::Char(x), Sym::Char(y)) => Some(Sym::Char(cond.ite(&x, &y))),
+        (Sym::CharStr(x), Sym::CharStr(y)) => Some(Sym::CharStr(cond.ite(&x, &y))),
+        (Sym::ListLen(x), Sym::ListLen(y)) => Some(Sym::ListLen(cond.ite(&x, &y))),
         (Sym::Opaque, Sym::Opaque) => Some(Sym::Opaque),
+        (
+            Sym::Record {
+                type_name: ta,
+                fields: fa,
+            },
+            Sym::Record {
+                type_name: tb,
+                fields: fb,
+            },
+        ) => {
+            // Same declaration, same field set: merge
+            // fieldwise (in the left record's field order).
+            if ta != tb || fa.len() != fb.len() {
+                return None;
+            }
+            let mut merged = Vec::with_capacity(fa.len());
+            for (name, va) in fa {
+                let vb = fb
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| v.clone())?;
+                merged.push((name, sym_ite(cond, va, vb)?));
+            }
+            Some(Sym::Record {
+                type_name: ta,
+                fields: merged,
+            })
+        }
+        (
+            Sym::Option {
+                some: ta,
+                payload: pa,
+            },
+            Sym::Option {
+                some: tb,
+                payload: pb,
+            },
+        ) => Some(Sym::Option {
+            some: Tag::merge(cond, &ta, &tb),
+            payload: sym_ite_payload(cond, pa, pb)?,
+        }),
+        (
+            Sym::Result {
+                ok: ta,
+                ok_payload: oa,
+                err_payload: ea,
+            },
+            Sym::Result {
+                ok: tb,
+                ok_payload: ob,
+                err_payload: eb,
+            },
+        ) => Some(Sym::Result {
+            ok: Tag::merge(cond, &ta, &tb),
+            ok_payload: sym_ite_payload(cond, oa, ob)?,
+            err_payload: sym_ite_payload(cond, ea, eb)?,
+        }),
         _ => None,
     }
 }
@@ -812,7 +1258,275 @@ fn sym_binop(kind: BinKind, l: Sym, r: Sym) -> Option<Sym> {
             a.push(item);
             Some(Sym::List(a))
         }
+        // Char comparisons (Phase 76, D5a): scalar order on
+        // the Int sort. Arithmetic on Chars does not exist
+        // in the interpreter and stays unencodable.
+        (Eq, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.eq(&b))),
+        (Neq, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.eq(&b).not())),
+        (Lt, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.lt(&b))),
+        (Le, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.le(&b))),
+        (Gt, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.gt(&b))),
+        (Ge, Sym::Char(a), Sym::Char(b)) => Some(Sym::Bool(a.ge(&b))),
+        // Indexed chars (the bridge's CharStr form): string
+        // equality/order over length-≤1 strings IS scalar
+        // equality/order (see Sym::CharStr). Against a
+        // CONSTANT Char the scalar converts to its one-char
+        // string; against a symbolic Char there is no
+        // conversion in the safe API — unencodable, the
+        // bridge's named boundary.
+        (Eq, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.eq(&b))),
+        (Neq, Sym::CharStr(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(a.eq(&b).not()))
+        }
+        (Lt, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.str_lt(&b))),
+        (Le, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.str_le(&b))),
+        (Gt, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.str_gt(&b))),
+        (Ge, Sym::CharStr(a), Sym::CharStr(b)) => Some(Sym::Bool(a.str_ge(&b))),
+        (Eq, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.eq(&char_const_string(&b)?)))
+        }
+        (Neq, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.eq(&char_const_string(&b)?).not()))
+        }
+        (Lt, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.str_lt(&char_const_string(&b)?)))
+        }
+        (Le, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.str_le(&char_const_string(&b)?)))
+        }
+        (Gt, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.str_gt(&char_const_string(&b)?)))
+        }
+        (Ge, Sym::CharStr(a), Sym::Char(b)) => {
+            Some(Sym::Bool(a.str_ge(&char_const_string(&b)?)))
+        }
+        (Eq, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.eq(&b)))
+        }
+        (Neq, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.eq(&b).not()))
+        }
+        (Lt, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.str_lt(&b)))
+        }
+        (Le, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.str_le(&b)))
+        }
+        (Gt, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.str_gt(&b)))
+        }
+        (Ge, Sym::Char(a), Sym::CharStr(b)) => {
+            Some(Sym::Bool(char_const_string(&a)?.str_ge(&b)))
+        }
+        // Record equality (Phase 76): fieldwise, by name —
+        // the interpreter's structural equality over
+        // Value::Record, with the type name part of it.
+        (
+            Eq,
+            Sym::Record {
+                type_name: an,
+                fields: af,
+            },
+            Sym::Record {
+                type_name: bn,
+                fields: bf,
+            },
+        ) => sym_record_eq(&an, &af, &bn, &bf).map(Sym::Bool),
+        (
+            Neq,
+            Sym::Record {
+                type_name: an,
+                fields: af,
+            },
+            Sym::Record {
+                type_name: bn,
+                fields: bf,
+            },
+        ) => sym_record_eq(&an, &af, &bn, &bf).map(|b| Sym::Bool(b.not())),
+        // Option / Result equality (Phase 76): tag logic
+        // plus the observed payload — see the helpers.
+        (
+            Eq,
+            Sym::Option {
+                some: at,
+                payload: ap,
+            },
+            Sym::Option {
+                some: bt,
+                payload: bp,
+            },
+        ) => sym_option_eq(&at, &ap, &bt, &bp).map(Sym::Bool),
+        (
+            Neq,
+            Sym::Option {
+                some: at,
+                payload: ap,
+            },
+            Sym::Option {
+                some: bt,
+                payload: bp,
+            },
+        ) => sym_option_eq(&at, &ap, &bt, &bp).map(|b| Sym::Bool(b.not())),
+        (
+            Eq,
+            Sym::Result {
+                ok: at,
+                ok_payload: ao,
+                err_payload: ae,
+            },
+            Sym::Result {
+                ok: bt,
+                ok_payload: bo,
+                err_payload: be,
+            },
+        ) => sym_result_eq(&at, &ao, &ae, &bt, &bo, &be).map(Sym::Bool),
+        (
+            Neq,
+            Sym::Result {
+                ok: at,
+                ok_payload: ao,
+                err_payload: ae,
+            },
+            Sym::Result {
+                ok: bt,
+                ok_payload: bo,
+                err_payload: be,
+            },
+        ) => sym_result_eq(&at, &ao, &ae, &bt, &bo, &be)
+            .map(|b| Sym::Bool(b.not())),
         _ => None,
+    }
+}
+
+/// The one-char string of a CONSTANT Char term, for the
+/// bridge's cross-representation comparisons. A symbolic
+/// Char term has no readable numeral (`as_i64` fails) and
+/// no string form in the safe API — None, which the caller
+/// turns into "unencodable" (the named boundary).
+#[cfg(feature = "z3-support")]
+fn char_const_string(c: &z3::ast::Int) -> Option<z3::ast::String> {
+    let n = c.as_i64()?;
+    let ch = char::from_u32(u32::try_from(n).ok()?)?;
+    z3::ast::String::from_str(&ch.to_string()).ok()
+}
+
+/// Equality of two symbolic values as a Bool term — the
+/// `Eq` row of `sym_binop`, unwrapped.
+#[cfg(feature = "z3-support")]
+fn sym_eq(l: Sym, r: Sym) -> Option<z3::ast::Bool> {
+    match sym_binop(BinKind::Eq, l, r)? {
+        Sym::Bool(b) => Some(b),
+        _ => None,
+    }
+}
+
+/// Record equality: records of different declared types
+/// are provably unequal (the interpreter's structural
+/// equality includes the type name — `Some(false)`, not
+/// unencodable); records of one type are equal iff every
+/// field is equal, compared BY NAME (written field order
+/// is not part of a value's identity here — the declared
+/// field set is). A field whose equality cannot encode
+/// makes the whole equality unencodable.
+#[cfg(feature = "z3-support")]
+fn sym_record_eq(
+    a_name: &str,
+    a_fields: &[(String, Sym)],
+    b_name: &str,
+    b_fields: &[(String, Sym)],
+) -> Option<z3::ast::Bool> {
+    if a_name != b_name {
+        return Some(z3::ast::Bool::from_bool(false));
+    }
+    if a_fields.len() != b_fields.len() {
+        return None; // one declared type, two field sets: malformed
+    }
+    let mut acc = z3::ast::Bool::from_bool(true);
+    for (name, va) in a_fields {
+        let vb = b_fields.iter().find(|(n, _)| n == name).map(|(_, v)| v)?;
+        acc = z3::ast::Bool::and(&[&acc, &sym_eq(va.clone(), vb.clone())?]);
+    }
+    Some(acc)
+}
+
+/// Option equality. When either side is a literal `None`
+/// (tag `Tag::False`), equality is exactly tag equality —
+/// no payload term is needed, which is what lets
+/// `output == None()` judge a body whose payload sort has
+/// no equality. Otherwise both sides can be `Some`, both
+/// payloads are present (the Sym::Option invariant), and
+/// equality is tag equality plus payload equality under
+/// the tag.
+#[cfg(feature = "z3-support")]
+fn sym_option_eq(
+    a_some: &Tag,
+    a_pay: &Option<Box<Sym>>,
+    b_some: &Tag,
+    b_pay: &Option<Box<Sym>>,
+) -> Option<z3::ast::Bool> {
+    if *a_some == Tag::False || *b_some == Tag::False {
+        return Some(a_some.term().eq(&b_some.term()));
+    }
+    let pa = a_pay.as_ref()?;
+    let pb = b_pay.as_ref()?;
+    let pe = sym_eq((**pa).clone(), (**pb).clone())?;
+    let tags = a_some.term().eq(&b_some.term());
+    let under_tag = z3::ast::Bool::or(&[&a_some.term().not(), &pe]);
+    Some(z3::ast::Bool::and(&[&tags, &under_tag]))
+}
+
+/// Result equality, by tag case analysis: literal tags
+/// decide which payload slot (if any) is observed; two
+/// free tags need both slots' equalities. A payload slot
+/// that is absent where the case analysis observes it
+/// makes the equality unencodable (it cannot arise under
+/// the Sym::Result invariants from well-formed values).
+#[cfg(feature = "z3-support")]
+fn sym_result_eq(
+    a_ok: &Tag,
+    a_okp: &Option<Box<Sym>>,
+    a_errp: &Option<Box<Sym>>,
+    b_ok: &Tag,
+    b_okp: &Option<Box<Sym>>,
+    b_errp: &Option<Box<Sym>>,
+) -> Option<z3::ast::Bool> {
+    use z3::ast::Bool;
+    let slot = |x: &Option<Box<Sym>>, y: &Option<Box<Sym>>| -> Option<z3::ast::Bool> {
+        sym_eq((**x.as_ref()?).clone(), (**y.as_ref()?).clone())
+    };
+    match (a_ok, b_ok) {
+        (Tag::False, Tag::False) => slot(a_errp, b_errp),
+        (Tag::True, Tag::True) => slot(a_okp, b_okp),
+        (Tag::True, Tag::False) | (Tag::False, Tag::True) => {
+            Some(Bool::from_bool(false))
+        }
+        (Tag::True, Tag::Free(_)) => {
+            let e = slot(a_okp, b_okp)?;
+            Some(Bool::and(&[&b_ok.term(), &e]))
+        }
+        (Tag::Free(_), Tag::True) => {
+            let e = slot(a_okp, b_okp)?;
+            Some(Bool::and(&[&a_ok.term(), &e]))
+        }
+        (Tag::False, Tag::Free(_)) => {
+            let e = slot(a_errp, b_errp)?;
+            Some(Bool::and(&[&b_ok.term().not(), &e]))
+        }
+        (Tag::Free(_), Tag::False) => {
+            let e = slot(a_errp, b_errp)?;
+            Some(Bool::and(&[&a_ok.term().not(), &e]))
+        }
+        (Tag::Free(_), Tag::Free(_)) => {
+            let oe = slot(a_okp, b_okp)?;
+            let ee = slot(a_errp, b_errp)?;
+            let ta = a_ok.term();
+            let tb = b_ok.term();
+            let observed = Bool::or(&[
+                &Bool::and(&[&ta, &oe]),
+                &Bool::and(&[&ta.not(), &ee]),
+            ]);
+            Some(Bool::and(&[&ta.eq(&tb), &observed]))
+        }
     }
 }
 
@@ -956,10 +1670,10 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
         Expr::FloatLit(_) => Some(Sym::Opaque),
         Expr::BoolLit(b) => Some(Sym::Bool(z3::ast::Bool::from_bool(*b))),
         Expr::StringLit(s) => Some(Sym::Str(z3::ast::String::from_str(s).ok()?)),
-        // Char, like Float: no honest Z3 sort in this
-        // encoder — Opaque (bindable, not usable in an
-        // operation that needs a concrete sort).
-        Expr::CharLit(_) => Some(Sym::Opaque),
+        // Char (Phase 76, D5a): its Unicode scalar value on
+        // the Int sort — a literal is a genuine scalar, so
+        // no side condition is owed for it.
+        Expr::CharLit(c) => Some(Sym::Char(z3::ast::Int::from_i64(*c as u32 as i64))),
         Expr::BinOp(op, l, r) => {
             let kind = match op {
                 BinOp::Add => BinKind::Add,
@@ -993,6 +1707,28 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 }
                 Some(Sym::List(values))
             }
+            // The Result/Option constructors (Phase 76),
+            // building the tag+payload forms — the same
+            // shapes sym_call builds on the body side, so a
+            // constraint's `Ok(...)` and a body's meet.
+            "Ok" if args.len() == 1 => Some(Sym::Result {
+                ok: Tag::True,
+                ok_payload: Some(Box::new(encode_expr(&args[0], env, ctx)?)),
+                err_payload: None,
+            }),
+            "Err" if args.len() == 1 => Some(Sym::Result {
+                ok: Tag::False,
+                ok_payload: None,
+                err_payload: Some(Box::new(encode_expr(&args[0], env, ctx)?)),
+            }),
+            "Some" if args.len() == 1 => Some(Sym::Option {
+                some: Tag::True,
+                payload: Some(Box::new(encode_expr(&args[0], env, ctx)?)),
+            }),
+            "None" if args.is_empty() => Some(Sym::Option {
+                some: Tag::False,
+                payload: None,
+            }),
             // A call to another spec resolves by inlining the
             // callee's body (see sym_invoke) — this arm is what
             // makes composition postconditions judgable at all;
@@ -1008,7 +1744,71 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
         Expr::Index(coll, idx) => {
             sym_index(encode_expr(coll, env, ctx)?, encode_expr(idx, env, ctx)?)
         }
-        Expr::Field(..) | Expr::Lambda(..) | Expr::Comprehension { .. } => None,
+        // Field projection (Phase 76, D2a): the base must
+        // encode to a record and the field must be among
+        // its fields — an unknown field or a non-record
+        // base is unencodable, never a guess.
+        Expr::Field(base, field) => match encode_expr(base, env, ctx)? {
+            Sym::Record { fields, .. } => fields
+                .into_iter()
+                .find(|(name, _)| name == field)
+                .map(|(_, v)| v),
+            _ => None,
+        },
+        // Record construction (Phase 76, D3a): the fields
+        // encode in written order; the stored type name is
+        // the resolved declaration name when the index
+        // carries declarations (see sym_eval's RecordLit).
+        Expr::RecordLit { type_name, fields } => {
+            let mut values = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                values.push((name.clone(), encode_expr(value, env, ctx)?));
+            }
+            let type_name = match ctx.index.record_fields(type_name) {
+                Some((resolved, _)) => resolved,
+                None => type_name.clone(),
+            };
+            Some(Sym::Record {
+                type_name,
+                fields: values,
+            })
+        }
+        // Method calls (Phase 76, D1a): the closed builtin
+        // table, encoded against the tag+payload forms.
+        // Every builtin is zero-argument; an argument, an
+        // unknown name, or a receiver of the wrong family
+        // is unencodable.
+        Expr::MethodCall {
+            receiver,
+            name,
+            args,
+        } => {
+            if !args.is_empty() {
+                return None;
+            }
+            let recv = encode_expr(receiver, env, ctx)?;
+            match (name.as_str(), recv) {
+                ("is_ok", Sym::Result { ok, .. }) => Some(Sym::Bool(ok.term())),
+                ("is_err", Sym::Result { ok, .. }) => {
+                    Some(Sym::Bool(ok.term().not()))
+                }
+                // unwrap projects the Ok payload. Its
+                // constraint uses are the guarded shapes
+                // (`is_err() || …unwrap()…`): on the Err
+                // branch the disjunction is already
+                // satisfied. When the receiver is a literal
+                // Err construction the payload slot is
+                // absent and there is nothing sound to
+                // project — unencodable, named here.
+                ("unwrap", Sym::Result { ok_payload, .. }) => {
+                    ok_payload.map(|p| *p)
+                }
+                ("len", v @ (Sym::List(_) | Sym::ListLen(_))) => sym_len(v),
+                _ => None,
+            }
+        }
+        // Lambda and comprehension have no encoding here.
+        Expr::Lambda(..) | Expr::Comprehension { .. } => None,
     }
 }
 
@@ -1046,7 +1846,7 @@ pub fn body_is_encodable_with(
     body: &IRNode,
     index: &SpecIndex,
 ) -> bool {
-    let mut env = param_env(spec);
+    let mut env = param_env(spec, index);
     sym_eval(body, &mut env, &EvalCtx::root(index)).is_some()
 }
 
@@ -1754,4 +2554,2392 @@ mod tests {
             VerificationStatus::Inconclusive
         );
     }
+
+    // ── Phase 76 evidence: the restored tokenizer module ──
+    //
+    // The same restored module text the interpreter tests
+    // execute (eval.rs RESTORED_TOKENIZER_MODULE, Phase
+    // 75), judged here by the verifier with hand bodies
+    // transcribed from the hand-written mirror — the
+    // bodies Phase 75 executed. Per-spec verdicts are the
+    // phase's evidence table (the M1 gate re-run is Phase
+    // 80's): the classifiers and peek verify outright;
+    // skip_whitespace's identity body verifies;
+    // tokenize_all's weak postcondition verifies;
+    // tokenize_one's postconditions encode and REFUTE the
+    // partial bodies (no verifying body exists short of a
+    // real tokenizing loop); next_char's body encodes but
+    // its postconditions call peek, for which the resolver
+    // denotes no body — the named reason it stays
+    // Inconclusive.
+
+    const RESTORED_TOKENIZER_MODULE: &str = r#"
+ScratchTokenizer {
+
+type TokenKind = Int;
+
+type Token = {
+    kind: TokenKind,
+    lexeme: String,
+    line: Int,
+    col: Int
 }
+
+type TokenizerState = {
+    source: String,
+    pos: Int,
+    line: Int,
+    col: Int,
+    tokens: List<Token>
+}
+
+type StepResult = Result<TokenizerState, String>;
+
+spec peek {
+    input: state: TokenizerState
+    output: Option<Char>
+
+    constraint: state.pos<len(state.source)||output==None()
+    constraint: state.pos>=len(state.source)||output==Some(state.source[state.pos])
+
+    test "non-empty" { input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] } expect: Some('h') }
+    test "at-end" { input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] } expect: None() }
+}
+
+spec next_char {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos==state.pos+1
+    constraint: peek(state)!=Some('\n')||output.line==state.line+1
+    constraint: peek(state)!=Some('\n')||output.col==1
+    constraint: peek(state)==Some('\n')||output.col==state.col+1
+
+    test "normal" {
+        input: TokenizerState { source: "ab", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "ab", pos: 1, line: 1, col: 2, tokens: [] }
+    }
+}
+
+spec skip_whitespace {
+    input: state: TokenizerState
+    output: TokenizerState
+
+    constraint: output.pos>=state.pos
+    constraint: len(output.source)==len(state.source)
+
+    test "no-whitespace" {
+        input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
+    }
+
+    test "skip-spaces" {
+        input: TokenizerState { source: "  hi", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: TokenizerState { source: "  hi", pos: 2, line: 1, col: 3, tokens: [] }
+    }
+}
+
+spec tokenize_one {
+    input: state: TokenizerState
+    output: StepResult
+
+    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+    constraint: output.is_ok() || state.pos >= len(state.source)
+
+    test "keyword-spec" {
+        input: TokenizerState { source: "spec", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok(TokenizerState { source: "spec", pos: 4, line: 1, col: 5, tokens: [
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 }
+        ] })
+    }
+
+    test "end-of-input" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok(TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] })
+    }
+}
+
+spec tokenize_all {
+    input: state: TokenizerState
+    output: Result<List<Token>, String>
+
+    constraint: output.is_err() || output.unwrap().len() >= len(state.tokens)
+    optimize: time < O(n)
+
+    test "simple-spec" {
+        input: TokenizerState { source: "spec sort", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([
+            Token { kind: 0, lexeme: "spec", line: 1, col: 1 },
+            Token { kind: 0, lexeme: "sort", line: 1, col: 6 }
+        ])
+    }
+
+    test "empty" {
+        input: TokenizerState { source: "", pos: 0, line: 1, col: 1, tokens: [] };
+        expect: Ok([])
+    }
+}
+
+}"#;
+
+    #[cfg(feature = "z3-support")]
+    fn load_restored_module() -> Spec {
+        let parsed = crate::spec::parser::parse(RESTORED_TOKENIZER_MODULE)
+            .expect("restored module parses");
+        crate::spec::typeck::check(parsed)
+            .expect("restored module typechecks")
+            .spec
+    }
+
+    #[cfg(feature = "z3-support")]
+    fn restored_spec<'m>(module: &'m Spec, name: &str) -> &'m FunctionSpec {
+        module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("restored module has spec {}", name))
+    }
+
+    /// The hand-written mirror's peek, as an IR body (the
+    /// same transcription eval.rs executes in Phase 75).
+    #[cfg(feature = "z3-support")]
+    fn peek_mirror_body() -> IRNode {
+        IRNode::If {
+            condition: Box::new(IRNode::BinOp(
+                IRBinOp::Lt,
+                Box::new(IRNode::FieldAccess {
+                    base: Box::new(IRNode::Var("state".into())),
+                    field: "pos".into(),
+                }),
+                Box::new(IRNode::Call {
+                    function: "len".into(),
+                    args: vec![IRNode::FieldAccess {
+                        base: Box::new(IRNode::Var("state".into())),
+                        field: "source".into(),
+                    }],
+                }),
+            )),
+            then_branch: Box::new(IRNode::Call {
+                function: "Some".into(),
+                args: vec![IRNode::Index(
+                    Box::new(IRNode::FieldAccess {
+                        base: Box::new(IRNode::Var("state".into())),
+                        field: "source".into(),
+                    }),
+                    Box::new(IRNode::FieldAccess {
+                        base: Box::new(IRNode::Var("state".into())),
+                        field: "pos".into(),
+                    }),
+                )],
+            }),
+            else_branch: Box::new(IRNode::Call {
+                function: "None".into(),
+                args: vec![],
+            }),
+        }
+    }
+
+    /// The mirror's next_char, as an IR body (a RecordLit
+    /// over field projections — Phase 75's transcription).
+    #[cfg(feature = "z3-support")]
+    fn next_char_mirror_body() -> IRNode {
+        let field = |name: &str| IRNode::FieldAccess {
+            base: Box::new(IRNode::Var("state".into())),
+            field: name.into(),
+        };
+        IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), field("source")),
+                (
+                    "pos".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(field("pos")),
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                    ),
+                ),
+                ("line".into(), field("line")),
+                ("col".into(), field("col")),
+                ("tokens".into(), field("tokens")),
+            ],
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_classifiers_verify_and_wrong_bodies_refute() {
+        // The classifiers live in the standing examples
+        // module (the restored scratch declares only the
+        // five state specs) — same constraints, same
+        // resolver bodies.
+        let examples = {
+            let src = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/functional_tokenizer.morph"
+            ))
+            .expect("examples tokenizer reads");
+            let parsed = crate::spec::parser::parse(&src).expect("examples parses");
+            crate::spec::typeck::check(parsed)
+                .expect("examples typechecks")
+                .spec
+        };
+        let ex_index = SpecIndex::from_module(&examples);
+        let ex_verifier = Verifier::with_module(&examples);
+        for name in ["is_whitespace", "is_ident_start", "is_ident_continue"] {
+            let spec = restored_spec(&examples, name);
+            let exact = ex_index
+                .callee_body(name)
+                .unwrap_or_else(|| panic!("{}: resolver body", name));
+            let good = candidate(&spec, 76, exact);
+            assert_eq!(
+                ex_verifier.verify_one(&good, &spec).status,
+                VerificationStatus::Verified,
+                "{}: the classifier body must verify after D5a",
+                name
+            );
+            let wrong = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+            assert_eq!(
+                ex_verifier.verify_one(&wrong, &spec).status,
+                VerificationStatus::VerificationFailed,
+                "{}: the constant-true body must be refuted after D5a",
+                name
+            );
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_peek_mirror_body_is_verified() {
+        let module = load_restored_module();
+        let spec = restored_spec(&module, "peek");
+        let verifier = Verifier::with_module(&module);
+        let good = candidate(&spec, 76, peek_mirror_body());
+        assert_eq!(
+            verifier.verify_one(&good, &spec).status,
+            VerificationStatus::Verified,
+            "peek's mirror body must verify: record fields, the \
+             string-index bridge and Option equality all encode"
+        );
+    }
+
+    /// The mirror's next_char, FULL body (Phase 81): the
+    /// Phase 76 transcription above carries line/col
+    /// unchanged, which the spec's rows refute at
+    /// non-newline inputs — it was an encodability probe,
+    /// never a verifying body. The full mirror branches
+    /// line/col on `peek(state) == Some('\n')`, stated as an
+    /// IR Call to peek (the form a candidate body carries;
+    /// the verifier inlines it through the resolver).
+    #[cfg(feature = "z3-support")]
+    fn next_char_full_mirror_body() -> IRNode {
+        let field = |name: &str| IRNode::FieldAccess {
+            base: Box::new(IRNode::Var("state".into())),
+            field: name.into(),
+        };
+        let peek_is_newline = || {
+            IRNode::BinOp(
+                IRBinOp::Eq,
+                Box::new(IRNode::Call {
+                    function: "peek".into(),
+                    args: vec![IRNode::Var("state".into())],
+                }),
+                Box::new(IRNode::Call {
+                    function: "Some".into(),
+                    args: vec![IRNode::Literal(IRLiteral::Char('\n'))],
+                }),
+            )
+        };
+        IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), field("source")),
+                (
+                    "pos".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(field("pos")),
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                    ),
+                ),
+                (
+                    "line".into(),
+                    IRNode::If {
+                        condition: Box::new(peek_is_newline()),
+                        then_branch: Box::new(IRNode::BinOp(
+                            IRBinOp::Add,
+                            Box::new(field("line")),
+                            Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                        )),
+                        else_branch: Box::new(field("line")),
+                    },
+                ),
+                (
+                    "col".into(),
+                    IRNode::If {
+                        condition: Box::new(peek_is_newline()),
+                        then_branch: Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                        else_branch: Box::new(IRNode::BinOp(
+                            IRBinOp::Add,
+                            Box::new(field("col")),
+                            Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                        )),
+                    },
+                ),
+                ("tokens".into(), field("tokens")),
+            ],
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase81_next_char_verifies_once_peek_denotes() {
+        // RE-STATED from Phase 76's
+        // phase76_next_char_body_encodes_but_peek_call_blocks_the_verdict,
+        // whose pinned premise — the resolver denotes no
+        // body for peek — is exactly what Phase 81 removes
+        // (the complementary-guard builder, remainder (i)).
+        // The encodability half of the old test is unchanged;
+        // the blocker assertions are replaced by the closure
+        // they predicted.
+        let module = load_restored_module();
+        let index = SpecIndex::from_module(&module);
+        let spec = restored_spec(&module, "next_char");
+        assert!(
+            body_is_encodable_with(&spec, &next_char_mirror_body(), &index),
+            "next_char's mirror body must be encodable after Phase 76"
+        );
+        // peek now denotes, through the complementary-guard
+        // builder appended at the END of the resolver chain.
+        let peek_body = index
+            .callee_body("peek")
+            .expect("peek must denote after Phase 81");
+        // Self-check (the Phase 80 pricing's added evidence
+        // for this builder): the denoted body verifies
+        // against peek's OWN postconditions.
+        let peek_spec = restored_spec(&module, "peek");
+        let verifier = Verifier::with_module(&module);
+        let cand = candidate(&peek_spec, 81, peek_body);
+        assert_eq!(
+            verifier.verify_one(&cand, &peek_spec).status,
+            VerificationStatus::Verified,
+            "peek's denoted body must verify against peek's own postconditions"
+        );
+        // And next_char's full mirror body — whose line/col
+        // logic calls peek(state) — now verifies with peek
+        // inlined through the denotation.
+        let cand = candidate(&spec, 81, next_char_full_mirror_body());
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Verified,
+            "next_char's full mirror body must verify once peek denotes"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_skip_whitespace_and_tokenize_all_verify() {
+        let module = load_restored_module();
+        let verifier = Verifier::with_module(&module);
+        // skip_whitespace's two stated postconditions are
+        // pos-monotonicity and source-length preservation;
+        // the identity body satisfies both, provably.
+        let spec = restored_spec(&module, "skip_whitespace");
+        let identity = candidate(&spec, 76, IRNode::Var("state".into()));
+        assert_eq!(
+            verifier.verify_one(&identity, &spec).status,
+            VerificationStatus::Verified,
+            "skip_whitespace identity body must verify"
+        );
+        // tokenize_all's single postcondition is the weak
+        // length bound; Ok(state.tokens) satisfies it.
+        let spec = restored_spec(&module, "tokenize_all");
+        let body = IRNode::Call {
+            function: "Ok".into(),
+            args: vec![IRNode::FieldAccess {
+                base: Box::new(IRNode::Var("state".into())),
+                field: "tokens".into(),
+            }],
+        };
+        let cand = candidate(&spec, 76, body);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Verified,
+            "tokenize_all's Ok(state.tokens) body must verify"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_tokenize_one_constraints_encode_and_refute_partial_bodies() {
+        let module = load_restored_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "tokenize_one");
+        // Ok(state): the is_err/is_ok/unwrap/len machinery
+        // encodes, and the first postcondition REFUTES this
+        // body (the token list does not grow) — the
+        // constraints bite; no partial body verifies, and
+        // none exists short of a real tokenizing loop.
+        let ok_state = IRNode::Call {
+            function: "Ok".into(),
+            args: vec![IRNode::Var("state".into())],
+        };
+        assert!(
+            body_is_encodable_with(&spec, &ok_state, &index),
+            "the Ok(state) body must be encodable"
+        );
+        let cand = candidate(&spec, 76, ok_state);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "tokenize_one must refute Ok(state): tokens do not grow"
+        );
+        // Err(_): the second postcondition refutes it (an
+        // error is only licensed at end of input).
+        let err = IRNode::Call {
+            function: "Err".into(),
+            args: vec![IRNode::Literal(IRLiteral::String("boom".into()))],
+        };
+        let cand = candidate(&spec, 76, err);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "tokenize_one must refute an unconditional Err body"
+        );
+    }
+
+    /// Phase 84 — RE-STATED from Phase 82's
+    /// `phase82_tokenize_one_eof_admitted_amendment_a`,
+    /// whose pinned position (amendment A: row 1's
+    /// disjunct reads the INPUT's pos; row 2 unamended)
+    /// is superseded by the owner-ratified round-2
+    /// amendment (ratified 2026-11-22; Phase 83's option
+    /// 1, applied in this phase): A′ moves row 1's
+    /// end-of-input disjunct to the OUTPUT state —
+    /// `|| output.unwrap().pos >= len(output.unwrap().source)`
+    /// — and R2-α (callee form) gives row 2 an Err
+    /// license for a non-token-start character at the
+    /// input's current position. The point machinery
+    /// below is Phase 80's, unchanged; what moves is
+    /// exactly what the round-2 rows move:
+    ///
+    ///   * (A) row 1 still PROVES under the golden EOF
+    ///     output, now through the output-side disjunct:
+    ///     the golden output's own pos 0 >= len("") = 0,
+    ///     so the row reads `false || 0 == 0 + 1 || true`
+    ///     with the truth on the output side. Row 2's
+    ///     verdict at this literal point becomes
+    ///     UNKNOWN — the literal-OOB artifact Phase 83
+    ///     named: row 2 now mentions
+    ///     `state.source[state.pos]`, and a constant
+    ///     out-of-bounds index into the literal empty
+    ///     string is what sym_index refuses. The
+    ///     admission itself is proven on the symbolic
+    ///     path in phase84_symbolic_state_encodability.
+    ///   * (B) the literal Err at EOF moves the same
+    ///     way (Proven under A → Unknown at the literal
+    ///     point), discharged symbolically in the same
+    ///     companion test.
+    ///   * (C) the free-tag analysis of row 1 at the
+    ///     point is SAT in every case, as under A — the
+    ///     reasoning moves sides: the free payload IS
+    ///     the EOF state, so the output-side disjunct
+    ///     (0 >= 0) is true of it. The (L=2 ∧ is_ok)
+    ///     case remains the rows' named EOF residue:
+    ///     at end-of-input inputs the rows constrain
+    ///     nothing further, and the golden tests are
+    ///     the only judge at EOF.
+    ///   * (D) teeth at the "keyword-spec" point,
+    ///     unchanged in verdict: a mid-input no-growth
+    ///     Ok is REFUTED by row 1 (the output's pos
+    ///     0 >= 4 is false on the output side now), and
+    ///     the mirror's one-token output is Proven.
+    ///
+    /// The token lists are bound as ListLen(n): the rows
+    /// observe them only through len, and ListLen is the
+    /// encoder's own model of a list observed through
+    /// len.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase84_tokenize_one_eof_admitted_round2() {
+        use crate::verify::smt::{SmtResult, Z3Session};
+
+        // The REAL completed module (examples/), not the
+        // Phase 76 scratch: the gate judges this file, and
+        // the round-2 amendment lives in it. The two row
+        // lines are pinned textually first — the needles
+        // are the full lines, so the header's prose quotes
+        // cannot match; each occurs exactly once.
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/functional_tokenizer.morph"
+        ))
+        .expect("examples tokenizer reads");
+        let row1_line = "    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || output.unwrap().pos >= len(output.unwrap().source)";
+        let row2_line = "    constraint: output.is_ok() || state.pos >= len(state.source) || (is_ident_start(state.source[state.pos]) == false && is_whitespace(state.source[state.pos]) == false && state.source[state.pos] != ':' && state.source[state.pos] != '{' && state.source[state.pos] != '}' && state.source[state.pos] != '(' && state.source[state.pos] != ')' && state.source[state.pos] != ',' && state.source[state.pos] != '<' && state.source[state.pos] != '>' && state.source[state.pos] != '=')";
+        assert_eq!(
+            src.matches(row1_line).count(),
+            1,
+            "round-2 row 1 (A′) is the file's row 1"
+        );
+        assert_eq!(
+            src.matches(row2_line).count(),
+            1,
+            "round-2 row 2 (R2-α, callee form) is the file's row 2"
+        );
+        let module = {
+            let parsed = crate::spec::parser::parse(&src).expect("examples parses");
+            crate::spec::typeck::check(parsed)
+                .expect("examples typechecks")
+                .spec
+        };
+        let spec = restored_spec(&module, "tokenize_one");
+        assert_eq!(spec.postconditions.len(), 2, "tokenize_one has two rows");
+        assert!(
+            format!("{:?}", spec.postconditions[0]).contains("is_err"),
+            "row 1 is the is_err row"
+        );
+        assert!(
+            format!("{:?}", spec.postconditions[1]).contains("is_ok"),
+            "row 2 is the is_ok row"
+        );
+        let verifier = Verifier::with_module(&module);
+        let index = SpecIndex::from_module(&module);
+
+        // ── The golden fact, read off the spec's own
+        // test: the EOF input and the Ok/0-token output
+        // it demands.
+        let test = spec
+            .tests
+            .iter()
+            .find(|t| t.name.as_deref() == Some("end-of-input"))
+            .expect("the end-of-input test is in-spec");
+        fn rec_fields(e: &SpecExpr) -> &Vec<(String, SpecExpr)> {
+            match e {
+                SpecExpr::RecordLit { type_name, fields } if type_name == "TokenizerState" => {
+                    fields
+                }
+                other => panic!("expected a TokenizerState literal, got {:?}", other),
+            }
+        }
+        fn field<'f>(fields: &'f [(String, SpecExpr)], name: &str) -> &'f SpecExpr {
+            fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, e)| e)
+                .unwrap_or_else(|| panic!("field {} present", name))
+        }
+        let is_empty_list = |e: &SpecExpr| {
+            matches!(e, SpecExpr::Call(n, a) if n == "List" && a.is_empty())
+        };
+        let in_fields = rec_fields(&test.input);
+        assert!(
+            matches!(field(in_fields, "source"), SpecExpr::StringLit(s) if s.is_empty()),
+            "EOF input: empty source"
+        );
+        assert!(
+            matches!(field(in_fields, "pos"), SpecExpr::IntLit(0)),
+            "EOF input: pos 0"
+        );
+        assert!(
+            is_empty_list(field(in_fields, "tokens")),
+            "EOF input: no tokens yet"
+        );
+        let (ctor, ctor_args) = match &test.expected_output {
+            SpecExpr::Call(n, a) => (n.as_str(), a),
+            other => panic!("expected output is a constructor call, got {:?}", other),
+        };
+        assert_eq!(ctor, "Ok", "the golden EOF output is Ok");
+        assert_eq!(ctor_args.len(), 1);
+        assert!(
+            is_empty_list(field(rec_fields(&ctor_args[0]), "tokens")),
+            "the golden EOF output carries NO token"
+        );
+
+        // ── Point instantiation. state := a point state;
+        // outputs observed through exactly what the rows
+        // read (tag; payload token-list length).
+        let int = |n: i64| Sym::Int(z3::ast::Int::from_i64(n));
+        let state_of = |source: &str, tok_len: i64| Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::from_str(source).unwrap()),
+                ),
+                ("pos".into(), int(0)),
+                ("line".into(), int(1)),
+                ("col".into(), int(1)),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::from_i64(tok_len)),
+                ),
+            ],
+        };
+        let ok_of = |st: Sym| Sym::Result {
+            ok: Tag::True,
+            ok_payload: Some(Box::new(st)),
+            err_payload: None,
+        };
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("", 0));
+
+        // (A) The golden output: row 1 PROVEN — under A′
+        // the truth is the OUTPUT-side disjunct (the
+        // golden output's own pos 0 >= len("") = 0).
+        // Row 2 at this literal point is UNKNOWN: the α
+        // license mentions state.source[state.pos], and
+        // sym_index refuses the constant out-of-bounds
+        // index into the literal empty string (Phase
+        // 83's named artifact); the admission is proven
+        // symbolically in
+        // phase84_symbolic_state_encodability.
+        let golden = ok_of(state_of("", 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[0],
+            "row1@golden-eof",
+            spec,
+            &env,
+            &Some(golden.clone()),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "round-2 row 1 must ADMIT the golden EOF output: \
+             false || 0 == 0 + 1 || (output pos 0 >= len 0)"
+        );
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@golden-eof",
+            spec,
+            &env,
+            &Some(golden),
+        );
+        assert!(
+            matches!(tri, Tri::Unknown),
+            "row 2 at the literal EOF point is the OOB-index artifact \
+             (its admission is proven on the symbolic path)"
+        );
+
+        // (B) A literal Err output at EOF: under
+        // amendment A row 2 was Proven here (0 >= 0);
+        // under R2-α the literal point is the same
+        // OOB-index artifact as in (A) — Unknown — and
+        // the license (the row's own EOF disjunct) is
+        // proven on the symbolic path in the companion
+        // test.
+        let err = Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(
+                Sym::Str(z3::ast::String::from_str("boom").unwrap()),
+            )),
+        };
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@err-eof",
+            spec,
+            &env,
+            &Some(err),
+        );
+        assert!(
+            matches!(tri, Tri::Unknown),
+            "row 2 at the literal EOF point is the OOB-index artifact \
+             for an Err output too (symbolic-path admission in the \
+             companion test)"
+        );
+
+        // (C) Round-2 row 1's satisfying set at EOF, by
+        // tag case analysis over a free tag: the free
+        // payload below IS the EOF state, so A′'s
+        // output-side disjunct (its pos 0 >= len 0) is
+        // true of it and every case is SAT — including
+        // the two whose UNSAT was Phase 80's
+        // contradiction.
+        let row1_free = |tok_len: i64, is_ok: &z3::ast::Bool| -> z3::ast::Bool {
+            let mut e = env.clone();
+            e.insert(
+                "output".into(),
+                Sym::Result {
+                    ok: Tag::Free(is_ok.clone()),
+                    ok_payload: Some(Box::new(state_of("", tok_len))),
+                    err_payload: Some(Box::new(
+                        Sym::Str(z3::ast::String::from_str("boom").unwrap()),
+                    )),
+                },
+            );
+            encode_constraint(&spec.postconditions[0], &e, &EvalCtx::root(&index))
+                .expect("amended row 1 encodes under a free tag")
+        };
+        let check = |formula: &z3::ast::Bool, extra: &z3::ast::Bool| -> SmtResult {
+            let z3 = Z3Session::new(10_000);
+            z3.assert(formula);
+            z3.assert(extra);
+            z3.check()
+        };
+        let is_ok = z3::ast::Bool::new_const("out_is_ok");
+        assert!(
+            matches!(
+                check(&row1_free(0, &is_ok), &is_ok),
+                SmtResult::Sat(_)
+            ),
+            "row 1 ∧ is_ok ∧ 0 tokens: SAT — the golden output is admitted \
+             (Phase 80: UNSAT, the contradiction)"
+        );
+        assert!(
+            matches!(
+                check(&row1_free(0, &is_ok), &is_ok.not()),
+                SmtResult::Sat(_)
+            ),
+            "row 1 ∧ is_err: SAT — an Err output satisfies row 1 at EOF"
+        );
+        assert!(
+            matches!(
+                check(&row1_free(1, &is_ok), &is_ok),
+                SmtResult::Sat(_)
+            ),
+            "row 1 ∧ is_ok ∧ 1 token: SAT — growth still satisfies row 1"
+        );
+        assert!(
+            matches!(
+                check(&row1_free(2, &is_ok), &is_ok),
+                SmtResult::Sat(_)
+            ),
+            "row 1 ∧ is_ok ∧ 2 tokens: SAT — at EOF inputs the amended row \
+             constrains nothing further (Phase 80: UNSAT, growth was exactly +1)"
+        );
+
+        // (D) Teeth, at the "keyword-spec" point (source
+        // "spec", pos 0, no tokens): the no-growth
+        // output's own pos is 0 and its source length 4,
+        // so A′'s output-side disjunct is false there
+        // (0 >= 4) and the row bites exactly as before.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("spec", 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[0],
+            "row1@spec-nogrowth",
+            spec,
+            &env,
+            &Some(ok_of(state_of("spec", 0))),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "round-2 row 1 must still refute a mid-input no-growth Ok: \
+             false || 0 == 0 + 1 || (output pos 0 >= 4) is false"
+        );
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[0],
+            "row1@spec-growth",
+            spec,
+            &env,
+            &Some(ok_of(state_of("spec", 1))),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "round-2 row 1 proves for the mirror's one-token output mid-input"
+        );
+    }
+
+    /// The hand-written mirror's tokenize_one, as an IR
+    /// body (structural transcription of
+    /// mirror_tokenize_one in
+    /// src/tokenizer_cross_validation.rs): skip, then the
+    /// peek dispatch — EOF, the ident arm with its
+    /// consumption loop, the nine single-char arms, the
+    /// error arm. The lexeme accumulation inside the loop
+    /// is the one approximate joint (a Char pushed onto a
+    /// String, written as a Concat of the indexed char);
+    /// it sits inside the While, which decides the body's
+    /// encodability on its own.
+    #[cfg(feature = "z3-support")]
+    fn tokenize_one_mirror_body() -> IRNode {
+        let var = |n: &str| IRNode::Var(n.into());
+        let field = |base: IRNode, name: &str| IRNode::FieldAccess {
+            base: Box::new(base),
+            field: name.into(),
+        };
+        let call = |f: &str, args: Vec<IRNode>| IRNode::Call {
+            function: f.into(),
+            args,
+        };
+        let peek_is_none = |s: IRNode| {
+            IRNode::BinOp(
+                IRBinOp::Eq,
+                Box::new(call("peek", vec![s])),
+                Box::new(call("None", vec![])),
+            )
+        };
+        let peeked = |s: IRNode| {
+            IRNode::Index(
+                Box::new(field(s.clone(), "source")),
+                Box::new(field(s, "pos")),
+            )
+        };
+        // push_token(start, end, kind, lexeme): the end
+        // state with one Token appended, the token stamped
+        // with the START state's line/col (D4a).
+        let push_token = |start: IRNode, end: IRNode, kind: i64, lexeme: IRNode| {
+            let tok = IRNode::RecordLit {
+                type_name: "Token".into(),
+                fields: vec![
+                    ("kind".into(), IRNode::Literal(IRLiteral::Int(kind))),
+                    ("lexeme".into(), lexeme),
+                    ("line".into(), field(start.clone(), "line")),
+                    ("col".into(), field(start, "col")),
+                ],
+            };
+            IRNode::RecordLit {
+                type_name: "TokenizerState".into(),
+                fields: vec![
+                    ("source".into(), field(end.clone(), "source")),
+                    ("pos".into(), field(end.clone(), "pos")),
+                    ("line".into(), field(end.clone(), "line")),
+                    ("col".into(), field(end.clone(), "col")),
+                    (
+                        "tokens".into(),
+                        IRNode::BinOp(
+                            IRBinOp::Concat,
+                            Box::new(field(end, "tokens")),
+                            Box::new(IRNode::Collection {
+                                kind: crate::synthesis::engine::CollectionKind::List,
+                                elements: vec![tok],
+                            }),
+                        ),
+                    ),
+                ],
+            }
+        };
+        let single = |kind: i64, ch: char| {
+            call(
+                "Ok",
+                vec![push_token(
+                    var("s1"),
+                    call("next_char", vec![var("s1")]),
+                    kind,
+                    IRNode::Literal(IRLiteral::String(ch.to_string())),
+                )],
+            )
+        };
+        // The nine single-char arms, innermost last arm
+        // first; the fall-through is the error arm.
+        let mut dispatch = call(
+            "Err",
+            vec![IRNode::Literal(IRLiteral::String(
+                "Unexpected character".into(),
+            ))],
+        );
+        for (ch, kind) in [
+            ('=', 12),
+            ('>', 11),
+            ('<', 10),
+            (',', 9),
+            (')', 4),
+            ('(', 3),
+            ('}', 6),
+            ('{', 5),
+            (':', 7),
+        ] {
+            dispatch = IRNode::If {
+                condition: Box::new(IRNode::BinOp(
+                    IRBinOp::Eq,
+                    Box::new(peeked(var("s1"))),
+                    Box::new(IRNode::Literal(IRLiteral::Char(ch))),
+                )),
+                then_branch: Box::new(single(kind, ch)),
+                else_branch: Box::new(dispatch),
+            };
+        }
+        // The ident arm: consume while is_ident_continue,
+        // accumulating the lexeme, then push one Ident
+        // token. The lexeme push (a Char onto a String) is
+        // written as a Concat of the indexed char — the one
+        // approximate joint, inside the While.
+        let ident_arm = IRNode::Let {
+            name: "s".into(),
+            value: Box::new(var("s1")),
+            body: Box::new(IRNode::Let {
+                name: "lex".into(),
+                value: Box::new(IRNode::Literal(IRLiteral::String(String::new()))),
+                body: Box::new(IRNode::Block(vec![
+                    IRNode::While {
+                        condition: Box::new(IRNode::BinOp(
+                            IRBinOp::And,
+                            Box::new(IRNode::BinOp(
+                                IRBinOp::Neq,
+                                Box::new(call("peek", vec![var("s")])),
+                                Box::new(call("None", vec![])),
+                            )),
+                            Box::new(call(
+                                "is_ident_continue",
+                                vec![peeked(var("s"))],
+                            )),
+                        )),
+                        body: Box::new(IRNode::Block(vec![
+                            IRNode::Assign {
+                                target: Box::new(var("lex")),
+                                value: Box::new(IRNode::BinOp(
+                                    IRBinOp::Concat,
+                                    Box::new(var("lex")),
+                                    Box::new(peeked(var("s"))),
+                                )),
+                            },
+                            IRNode::Assign {
+                                target: Box::new(var("s")),
+                                value: Box::new(call(
+                                    "next_char",
+                                    vec![var("s")],
+                                )),
+                            },
+                        ])),
+                        invariant: None,
+                    },
+                    call(
+                        "Ok",
+                        vec![push_token(var("s1"), var("s"), 0, var("lex"))],
+                    ),
+                ])),
+            }),
+        };
+        IRNode::Let {
+            name: "s1".into(),
+            value: Box::new(call("skip_whitespace", vec![var("state")])),
+            body: Box::new(IRNode::If {
+                condition: Box::new(peek_is_none(var("s1"))),
+                then_branch: Box::new(call("Ok", vec![var("s1")])),
+                else_branch: Box::new(IRNode::If {
+                    condition: Box::new(call(
+                        "is_ident_start",
+                        vec![peeked(var("s1"))],
+                    )),
+                    then_branch: Box::new(ident_arm),
+                    else_branch: Box::new(dispatch),
+                }),
+            }),
+        }
+    }
+    /// Phase 84 — RE-STATED from Phase 82's
+    /// `phase82_tokenize_one_mirror_body_vs_amended_rows`:
+    /// the mirror-transcribed tokenize_one body against
+    /// the ROUND-2 rows (A′ + R2-α, owner-ratified
+    /// 2026-11-22, applied in this phase) — the contract
+    /// the generation campaign (Phase 85) is built
+    /// against, measured through the production encoder:
+    /// the whole body judged by verify_one, and the
+    /// mirror's own output judged at the point for each
+    /// of the cross-validation battery's input classes.
+    /// Phase 82's table pinned two REFUTED classes under
+    /// amendment A; Phase 83 measured the round-2
+    /// formulations on scratch copies; this re-statement
+    /// pins Phase 83's joint table against the REAL
+    /// module — both classes are closed, and the one
+    /// surviving deviation is stated at its own point
+    /// below.
+    ///
+    /// Whole body: verify_one returns Inconclusive, and
+    /// the body is outside the encodable subset twice
+    /// over, both blockers named (unchanged): its ident
+    /// arm is a While loop (While is an unencodable arm
+    /// of sym_eval — the standing loop boundary), and
+    /// its first step calls skip_whitespace, for which
+    /// the resolver denotes NO body (its two stated rows
+    /// are field inequalities no builder denotes), so
+    /// there is nothing to inline even before the loop.
+    /// A Phase 85 body that verifies must be an
+    /// encodable formulation of this behavior, not this
+    /// transcription.
+    ///
+    /// Per class (input at pos 0, no tokens; the
+    /// mirror's output judged against both rows at the
+    /// point):
+    ///   ""      EOF           Ok, no token   Proven / Unknown — row 1 admits; row 2's literal point is the OOB artifact (admission proven symbolically, companion test)
+    ///   "spec"  ident         Ok, +1 token   Proven / Proven — admitted by the growth disjunct
+    ///   "  spec" leading ws   Ok, +1 token   Proven / Proven — admitted by growth
+    ///   "\n\nx" newline run   Ok, +1 token   Proven / Proven — admitted by growth
+    ///   ":"     single char   Ok, +1 token   Proven / Proven — admitted by growth
+    ///   " "     ws-only rest  Ok, no token   Proven / Proven — ADMITTED (class W closed by A′; Phase 82: row 1 refuted it)
+    ///   "5"     unexpected    Err            free tag / Proven — ADMITTED (class E closed by R2-α; Phase 82: row 2 refuted it)
+    ///   "é"     unexpected    Err            free tag / Proven — α licenses a non-ASCII bad char too
+    ///
+    /// The one surviving deviation, named: at " 5"
+    /// (whitespace, then a bad char) the mirror's Err
+    /// stays REFUTED by row 2 — α reads the PRE-skip
+    /// character, a space — and the joint rows admit
+    /// only the fabricated Ok/+1 there. Phase 83 priced
+    /// this subclass as unreachable from the spec side
+    /// (the peek form over-licenses; the skip form is
+    /// unencodable; a skip denotation is underivable);
+    /// it stands as the rows' one named deviation from
+    /// the mirror — the generation campaign's one named
+    /// executed-agreement gap.
+    ///
+    /// Teeth under the joint rows, pinned below: a
+    /// no-growth Ok at a token start is refuted by row
+    /// 1; Err at identifier, punctuation, and whitespace
+    /// positions is refuted by row 2. A′'s residue is
+    /// pinned too: a no-growth Ok whose pos jumps to
+    /// end-of-input is admitted by row 1 (the row cannot
+    /// tell a skip-to-EOF from a teleport; the golden
+    /// tests judge that shape). At EOF inputs the rows
+    /// constrain nothing further (the companion test's
+    /// L=2 case) — executed agreement is the only judge
+    /// there.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase84_tokenize_one_mirror_body_vs_round2_rows() {
+        // The REAL module (examples/): the round-2
+        // amendment lives there, and the gate judges
+        // this file.
+        let module = {
+            let src = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/functional_tokenizer.morph"
+            ))
+            .expect("examples tokenizer reads");
+            let parsed = crate::spec::parser::parse(&src).expect("examples parses");
+            crate::spec::typeck::check(parsed)
+                .expect("examples typechecks")
+                .spec
+        };
+        let spec = restored_spec(&module, "tokenize_one");
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+
+        // ── Whole body: Inconclusive, with both blockers
+        // named. The resolver denotes no body for
+        // skip_whitespace (peek denotes, since Phase 81 —
+        // asserted here so the contrast is pinned, not
+        // anecdotal).
+        assert!(
+            index.callee_body("skip_whitespace").is_none(),
+            "no denotation exists for skip_whitespace: nothing to inline"
+        );
+        assert!(
+            index.callee_body("peek").is_some(),
+            "peek denotes since Phase 81"
+        );
+        let body = tokenize_one_mirror_body();
+        assert!(
+            !body_is_encodable_with(&spec, &body, &index),
+            "the mirror transcription is outside the encodable subset \
+             (While arm; the skip_whitespace call)"
+        );
+        let cand = candidate(&spec, 82, body);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Inconclusive,
+            "the mirror body cannot verify whole: loops do not encode"
+        );
+
+        // ── Per-class point verdicts: the mirror's own
+        // output at each battery input, judged against
+        // both round-2 rows at the point.
+        let int = |n: i64| Sym::Int(z3::ast::Int::from_i64(n));
+        let state_of = |source: &str, pos: i64, tok_len: i64| Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::from_str(source).unwrap()),
+                ),
+                ("pos".into(), int(pos)),
+                ("line".into(), int(1)),
+                ("col".into(), int(1)),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::from_i64(tok_len)),
+                ),
+            ],
+        };
+        let ok_of = |st: Sym| Sym::Result {
+            ok: Tag::True,
+            ok_payload: Some(Box::new(st)),
+            err_payload: None,
+        };
+        // (class name, input source, mirror output,
+        //  expected row 1, expected row 2). The mirror
+        //  outputs carry its true end pos; the rows read
+        //  the tag, the payload's token length, the
+        //  OUTPUT's pos / source length (row 1's A′
+        //  disjunct), and the INPUT's pos / source
+        //  length / indexed char (row 2's α license).
+        let classes: Vec<(&str, &str, Sym, Tri, Tri)> = vec![
+            (
+                "eof",
+                "",
+                ok_of(state_of("", 0, 0)),
+                Tri::Proven,
+                Tri::Unknown,
+            ),
+            (
+                "ident",
+                "spec",
+                ok_of(state_of("spec", 4, 1)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "leading-ws-ident",
+                "  spec",
+                ok_of(state_of("  spec", 6, 1)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "newline-run",
+                "\n\nx",
+                ok_of(state_of("\n\nx", 3, 1)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "single-colon",
+                ":",
+                ok_of(state_of(":", 1, 1)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "corner-whitespace-only",
+                " ",
+                ok_of(state_of(" ", 1, 0)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+        ];
+        for (name, source, output, want1, want2) in classes {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), state_of(source, 0, 0));
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[0],
+                "row1@class",
+                spec,
+                &env,
+                &Some(output.clone()),
+            );
+            assert!(
+                matches!((&tri, &want1), (Tri::Proven, Tri::Proven)
+                    | (Tri::Refuted, Tri::Refuted)
+                    | (Tri::Unknown, Tri::Unknown)),
+                "class {}: round-2 row 1 verdict for the mirror output",
+                name
+            );
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[1],
+                "row2@class",
+                spec,
+                &env,
+                &Some(output),
+            );
+            assert!(
+                matches!((&tri, &want2), (Tri::Proven, Tri::Proven)
+                    | (Tri::Refuted, Tri::Refuted)
+                    | (Tri::Unknown, Tri::Unknown)),
+                "class {}: row 2 verdict for the mirror output",
+                name
+            );
+        }
+
+        // The unexpected-character class, closed: the
+        // mirror's Err at input "5". Row 2 now PROVES it
+        // — the α license fires on the indexed char '5'
+        // (not ident-start, not whitespace, not a
+        // punctuation) where the unamended row 2 refuted
+        // it in Phase 82. Row 1 is satisfied through its
+        // is_err disjunct — discharged via the free tag,
+        // as in Phase 80 (row 1 under a LITERAL Err tag
+        // is the encoder's named unencodable case). The
+        // non-ASCII point ("é") is admitted the same way.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("5", 0, 0));
+        let err = Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(Sym::Str(
+                z3::ast::String::from_str("Unexpected character '5' at line 1")
+                    .unwrap(),
+            ))),
+        };
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@digit-err",
+            spec,
+            &env,
+            &Some(err),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "round-2 row 2 ADMITS the mirror's mid-input Err at \"5\" \
+             (the α license; Phase 82: refuted)"
+        );
+        let is_ok = z3::ast::Bool::new_const("out_is_ok");
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("5", 0, 0));
+        env.insert(
+            "output".into(),
+            Sym::Result {
+                ok: Tag::Free(is_ok.clone()),
+                ok_payload: Some(Box::new(state_of("5", 1, 1))),
+                err_payload: Some(Box::new(
+                    Sym::Str(z3::ast::String::from_str("boom").unwrap()),
+                )),
+            },
+        );
+        let formula = encode_constraint(
+            &spec.postconditions[0],
+            &env,
+            &EvalCtx::root(&index),
+        )
+        .expect("row 1 encodes under a free tag");
+        {
+            use crate::verify::smt::{SmtResult, Z3Session};
+            let z3 = Z3Session::new(10_000);
+            z3.assert(&formula);
+            z3.assert(&is_ok.not());
+            assert!(
+                matches!(z3.check(), SmtResult::Sat(_)),
+                "row 1 is satisfiable by the class-E Err (free tag)"
+            );
+        }
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("é", 0, 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@eacute-err",
+            spec,
+            &env,
+            &Some(Sym::Result {
+                ok: Tag::False,
+                ok_payload: None,
+                err_payload: Some(Box::new(Sym::Str(
+                    z3::ast::String::from_str("Unexpected character").unwrap(),
+                ))),
+            }),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "round-2 row 2 admits the mirror's Err at a non-ASCII bad char"
+        );
+
+        // The surviving deviation, at its own point: at
+        // " 5" the mirror's Err stays REFUTED by row 2
+        // (α reads the pre-skip char — a space), and the
+        // only shape the joint rows admit is the
+        // fabricated Ok/+1. This subclass is the rows'
+        // one named deviation from the mirror.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of(" 5", 0, 0));
+        let err5 = Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(Sym::Str(
+                z3::ast::String::from_str("Unexpected character '5' at line 1")
+                    .unwrap(),
+            ))),
+        };
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@ws-digit-err",
+            spec,
+            &env,
+            &Some(err5),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "\" 5\" residue: the mirror's Err stays refuted — α reads \
+             the pre-skip char"
+        );
+        for (i, label) in ["row1", "row2"].iter().enumerate() {
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[i],
+                label,
+                spec,
+                &env,
+                &Some(ok_of(state_of(" 5", 2, 1))),
+            );
+            assert!(
+                matches!(tri, Tri::Proven),
+                "\" 5\" residue: only the fabricated Ok/+1 is admitted ({})",
+                label
+            );
+        }
+
+        // Teeth under the joint rows: Err at an
+        // identifier start, at a punctuation start, and
+        // at the whitespace corner is refuted by row 2 —
+        // the α license does not over-admit. (Row 1's
+        // teeth — the no-growth Ok at a token start —
+        // are pinned in the companion test's section D.)
+        for (source, label) in [
+            ("spec", "identifier start"),
+            (":", "punctuation start"),
+            (" ", "whitespace corner"),
+        ] {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), state_of(source, 0, 0));
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[1],
+                "row2@teeth",
+                spec,
+                &env,
+                &Some(Sym::Result {
+                    ok: Tag::False,
+                    ok_payload: None,
+                    err_payload: Some(Box::new(Sym::Str(
+                        z3::ast::String::from_str("x").unwrap(),
+                    ))),
+                }),
+            );
+            assert!(
+                matches!(tri, Tri::Refuted),
+                "teeth: Err at a {} stays refuted by row 2",
+                label
+            );
+        }
+
+        // A′'s residue in the joint context: a no-growth
+        // Ok whose pos jumps to end-of-input is admitted
+        // by row 1 — the row cannot distinguish it from
+        // the class-W skip; the golden tests judge it.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("spec", 0, 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[0],
+            "row1@teleport",
+            spec,
+            &env,
+            &Some(ok_of(state_of("spec", 4, 0))),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "A′ residue: a no-growth Ok whose pos reaches EOF is \
+             admitted by row 1"
+        );
+    }
+
+    // ── Phase 84: round-2 rows, standing pins ────────
+    //
+    // Phase 83 measured the round-2 candidates on
+    // SCRATCH copies of the examples module (a
+    // substitution builder plus five Z3-gated tests).
+    // The owner ratified option 1 (A′ + R2-α, callee
+    // form) on 2026-11-22 and this phase applied it to
+    // examples/functional_tokenizer.morph — so the
+    // scratch apparatus is retired here: the
+    // substitution builder and the candidate-row
+    // constants are removed, and the five measurement
+    // tests are disposed of as follows.
+    //
+    //   * phase83_a_prime_output_pos_disjunct and
+    //     phase83_joint_a_prime_alpha_battery: their
+    //     surviving assertions are the standing battery
+    //     itself — folded into
+    //     phase84_tokenize_one_mirror_body_vs_round2_rows
+    //     (above), judged against the REAL module. The
+    //     A/A′ contrast assertion (the real file refutes
+    //     the class-W output) is dropped: its premise
+    //     is what this phase removes.
+    //   * phase83_row2_alpha_err_license: the callee
+    //     half's case table is the real row 2 now and
+    //     is pinned in the same battery (class E, the
+    //     teeth, the non-ASCII point); the direct half
+    //     measured an unratified formulation — its
+    //     verdicts stand in the Phase 83 record, not in
+    //     the suite.
+    //   * phase83_row2_beta_formulations_fail: retired.
+    //     Its subject (formulations that are not rows
+    //     of any spec) does not belong against the real
+    //     module; its one load-bearing pin — the
+    //     resolver denotes no body for skip_whitespace —
+    //     stands in the mirror-body test above, and the
+    //     β verdicts are recorded in the Phase 83 note.
+    //   * phase83_symbolic_state_encodability:
+    //     RE-STATED below against the real module — the
+    //     symbolic-path facts are not point facts and
+    //     do not fold into the battery.
+
+    /// The real examples module (round-2 rows as
+    /// applied in this phase).
+    #[cfg(feature = "z3-support")]
+    fn phase84_real_module() -> Spec {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/functional_tokenizer.morph"
+        ))
+        .expect("examples tokenizer reads");
+        let parsed = crate::spec::parser::parse(&src).expect("examples parses");
+        crate::spec::typeck::check(parsed)
+            .expect("examples typechecks")
+            .spec
+    }
+
+    /// Point Syms in the Phase 82 shapes: a state is
+    /// observed through exactly what the rows read (the
+    /// source as a literal string, pos, the token list
+    /// through its length).
+    #[cfg(feature = "z3-support")]
+    fn phase84_state(source: &str, pos: i64, tok_len: i64) -> Sym {
+        let int = |n: i64| Sym::Int(z3::ast::Int::from_i64(n));
+        Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::from_str(source).unwrap()),
+                ),
+                ("pos".into(), int(pos)),
+                ("line".into(), int(1)),
+                ("col".into(), int(1)),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::from_i64(tok_len)),
+                ),
+            ],
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    fn phase84_ok(st: Sym) -> Sym {
+        Sym::Result {
+            ok: Tag::True,
+            ok_payload: Some(Box::new(st)),
+            err_payload: None,
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    fn phase84_err(msg: &str) -> Sym {
+        Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(
+                Sym::Str(z3::ast::String::from_str(msg).unwrap()),
+            )),
+        }
+    }
+
+    /// Phase 84 — RE-STATED from Phase 83's
+    /// `phase83_symbolic_state_encodability`, which
+    /// measured the candidate rows on scratch modules.
+    /// The rows are the module's own now (A′ row 1;
+    /// R2-α callee row 2 — the direct formulation was
+    /// not ratified and its measurement loop is dropped;
+    /// its verdicts stand in the Phase 83 record), the
+    /// scratch substitution is gone, and this test reads
+    /// the real examples module throughout.
+    ///
+    /// The battery's case tables judge literal points,
+    /// where sym_index is exact; production judging
+    /// (verify_one) binds the state SYMBOLICALLY, so the
+    /// rows must also encode — and judge — with a free
+    /// source and a free pos, where
+    /// `state.source[state.pos]` takes the CharStr bridge
+    /// form (`str.at` of a symbolic index).
+    ///
+    /// Measured, against the real rows:
+    ///   * α row 2 ENCODES under a fully free state (the
+    ///     callee form inlines both classifiers over the
+    ///     CharStr argument), and under that path the
+    ///     EOF Err admission the literal table cannot
+    ///     judge (the OOB artifact) is PROVEN: with
+    ///     len(source) == 0 ∧ pos == 0 asserted, the
+    ///     row's negation has no model — the license is
+    ///     the row's own EOF disjunct. The digit
+    ///     admission is likewise proven symbolically
+    ///     (source == "5" ∧ pos == 0: no countermodel —
+    ///     the license fires through the bridge, not
+    ///     only at literal points).
+    ///   * The EOF admission for the golden OK output —
+    ///     Unknown at the literal points in the standing
+    ///     tests (the same artifact) — is proven on this
+    ///     path: a free state with a free Ok payload,
+    ///     under the EOF facts, admits no countermodel.
+    ///   * A′ row 1 encodes both against a point Ok
+    ///     output and against a fully free Ok payload
+    ///     (its disjunct is Int >= len(Str) over free
+    ///     terms).
+    ///   * Control: α row 2 under a free state and an
+    ///     Err output is NOT valid (a countermodel
+    ///     exists — a token-start char): the row
+    ///     genuinely discriminates, it does not merely
+    ///     encode.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase84_symbolic_state_encodability() {
+        use crate::verify::smt::{SmtResult, Z3Session};
+
+        // A state whose fields are free constants, in
+        // param_env's shapes; returns the state plus the
+        // source/pos terms for fact assertions.
+        let free_state = || {
+            let source = z3::ast::String::new_const("state.source");
+            let pos = z3::ast::Int::new_const("state.pos");
+            let st = Sym::Record {
+                type_name: "TokenizerState".into(),
+                fields: vec![
+                    ("source".into(), Sym::Str(source.clone())),
+                    ("pos".into(), Sym::Int(pos.clone())),
+                    (
+                        "line".into(),
+                        Sym::Int(z3::ast::Int::new_const("state.line")),
+                    ),
+                    (
+                        "col".into(),
+                        Sym::Int(z3::ast::Int::new_const("state.col")),
+                    ),
+                    (
+                        "tokens".into(),
+                        Sym::ListLen(z3::ast::Int::new_const("state.tokens.len")),
+                    ),
+                ],
+            };
+            (st, source, pos)
+        };
+        let free_payload = || Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::new_const("output.source")),
+                ),
+                (
+                    "pos".into(),
+                    Sym::Int(z3::ast::Int::new_const("output.pos")),
+                ),
+                (
+                    "line".into(),
+                    Sym::Int(z3::ast::Int::new_const("output.line")),
+                ),
+                (
+                    "col".into(),
+                    Sym::Int(z3::ast::Int::new_const("output.col")),
+                ),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::new_const("output.tokens.len")),
+                ),
+            ],
+        };
+
+        let module = phase84_real_module();
+        let spec = restored_spec(&module, "tokenize_one");
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+
+        // α row 2 under a symbolic state, Err output:
+        // encodability, then the two admissions.
+        let (state, source, pos) = free_state();
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state);
+        env.insert("output".into(), phase84_err("Unexpected character"));
+        let formula = encode_constraint(
+            &spec.postconditions[1],
+            &env,
+            &EvalCtx::root(&index),
+        );
+        assert!(
+            formula.is_some(),
+            "α row 2 ENCODES under a symbolic state — the symbolic \
+             index takes the CharStr bridge form"
+        );
+        let formula = formula.unwrap();
+
+        // Admission at end-of-input, symbolic path:
+        // under len(source) == 0 ∧ pos == 0 the negated
+        // row has no model.
+        let z3 = Z3Session::new(10_000);
+        z3.assert(&formula.not());
+        z3.assert(&source.length().eq(&z3::ast::Int::from_i64(0)));
+        z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
+        assert!(
+            matches!(z3.check(), SmtResult::Unsat),
+            "α row 2 admits Err at end-of-input under the symbolic path"
+        );
+        // Admission at the digit point, symbolic path:
+        // under source == "5" ∧ pos == 0 the negated row
+        // has no model — the license fires through the
+        // bridge, not only at literal points.
+        let z3 = Z3Session::new(10_000);
+        z3.assert(&formula.not());
+        z3.assert(
+            &source.eq(&z3::ast::String::from_str("5").unwrap()),
+        );
+        z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
+        assert!(
+            matches!(z3.check(), SmtResult::Unsat),
+            "α row 2 admits Err at \"5\" under the symbolic path"
+        );
+        // Control: with no facts, the row under an Err
+        // output is not valid — a countermodel exists
+        // (the free char may be a token start).
+        let mut env = SymEnv::new();
+        let (state, _, _) = free_state();
+        env.insert("state".into(), state);
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "alpha@free-state-err",
+            spec,
+            &env,
+            &Some(phase84_err("Unexpected character")),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "α row 2 discriminates under a free state (not vacuous)"
+        );
+
+        // The EOF admission for an Ok output (the golden
+        // output's symbolic counterpart): a free state
+        // with a free Ok payload; under the EOF facts
+        // the negated row has no model. This discharges
+        // the literal points' Unknown artifact in the
+        // standing tests.
+        let (state, source, pos) = free_state();
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state);
+        env.insert("output".into(), phase84_ok(free_payload()));
+        let formula = encode_constraint(
+            &spec.postconditions[1],
+            &env,
+            &EvalCtx::root(&index),
+        )
+        .expect("α row 2 encodes with a symbolic state and a free Ok output");
+        let z3 = Z3Session::new(10_000);
+        z3.assert(&formula.not());
+        z3.assert(&source.length().eq(&z3::ast::Int::from_i64(0)));
+        z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
+        assert!(
+            matches!(z3.check(), SmtResult::Unsat),
+            "α row 2 admits the golden Ok output at end-of-input \
+             under the symbolic path"
+        );
+
+        // A′ row 1 under symbolic shapes: a free state
+        // with a point Ok output encodes, and so does a
+        // fully free Ok payload.
+        let (state, _, _) = free_state();
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state);
+        env.insert(
+            "output".into(),
+            phase84_ok(phase84_state("spec", 4, 1)),
+        );
+        assert!(
+            encode_constraint(&spec.postconditions[0], &env, &EvalCtx::root(&index))
+                .is_some(),
+            "A′ row 1 encodes with a symbolic state and a point Ok output"
+        );
+        env.insert("output".into(), phase84_ok(free_payload()));
+        assert!(
+            encode_constraint(&spec.postconditions[0], &env, &EvalCtx::root(&index))
+                .is_some(),
+            "A′ row 1 encodes with a fully free Ok payload: \
+             pos >= len(source) over free terms"
+        );
+    }
+
+    /// Phase 87 — skip_whitespace strengthening
+    /// MEASUREMENT (workstream 2 of the road-B push;
+    /// scratch only: the examples file is NOT touched
+    /// and nothing measured here is ratified — the
+    /// Phase 88 gate re-run prices these rows from
+    /// this record). skip's spec states two invariants
+    /// (pos monotone, source length), and its crowned
+    /// winner satisfies them without performing the
+    /// skip (Phase 86 freeze: Verified, tpr 0.500,
+    /// mirror agreement 4/12, stated rows 12/12).
+    /// Candidate strengthenings, formulated in the
+    /// module dialect and measured through the
+    /// production encoder (Phase 83/84 method):
+    ///   (a) boundary — the output position is at EOF
+    ///       or the char there is not whitespace;
+    ///   (b) no-overshoot — an advanced output
+    ///       position's previous char is whitespace;
+    ///   (c) all-whitespace-between — a Forall over
+    ///       the skipped range.
+    ///
+    /// MEASURED (this test pins each claim):
+    ///   (a) ENCODES — symbolically (free state/output,
+    ///       the indexed char through the Phase 76
+    ///       CharStr bridge) and at literal points.
+    ///       The hand mirror's outputs satisfy it at
+    ///       10 of 12 battery points (Proven); the two
+    ///       EOF outputs ("" and " ") judge Unknown at
+    ///       literal points — the standing OOB
+    ///       artifact (the row's index term is out of
+    ///       range exactly where its first disjunct
+    ///       holds; the symbolic path carries the
+    ///       proof burden, as with R2-α in Phase 84).
+    ///       The crowned winner is REFUTED by (a)
+    ///       (VerificationFailed): the strengthening
+    ///       bites. But no constraint-seed family
+    ///       fires for the strengthened spec (kinds
+    ///       [] — the same as the current spec), and
+    ///       NO pool body is Verified under
+    ///       current+(a) (0 in the measured pool; the
+    ///       zero is structural — a Verified body is
+    ///       loop-free, and a loop-free body cannot
+    ///       cross an unbounded whitespace run): the
+    ///       only body that performs the skip is the
+    ///       hand mirror, whose While body is
+    ///       Inconclusive by construction, and no
+    ///       denotation exists for skip_whitespace
+    ///       (callee_body None, re-pinned here).
+    ///   (b) ENCODES (symbolically and at all 12
+    ///       points; the mirror satisfies it 12/12).
+    ///       The crowned winner SURVIVES it
+    ///       (Verified) — a body that barely advances
+    ///       satisfies a no-overshoot row vacuously —
+    ///       and pool bodies are Verified under
+    ///       current+(b) (11 in the measured pool).
+    ///       Alone, (b) changes nothing.
+    ///   (a)+(b) together still do NOT pin the skip:
+    ///       both rows PROVE at the overshoot points
+    ///       ("a b" from 0 landing at pos 2; "ab cd"
+    ///       from 0 landing at pos 3) — the rows pin
+    ///       the landing to A word boundary (never on
+    ///       whitespace, always just after one), not
+    ///       to THE first boundary. The exact pin is
+    ///       (c)'s content.
+    ///   (c) is STATABLE — the formulation parses to
+    ///       Constraint::Forall with the intended
+    ///       body — and UNENCODABLE: the production
+    ///       encoder returns None for Forall
+    ///       (verifier.rs: quantified formulas have no
+    ///       encoding here), confirming the Phase 80
+    ///       option-D boundary. Closing the skip
+    ///       clause exactly is therefore encoder
+    ///       research (the L–XL extension the owner
+    ///       did not commission), not a spec edit.
+    ///   No candidate reads line/col: even a
+    ///       hypothetical Verified body under (a)+(b)
+    ///       could mis-track them; golden/executed
+    ///       agreement remains their only judge.
+    ///
+    /// The priced statement for Phase 88: ratifying
+    /// (a) (with or without (b)) trades skip's
+    /// standing — a Verified winner that satisfies
+    /// the stated rows without skipping (golden
+    /// 4/12, partial BY SPEC STRENGTH) — for NO
+    /// Verified body at all, with the gate's skip
+    /// clause still unprovable exactly ((c)
+    /// unencodable, line/col unpinned). It buys a
+    /// refuted wrong winner and a spec that states
+    /// the boundary; it cannot buy a Verified
+    /// correct skip.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase87_skip_strengthening_measurement() {
+        use crate::spec::ast::Constraint;
+        use crate::synthesis::engine::{
+            synthesize_with_module_spec, SynthesisConfig, SynthesisEngine,
+        };
+        use crate::synthesis::selector::select_best;
+
+        let module = phase84_real_module();
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+
+        // Candidate rows parsed in the module dialect
+        // (the parser is syntactic; the encoder
+        // resolves the classifier call against the
+        // real module index, as it did for R2-α).
+        let parse_row = |text: &str| -> Constraint {
+            let src = format!(
+                "T {{\n spec probe {{\n input: state: TokenizerState\n output: TokenizerState\n constraint: {}\n }}\n}}",
+                text
+            );
+            let parsed = crate::spec::parser::parse(&src).expect("candidate row parses");
+            parsed.functions[0].postconditions[0].clone()
+        };
+        let row_a = parse_row(
+            "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
+        );
+        let row_b = parse_row(
+            "output.pos == state.pos || is_whitespace(output.source[output.pos - 1])",
+        );
+        let strengthened = |row: &Constraint| {
+            let mut s = skip.clone();
+            s.postconditions.push(row.clone());
+            s
+        };
+
+        // Point Syms in the Phase 84 shapes.
+        let state_sym = |source: &str, pos: i64, line: i64, col: i64| Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::from_str(source).unwrap()),
+                ),
+                ("pos".into(), Sym::Int(z3::ast::Int::from_i64(pos))),
+                ("line".into(), Sym::Int(z3::ast::Int::from_i64(line))),
+                ("col".into(), Sym::Int(z3::ast::Int::from_i64(col))),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::from_i64(0)),
+                ),
+            ],
+        };
+        // The mirror's skip, simulated on chars (the
+        // Phase 47 mirror semantics: whitespace is
+        // exactly ' ' '\t' '\n' '\r' — U+A0 is not —
+        // and next_char tracks line/col through
+        // newlines).
+        let mirror_skip = |source: &str, pos: i64, line: i64, col: i64| {
+            let chars: Vec<char> = source.chars().collect();
+            let (mut p, mut l, mut c) = (pos, line, col);
+            while (p as usize) < chars.len()
+                && matches!(chars[p as usize], ' ' | '\t' | '\n' | '\r')
+            {
+                if chars[p as usize] == '\n' {
+                    l += 1;
+                    c = 1;
+                } else {
+                    c += 1;
+                }
+                p += 1;
+            }
+            (p, l, c)
+        };
+        // The Phase 47 skip battery (xval skip_battery):
+        // (source, pos, line, col).
+        let battery: Vec<(&str, i64, i64, i64)> = vec![
+            ("", 0, 1, 1),
+            (" ", 0, 1, 1),
+            ("  \t\n x", 0, 1, 1),
+            ("no-ws", 0, 1, 1),
+            ("\n\nab", 0, 1, 1),
+            (" \u{A0}x", 0, 1, 1),
+            ("a b", 0, 1, 1),
+            ("\r\n\t", 0, 1, 1),
+            ("a b", 1, 1, 2),
+            ("  \t\n x", 2, 1, 3),
+            ("\n\nab", 1, 1, 2),
+            (" \u{A0}x", 1, 1, 2),
+        ];
+        // Mirror satisfaction at the battery points:
+        // (a) Proven everywhere except the two EOF
+        // outputs (the literal-point OOB artifact);
+        // (b) Proven at all 12.
+        for (label, row) in [("a", &row_a), ("b", &row_b)] {
+            let spec = strengthened(row);
+            for (i, (src, pos, line, col)) in battery.iter().enumerate() {
+                let (p, l, c) = mirror_skip(src, *pos, *line, *col);
+                let mut env = SymEnv::new();
+                env.insert("state".into(), state_sym(src, *pos, *line, *col));
+                let (_, tri) = verifier.verify_constraint(
+                    row,
+                    "phase87@point",
+                    &spec,
+                    &env,
+                    &Some(state_sym(src, p, l, c)),
+                );
+                match (label, i) {
+                    ("a", 0) | ("a", 1) => assert!(
+                        matches!(tri, Tri::Unknown),
+                        "row (a) at EOF point {}: the OOB artifact judges Unknown, got {}",
+                        i,
+                        match tri {
+                            Tri::Proven => "Proven",
+                            Tri::Refuted => "Refuted",
+                            Tri::Unknown => "Unknown",
+                        }
+                    ),
+                    _ => assert!(
+                        matches!(tri, Tri::Proven),
+                        "row ({}) at battery point {} ({:?} from {}): the mirror's \
+                         output must satisfy it, got {}",
+                        label,
+                        i,
+                        src,
+                        pos,
+                        match tri {
+                            Tri::Proven => "Proven",
+                            Tri::Refuted => "Refuted",
+                            Tri::Unknown => "Unknown",
+                        }
+                    ),
+                }
+            }
+        }
+
+        // The overshoot admissions: outputs that are
+        // NOT the mirror's (they jump a word) satisfy
+        // BOTH rows — (a)+(b) pin a word boundary, not
+        // the first one.
+        for (src, out_pos) in [("a b", 2), ("ab cd", 3)] {
+            for (label, row) in [("a", &row_a), ("b", &row_b)] {
+                let spec = strengthened(row);
+                let mut env = SymEnv::new();
+                env.insert("state".into(), state_sym(src, 0, 1, 1));
+                let (_, tri) = verifier.verify_constraint(
+                    row,
+                    "phase87@overshoot",
+                    &spec,
+                    &env,
+                    &Some(state_sym(src, out_pos, 1, 3)),
+                );
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "row ({}) must ADMIT the overshoot {:?} -> {} (the residual \
+                     freedom only the Forall would close)",
+                    label,
+                    src,
+                    out_pos
+                );
+            }
+        }
+
+        // Symbolic-path encodability: free state and
+        // free output records (the CharStr bridge form
+        // for the indexed char).
+        let free_record = |prefix: &str| Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::new_const(format!("{}.source", prefix))),
+                ),
+                (
+                    "pos".into(),
+                    Sym::Int(z3::ast::Int::new_const(format!("{}.pos", prefix))),
+                ),
+                (
+                    "line".into(),
+                    Sym::Int(z3::ast::Int::new_const(format!("{}.line", prefix))),
+                ),
+                (
+                    "col".into(),
+                    Sym::Int(z3::ast::Int::new_const(format!("{}.col", prefix))),
+                ),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::new_const(format!(
+                        "{}.tokens.len",
+                        prefix
+                    ))),
+                ),
+            ],
+        };
+        for (label, row) in [("a", &row_a), ("b", &row_b)] {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), free_record("state"));
+            env.insert("output".into(), free_record("output"));
+            let f = encode_constraint(row, &env, &EvalCtx::root(&index));
+            assert!(
+                f.is_some(),
+                "row ({}) ENCODES under a fully free state and output \
+                 (the CharStr bridge form)",
+                label
+            );
+        }
+
+        // The crowned winner under the CURRENT rows,
+        // judged against each strengthened spec: (a)
+        // refutes it, (b) does not, (a)+(b) refutes it
+        // through (a).
+        let pool = synthesize_with_module_spec(&skip, 1, &module)
+            .expect("skip synthesis under current rows");
+        let verified = verifier
+            .verify_all(pool, &skip)
+            .expect("verify pool under current rows");
+        let winner = select_best(verified, &skip).expect("a crowned winner exists");
+        assert!(
+            winner.verified,
+            "the standing winner is Verified under the current rows"
+        );
+        assert_eq!(
+            verifier.verify_one(&winner, &strengthened(&row_a)).status,
+            VerificationStatus::VerificationFailed,
+            "row (a) REFUTES the crowned winner: the strengthening bites"
+        );
+        assert_eq!(
+            verifier.verify_one(&winner, &strengthened(&row_b)).status,
+            VerificationStatus::Verified,
+            "row (b) alone leaves the crowned winner standing (vacuous bite)"
+        );
+        let mut both = skip.clone();
+        both.postconditions.push(row_a.clone());
+        both.postconditions.push(row_b.clone());
+        assert_eq!(
+            verifier.verify_one(&winner, &both).status,
+            VerificationStatus::VerificationFailed,
+            "(a)+(b) refute the winner through (a)"
+        );
+
+        // Seed existence + pool verdicts under each
+        // strengthened spec: no constraint-seed family
+        // fires (the current spec's kinds are the
+        // control), no body is Verified under
+        // current+(a), and bodies are Verified under
+        // current+(b) without performing the skip.
+        assert!(
+            index.callee_body("skip_whitespace").is_none(),
+            "no denotation exists for skip_whitespace: nothing to inline, \
+             no seed family can build the real skip from a callee body"
+        );
+        let engine = SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        assert!(
+            engine.constraint_seed_kinds(&skip).is_empty(),
+            "control: no constraint-seed kinds fire for the current spec either"
+        );
+        for (label, row, want_verified) in [("a", &row_a, Some(0usize)), ("b", &row_b, None)] {
+            let spec = strengthened(row);
+            assert!(
+                engine.constraint_seed_kinds(&spec).is_empty(),
+                "no constraint-seed kinds fire under strengthened row ({})",
+                label
+            );
+            let pool = synthesize_with_module_spec(&spec, 1, &module)
+                .expect("skip synthesis under strengthened rows");
+            let verified = verifier
+                .verify_all(pool, &spec)
+                .expect("verify pool under strengthened rows");
+            let n_verified = verified.iter().filter(|c| c.verified).count();
+            match want_verified {
+                // (a): exactly zero — structurally, not
+                // by luck of the draw: a Verified body
+                // must be loop-free (loops do not
+                // encode), and a loop-free body advances
+                // a bounded number of steps, so a
+                // whitespace run longer than that bound
+                // is a countermodel (it lands mid-run,
+                // on whitespace).
+                Some(want) => assert_eq!(
+                    n_verified, want,
+                    "Verified bodies under current+({})",
+                    label
+                ),
+                // (b): at least the standing winner's
+                // class verifies (it satisfies (b)
+                // already); the exact count is search
+                // dynamics, the existence is the claim.
+                None => assert!(
+                    n_verified >= 1,
+                    "bodies are Verified under current+(b) without \
+                     performing the skip ({} found)",
+                    n_verified
+                ),
+            }
+        }
+
+        // (c) The all-whitespace-between property as a
+        // Forall: statable in the dialect (the parser
+        // accepts the formulation), unencodable
+        // through the production encoder.
+        let forall_row = {
+            let src = "T {\n spec probe {\n input: state: TokenizerState\n output: TokenizerState\n constraint: forall i: Int in range(len(output.source)): i < state.pos || i >= output.pos || is_whitespace(output.source[i])\n }\n}";
+            let parsed = crate::spec::parser::parse(src).expect("forall row parses");
+            parsed.functions[0].postconditions[0].clone()
+        };
+        assert!(
+            matches!(forall_row, Constraint::Forall { .. }),
+            "the all-whitespace-between formulation is statable: it parses \
+             to a Forall, got {:?}",
+            forall_row
+        );
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_sym(" x", 0, 1, 1));
+        env.insert("output".into(), state_sym(" x", 2, 1, 3));
+        assert!(
+            encode_constraint(&forall_row, &env, &EvalCtx::root(&index)).is_none(),
+            "the Forall has NO encoding through the production encoder \
+             (quantified formulas are the encoder's stated boundary): \
+             the exact skip pin is encoder research, not a spec edit"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_char_range_side_condition_is_decisive() {
+        // A Char parameter ranges over Unicode scalar
+        // values ONLY because verify_constraint asserts the
+        // range side-condition; without it both specs below
+        // would be refutable (by a surrogate / out-of-range
+        // "char"). The Int control proves the condition is
+        // Char-specific.
+        let src = r#"
+CharRangeProbe {
+
+spec within_unicode {
+    input: c: Char
+    output: Bool
+    constraint: output == (c <= '\u{10FFFF}')
+}
+
+spec not_a_surrogate {
+    input: c: Char
+    output: Bool
+    constraint: output == (c <= '\u{D7FF}' || c >= '\u{E000}')
+}
+
+spec int_control {
+    input: n: Int
+    output: Bool
+    constraint: output == (n <= 1114111)
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("probe typechecks")
+            .spec;
+        let verifier = Verifier::with_module(&module);
+        for name in ["within_unicode", "not_a_surrogate"] {
+            let spec = restored_spec(&module, name);
+            let cand = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+            assert_eq!(
+                verifier.verify_one(&cand, &spec).status,
+                VerificationStatus::Verified,
+                "{}: true must verify ONLY via the Char range side-condition",
+                name
+            );
+        }
+        let spec = restored_spec(&module, "int_control");
+        let cand = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "the Int control must be refuted: no side-condition leaks to Int"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_bridge_boundary_indexed_char_vs_char_param() {
+        // The bridge's named boundary: an indexed char
+        // compares against Char LITERALS (and other indexed
+        // chars), never against a symbolic Char parameter —
+        // the z3 0.20 public API has no string-to-code
+        // bridge between the sequence sort and the scalar
+        // sort.
+        let src = r#"
+BridgeProbe {
+
+spec idx_vs_param {
+    input: s: String, c: Char
+    output: Bool
+    constraint: output == (s[0] == c)
+}
+
+spec idx_vs_lit {
+    input: s: String
+    output: Bool
+    constraint: output == (s[0] == 'a')
+}
+
+spec any_output {
+    input: s: String
+    output: Bool
+    constraint: output == true
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("probe typechecks")
+            .spec;
+        let verifier = Verifier::with_module(&module);
+        // Boundary: the constraint itself is unencodable.
+        let spec = restored_spec(&module, "idx_vs_param");
+        let cand = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Inconclusive,
+            "indexed char vs Char parameter is the named bridge boundary"
+        );
+        // Inside the fragment: the same comparison against
+        // a literal verifies with the mirror body.
+        let spec = restored_spec(&module, "idx_vs_lit");
+        let body = IRNode::BinOp(
+            IRBinOp::Eq,
+            Box::new(IRNode::Index(
+                Box::new(IRNode::Var("s".into())),
+                Box::new(IRNode::Literal(IRLiteral::Int(0))),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::Char('a'))),
+        );
+        let cand = candidate(&spec, 76, body);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Verified,
+            "indexed char vs Char literal must verify"
+        );
+        // A constant index into a literal string is EXACT:
+        // in-bounds yields the real scalar (verified
+        // against the true constraint); out-of-bounds is
+        // unencodable, never totalized.
+        let spec = restored_spec(&module, "any_output");
+        let exact = IRNode::BinOp(
+            IRBinOp::Eq,
+            Box::new(IRNode::Index(
+                Box::new(IRNode::Literal(IRLiteral::String("ab".into()))),
+                Box::new(IRNode::Literal(IRLiteral::Int(1))),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::Char('b'))),
+        );
+        let cand = candidate(&spec, 76, exact);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Verified,
+            "constant index into a literal string is the exact scalar"
+        );
+        let oob = IRNode::BinOp(
+            IRBinOp::Eq,
+            Box::new(IRNode::Index(
+                Box::new(IRNode::Literal(IRLiteral::String("ab".into()))),
+                Box::new(IRNode::Literal(IRLiteral::Int(5))),
+            )),
+            Box::new(IRNode::Literal(IRLiteral::Char('b'))),
+        );
+        let cand = candidate(&spec, 76, oob);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Inconclusive,
+            "constant out-of-bounds index is unencodable, not totalized"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_record_params_fields_and_literals_verify() {
+        let src = r#"
+RecordProbe {
+
+type P = { x: Int, y: Int }
+
+spec move_x {
+    input: p: P
+    output: P
+    constraint: output.x == p.x + 1
+    constraint: output.y == p.y
+}
+
+spec move_x_lit {
+    input: p: P
+    output: P
+    constraint: output == P { x: p.x + 1, y: p.y }
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("probe typechecks")
+            .spec;
+        let verifier = Verifier::with_module(&module);
+        let field = |name: &str| IRNode::FieldAccess {
+            base: Box::new(IRNode::Var("p".into())),
+            field: name.into(),
+        };
+        let good_body = IRNode::RecordLit {
+            type_name: "P".into(),
+            fields: vec![
+                (
+                    "x".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(field("x")),
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                    ),
+                ),
+                ("y".into(), field("y")),
+            ],
+        };
+        for name in ["move_x", "move_x_lit"] {
+            let spec = restored_spec(&module, name);
+            let cand = candidate(&spec, 76, good_body.clone());
+            assert_eq!(
+                verifier.verify_one(&cand, &spec).status,
+                VerificationStatus::Verified,
+                "{}: the RecordLit body must verify against the record parameter",
+                name
+            );
+        }
+        // The identity body violates both statements.
+        let spec = restored_spec(&module, "move_x");
+        let cand = candidate(&spec, 76, IRNode::Var("p".into()));
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "the identity body must be refuted"
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase76_guarded_unwrap_verifies_and_literal_err_unwrap_is_unencodable() {
+        // The guarded shape the tokenizer uses: is_ok
+        // guards unwrap; the payload encodes and the
+        // postcondition decides.
+        let src = r#"
+UnwrapProbe {
+
+spec guarded {
+    input: r: Result<Int, String>
+    output: Bool
+    constraint: output == (r.is_err() || r.unwrap() == 3)
+}
+
+}
+"#;
+        let parsed = crate::spec::parser::parse(src).expect("probe parses");
+        let module = crate::spec::typeck::check(parsed)
+            .expect("probe typechecks")
+            .spec;
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "guarded");
+        // Body: the constraint's own RHS as a candidate is
+        // judged through verify — instead judge two
+        // constructed Result values via a body that returns
+        // the guard expression itself is not expressible in
+        // IR (no MethodCall kind); use constant bodies:
+        // `true` is refuted (an Ok(4) input falsifies it),
+        // proving unwrap encoded rather than vanished.
+        let cand = candidate(&spec, 76, IRNode::Literal(IRLiteral::Bool(true)));
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::VerificationFailed,
+            "constant true must be refuted: unwrap of Ok(4) is 4, not 3"
+        );
+        // unwrap of a literal Err construction has no Ok
+        // payload to denote: the constraint is unencodable
+        // (the named case), so the verdict is Inconclusive
+        // for every body.
+        let hand = FunctionSpec {
+            name: "unwrap_of_err".into(),
+            doc: None,
+            generics: vec![],
+            params: vec![],
+            return_type: TypeRef::Int,
+            preconditions: vec![],
+            postconditions: vec![Constraint::Expr(SpecExpr::BinOp(
+                SpecBinOp::Eq,
+                Box::new(SpecExpr::Var("output".into())),
+                Box::new(SpecExpr::MethodCall {
+                    receiver: Box::new(SpecExpr::Call(
+                        "Err".into(),
+                        vec![SpecExpr::StringLit("x".into())],
+                    )),
+                    name: "unwrap".into(),
+                    args: vec![],
+                }),
+            ))],
+            invariants: vec![],
+            complexity: None,
+            resource: None,
+            tests: vec![],
+            annotations: Default::default(),
+        };
+        let cand = candidate(&hand, 76, IRNode::Literal(IRLiteral::Int(0)));
+        assert_eq!(
+            verifier.verify_one(&cand, &hand).status,
+            VerificationStatus::Inconclusive,
+            "unwrap of a literal Err is unencodable by construction"
+        );
+    }
+}
+

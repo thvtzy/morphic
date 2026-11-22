@@ -135,6 +135,13 @@ fn node_kind(node: &IRNode) -> i64 {
         Break { .. } => 25,
         StructDef { .. } => 26,
         TryPropagate(_) => 27,
+        // M1 features (Phase 73): appended at the end, never
+        // renumbered (audit section 4). The Codegen specs
+        // gain the 28/29 rows in Phase 78; until then the
+        // composed emitter's classifications are total over
+        // these codes by their standing default arms.
+        FieldAccess { .. } => 28,
+        RecordLit { .. } => 29,
     }
 }
 
@@ -469,12 +476,72 @@ impl Adapter {
                     self.sexpr_text(body)?,
                 )
             }
+            // Field projection (Phase 78): the template
+            // winner renders the dot; the field name passes
+            // through the same rust_ident glue the Var arm
+            // uses, exactly as the original's Field arm.
+            SpecExpr::Field(base, field) => {
+                syn::rust_expr_field_text::rust_expr_field_text(
+                    self.sexpr_text(base)?,
+                    rust_ident(field),
+                )
+            }
+            // Method calls (Phase 78, decision D1a): the
+            // dispatch winner classifies the EFFECTIVE name
+            // — the walker folds the argument count into
+            // the key (a call carrying arguments passes the
+            // empty name, itself off-table), exactly the
+            // fold the spec's doc records and the original's
+            // args.is_empty() guard makes. The closed table
+            // renders through the method template winner on
+            // the rendered receiver; everything else takes
+            // the fixed-text table's kind-13 row.
+            SpecExpr::MethodCall {
+                receiver,
+                name,
+                args,
+            } => {
+                let key = if args.is_empty() { name.clone() } else { String::new() };
+                match syn::rust_expr_method_form::rust_expr_method_form(key) {
+                    0 => syn::rust_expr_method_text::rust_expr_method_text(
+                        self.sexpr_text(receiver)?,
+                        name.clone(),
+                    ),
+                    _ => syn::rust_expr_fixed_text::rust_expr_fixed_text(13),
+                }
+            }
+            // Record literals (Phase 78, decision D3a):
+            // fields in written order; a bare string-literal
+            // field value takes the owned form through its
+            // winner (the defect-4d rule, as the original's
+            // arm applies it); the frame is the record
+            // template winner's, the type name through the
+            // rust_ident glue as in the original.
+            SpecExpr::RecordLit { type_name, fields } => {
+                let rendered: Result<Vec<String>, String> = fields
+                    .iter()
+                    .map(|(n, v)| {
+                        let value_text = match v {
+                            SpecExpr::StringLit(s) => {
+                                syn::rust_string_literal_owned_text::rust_string_literal_owned_text(
+                                    self.literal_contents(s),
+                                )
+                            }
+                            _ => self.sexpr_text(v)?,
+                        };
+                        Ok(format!("{}: {}", rust_ident(n), value_text))
+                    })
+                    .collect();
+                syn::rust_expr_record_text::rust_expr_record_text(
+                    rust_ident(type_name),
+                    rendered?.join(", "),
+                )
+            }
             // Every kind without an arm: the fixed text the
             // rust_expr_fixed_text table pins ("??").
             other => {
                 let kind = match other {
                     SpecExpr::FloatLit(_) => 2,
-                    SpecExpr::Field(..) => 5,
                     SpecExpr::Index(..) => 6,
                     SpecExpr::UnaryOp(..) => 9,
                     SpecExpr::Length(_) => 11,
@@ -590,6 +657,54 @@ impl Adapter {
         ))
     }
 
+    /// Assembly of ir_call_text (src/codegen/mod.rs),
+    /// composed through the Phase 85 winners exactly as
+    /// the emitter decides then renders — the gate
+    /// assembly's helper, transcribed to direct calls.
+    /// Shared by the expression and statement walkers.
+    fn call_dispatched_text(
+        &self,
+        function: &str,
+        args: &[IRNode],
+    ) -> Result<String, String> {
+        let eff_name: &str = match function {
+            "None" if !args.is_empty() => "",
+            "len" if args.len() != 1 => "",
+            other => other,
+        };
+        let form = syn::rust_call_form::rust_call_form(eff_name.to_string());
+        Ok(match form {
+            1 => {
+                let rendered: Result<Vec<String>, String> =
+                    args.iter().map(|a| self.expr_text(a)).collect();
+                syn::rust_expr_list_text::rust_expr_list_text(rendered?.join(", "))
+            }
+            2 => rust_ident(function),
+            3 => {
+                let argform: i64 = match &args[0] {
+                    IRNode::FieldAccess { .. } => 1,
+                    IRNode::Literal(IRLiteral::String(_)) => 1,
+                    _ => 0,
+                };
+                let arg_text = self.expr_text(&args[0])?;
+                let len_form = syn::rust_call_len_form::rust_call_len_form(argform);
+                if len_form == 1 {
+                    syn::rust_call_len_char_text::rust_call_len_char_text(arg_text)
+                } else {
+                    syn::rust_call_len_text::rust_call_len_text(arg_text)
+                }
+            }
+            _ => {
+                let rendered: Result<Vec<String>, String> =
+                    args.iter().map(|a| self.expr_text(a)).collect();
+                syn::rust_call_text::rust_call_text(
+                    rust_ident(function),
+                    rendered?.join(", "),
+                )
+            }
+        })
+    }
+
     pub(crate) fn expr_text(&self, node: &IRNode) -> Result<String, String> {
         Ok(match node {
             IRNode::Literal(lit) => self.literal_text(lit)?,
@@ -620,14 +735,7 @@ impl Adapter {
                 unary_code(*op),
                 self.expr_text(inner)?,
             ),
-            IRNode::Call { function, args } => {
-                let rendered: Result<Vec<String>, String> =
-                    args.iter().map(|a| self.expr_text(a)).collect();
-                syn::rust_call_text::rust_call_text(
-                    rust_ident(function),
-                    rendered?.join(", "),
-                )
-            }
+            IRNode::Call { function, args } => self.call_dispatched_text(function, args)?,
             IRNode::If {
                 condition,
                 then_branch,
@@ -734,10 +842,22 @@ impl Adapter {
                     self.expr_text(body)?,
                 )
             }
-            IRNode::Index(coll, idx) => syn::rust_index_text::rust_index_text(
-                self.expr_text(coll)?,
-                self.expr_text(idx)?,
-            ),
+            IRNode::Index(coll, idx) => {
+                // Phase 85 dispatch (rust_index_form),
+                // exactly the gate assembly's decision.
+                let (kind, lit) = match coll.as_ref() {
+                    IRNode::Literal(l) => (9, lit_kind(l)),
+                    _ => (node_kind(coll), 0),
+                };
+                let form = syn::rust_index_form::rust_index_form(kind, lit);
+                let coll_text = self.expr_text(coll)?;
+                let idx_text = self.expr_text(idx)?;
+                if form == 1 {
+                    syn::rust_index_char_text::rust_index_char_text(coll_text, idx_text)
+                } else {
+                    syn::rust_index_text::rust_index_text(coll_text, idx_text)
+                }
+            }
             IRNode::TryPropagate(inner) => {
                 syn::rust_try_text::rust_try_text(self.expr_text(inner)?)
             }
@@ -757,6 +877,54 @@ impl Adapter {
             IRNode::Hole { .. } => syn::rust_hole_text::rust_hole_text(0),
             IRNode::Alloc { .. } => {
                 syn::rust_unsupported_text::rust_unsupported_text("Alloc".to_string())
+            }
+            // M1 features (Phase 78, decisions D2a/D3a):
+            // field projection renders through its template
+            // winner — the base through the condition
+            // position, a record-literal base parenthesized
+            // first, exactly the original's discipline; the
+            // field name through the rust_ident glue.
+            IRNode::FieldAccess { base, field } => {
+                let base_text = match base.as_ref() {
+                    IRNode::RecordLit { .. } => {
+                        format!("({})", self.expr_text(base)?)
+                    }
+                    _ => self.condition_text(base)?,
+                };
+                syn::rust_field_access_text::rust_field_access_text(
+                    base_text,
+                    rust_ident(field),
+                )
+            }
+            // Record construction: fields in written order,
+            // a bare string-literal field value owned
+            // through its winner (the defect-4d rule), the
+            // frame the record template winner's.
+            IRNode::RecordLit { type_name, fields } => {
+                let rendered: Result<Vec<String>, String> = fields
+                    .iter()
+                    .map(|(n, v)| {
+                        let value_text = match v {
+                            IRNode::Literal(IRLiteral::String(s)) => {
+                                syn::rust_string_literal_owned_text::rust_string_literal_owned_text(
+                                    self.literal_contents(s),
+                                )
+                            }
+                            // Phase 85: a FieldAccess value
+                            // takes the clone form through
+                            // rust_unary_text's Clone family.
+                            IRNode::FieldAccess { .. } => {
+                                syn::rust_unary_text::rust_unary_text(9, self.expr_text(v)?)
+                            }
+                            _ => self.expr_text(v)?,
+                        };
+                        Ok(format!("{}: {}", rust_ident(n), value_text))
+                    })
+                    .collect();
+                syn::rust_record_lit_text::rust_record_lit_text(
+                    rust_ident(type_name),
+                    rendered?.join(", "),
+                )
             }
             IRNode::Typed { node, ty } => self.expr_typed_text(node, Some(ty))?,
         })
@@ -885,13 +1053,29 @@ impl Adapter {
                 out
             }
             IRNode::Call { function, args } => {
-                let rendered: Result<Vec<String>, String> =
-                    args.iter().map(|a| self.expr_text(a)).collect();
-                syn::rust_stmt_call_text::rust_stmt_call_text(
-                    pad,
-                    rust_ident(function),
-                    rendered?.join(", "),
-                )
+                // Phase 85: family 0 keeps the standing
+                // statement template; the dispatched
+                // families terminate through
+                // rust_stmt_expr_text — the gate
+                // assembly's composition exactly.
+                let eff_name: &str = match function.as_str() {
+                    "None" if !args.is_empty() => "",
+                    "len" if args.len() != 1 => "",
+                    other => other,
+                };
+                let form = syn::rust_call_form::rust_call_form(eff_name.to_string());
+                if form == 0 {
+                    let rendered: Result<Vec<String>, String> =
+                        args.iter().map(|a| self.expr_text(a)).collect();
+                    syn::rust_stmt_call_text::rust_stmt_call_text(
+                        pad,
+                        rust_ident(function),
+                        rendered?.join(", "),
+                    )
+                } else {
+                    let rendered = self.call_dispatched_text(function, args)?;
+                    syn::rust_stmt_expr_text::rust_stmt_expr_text(pad, rendered)
+                }
             }
             IRNode::Return(inner) => syn::rust_stmt_return_text::rust_stmt_return_text(
                 pad,

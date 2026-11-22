@@ -14,34 +14,54 @@
 //  Unlike the M2/M3 probes, EVERY spec's verified pool is
 //  dumped candidate by candidate (CANDT lines): the pools
 //  here are small (tens, not hundreds) and the pool IS the
-//  story for this module — the five record
-//  specs' constraints convert to IR Holes wherever they use
-//  field access / indexing / constructors (expr_to_ir), and
-//  tokenize_one / tokenize_all carry no constraints at all
-//  (method calls on Result values are not expressible — an
-//  owner decision, still open). Whether a seed reaches any
+//  story for this module. Whether a seed reaches any
 //  pool, and what selection crowns from each pool, is
 //  measured here; executed agreement against the Phase 47
 //  mirrors is the cross-validation harness's job
 //  (src/tokenizer_cross_validation.rs).
 //
-//  Phase 49 update: the three Char classifiers DO have a
-//  constraint seed now — the char_equation family admits
-//  the postcondition's own right-hand side for a single
-//  Char parameter (the equation family's admission gate
-//  refuses it: Char is Opaque to Z3, so the body is
-//  unencodable and the seed's verdict is Inconclusive by
-//  construction). The probe's seeds=[...] instrumentation
-//  shows char_equation in their pools and the seed crowned
-//  in every run; the cross-validation harness's verdicts
-//  record the classifiers EXACT (774/774 executed
-//  agreement, all runs).
+//  Phase 49 update (historical): the three Char
+//  classifiers gained a constraint seed — the
+//  char_equation family admitted the postcondition's own
+//  right-hand side for a single Char parameter, knowing
+//  Z3 could not judge it (Char was Opaque to the encoder;
+//  the verdict was Inconclusive by construction) — and
+//  the cross-validation harness recorded the classifiers
+//  EXACT by executed agreement (774/774, all runs).
+//
+//  Phase 79 re-instrumentation (the M1-features campaign,
+//  Phases 73–78, decisions D1a–D5a): the module this probe
+//  loads is the COMPLETED tokenizer — tokenize_one /
+//  tokenize_all carry their restored constraints (the D1a
+//  method calls), and all 18 original tests are in-spec
+//  (the 9 record tests in the D3a named form). The
+//  pre-campaign framing no longer holds anywhere in this
+//  instrument: field access / indexing lower to real IR
+//  (Phase 73; only MethodCall still lowers to Hole — no
+//  IR kind exists for it, the re-pinned design fact — so
+//  a constraint-derived seed built from a method-call
+//  constraint carries that hole); Char encodes as its
+//  Unicode scalar value (D5a, Phase 76), so the equation
+//  family owns the classifiers and their seeds are
+//  Z3-Verified — char_equation's territory is empty by
+//  construction and its builder remains only as the
+//  recorded fallback; and verification here is
+//  module-aware in the full Phase 76 sense
+//  (Verifier::with_module: specs + type declarations, so
+//  record parameters bind symbolically instead of as
+//  opaque blobs).
 //
 //  The probe never asserts on synthesis *quality* — the
-//  engine is randomized — only on pipeline invariants:
-//  parse/typecheck succeed and synthesize returns Ok with
-//  at least one candidate. Winner code is written to
-//  target/tokenizer-synthesis/<spec>_run<N>.rs. Run with:
+//  engine is randomized — only on pipeline invariants
+//  (parse/typecheck succeed, synthesize returns Ok with
+//  at least one candidate) and, since Phase 79, on one
+//  deterministic verdict fact: for each Char classifier,
+//  in every run, a constraint seed reaches the verified
+//  pool and every such seed is Verified. That is a Z3
+//  fact about the fixed seed bodies (Phase 76), not a
+//  claim about what selection crowns. Winner code is
+//  written to target/tokenizer-synthesis/<spec>_run<N>.rs.
+//  Run with:
 //
 //    cargo test -- --ignored --nocapture tokenizer_synthesis_probe
 // ─────────────────────────────────────────────────────────────
@@ -92,6 +112,11 @@ mod probe_tok {
             Break { value } => value.as_ref().map(|v| count_holes(v)).unwrap_or(0),
             StructDef { body, .. } => count_holes(body),
             TryPropagate(e) => count_holes(e),
+            // M1 features (Phase 73): structural recursion.
+            FieldAccess { base, .. } => count_holes(base),
+            RecordLit { fields, .. } => {
+                fields.iter().map(|(_, v)| count_holes(v)).sum()
+            }
             Literal(_) | Var(_) => 0,
         }
     }
@@ -201,6 +226,13 @@ mod probe_tok {
                 }
                 StructDef { body, .. } => walk(body, calls, concat, has_match),
                 TryPropagate(e) => walk(e, calls, concat, has_match),
+                // M1 features (Phase 73): structural recursion.
+                FieldAccess { base, .. } => walk(base, calls, concat, has_match),
+                RecordLit { fields, .. } => {
+                    for (_, v) in fields {
+                        walk(v, calls, concat, has_match);
+                    }
+                }
                 Hole { .. } | Literal(_) | Var(_) => {}
             }
         }
@@ -233,6 +265,9 @@ mod probe_tok {
             Hole { .. } => "Hole",
             Literal(_) => "Literal",
             Var(_) => "Var",
+            // M1 features (Phase 73).
+            FieldAccess { .. } => "FieldAccess",
+            RecordLit { .. } => "RecordLit",
         };
         let mut calls = Vec::new();
         let mut concat = false;
@@ -242,13 +277,13 @@ mod probe_tok {
         (calls, root, concat, has_match)
     }
 
-    fn load_tokenizer_module() -> Vec<spec::ast::FunctionSpec> {
+    fn load_tokenizer_module() -> spec::ast::Spec {
         let root = env!("CARGO_MANIFEST_DIR");
         let path = format!("{}/examples/functional_tokenizer.morph", root);
         let source = std::fs::read_to_string(&path).unwrap();
         let parsed = spec::parser::parse(&source).expect("parse must succeed");
         let checked = spec::typeck::check(parsed).expect("typeck must succeed");
-        checked.spec.functions
+        checked.spec
     }
 
     #[test]
@@ -257,15 +292,16 @@ mod probe_tok {
         let root = env!("CARGO_MANIFEST_DIR");
         let out_dir = format!("{}/target/tokenizer-synthesis", root);
         std::fs::create_dir_all(&out_dir).unwrap();
-        let functions = load_tokenizer_module();
+        let module = load_tokenizer_module();
+        let functions = &module.functions;
         assert_eq!(functions.len(), 8, "tokenizer module spec count");
 
         for run in 1..=3usize {
-            for func in &functions {
+            for func in functions {
                 let name = func.name.clone();
                 let started = Instant::now();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    engine::synthesize_with_module(func, 1, &functions)
+                    engine::synthesize_with_module_spec(func, 1, &module)
                 }));
                 let synth_ms = started.elapsed().as_millis();
 
@@ -288,8 +324,10 @@ mod probe_tok {
                 let n_candidates = candidates.len();
 
                 // Phase 4 of the real pipeline: Z3 verification
-                // with the whole module in scope (Phase 18).
-                let verified = verify::verifier::Verifier::with_specs(&functions)
+                // with the whole module in scope — specs AND
+                // type declarations (Phase 76), so record
+                // parameters bind symbolically.
+                let verified = verify::verifier::Verifier::with_module(&module)
                     .verify_all(candidates, func)
                     .expect("verify_all must not error");
                 let n_verified = verified.iter().filter(|c| c.verified).count();
@@ -318,6 +356,34 @@ mod probe_tok {
                             c.scores.test_pass_ratio
                         );
                     }
+                }
+
+                // Phase 79 assertion (the post-D5a reality):
+                // for each Char classifier, a constraint seed
+                // reaches the verified pool in every run and
+                // every such seed is Verified — a deterministic
+                // Z3 fact about the fixed seed bodies
+                // (Phase 76), asserted so an encoder or seed-
+                // admission regression is loud. (Pre-D5a the
+                // classifiers' only seed was char_equation's,
+                // Inconclusive by construction; post-D5a the
+                // equation family owns them.)
+                if matches!(
+                    name.as_str(),
+                    "is_whitespace" | "is_ident_start" | "is_ident_continue"
+                ) {
+                    assert!(
+                        !seed_kinds.is_empty(),
+                        "classifier {}: no constraint seed reached the pool",
+                        name
+                    );
+                    assert_eq!(
+                        seed_verified,
+                        seed_kinds.len(),
+                        "classifier {}: constraint seed(s) not all Verified: {:?}",
+                        name,
+                        seed_kinds
+                    );
                 }
 
                 // Full verified-pool dump for EVERY spec (the
