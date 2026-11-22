@@ -244,6 +244,14 @@ async function bootCompiler() {
   try { synthClient?.worker.terminate(); } catch { /* already gone */ }
   const pkg = await import('../pkg/morphic_wasm.js');
   await pkg.default();
+  // Phase 112: install the standard-library asset before
+  // any direct call — the same fetch the workers perform
+  // (the library ships as runtime data, not bundle data).
+  const assetResponse = await fetch(new URL('../pkg/stdlib-asset.bin', import.meta.url));
+  if (!assetResponse.ok) {
+    throw new Error(`stdlib asset fetch failed: ${assetResponse.status}`);
+  }
+  pkg.init_stdlib(new Uint8Array(await assetResponse.arrayBuffer()));
   checkClient = new DirectClient(pkg);
   synthClient = checkClient;
   workerNoteEl.hidden = false;

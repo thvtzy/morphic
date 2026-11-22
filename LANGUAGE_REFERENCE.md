@@ -462,6 +462,9 @@ receiver's type:
 | `Result<T, E>` | `is_ok()` | `Bool` — true when the value is `Ok` |
 | `Result<T, E>` | `is_err()` | `Bool` — true when the value is `Err` |
 | `Result<T, E>` | `unwrap()` | `T` — the `Ok` payload |
+| `Option<T>` | `is_some()` | `Bool` — true when the value is `Some` |
+| `Option<T>` | `is_none()` | `Bool` — true when the value is `None` |
+| `Option<T>` | `unwrap()` | `T` — the `Some` payload |
 | `List<T>` | `len()` | `Int` — the method spelling of `len(list)` |
 
 ```morphic

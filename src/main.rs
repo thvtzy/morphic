@@ -98,6 +98,13 @@ enum Command {
         /// Project name
         name: String,
     },
+
+    /// Print the standard library as a JSON asset
+    /// (playground build tooling, Phase 112: regenerates
+    /// playground/stdlib-asset.bin from the embedded
+    /// library data)
+    #[command(hide = true)]
+    StdlibAsset,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -115,9 +122,14 @@ fn main() -> anyhow::Result<()> {
     ╚══════════════════════════════════════════════╝
     "#;
 
-    println!("{}", banner.cyan());
-
     let cli = Cli::parse();
+
+    // The stdlib-asset subcommand's stdout IS the asset
+    // file (Phase 112) — the banner would corrupt it, so
+    // that one command runs without it.
+    if !matches!(cli.command, Command::StdlibAsset) {
+        println!("{}", banner.cyan());
+    }
 
     match cli.command {
         Command::Build { input, target, opt_level, output } => {
@@ -229,6 +241,16 @@ fn main() -> anyhow::Result<()> {
         Command::Lsp => {
             println!("{} Starting Morphic Language Server...", "🔌".bold());
             // TODO: LSP implementation
+        }
+
+        Command::StdlibAsset => {
+            // Phase 112: the asset generator. Stdout is
+            // exactly the asset bytes (no banner, nothing
+            // else): `morphic stdlib-asset >
+            // playground/stdlib-asset.bin` regenerates the
+            // checked-in file byte-for-byte.
+            use std::io::Write;
+            std::io::stdout().write_all(&morphic::stdlib::library_asset_bytes())?;
         }
 
         Command::Init { name } => {

@@ -18,6 +18,21 @@ pub fn start() {
     console_error_panic_hook::set_once();
 }
 
+/// Install the standard-library asset (Phase 112). The
+/// playground build compiles NO library data into the
+/// WASM bundle — the page fetches playground/
+/// stdlib-asset.bin (copied into pkg/ by build.sh) and
+/// installs it through this export before any check or
+/// synthesis call; without it the prelude is empty.
+/// Returns true on success; throws the refusal
+/// (malformed asset, or a second install) as an error
+/// string.
+#[wasm_bindgen]
+pub fn init_stdlib(asset_bytes: Vec<u8>) -> Result<bool, String> {
+    morphic::stdlib::set_library_asset(&asset_bytes)?;
+    Ok(true)
+}
+
 /// Parse + typecheck a Morphic source text; returns the
 /// CheckReport as JSON (ok / failing stage / per-spec test
 /// inventory with bindability). The W2 playground surface.

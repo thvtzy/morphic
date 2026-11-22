@@ -80,9 +80,10 @@ against the budget on every build.
 
 ## Bundle budget (W4)
 
-`budget.txt` caps `pkg/morphic_wasm_bg.wasm` at **673,792 bytes** — the
-W4 measurement (611,728 B) plus 10% headroom, rounded up to a whole
-KiB. `.github/workflows/playground.yml` builds the playground on every
+`budget.txt` caps `pkg/morphic_wasm_bg.wasm` at **771,072 bytes** —
+the W4 measurement (611,728 B) plus 10% headroom, rounded up to a
+whole KiB, re-baselined at Phase 89 (700,674 B measured; see
+`budget.txt` for the full history). `.github/workflows/playground.yml` builds the playground on every
 push/PR touching the playground path, fails if the bundle exceeds the
 budget, and runs the corpus agreement runner below. History: W1
 546,229 B; W2 547,342 B; W3 611,728 B (synthesis renders became
@@ -91,6 +92,27 @@ indicatif feature-gated — shrank the wasm *graph* from 67 to 59
 packages but changed the bytes by exactly zero: unreachable code was
 never linked in). No wasm-opt pass runs anywhere yet; the budget is
 enforced on exactly what `build.sh` produces.
+
+## The standard-library asset (Phase 112)
+
+The standard library's data — the bundled `.morph` module sources
+and the shipped entry bodies — is **not** compiled into the WASM
+bundle. It ships as a separate asset, `pkg/stdlib-asset.bin`
+(copied there by `build.sh` from the checked-in
+`playground/stdlib-asset.bin`), which the page fetches and
+installs through the WASM export `init_stdlib` before any check or
+synthesis runs: both Web Workers do this before posting `ready`,
+the direct fallback path does it before its first call, and the
+corpus runner below does it before its first case. Without the
+asset the prelude is empty — library entries do not resolve.
+
+The asset is generated from the compiler's embedded library data
+by the hidden CLI subcommand `morphic stdlib-asset` (its stdout is
+exactly the asset file), and
+`tests/phase112_stdlib_asset.rs` pins the checked-in file
+byte-for-byte against the embedded data, so the two forms of the
+library cannot drift. Native builds (CLI/API) always use the
+embedded data and never read the asset.
 
 ## Preview locally
 

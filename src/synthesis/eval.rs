@@ -697,12 +697,14 @@ fn eval_call(
 /// evaluated receiver (Phase 75): the spec language's method
 /// semantics on interpreter values. The table is exactly the
 /// typechecker's closed table (Phase 74) — `Result`:
-/// `is_ok` / `is_err` / `unwrap`; `List`: `len` — all
-/// zero-argument. Anything else (unknown method, wrong
-/// receiver family, arguments to a builtin, a receiver with
-/// no method table) is a named `NotEvaluable`, never a
-/// guessed value; `unwrap` on an `Err` value is the named
-/// failure the interpreter's failure semantics require.
+/// `is_ok` / `is_err` / `unwrap`; `Option`: `is_some` /
+/// `is_none` / `unwrap` (Phase 112, the STDLIB_SCOPE §2.5
+/// extension); `List`: `len` — all zero-argument. Anything
+/// else (unknown method, wrong receiver family, arguments
+/// to a builtin, a receiver with no method table) is a
+/// named `NotEvaluable`, never a guessed value; `unwrap`
+/// on an `Err` or `None` value is the named failure the
+/// interpreter's failure semantics require.
 pub(crate) fn eval_method_call(
     receiver: &Value,
     name: &str,
@@ -740,6 +742,28 @@ pub(crate) fn eval_method_call(
             )),
             _ => Err(not_evaluable(format!(
                 "method `{}` does not exist on a Result value",
+                name
+            ))),
+        },
+        Value::Some(payload) => match name {
+            "is_some" => Ok(Value::Bool(true)),
+            "is_none" => Ok(Value::Bool(false)),
+            "unwrap" => Ok((**payload).clone()),
+            _ => Err(not_evaluable(format!(
+                "method `{}` does not exist on an Option value",
+                name
+            ))),
+        },
+        Value::None => match name {
+            "is_some" => Ok(Value::Bool(false)),
+            "is_none" => Ok(Value::Bool(true)),
+            // The Err case's failure semantics, verbatim:
+            // unwrapping a None has no value.
+            "unwrap" => Err(not_evaluable(
+                "method `unwrap` called on a None value",
+            )),
+            _ => Err(not_evaluable(format!(
+                "method `{}` does not exist on an Option value",
                 name
             ))),
         },

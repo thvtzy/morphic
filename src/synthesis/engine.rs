@@ -173,6 +173,15 @@ pub enum Provenance {
 /// - Mutable (nodes can be rewritten during search)
 /// - Verifiable (easily lowered to Z3 SMT-LIB)
 /// - Lightweight (cheap to clone for GA/MCTS operations)
+///
+/// Deliberately NO serde derives on the IR (Phase 112,
+/// measured): the standard library's asset form serializes
+/// shipped bodies as data, and the obvious implementation
+/// — serde derives plus serde_json — pulled a 161,717-byte
+/// deserialization graph into the WASM playground bundle,
+/// blowing its frozen budget on its own. The asset
+/// therefore uses a small hand-rolled codec (src/stdlib.rs)
+/// whose parser costs a few KB and nothing else.
 #[derive(Debug, Clone)]
 pub enum IRNode {
     /// Empty / hole — to be filled by synthesis
@@ -936,6 +945,17 @@ impl SynthesisEngine {
         // moves.
         if let Some(body) = char_guard_table_seed_body(spec, &self.spec_index) {
             admit("char_guard_table", body);
+        }
+        // Phase 112 (1.0 library, Result/Option entries):
+        // the match-from-rows family, appended after
+        // char_guard_table. Its territory is disjoint
+        // from every standing family by shape (guarded
+        // method rows over a Result/Option parameter —
+        // the row families' leaves are comparisons, the
+        // equation families state equations), so no
+        // standing seed moves.
+        if let Some(body) = match_from_rows_seed_body(spec, &self.spec_index) {
+            admit("match_from_rows", body);
         }
         // Phase 60 (campaign slice G3): the forall-fold
         // family runs LAST and claims only a spec no
@@ -6290,6 +6310,313 @@ fn char_guard_table_body(spec: &FunctionSpec) -> Option<IRNode> {
 /// encode the resolved body in the module context.
 fn char_guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
     let raw = char_guard_table_body(spec)?;
+    let body = match index.inline_calls(&raw) {
+        Some(body) => body,
+        None => {
+            if body_calls_indexed(&raw, index) {
+                return None;
+            }
+            raw
+        }
+    };
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+/// A pin expression with the scrutinee's `unwrap()`
+/// rewritten to the payload binder (Phase 112): the one
+/// method call a match-from-rows pin may contain, in any
+/// position (`output == Ok(o.unwrap())` states the Some
+/// arm's body as `Ok(v)`). Any OTHER method call — a
+/// foreign receiver, a different method, an argument —
+/// is not this family's shape: None. The walk is
+/// `len_as_call`'s structural recursion, restated.
+fn subst_scrutinee_unwrap(expr: &Expr, scrutinee: &str, binder: &str) -> Option<Expr> {
+    match expr {
+        Expr::MethodCall {
+            receiver,
+            name,
+            args,
+        } => {
+            if name == "unwrap"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), Expr::Var(v) if v == scrutinee)
+            {
+                Some(Expr::Var(binder.into()))
+            } else {
+                None
+            }
+        }
+        Expr::Call(n, args) => Some(Expr::Call(
+            n.clone(),
+            args.iter()
+                .map(|a| subst_scrutinee_unwrap(a, scrutinee, binder))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        Expr::BinOp(op, l, r) => Some(Expr::BinOp(
+            *op,
+            Box::new(subst_scrutinee_unwrap(l, scrutinee, binder)?),
+            Box::new(subst_scrutinee_unwrap(r, scrutinee, binder)?),
+        )),
+        Expr::UnaryOp(op, inner) => Some(Expr::UnaryOp(
+            *op,
+            Box::new(subst_scrutinee_unwrap(inner, scrutinee, binder)?),
+        )),
+        Expr::Index(c, i) => Some(Expr::Index(
+            Box::new(subst_scrutinee_unwrap(c, scrutinee, binder)?),
+            Box::new(subst_scrutinee_unwrap(i, scrutinee, binder)?),
+        )),
+        Expr::Field(inner, f) => Some(Expr::Field(
+            Box::new(subst_scrutinee_unwrap(inner, scrutinee, binder)?),
+            f.clone(),
+        )),
+        Expr::Length(inner) => Some(Expr::Length(Box::new(subst_scrutinee_unwrap(
+            inner, scrutinee, binder,
+        )?))),
+        Expr::Lambda(params, body) => Some(Expr::Lambda(
+            params.clone(),
+            Box::new(subst_scrutinee_unwrap(body, scrutinee, binder)?),
+        )),
+        Expr::Comprehension {
+            binder: b,
+            collection,
+            body,
+        } => Some(Expr::Comprehension {
+            binder: b.clone(),
+            collection: Box::new(subst_scrutinee_unwrap(collection, scrutinee, binder)?),
+            body: Box::new(subst_scrutinee_unwrap(body, scrutinee, binder)?),
+        }),
+        Expr::RecordLit { type_name, fields } => Some(Expr::RecordLit {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(n, v)| {
+                    subst_scrutinee_unwrap(v, scrutinee, binder).map(|nv| (n.clone(), nv))
+                })
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        leaf => Some(leaf.clone()),
+    }
+}
+
+/// Does the expression contain the scrutinee's
+/// `unwrap()` anywhere? (The match-from-rows empty arm
+/// has no payload to project, so its pin must not.)
+fn expr_has_scrutinee_unwrap(expr: &Expr, scrutinee: &str) -> bool {
+    match expr {
+        Expr::MethodCall {
+            receiver,
+            name,
+            args,
+        } => {
+            (name == "unwrap"
+                && args.is_empty()
+                && matches!(receiver.as_ref(), Expr::Var(v) if v == scrutinee))
+                || expr_has_scrutinee_unwrap(receiver, scrutinee)
+                || args.iter().any(|a| expr_has_scrutinee_unwrap(a, scrutinee))
+        }
+        Expr::Call(_, args) => args.iter().any(|a| expr_has_scrutinee_unwrap(a, scrutinee)),
+        Expr::BinOp(_, l, r) => {
+            expr_has_scrutinee_unwrap(l, scrutinee) || expr_has_scrutinee_unwrap(r, scrutinee)
+        }
+        Expr::UnaryOp(_, inner) | Expr::Length(inner) => {
+            expr_has_scrutinee_unwrap(inner, scrutinee)
+        }
+        Expr::Index(c, i) => {
+            expr_has_scrutinee_unwrap(c, scrutinee) || expr_has_scrutinee_unwrap(i, scrutinee)
+        }
+        Expr::Field(inner, _) => expr_has_scrutinee_unwrap(inner, scrutinee),
+        Expr::Lambda(_, body) => expr_has_scrutinee_unwrap(body, scrutinee),
+        Expr::Comprehension {
+            collection, body, ..
+        } => {
+            expr_has_scrutinee_unwrap(collection, scrutinee)
+                || expr_has_scrutinee_unwrap(body, scrutinee)
+        }
+        Expr::RecordLit { fields, .. } => fields
+            .iter()
+            .any(|(_, v)| expr_has_scrutinee_unwrap(v, scrutinee)),
+        _ => false,
+    }
+}
+
+/// The match-from-rows body (Phase 112, built for the
+/// 1.0 library's Result/Option entries): a spec stated
+/// as the guarded method form over ONE Result or Option
+/// parameter —
+///
+///   r.is_err() || output == r.unwrap()     (payload row)
+///   r.is_ok()  || output == d              (empty row)
+///
+/// — is the constructor Match those rows state, read
+/// directly off them. The measured gap it closes (the
+/// Phase 106 audit §2.5, re-measured in Phase 112): the
+/// judge side was always ready (a hand-written Match
+/// Verifies ∧ golden-exact against this contract), but
+/// NO seed family claimed the shape — the guard families
+/// key on Int/Bool/Char leaves, the equation families
+/// state equations — so the pool held only test-induced
+/// match junk, Inconclusive forever.
+///
+/// Recognition is structural, in the guard families'
+/// discipline. The scrutinee is the spec's UNIQUE
+/// Result/Option parameter. Every row-shaped
+/// postcondition (the shared `guard_row_parts` grammar)
+/// must be a row of this table or there is no seed (all
+/// rows or none): exactly one guard leaf, a zero-argument
+/// method test of the scrutinee's own family — the row
+/// fires on the complementary constructor (`is_err`
+/// guards the Ok row, `is_none` the Some row). Non-row
+/// postconditions are skipped, as in every guard
+/// builder; the verifier judges the recovered body
+/// against all of them regardless. The two rows must
+/// state complementary arms, one per constructor, or
+/// the table is incomplete — no seed.
+///
+/// A pin converts whole or there is no seed: the
+/// payload arm's pin may project the payload only as
+/// the scrutinee's `unwrap()`, rewritten to the bound
+/// payload variable; the empty arm's pin may not
+/// project at all (there is no payload on that arm).
+/// The payload binder is the first of `v`, `v1`, `v2`, …
+/// not among the parameter names.
+///
+/// Territory: a Result/Option parameter stated as
+/// method-guarded rows. The row families refuse the
+/// guard shape (their leaves are comparisons, not
+/// method calls), the equation families the row shape,
+/// so no standing seed moves.
+fn match_from_rows_body(spec: &FunctionSpec) -> Option<IRNode> {
+    // The scrutinee: the unique Result/Option parameter.
+    let mut scrutinee: Option<(&Param, bool)> = None; // (param, is_result)
+    for p in &spec.params {
+        let is_result = match &p.ty {
+            TypeRef::Result(..) => true,
+            TypeRef::Option(..) => false,
+            _ => continue,
+        };
+        if scrutinee.is_some() {
+            return None; // two candidate scrutinees: not this family's shape
+        }
+        scrutinee = Some((p, is_result));
+    }
+    let (param, is_result) = scrutinee?;
+    // The family's vocabulary: (payload constructor,
+    // empty constructor, the guard naming the EMPTY case
+    // — its row states the payload arm — and the guard
+    // naming the PAYLOAD case).
+    let (payload_ctor, empty_ctor, empty_guard, payload_guard) = if is_result {
+        ("Ok", "Err", "is_err", "is_ok")
+    } else {
+        ("Some", "None", "is_none", "is_some")
+    };
+    // The payload binder: the first fresh name.
+    let binder = {
+        let mut candidate = "v".to_string();
+        let mut n = 0;
+        while spec.params.iter().any(|p| p.name == candidate) {
+            n += 1;
+            candidate = format!("v{n}");
+        }
+        candidate
+    };
+    let mut payload_pin: Option<IRNode> = None;
+    let mut empty_pin: Option<IRNode> = None;
+    for c in &spec.postconditions {
+        let Some((pin_side, guard_leaves)) = guard_row_parts(c) else {
+            continue; // not a row: skipped, as in every guard builder
+        };
+        // Row-shaped: it must be a row of this table, or
+        // the spec states a row this body would not
+        // honor — a deviation, so no seed.
+        if guard_leaves.len() != 1 {
+            return None;
+        }
+        let Expr::MethodCall {
+            receiver,
+            name,
+            args,
+        } = guard_leaves[0]
+        else {
+            return None;
+        };
+        if !args.is_empty()
+            || !matches!(receiver.as_ref(), Expr::Var(v) if v == &param.name)
+        {
+            return None;
+        }
+        if expr_mentions_var(pin_side, OUTPUT_VAR) {
+            return None;
+        }
+        // The guard names the case it EXCLUDES: the row
+        // fires on the complementary constructor.
+        let states_payload = if name.as_str() == empty_guard {
+            true
+        } else if name.as_str() == payload_guard {
+            false
+        } else {
+            return None; // a method of another family (or unwrap itself) as guard
+        };
+        if (if states_payload {
+            payload_pin.is_some()
+        } else {
+            empty_pin.is_some()
+        }) {
+            return None; // two rows state the same arm: not a table
+        }
+        let pin = if states_payload {
+            // The payload arm: `unwrap()` rewrites to the
+            // binder; any other method call declines.
+            let rewritten = subst_scrutinee_unwrap(pin_side, &param.name, &binder)?;
+            expr_to_ir(&rewritten)
+        } else {
+            // The empty arm: no payload exists to project.
+            if expr_has_scrutinee_unwrap(pin_side, &param.name) {
+                return None;
+            }
+            expr_to_ir(pin_side)
+        };
+        if count_holes(&pin) > 0 {
+            return None; // the pin must convert whole
+        }
+        if states_payload {
+            payload_pin = Some(pin);
+        } else {
+            empty_pin = Some(pin);
+        }
+    }
+    let payload_body = payload_pin?;
+    let empty_body = empty_pin?;
+    let empty_pattern = if is_result {
+        IRPattern::Constructor(empty_ctor.into(), vec![IRPattern::Wildcard])
+    } else {
+        IRPattern::Constructor(empty_ctor.into(), vec![])
+    };
+    Some(IRNode::Match {
+        scrutinee: Box::new(IRNode::Var(param.name.clone())),
+        cases: vec![
+            (
+                IRPattern::Constructor(
+                    payload_ctor.into(),
+                    vec![IRPattern::Variable(binder)],
+                ),
+                payload_body,
+            ),
+            (empty_pattern, empty_body),
+        ],
+    })
+}
+
+/// The match-from-rows seed's body: the recovered match,
+/// with any spec-to-spec calls in its pins resolved
+/// against the module (the char_guard_table seed's
+/// admission precedent), admitted when the verifier can
+/// encode the resolved body in the module context.
+fn match_from_rows_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = match_from_rows_body(spec)?;
     let body = match index.inline_calls(&raw) {
         Some(body) => body,
         None => {

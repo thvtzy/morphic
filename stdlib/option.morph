@@ -1,0 +1,55 @@
+// ─────────────────────────────────────────────────────────
+//  MORPHIC STANDARD LIBRARY — Option module (Phase 112)
+//
+//  Prelude module like the Int/Char modules (decision
+//  D2a); bodies crowned at library-build time, shipped
+//  as data in src/stdlib.rs. The Option half of the
+//  frozen scope's Result/Option family (STDLIB_SCOPE.md
+//  §2.5). Both contracts are stated in the guarded
+//  method form over the Phase 112 table extension
+//  (Option::{is_some, is_none, unwrap} — without it no
+//  spec could project a symbolic Some payload), and the
+//  bodies are the constructor Matches those rows state,
+//  crowned through the pipeline by the match_from_rows
+//  seed family (Phase 112).
+// ─────────────────────────────────────────────────────────
+
+StdlibOption {
+spec option_unwrap_or {
+    doc: "option_unwrap_or(o, d) = the Some payload of o, or d when o is None (STDLIB_SCOPE.md 2.5)."
+
+    input: o: Option<Int>, d: Int
+    output: Int
+
+    constraint: o.is_none() || output == o.unwrap()
+    constraint: o.is_some() || output == d
+
+    test "some payload" { input: (Some(7), 3) expect: 7 }
+
+    test "none default" { input: (None(), 3) expect: 3 }
+
+    test "some zero payload" { input: (Some(0), 5) expect: 0 }
+
+    test "none zero default" { input: (None(), 0) expect: 0 }
+
+    test "some negative payload" { input: (Some((0 - 9)), 1) expect: (0 - 9) }
+}
+
+spec option_ok_or {
+    doc: "option_ok_or(o, e) = Ok(v) when o is Some(v), or Err(e) with e unchanged when o is None (STDLIB_SCOPE.md 2.5)."
+
+    input: o: Option<Int>, e: String
+    output: Result<Int, String>
+
+    constraint: o.is_none() || output == Ok(o.unwrap())
+    constraint: o.is_some() || output == Err(e)
+
+    test "some to ok" { input: (Some(4), "missing") expect: Ok(4) }
+
+    test "none to err" { input: (None(), "missing") expect: Err("missing") }
+
+    test "none empty error" { input: (None(), "") expect: Err("") }
+
+    test "some zero to ok" { input: (Some(0), "e") expect: Ok(0) }
+}
+}

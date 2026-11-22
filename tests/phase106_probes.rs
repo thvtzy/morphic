@@ -611,13 +611,18 @@ fn phase106_hand_body_boundaries() {
 }
 
 #[test]
-fn phase106_option_has_no_eliminator_in_spec_expressions() {
-    // Result has the D1a method table; Option has no methods at
-    // all, and spec expressions have no match form — so a spec can
-    // discriminate None vs Some only by equality and can never
-    // project a symbolic Some payload. Both spellings are type
-    // errors naming the closed table.
-    for spelling in ["x.unwrap()", "x.is_some()"] {
+fn phase106_option_eliminator_gap_closed_by_phase112() {
+    // INVERTED AT ITS SITE (Phase 112, the Phase 100 probe-2
+    // precedent): the audit measured that Option had no
+    // eliminator in spec expressions — `x.unwrap()` and
+    // `x.is_some()` were both type errors naming the closed
+    // table, so a spec could never project a symbolic Some
+    // payload. STDLIB_SCOPE §2.5 froze the closing extension
+    // (`Option::{is_some, is_none, unwrap}` joins the table),
+    // and Phase 112 landed it: both spellings now typecheck,
+    // and the payload projection is the Option entries'
+    // contract surface. The pin flips with the fact.
+    for spelling in ["x.unwrap()"] {
         let source = format!(
             r#"Probe {{ spec probe_option {{
                 input: x: Option<Int>
@@ -627,17 +632,25 @@ fn phase106_option_has_no_eliminator_in_spec_expressions() {
             }} }}"#
         );
         let parsed = parser::parse(&source).expect("option probe parses");
-        let err = match typeck::check(parsed) {
-            Ok(_) => panic!("Option method must be rejected"),
-            Err(e) => e,
-        };
-        println!("P106|option|{spelling}|typecheck=error|{}", err.message);
-        assert!(
-            err.message.contains("is_ok") || err.message.contains("Unknown method"),
-            "error must name the closed method table: {}",
-            err.message
+        let checked = typeck::check(parsed).unwrap_or_else(|e| {
+            panic!("Option eliminator must typecheck after Phase 112: {}", e.message)
+        });
+        println!(
+            "P106|option|{spelling}|typecheck=ok|specs={}",
+            checked.spec.functions.len()
         );
     }
+    // The is_some spelling's output type is Bool, so the
+    // probe above pins unwrap's projection (Int output);
+    // is_some in its own shape checks too.
+    let source = r#"Probe { spec probe_option {
+        input: x: Option<Int>
+        output: Bool
+        constraint: output == x.is_some()
+        test { input: Some(1); expect: true }
+    } }"#;
+    let parsed = parser::parse(source).expect("option probe parses");
+    typeck::check(parsed).expect("is_some must typecheck after Phase 112");
 }
 
 #[test]

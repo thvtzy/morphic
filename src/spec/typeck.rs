@@ -503,7 +503,14 @@ fn expand_aliases_seen(ty: &TypeRef, env: &TypeEnv, seen: &HashSet<String>) -> T
 ///
 ///   Result<T, E>:  is_ok() -> Bool, is_err() -> Bool,
 ///                  unwrap() -> T
+///   Option<T>:     is_some() -> Bool, is_none() -> Bool,
+///                  unwrap() -> T
 ///   List<T>:       len() -> Int
+///
+/// The Option family joined the table in Phase 112 (the
+/// frozen enabling extension of STDLIB_SCOPE §2.5): without
+/// it no spec could project a symbolic `Some` payload, and
+/// the Option library entries' contracts were unstatable.
 ///
 /// Every builtin is zero-argument. An unknown method name,
 /// a method of the wrong family, a method on any other
@@ -521,11 +528,12 @@ fn method_call_result_type(
     arg_count: usize,
     env: &TypeEnv,
 ) -> Result<TypeRef, TypeError> {
-    const KNOWN: [&str; 4] = ["is_ok", "is_err", "unwrap", "len"];
+    const KNOWN: [&str; 6] = ["is_ok", "is_err", "unwrap", "len", "is_some", "is_none"];
     if !KNOWN.contains(&name) {
         return Err(terr(format!(
             "Unknown method '.{}' on {}: the builtin methods are is_ok(), is_err(), \
-             unwrap() on Result<T, E> and len() on List<T>",
+             unwrap() on Result<T, E>, is_some(), is_none(), unwrap() on Option<T> \
+             and len() on List<T>",
             name, recv_ty
         )));
     }
@@ -540,10 +548,35 @@ fn method_call_result_type(
                 zero_args(name, recv_ty, arg_count)?;
                 Ok((**ok).clone())
             }
-            _ => Err(terr(format!(
+            "len" => Err(terr(format!(
                 "Method '.{}' is not a method of {}: len() is the List<T> method — \
                  Result<T, E> has is_ok(), is_err(), unwrap()",
                 name, recv_ty
+            ))),
+            _ => Err(terr(format!(
+                "Method '.{}' is not a method of {}: {}() is an Option<T> method — \
+                 Result<T, E> has is_ok(), is_err(), unwrap()",
+                name, recv_ty, name
+            ))),
+        },
+        TypeRef::Option(inner) => match name {
+            "is_some" | "is_none" => {
+                zero_args(name, recv_ty, arg_count)?;
+                Ok(TypeRef::Bool)
+            }
+            "unwrap" => {
+                zero_args(name, recv_ty, arg_count)?;
+                Ok((**inner).clone())
+            }
+            "len" => Err(terr(format!(
+                "Method '.{}' is not a method of {}: len() is the List<T> method — \
+                 Option<T> has is_some(), is_none(), unwrap()",
+                name, recv_ty
+            ))),
+            _ => Err(terr(format!(
+                "Method '.{}' is not a method of {}: {}() is a Result<T, E> method — \
+                 Option<T> has is_some(), is_none(), unwrap()",
+                name, recv_ty, name
             ))),
         },
         TypeRef::List(_) => match name {
@@ -551,6 +584,11 @@ fn method_call_result_type(
                 zero_args(name, recv_ty, arg_count)?;
                 Ok(TypeRef::Int)
             }
+            "is_some" | "is_none" => Err(terr(format!(
+                "Method '.{}' is not a method of {}: {}() is an Option<T> method — \
+                 List<T> has len()",
+                name, recv_ty, name
+            ))),
             _ => Err(terr(format!(
                 "Method '.{}' is not a method of {}: {}() is a Result<T, E> method — \
                  List<T> has len()",
@@ -563,7 +601,8 @@ fn method_call_result_type(
         TypeRef::Generic(_) => Ok(TypeRef::Named("_".into())),
         _ => Err(terr(format!(
             "Method '.{}' is not defined on {}: methods exist only on \
-             Result<T, E> (is_ok(), is_err(), unwrap()) and List<T> (len())",
+             Result<T, E> (is_ok(), is_err(), unwrap()), Option<T> \
+             (is_some(), is_none(), unwrap()) and List<T> (len())",
             name, recv_ty
         ))),
     }

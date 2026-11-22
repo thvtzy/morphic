@@ -1,0 +1,34 @@
+// ─────────────────────────────────────────────────────────
+//  MORPHIC STANDARD LIBRARY — String module (Phase 112)
+//
+//  Prelude module like the Int/Char modules (decision
+//  D2a); bodies crowned at library-build time, shipped
+//  as data in src/stdlib.rs. The String family of the
+//  frozen scope (STDLIB_SCOPE.md §2.4) is basics only —
+//  the standing surface (`len`, the `++` operator) plus
+//  the one measured entry below. The transform class
+//  (reverse/case/replace/split/join) is out per D5a:
+//  there is no per-character iteration in the expression
+//  language, so such bodies cannot even be stated.
+// ─────────────────────────────────────────────────────────
+
+StdlibString {
+spec string_is_empty {
+    doc: "string_is_empty(s) = true iff s is the empty string: len(s) == 0 (STDLIB_SCOPE.md 2.4)."
+
+    input: s: String
+    output: Bool
+
+    constraint: output == (len(s) == 0)
+
+    test "empty" { input: "" expect: true }
+
+    test "single char" { input: "a" expect: false }
+
+    test "typical" { input: "hello" expect: false }
+
+    test "whitespace is not empty" { input: " " expect: false }
+
+    test "long" { input: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" expect: false }
+}
+}

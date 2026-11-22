@@ -5025,6 +5025,21 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 ("unwrap", Sym::Result { ok_payload, .. }) => {
                     ok_payload.map(|p| *p)
                 }
+                // The Option family (Phase 112, the
+                // STDLIB_SCOPE §2.5 extension): the same
+                // tag+payload forms, the same discipline.
+                // unwrap projects the Some payload; a
+                // literal None construction leaves the
+                // slot absent and declines, exactly as
+                // the literal Err case above — the row
+                // judges recover guarded uses per-disjunct.
+                ("is_some", Sym::Option { some, .. }) => Some(Sym::Bool(some.term())),
+                ("is_none", Sym::Option { some, .. }) => {
+                    Some(Sym::Bool(some.term().not()))
+                }
+                ("unwrap", Sym::Option { payload, .. }) => {
+                    payload.map(|p| *p)
+                }
                 ("len", v @ (Sym::List(_) | Sym::ListLen(_))) => sym_len(v),
                 _ => None,
             }

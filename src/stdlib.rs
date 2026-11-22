@@ -39,24 +39,1307 @@
 //  (tests/phase110_prelude.rs): each shipped body judges
 //  Z3-Verified ∧ golden-exact against its own spec, and equals
 //  the body the pipeline crowns for that entry.
+//
+//  THE ASSET FORM (Phase 112): the WASM playground bundle
+//  stood 1,290 bytes from its frozen budget (771,072 B) with
+//  the List family still to ship, so under the
+//  `wasm-playground` feature the library's DATA — the module
+//  sources and the shipped bodies — is not compiled into the
+//  bundle at all: the prelude is built from a text asset
+//  (LibraryAsset below) that the page fetches and installs
+//  via `set_library_asset` before any other call. Native
+//  builds (CLI, API, every test configuration) keep the
+//  embedded form below, byte-for-byte the behaviour they
+//  always were. The asset is generated from the native data
+//  by the hidden `morphic stdlib-asset` CLI subcommand and
+//  checked in at playground/stdlib-asset.bin; the pin
+//  (tests/phase112_stdlib_asset.rs) regenerates it in memory
+//  and asserts the checked-in file matches byte-for-byte,
+//  so the two forms cannot drift.
 // ─────────────────────────────────────────────────────────────
 
 use std::sync::OnceLock;
 
-use crate::spec::ast::{FunctionSpec, Spec};
-use crate::synthesis::engine::{IRBinOp, IRLiteral, IRNode, IRPattern};
+use crate::spec::ast::{FunctionSpec, Spec, TypeRef};
+use crate::synthesis::engine::{
+    CollectionKind, IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp,
+};
 
 /// The bundled library modules: (module name, source text).
 /// Sources live in the repo's `stdlib/` directory and are
-/// embedded into every build — native binary and WASM alike —
-/// by `include_str!`, the codebase's standing embedding
-/// mechanism. One module per family (STDLIB_SCOPE §2): the
-/// Int module (Phase 110's spine, completed in Phase 111)
-/// and the Char module (Phase 111).
+/// embedded into native builds by `include_str!`, the
+/// codebase's standing embedding mechanism. One module per
+/// family (STDLIB_SCOPE §2): the Int module (Phase 110's
+/// spine, completed in Phase 111), the Char module
+/// (Phase 111), and the String / Result / Option modules
+/// (Phase 112). Under the `wasm-playground` feature this
+/// table does not exist — the same sources arrive in the
+/// runtime asset instead (the banner comment above).
+#[cfg(not(feature = "wasm-playground"))]
 pub const LIBRARY_MODULES: &[(&str, &str)] = &[
     ("int", include_str!("../stdlib/int.morph")),
     ("char", include_str!("../stdlib/char.morph")),
+    ("string", include_str!("../stdlib/string.morph")),
+    ("result", include_str!("../stdlib/result.morph")),
+    ("option", include_str!("../stdlib/option.morph")),
 ];
+
+// ── The asset form (Phase 112) ───────────────────────────
+
+/// The standard library as portable data: the module
+/// sources (parsed once at load, exactly as the embedded
+/// form is) and the shipped bodies, encoded as IR. This
+/// is the playground's separately-loaded asset format;
+/// native builds generate it from the embedded data
+/// ([`library_asset`]).
+#[derive(Debug, Clone)]
+pub struct LibraryAsset {
+    pub modules: Vec<AssetModule>,
+    /// (entry name, shipped body) in prelude order.
+    pub bodies: Vec<(String, IRNode)>,
+}
+
+/// One bundled module in asset form.
+#[derive(Debug, Clone)]
+pub struct AssetModule {
+    pub name: String,
+    pub source: String,
+}
+
+/// The installed runtime asset (playground builds).
+/// Set once, before any prelude use; native builds
+/// never install one and never consult the slot.
+fn asset_slot() -> &'static OnceLock<LibraryAsset> {
+    static SLOT: OnceLock<LibraryAsset> = OnceLock::new();
+    &SLOT
+}
+
+/// Install the standard-library asset from its wire
+/// bytes. The playground shell calls this once, right
+/// after the WASM initializes and before any check or
+/// synthesis call; installing twice, or installing
+/// malformed bytes, is an error. Native builds accept
+/// the call (the slot exists) but never consult it —
+/// their prelude is the embedded data.
+pub fn set_library_asset(bytes: &[u8]) -> Result<(), String> {
+    let asset = parse_library_asset(bytes)?;
+    asset_slot()
+        .set(asset)
+        .map_err(|_| "stdlib asset already installed".to_string())
+}
+
+/// The installed asset, if any (playground builds).
+#[cfg(feature = "wasm-playground")]
+fn installed_asset() -> Option<&'static LibraryAsset> {
+    asset_slot().get()
+}
+
+/// The library asset built from this build's own data:
+/// natively, the embedded modules and shipped bodies;
+/// in a playground build, a round-trip of the installed
+/// asset. The generator surface for
+/// `playground/stdlib-asset.bin`.
+pub fn library_asset() -> LibraryAsset {
+    LibraryAsset {
+        modules: module_sources()
+            .into_iter()
+            .map(|(name, source)| AssetModule { name, source })
+            .collect(),
+        bodies: prelude_specs()
+            .iter()
+            .filter_map(|spec| shipped_body(&spec.name).map(|body| (spec.name.clone(), body)))
+            .collect(),
+    }
+}
+
+/// [`library_asset`] in its wire form — the checked-in
+/// asset file is exactly these bytes (a pin test holds
+/// them equal). The format is a small hand-rolled BINARY
+/// codec, not JSON/serde and not a text grammar — the
+/// measured reasons are on IRNode's docs in
+/// synthesis/engine.rs: a serde deserialization graph
+/// costs 161,717 bundle bytes, and a text recursive-
+/// descent parser over the IR's 30 node kinds costs
+/// 30,189. What fits the bundle is a stack machine:
+/// bodies are postfix opcode streams that one tight
+/// builder loop interprets — no string matching, no
+/// formatted errors, every name an index into a shared
+/// string table.
+///
+/// Wire layout: the magic line ASSET_MAGIC, then
+/// sections (one tag byte + u32 LE payload length +
+/// payload):
+///   'S' string table — u32 count, then per string a
+///       u32 byte length + UTF-8 bytes;
+///   'M' module — u32 name index, u32 source byte
+///       length + source bytes;
+///   'B' body — u32 name index, u32 encoding byte
+///       length + the encoding;
+///   'E' end (no length, no payload).
+/// Inside an encoding, children precede their opcode
+/// (postfix); the opcode's immediates (counts, string
+/// indices, inline type streams) follow it. Patterns
+/// build on a second stack inside the same stream.
+/// The writer and the builder share the opcode
+/// constants and op tables below, so the two sides
+/// cannot disagree about numbering.
+#[cfg(not(feature = "wasm-playground"))]
+pub fn library_asset_bytes() -> Vec<u8> {
+    let asset = library_asset();
+    let mut writer = AssetWriter::default();
+    let mut sections: Vec<u8> = Vec::new();
+    for module in &asset.modules {
+        let name_idx = writer.intern(&module.name);
+        let mut payload = Vec::new();
+        push_u32(&mut payload, name_idx);
+        push_u32(&mut payload, module.source.len() as u32);
+        payload.extend_from_slice(module.source.as_bytes());
+        push_section(&mut sections, b'M', &payload);
+    }
+    for (name, body) in &asset.bodies {
+        let name_idx = writer.intern(name);
+        let mut encoding: Vec<u8> = Vec::new();
+        write_node(body, &mut writer, &mut encoding);
+        let mut payload = Vec::new();
+        push_u32(&mut payload, name_idx);
+        push_u32(&mut payload, encoding.len() as u32);
+        payload.extend_from_slice(&encoding);
+        push_section(&mut sections, b'B', &payload);
+    }
+    let mut table_payload = Vec::new();
+    push_u32(&mut table_payload, writer.strings.len() as u32);
+    for string in &writer.strings {
+        push_u32(&mut table_payload, string.len() as u32);
+        table_payload.extend_from_slice(string.as_bytes());
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(ASSET_MAGIC);
+    push_section(&mut out, b'S', &table_payload);
+    out.extend_from_slice(&sections);
+    out.push(b'E');
+    out
+}
+
+const ASSET_MAGIC: &[u8] = b"MORPHIC-STDLIB-ASSET 1\n";
+
+// Node opcodes (postfix stream; see the module docs of
+// library_asset_bytes).
+const OP_VAR: u8 = 0x00;
+const OP_INT: u8 = 0x01;
+const OP_FLOAT: u8 = 0x02;
+const OP_BOOL: u8 = 0x03;
+const OP_CHAR: u8 = 0x04;
+const OP_STR: u8 = 0x05;
+const OP_UNIT: u8 = 0x06;
+const OP_BINOP: u8 = 0x07;
+const OP_UNOP: u8 = 0x08;
+const OP_CALL: u8 = 0x09;
+const OP_IF: u8 = 0x0A;
+const OP_LET: u8 = 0x0B;
+const OP_MATCH: u8 = 0x0C;
+const OP_BLOCK: u8 = 0x0D;
+const OP_RETURN: u8 = 0x0E;
+const OP_HOLE: u8 = 0x0F;
+const OP_WHILE: u8 = 0x10;
+const OP_FOR: u8 = 0x11;
+const OP_LAMBDA: u8 = 0x12;
+const OP_CLOSURE: u8 = 0x13;
+const OP_COLLECTION: u8 = 0x14;
+const OP_MAP: u8 = 0x15;
+const OP_FILTER: u8 = 0x16;
+const OP_FOLD: u8 = 0x17;
+const OP_SORT: u8 = 0x18;
+const OP_ALLOC: u8 = 0x19;
+const OP_ASSIGN: u8 = 0x1A;
+const OP_TYPED: u8 = 0x1B;
+const OP_INDEX: u8 = 0x1C;
+const OP_LOOP: u8 = 0x1D;
+const OP_BREAK: u8 = 0x1E;
+const OP_STRUCTDEF: u8 = 0x1F;
+const OP_TRYPROP: u8 = 0x20;
+const OP_FIELD: u8 = 0x21;
+const OP_RECORDLIT: u8 = 0x22;
+// Pattern opcodes (the pattern stack in the same stream).
+const OP_PWILD: u8 = 0x30;
+const OP_PVAR: u8 = 0x31;
+const OP_PLIT: u8 = 0x32;
+const OP_PCTOR: u8 = 0x33;
+const OP_PGUARD: u8 = 0x34;
+// Type tags (inline streams inside opcodes).
+const TY_INT: u8 = 0x00;
+const TY_FLOAT: u8 = 0x01;
+const TY_BOOL: u8 = 0x02;
+const TY_STRING: u8 = 0x03;
+const TY_CHAR: u8 = 0x04;
+const TY_UNIT: u8 = 0x05;
+const TY_I8: u8 = 0x06;
+const TY_I16: u8 = 0x07;
+const TY_I32: u8 = 0x08;
+const TY_I64: u8 = 0x09;
+const TY_U8: u8 = 0x0A;
+const TY_U16: u8 = 0x0B;
+const TY_U32: u8 = 0x0C;
+const TY_U64: u8 = 0x0D;
+const TY_GENERIC: u8 = 0x0E;
+const TY_NAMED: u8 = 0x0F;
+const TY_LIST: u8 = 0x10;
+const TY_SET: u8 = 0x11;
+const TY_MAP: u8 = 0x12;
+const TY_OPTION: u8 = 0x13;
+const TY_RESULT: u8 = 0x14;
+const TY_TUPLE: u8 = 0x15;
+const TY_ARRAY: u8 = 0x16;
+const TY_FUNCTION: u8 = 0x17;
+const TY_REF: u8 = 0x18;
+const TY_STREAM: u8 = 0x19;
+
+/// Op numbering shared by the codec's two sides.
+const BINOP_TABLE: &[IRBinOp] = &[
+    IRBinOp::Add,
+    IRBinOp::Sub,
+    IRBinOp::Mul,
+    IRBinOp::Div,
+    IRBinOp::Mod,
+    IRBinOp::And,
+    IRBinOp::Or,
+    IRBinOp::Xor,
+    IRBinOp::Eq,
+    IRBinOp::Neq,
+    IRBinOp::Lt,
+    IRBinOp::Le,
+    IRBinOp::Gt,
+    IRBinOp::Ge,
+    IRBinOp::Shl,
+    IRBinOp::Shr,
+    IRBinOp::Concat,
+    IRBinOp::Append,
+    IRBinOp::Merge,
+];
+
+const UNOP_TABLE: &[IRUnaryOp] = &[
+    IRUnaryOp::Neg,
+    IRUnaryOp::Not,
+    IRUnaryOp::Abs,
+    IRUnaryOp::Len,
+    IRUnaryOp::Head,
+    IRUnaryOp::Tail,
+    IRUnaryOp::Init,
+    IRUnaryOp::Last,
+    IRUnaryOp::Reverse,
+    IRUnaryOp::Clone,
+];
+
+const KIND_TABLE: &[CollectionKind] = &[
+    CollectionKind::List,
+    CollectionKind::Set,
+    CollectionKind::Map,
+    CollectionKind::Array,
+    CollectionKind::Tuple,
+];
+
+fn push_u32(out: &mut Vec<u8>, n: u32) {
+    out.extend_from_slice(&n.to_le_bytes());
+}
+
+fn push_varint(out: &mut Vec<u8>, mut n: u64) {
+    loop {
+        let byte = (n & 0x7F) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+fn push_zigzag(out: &mut Vec<u8>, n: i64) {
+    push_varint(out, ((n << 1) ^ (n >> 63)) as u64);
+}
+
+fn push_section(out: &mut Vec<u8>, tag: u8, payload: &[u8]) {
+    out.push(tag);
+    push_u32(out, payload.len() as u32);
+    out.extend_from_slice(payload);
+}
+
+/// The asset writer's string table: interned in
+/// encounter order (deterministic — the map is only
+/// ever looked up, never iterated).
+#[cfg(not(feature = "wasm-playground"))]
+#[derive(Default)]
+struct AssetWriter {
+    strings: Vec<String>,
+    index: std::collections::HashMap<String, u32>,
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+impl AssetWriter {
+    fn intern(&mut self, s: &str) -> u32 {
+        if let Some(idx) = self.index.get(s) {
+            return *idx;
+        }
+        let idx = self.strings.len() as u32;
+        self.strings.push(s.to_string());
+        self.index.insert(s.to_string(), idx);
+        idx
+    }
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+fn write_literal(lit: &IRLiteral, w: &mut AssetWriter, out: &mut Vec<u8>) {
+    match lit {
+        IRLiteral::Int(n) => {
+            out.push(OP_INT);
+            push_zigzag(out, *n);
+        }
+        IRLiteral::Float(f) => {
+            out.push(OP_FLOAT);
+            out.extend_from_slice(&f.to_bits().to_le_bytes());
+        }
+        IRLiteral::Bool(b) => {
+            out.push(OP_BOOL);
+            out.push(u8::from(*b));
+        }
+        IRLiteral::Char(c) => {
+            out.push(OP_CHAR);
+            push_varint(out, u64::from(*c as u32));
+        }
+        IRLiteral::String(s) => {
+            out.push(OP_STR);
+            push_varint(out, u64::from(w.intern(s)));
+        }
+        IRLiteral::Unit => out.push(OP_UNIT),
+    }
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+fn write_type(ty: &TypeRef, w: &mut AssetWriter, out: &mut Vec<u8>) {
+    match ty {
+        TypeRef::Int => out.push(TY_INT),
+        TypeRef::Float => out.push(TY_FLOAT),
+        TypeRef::Bool => out.push(TY_BOOL),
+        TypeRef::String => out.push(TY_STRING),
+        TypeRef::Char => out.push(TY_CHAR),
+        TypeRef::Unit => out.push(TY_UNIT),
+        TypeRef::I8 => out.push(TY_I8),
+        TypeRef::I16 => out.push(TY_I16),
+        TypeRef::I32 => out.push(TY_I32),
+        TypeRef::I64 => out.push(TY_I64),
+        TypeRef::U8 => out.push(TY_U8),
+        TypeRef::U16 => out.push(TY_U16),
+        TypeRef::U32 => out.push(TY_U32),
+        TypeRef::U64 => out.push(TY_U64),
+        TypeRef::Generic(name) => {
+            out.push(TY_GENERIC);
+            push_varint(out, u64::from(w.intern(name)));
+        }
+        TypeRef::Named(name) => {
+            out.push(TY_NAMED);
+            push_varint(out, u64::from(w.intern(name)));
+        }
+        TypeRef::List(inner) => {
+            out.push(TY_LIST);
+            write_type(inner, w, out);
+        }
+        TypeRef::Set(inner) => {
+            out.push(TY_SET);
+            write_type(inner, w, out);
+        }
+        TypeRef::Map(k, v) => {
+            out.push(TY_MAP);
+            write_type(k, w, out);
+            write_type(v, w, out);
+        }
+        TypeRef::Option(inner) => {
+            out.push(TY_OPTION);
+            write_type(inner, w, out);
+        }
+        TypeRef::Result(ok, err) => {
+            out.push(TY_RESULT);
+            write_type(ok, w, out);
+            write_type(err, w, out);
+        }
+        TypeRef::Tuple(items) => {
+            out.push(TY_TUPLE);
+            push_varint(out, items.len() as u64);
+            for item in items {
+                write_type(item, w, out);
+            }
+        }
+        TypeRef::Array(inner, size) => {
+            out.push(TY_ARRAY);
+            write_type(inner, w, out);
+            push_varint(out, *size as u64);
+        }
+        TypeRef::Function(params, ret) => {
+            out.push(TY_FUNCTION);
+            push_varint(out, params.len() as u64);
+            for param in params {
+                write_type(param, w, out);
+            }
+            write_type(ret, w, out);
+        }
+        TypeRef::Ref(inner) => {
+            out.push(TY_REF);
+            write_type(inner, w, out);
+        }
+        TypeRef::Stream(inner) => {
+            out.push(TY_STREAM);
+            write_type(inner, w, out);
+        }
+    }
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+fn write_opt_string(value: &Option<String>, w: &mut AssetWriter, out: &mut Vec<u8>) {
+    // Index-plus-one: 0 encodes None.
+    match value {
+        Some(s) => push_varint(out, u64::from(w.intern(s)) + 1),
+        None => push_varint(out, 0),
+    }
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+fn write_params(params: &[(String, TypeRef)], w: &mut AssetWriter, out: &mut Vec<u8>) {
+    push_varint(out, params.len() as u64);
+    for (name, ty) in params {
+        push_varint(out, u64::from(w.intern(name)));
+        write_type(ty, w, out);
+    }
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+fn write_pattern(pattern: &IRPattern, w: &mut AssetWriter, out: &mut Vec<u8>) {
+    match pattern {
+        IRPattern::Wildcard => out.push(OP_PWILD),
+        IRPattern::Variable(name) => {
+            out.push(OP_PVAR);
+            push_varint(out, u64::from(w.intern(name)));
+        }
+        IRPattern::Literal(lit) => {
+            write_literal(lit, w, out);
+            out.push(OP_PLIT);
+        }
+        IRPattern::Constructor(name, subs) => {
+            for sub in subs {
+                write_pattern(sub, w, out);
+            }
+            out.push(OP_PCTOR);
+            push_varint(out, u64::from(w.intern(name)));
+            push_varint(out, subs.len() as u64);
+        }
+        IRPattern::Guard(inner, condition) => {
+            write_pattern(inner, w, out);
+            out.push(OP_PGUARD);
+            push_varint(out, u64::from(w.intern(condition)));
+        }
+    }
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+fn write_node(node: &IRNode, w: &mut AssetWriter, out: &mut Vec<u8>) {
+    match node {
+        IRNode::Hole { id, expected_type } => {
+            out.push(OP_HOLE);
+            push_varint(out, *id);
+            match expected_type {
+                Some(ty) => {
+                    out.push(1);
+                    write_type(ty, w, out);
+                }
+                None => out.push(0),
+            }
+        }
+        IRNode::Block(statements) => {
+            for statement in statements {
+                write_node(statement, w, out);
+            }
+            out.push(OP_BLOCK);
+            push_varint(out, statements.len() as u64);
+        }
+        IRNode::Let { name, value, body } => {
+            write_node(value, w, out);
+            write_node(body, w, out);
+            out.push(OP_LET);
+            push_varint(out, u64::from(w.intern(name)));
+        }
+        IRNode::If { condition, then_branch, else_branch } => {
+            write_node(condition, w, out);
+            write_node(then_branch, w, out);
+            write_node(else_branch, w, out);
+            out.push(OP_IF);
+        }
+        IRNode::While { condition, body, invariant } => {
+            write_node(condition, w, out);
+            write_node(body, w, out);
+            out.push(OP_WHILE);
+            write_opt_string(invariant, w, out);
+        }
+        IRNode::For { var, start, end, body } => {
+            write_node(start, w, out);
+            write_node(end, w, out);
+            write_node(body, w, out);
+            out.push(OP_FOR);
+            push_varint(out, u64::from(w.intern(var)));
+        }
+        IRNode::Match { scrutinee, cases } => {
+            write_node(scrutinee, w, out);
+            for (pattern, body) in cases {
+                write_pattern(pattern, w, out);
+                write_node(body, w, out);
+            }
+            out.push(OP_MATCH);
+            push_varint(out, cases.len() as u64);
+        }
+        IRNode::Call { function, args } => {
+            for arg in args {
+                write_node(arg, w, out);
+            }
+            out.push(OP_CALL);
+            push_varint(out, u64::from(w.intern(function)));
+            push_varint(out, args.len() as u64);
+        }
+        IRNode::Return(value) => {
+            write_node(value, w, out);
+            out.push(OP_RETURN);
+        }
+        IRNode::Literal(lit) => write_literal(lit, w, out),
+        IRNode::Var(name) => {
+            out.push(OP_VAR);
+            push_varint(out, u64::from(w.intern(name)));
+        }
+        IRNode::BinOp(op, l, r) => {
+            write_node(l, w, out);
+            write_node(r, w, out);
+            out.push(OP_BINOP);
+            out.push(BINOP_TABLE.iter().position(|o| o == op).unwrap() as u8);
+        }
+        IRNode::UnaryOp(op, x) => {
+            write_node(x, w, out);
+            out.push(OP_UNOP);
+            out.push(UNOP_TABLE.iter().position(|o| o == op).unwrap() as u8);
+        }
+        IRNode::Lambda { params, body } => {
+            write_node(body, w, out);
+            out.push(OP_LAMBDA);
+            write_params(params, w, out);
+        }
+        IRNode::Closure { params, captures, body } => {
+            write_node(body, w, out);
+            out.push(OP_CLOSURE);
+            write_params(params, w, out);
+            push_varint(out, captures.len() as u64);
+            for capture in captures {
+                push_varint(out, u64::from(w.intern(capture)));
+            }
+        }
+        IRNode::Collection { kind, elements } => {
+            for element in elements {
+                write_node(element, w, out);
+            }
+            out.push(OP_COLLECTION);
+            out.push(KIND_TABLE.iter().position(|k| k == kind).unwrap() as u8);
+            push_varint(out, elements.len() as u64);
+        }
+        IRNode::Map { function, over } => {
+            write_node(function, w, out);
+            write_node(over, w, out);
+            out.push(OP_MAP);
+        }
+        IRNode::Filter { predicate, over } => {
+            write_node(predicate, w, out);
+            write_node(over, w, out);
+            out.push(OP_FILTER);
+        }
+        IRNode::Fold { operation, initial, over } => {
+            write_node(operation, w, out);
+            write_node(initial, w, out);
+            write_node(over, w, out);
+            out.push(OP_FOLD);
+        }
+        IRNode::Sort { comparator, collection } => {
+            write_node(comparator, w, out);
+            write_node(collection, w, out);
+            out.push(OP_SORT);
+        }
+        IRNode::Alloc { name, ty, initial } => {
+            write_node(initial, w, out);
+            out.push(OP_ALLOC);
+            push_varint(out, u64::from(w.intern(name)));
+            write_type(ty, w, out);
+        }
+        IRNode::Assign { target, value } => {
+            write_node(target, w, out);
+            write_node(value, w, out);
+            out.push(OP_ASSIGN);
+        }
+        IRNode::Typed { node, ty } => {
+            write_node(node, w, out);
+            out.push(OP_TYPED);
+            write_type(ty, w, out);
+        }
+        IRNode::Index(collection, index) => {
+            write_node(collection, w, out);
+            write_node(index, w, out);
+            out.push(OP_INDEX);
+        }
+        IRNode::Loop { body, invariant } => {
+            write_node(body, w, out);
+            out.push(OP_LOOP);
+            write_opt_string(invariant, w, out);
+        }
+        IRNode::Break { value } => {
+            match value {
+                Some(inner) => write_node(inner, w, out),
+                None => {}
+            }
+            out.push(OP_BREAK);
+            out.push(u8::from(value.is_some()));
+        }
+        IRNode::StructDef { name, fields, body } => {
+            write_node(body, w, out);
+            out.push(OP_STRUCTDEF);
+            push_varint(out, u64::from(w.intern(name)));
+            push_varint(out, fields.len() as u64);
+            for (field, ty) in fields {
+                push_varint(out, u64::from(w.intern(field)));
+                write_type(ty, w, out);
+            }
+        }
+        IRNode::TryPropagate(inner) => {
+            write_node(inner, w, out);
+            out.push(OP_TRYPROP);
+        }
+        IRNode::FieldAccess { base, field } => {
+            write_node(base, w, out);
+            out.push(OP_FIELD);
+            push_varint(out, u64::from(w.intern(field)));
+        }
+        IRNode::RecordLit { type_name, fields } => {
+            for (_, value) in fields {
+                write_node(value, w, out);
+            }
+            out.push(OP_RECORDLIT);
+            push_varint(out, u64::from(w.intern(type_name)));
+            push_varint(out, fields.len() as u64);
+            for (field, _) in fields {
+                push_varint(out, u64::from(w.intern(field)));
+            }
+        }
+    }
+}
+
+/// Parse the asset's wire form (the inverse of
+/// [`library_asset_bytes`]). Used by
+/// [`set_library_asset`] and by the asset pin test.
+/// Errors are static strings by design: formatted
+/// errors are code the bundle cannot afford, and a
+/// malformed asset has exactly one remedy (regenerate
+/// it) regardless of which byte is wrong.
+pub fn parse_library_asset(bytes: &[u8]) -> Result<LibraryAsset, String> {
+    let mut cur = ByteCursor { bytes, pos: 0 };
+    let magic = cur.take(ASSET_MAGIC.len()).map_err(str::to_string)?;
+    if magic != ASSET_MAGIC {
+        return Err("invalid stdlib asset: bad magic".to_string());
+    }
+    let mut strings: Vec<String> = Vec::new();
+    let mut modules = Vec::new();
+    let mut bodies = Vec::new();
+    loop {
+        match cur.u8().map_err(str::to_string)? {
+            b'S' => {
+                let mut payload = cur.payload()?;
+                let count = payload.u32().map_err(str::to_string)?;
+                let mut table = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    let len = payload.u32().map_err(str::to_string)? as usize;
+                    let raw = payload.take(len).map_err(str::to_string)?;
+                    table.push(
+                        String::from_utf8(raw.to_vec())
+                            .map_err(|_| "invalid stdlib asset: non-UTF-8 string".to_string())?,
+                    );
+                }
+                strings = table;
+            }
+            b'M' => {
+                let mut payload = cur.payload()?;
+                let name = string_at(&strings, payload.u32().map_err(str::to_string)?)?;
+                let len = payload.u32().map_err(str::to_string)? as usize;
+                let raw = payload.take(len).map_err(str::to_string)?;
+                let source = String::from_utf8(raw.to_vec())
+                    .map_err(|_| "invalid stdlib asset: non-UTF-8 source".to_string())?;
+                modules.push(AssetModule { name, source });
+            }
+            b'B' => {
+                let mut payload = cur.payload()?;
+                let name = string_at(&strings, payload.u32().map_err(str::to_string)?)?;
+                let len = payload.u32().map_err(str::to_string)? as usize;
+                let encoding = payload.take(len).map_err(str::to_string)?;
+                let body = build_body(encoding, &strings)?;
+                bodies.push((name, body));
+            }
+            b'E' => break,
+            _ => return Err("invalid stdlib asset: unknown section".to_string()),
+        }
+    }
+    Ok(LibraryAsset { modules, bodies })
+}
+
+fn string_at(strings: &[String], idx: u32) -> Result<String, String> {
+    strings
+        .get(idx as usize)
+        .cloned()
+        .ok_or_else(|| "invalid stdlib asset: string index out of range".to_string())
+}
+
+/// A byte cursor over the wire form. All errors are
+/// the same static class strings (see parse_library_asset).
+struct ByteCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteCursor<'a> {
+    fn u8(&mut self) -> Result<u8, &'static str> {
+        let byte = *self.bytes.get(self.pos).ok_or("invalid stdlib asset: overrun")?;
+        self.pos += 1;
+        Ok(byte)
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], &'static str> {
+        if self.pos + len > self.bytes.len() {
+            return Err("invalid stdlib asset: overrun");
+        }
+        let slice = &self.bytes[self.pos..self.pos + len];
+        self.pos += len;
+        Ok(slice)
+    }
+
+    fn u32(&mut self) -> Result<u32, &'static str> {
+        let raw = self.take(4)?;
+        Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+    }
+
+    /// A section payload as its own cursor.
+    fn payload(&mut self) -> Result<ByteCursor<'a>, String> {
+        let len = self.u32().map_err(str::to_string)? as usize;
+        let raw = self.take(len).map_err(str::to_string)?;
+        Ok(ByteCursor { bytes: raw, pos: 0 })
+    }
+
+    fn varint(&mut self) -> Result<u64, &'static str> {
+        let mut value: u64 = 0;
+        let mut shift = 0;
+        loop {
+            let byte = self.u8()?;
+            value |= u64::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return Err("invalid stdlib asset: varint too long");
+            }
+        }
+    }
+
+    fn zigzag(&mut self) -> Result<i64, &'static str> {
+        let raw = self.varint()?;
+        Ok(((raw >> 1) as i64) ^ -((raw & 1) as i64))
+    }
+
+    fn idx(&mut self) -> Result<usize, &'static str> {
+        Ok(self.varint()? as usize)
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos >= self.bytes.len()
+    }
+}
+
+fn pop_node(nodes: &mut Vec<IRNode>) -> Result<IRNode, String> {
+    nodes
+        .pop()
+        .ok_or_else(|| "invalid stdlib asset: body stack underflow".to_string())
+}
+
+fn pop_pattern(patterns: &mut Vec<IRPattern>) -> Result<IRPattern, String> {
+    patterns
+        .pop()
+        .ok_or_else(|| "invalid stdlib asset: pattern stack underflow".to_string())
+}
+
+fn table<T: Copy>(table: &[T], idx: usize) -> Result<T, String> {
+    table
+        .get(idx)
+        .copied()
+        .ok_or_else(|| "invalid stdlib asset: op index out of range".to_string())
+}
+
+fn build_type(cur: &mut ByteCursor, strings: &[String]) -> Result<TypeRef, String> {
+    Ok(match cur.u8().map_err(str::to_string)? {
+        TY_INT => TypeRef::Int,
+        TY_FLOAT => TypeRef::Float,
+        TY_BOOL => TypeRef::Bool,
+        TY_STRING => TypeRef::String,
+        TY_CHAR => TypeRef::Char,
+        TY_UNIT => TypeRef::Unit,
+        TY_I8 => TypeRef::I8,
+        TY_I16 => TypeRef::I16,
+        TY_I32 => TypeRef::I32,
+        TY_I64 => TypeRef::I64,
+        TY_U8 => TypeRef::U8,
+        TY_U16 => TypeRef::U16,
+        TY_U32 => TypeRef::U32,
+        TY_U64 => TypeRef::U64,
+        TY_GENERIC => {
+            TypeRef::Generic(string_at(strings, cur.varint().map_err(str::to_string)? as u32)?)
+        }
+        TY_NAMED => {
+            TypeRef::Named(string_at(strings, cur.varint().map_err(str::to_string)? as u32)?)
+        }
+        TY_LIST => TypeRef::List(Box::new(build_type(cur, strings)?)),
+        TY_SET => TypeRef::Set(Box::new(build_type(cur, strings)?)),
+        TY_MAP => {
+            let k = build_type(cur, strings)?;
+            let v = build_type(cur, strings)?;
+            TypeRef::Map(Box::new(k), Box::new(v))
+        }
+        TY_OPTION => TypeRef::Option(Box::new(build_type(cur, strings)?)),
+        TY_RESULT => {
+            let ok = build_type(cur, strings)?;
+            let err = build_type(cur, strings)?;
+            TypeRef::Result(Box::new(ok), Box::new(err))
+        }
+        TY_TUPLE => {
+            let count = cur.idx().map_err(str::to_string)?;
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(build_type(cur, strings)?);
+            }
+            TypeRef::Tuple(items)
+        }
+        TY_ARRAY => {
+            let inner = build_type(cur, strings)?;
+            let size = cur.idx().map_err(str::to_string)?;
+            TypeRef::Array(Box::new(inner), size)
+        }
+        TY_FUNCTION => {
+            let count = cur.idx().map_err(str::to_string)?;
+            let mut params = Vec::with_capacity(count);
+            for _ in 0..count {
+                params.push(build_type(cur, strings)?);
+            }
+            let ret = build_type(cur, strings)?;
+            TypeRef::Function(params, Box::new(ret))
+        }
+        TY_REF => TypeRef::Ref(Box::new(build_type(cur, strings)?)),
+        TY_STREAM => TypeRef::Stream(Box::new(build_type(cur, strings)?)),
+        _ => return Err("invalid stdlib asset: bad type tag".to_string()),
+    })
+}
+
+fn build_opt_string(
+    cur: &mut ByteCursor,
+    strings: &[String],
+) -> Result<Option<String>, String> {
+    let raw = cur.varint().map_err(str::to_string)?;
+    if raw == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(string_at(strings, (raw - 1) as u32)?))
+    }
+}
+
+fn build_params(
+    cur: &mut ByteCursor,
+    strings: &[String],
+) -> Result<Vec<(String, TypeRef)>, String> {
+    let count = cur.idx().map_err(str::to_string)?;
+    let mut params = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+        let ty = build_type(cur, strings)?;
+        params.push((name, ty));
+    }
+    Ok(params)
+}
+
+/// The stack-machine builder: interpret one body's
+/// postfix opcode stream. Exactly one node must remain
+/// on the node stack, and the pattern stack must be
+/// empty, when the stream ends.
+fn build_body(encoding: &[u8], strings: &[String]) -> Result<IRNode, String> {
+    let mut cur = ByteCursor { bytes: encoding, pos: 0 };
+    let mut nodes: Vec<IRNode> = Vec::new();
+    let mut patterns: Vec<IRPattern> = Vec::new();
+    while !cur.at_end() {
+        let op = cur.u8().map_err(str::to_string)?;
+        match op {
+            OP_VAR => {
+                let name = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                nodes.push(IRNode::Var(name));
+            }
+            OP_INT => nodes.push(IRNode::Literal(IRLiteral::Int(
+                cur.zigzag().map_err(str::to_string)?,
+            ))),
+            OP_FLOAT => {
+                let raw = cur.take(8).map_err(str::to_string)?;
+                let bits = u64::from_le_bytes([
+                    raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                ]);
+                nodes.push(IRNode::Literal(IRLiteral::Float(f64::from_bits(bits))));
+            }
+            OP_BOOL => {
+                let b = cur.u8().map_err(str::to_string)?;
+                nodes.push(IRNode::Literal(IRLiteral::Bool(b != 0)));
+            }
+            OP_CHAR => {
+                let raw = cur.varint().map_err(str::to_string)?;
+                let c = char::from_u32(raw as u32)
+                    .ok_or_else(|| "invalid stdlib asset: bad char".to_string())?;
+                nodes.push(IRNode::Literal(IRLiteral::Char(c)));
+            }
+            OP_STR => {
+                let s = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                nodes.push(IRNode::Literal(IRLiteral::String(s)));
+            }
+            OP_UNIT => nodes.push(IRNode::Literal(IRLiteral::Unit)),
+            OP_BINOP => {
+                let idx = cur.u8().map_err(str::to_string)? as usize;
+                let op = table(BINOP_TABLE, idx)?;
+                let r = pop_node(&mut nodes)?;
+                let l = pop_node(&mut nodes)?;
+                nodes.push(IRNode::BinOp(op, Box::new(l), Box::new(r)));
+            }
+            OP_UNOP => {
+                let idx = cur.u8().map_err(str::to_string)? as usize;
+                let op = table(UNOP_TABLE, idx)?;
+                let x = pop_node(&mut nodes)?;
+                nodes.push(IRNode::UnaryOp(op, Box::new(x)));
+            }
+            OP_CALL => {
+                let function =
+                    string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let argc = cur.idx().map_err(str::to_string)?;
+                let mut args = Vec::with_capacity(argc);
+                for _ in 0..argc {
+                    args.push(pop_node(&mut nodes)?);
+                }
+                args.reverse();
+                nodes.push(IRNode::Call { function, args });
+            }
+            OP_IF => {
+                let else_branch = pop_node(&mut nodes)?;
+                let then_branch = pop_node(&mut nodes)?;
+                let condition = pop_node(&mut nodes)?;
+                nodes.push(IRNode::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(else_branch),
+                });
+            }
+            OP_LET => {
+                let name = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let body = pop_node(&mut nodes)?;
+                let value = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Let {
+                    name,
+                    value: Box::new(value),
+                    body: Box::new(body),
+                });
+            }
+            OP_MATCH => {
+                let count = cur.idx().map_err(str::to_string)?;
+                let mut cases = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let body = pop_node(&mut nodes)?;
+                    let pattern = pop_pattern(&mut patterns)?;
+                    cases.push((pattern, body));
+                }
+                cases.reverse();
+                let scrutinee = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Match {
+                    scrutinee: Box::new(scrutinee),
+                    cases,
+                });
+            }
+            OP_BLOCK => {
+                let count = cur.idx().map_err(str::to_string)?;
+                let mut statements = Vec::with_capacity(count);
+                for _ in 0..count {
+                    statements.push(pop_node(&mut nodes)?);
+                }
+                statements.reverse();
+                nodes.push(IRNode::Block(statements));
+            }
+            OP_RETURN => {
+                let value = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Return(Box::new(value)));
+            }
+            OP_HOLE => {
+                let id = cur.varint().map_err(str::to_string)?;
+                let has_type = cur.u8().map_err(str::to_string)?;
+                let expected_type = if has_type != 0 {
+                    Some(build_type(&mut cur, strings)?)
+                } else {
+                    None
+                };
+                nodes.push(IRNode::Hole { id, expected_type });
+            }
+            OP_WHILE => {
+                let invariant = build_opt_string(&mut cur, strings)?;
+                let body = pop_node(&mut nodes)?;
+                let condition = pop_node(&mut nodes)?;
+                nodes.push(IRNode::While {
+                    condition: Box::new(condition),
+                    body: Box::new(body),
+                    invariant,
+                });
+            }
+            OP_FOR => {
+                let var = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let body = pop_node(&mut nodes)?;
+                let end = pop_node(&mut nodes)?;
+                let start = pop_node(&mut nodes)?;
+                nodes.push(IRNode::For {
+                    var,
+                    start: Box::new(start),
+                    end: Box::new(end),
+                    body: Box::new(body),
+                });
+            }
+            OP_LAMBDA => {
+                let params = build_params(&mut cur, strings)?;
+                let body = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Lambda {
+                    params,
+                    body: Box::new(body),
+                });
+            }
+            OP_CLOSURE => {
+                let params = build_params(&mut cur, strings)?;
+                let count = cur.idx().map_err(str::to_string)?;
+                let mut captures = Vec::with_capacity(count);
+                for _ in 0..count {
+                    captures.push(string_at(
+                        strings,
+                        cur.varint().map_err(str::to_string)? as u32,
+                    )?);
+                }
+                let body = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Closure {
+                    params,
+                    captures,
+                    body: Box::new(body),
+                });
+            }
+            OP_COLLECTION => {
+                let kind_idx = cur.u8().map_err(str::to_string)? as usize;
+                let kind = table(KIND_TABLE, kind_idx)?;
+                let count = cur.idx().map_err(str::to_string)?;
+                let mut elements = Vec::with_capacity(count);
+                for _ in 0..count {
+                    elements.push(pop_node(&mut nodes)?);
+                }
+                elements.reverse();
+                nodes.push(IRNode::Collection { kind, elements });
+            }
+            OP_MAP => {
+                let over = pop_node(&mut nodes)?;
+                let function = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Map {
+                    function: Box::new(function),
+                    over: Box::new(over),
+                });
+            }
+            OP_FILTER => {
+                let over = pop_node(&mut nodes)?;
+                let predicate = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Filter {
+                    predicate: Box::new(predicate),
+                    over: Box::new(over),
+                });
+            }
+            OP_FOLD => {
+                let over = pop_node(&mut nodes)?;
+                let initial = pop_node(&mut nodes)?;
+                let operation = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Fold {
+                    operation: Box::new(operation),
+                    initial: Box::new(initial),
+                    over: Box::new(over),
+                });
+            }
+            OP_SORT => {
+                let collection = pop_node(&mut nodes)?;
+                let comparator = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Sort {
+                    comparator: Box::new(comparator),
+                    collection: Box::new(collection),
+                });
+            }
+            OP_ALLOC => {
+                let name = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let ty = build_type(&mut cur, strings)?;
+                let initial = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Alloc {
+                    name,
+                    ty,
+                    initial: Box::new(initial),
+                });
+            }
+            OP_ASSIGN => {
+                let value = pop_node(&mut nodes)?;
+                let target = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Assign {
+                    target: Box::new(target),
+                    value: Box::new(value),
+                });
+            }
+            OP_TYPED => {
+                let ty = build_type(&mut cur, strings)?;
+                let node = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Typed {
+                    node: Box::new(node),
+                    ty,
+                });
+            }
+            OP_INDEX => {
+                let index = pop_node(&mut nodes)?;
+                let collection = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Index(Box::new(collection), Box::new(index)));
+            }
+            OP_LOOP => {
+                let invariant = build_opt_string(&mut cur, strings)?;
+                let body = pop_node(&mut nodes)?;
+                nodes.push(IRNode::Loop {
+                    body: Box::new(body),
+                    invariant,
+                });
+            }
+            OP_BREAK => {
+                let has_value = cur.u8().map_err(str::to_string)?;
+                let value = if has_value != 0 {
+                    Some(Box::new(pop_node(&mut nodes)?))
+                } else {
+                    None
+                };
+                nodes.push(IRNode::Break { value });
+            }
+            OP_STRUCTDEF => {
+                let name = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let count = cur.idx().map_err(str::to_string)?;
+                let mut fields = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let field =
+                        string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                    let ty = build_type(&mut cur, strings)?;
+                    fields.push((field, ty));
+                }
+                let body = pop_node(&mut nodes)?;
+                nodes.push(IRNode::StructDef {
+                    name,
+                    fields,
+                    body: Box::new(body),
+                });
+            }
+            OP_TRYPROP => {
+                let inner = pop_node(&mut nodes)?;
+                nodes.push(IRNode::TryPropagate(Box::new(inner)));
+            }
+            OP_FIELD => {
+                let field = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let base = pop_node(&mut nodes)?;
+                nodes.push(IRNode::FieldAccess {
+                    base: Box::new(base),
+                    field,
+                });
+            }
+            OP_RECORDLIT => {
+                let type_name =
+                    string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let count = cur.idx().map_err(str::to_string)?;
+                let mut names = Vec::with_capacity(count);
+                for _ in 0..count {
+                    names.push(string_at(
+                        strings,
+                        cur.varint().map_err(str::to_string)? as u32,
+                    )?);
+                }
+                let mut values = Vec::with_capacity(count);
+                for _ in 0..count {
+                    values.push(pop_node(&mut nodes)?);
+                }
+                values.reverse();
+                let fields = names.into_iter().zip(values).collect();
+                nodes.push(IRNode::RecordLit {
+                    type_name,
+                    fields,
+                });
+            }
+            OP_PWILD => patterns.push(IRPattern::Wildcard),
+            OP_PVAR => {
+                let name = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                patterns.push(IRPattern::Variable(name));
+            }
+            OP_PLIT => {
+                let node = pop_node(&mut nodes)?;
+                match node {
+                    IRNode::Literal(lit) => patterns.push(IRPattern::Literal(lit)),
+                    _ => {
+                        return Err(
+                            "invalid stdlib asset: pattern literal over non-literal".to_string()
+                        )
+                    }
+                }
+            }
+            OP_PCTOR => {
+                let name = string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let count = cur.idx().map_err(str::to_string)?;
+                let mut subs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    subs.push(pop_pattern(&mut patterns)?);
+                }
+                subs.reverse();
+                patterns.push(IRPattern::Constructor(name, subs));
+            }
+            OP_PGUARD => {
+                let condition =
+                    string_at(strings, cur.varint().map_err(str::to_string)? as u32)?;
+                let inner = pop_pattern(&mut patterns)?;
+                patterns.push(IRPattern::Guard(Box::new(inner), condition));
+            }
+            _ => return Err("invalid stdlib asset: bad opcode".to_string()),
+        }
+    }
+    if nodes.len() != 1 || !patterns.is_empty() {
+        return Err("invalid stdlib asset: body does not reduce to one node".to_string());
+    }
+    Ok(nodes.pop().unwrap())
+}
+
+/// The module sources the prelude is built from, in
+/// bundle order: natively the embedded table; in a
+/// playground build, the installed asset's modules (or
+/// none, before installation).
+fn module_sources() -> Vec<(String, String)> {
+    #[cfg(not(feature = "wasm-playground"))]
+    return LIBRARY_MODULES
+        .iter()
+        .map(|(name, source)| (name.to_string(), source.to_string()))
+        .collect();
+    #[cfg(feature = "wasm-playground")]
+    return match installed_asset() {
+        Some(asset) => asset
+            .modules
+            .iter()
+            .map(|m| (m.name.clone(), m.source.clone()))
+            .collect(),
+        None => Vec::new(),
+    };
+}
 
 /// The bundled library, parsed once per process and merged
 /// into one module. A bundled source that fails to parse is
@@ -69,8 +1352,8 @@ fn library_module() -> &'static Spec {
         let mut functions = Vec::new();
         let mut types = Vec::new();
         let mut imports = Vec::new();
-        for (name, source) in LIBRARY_MODULES {
-            let module = crate::spec::parser::parse(source).unwrap_or_else(|e| {
+        for (name, source) in module_sources() {
+            let module = crate::spec::parser::parse(&source).unwrap_or_else(|e| {
                 panic!("bundled stdlib module '{name}' must parse: {e}")
             });
             functions.extend(module.functions);
@@ -98,8 +1381,27 @@ pub fn prelude_specs() -> Vec<FunctionSpec> {
 /// The crowned body shipped for the library entry `name`,
 /// or None when the entry carries no shipped body (its name
 /// then denotes whatever its spec's rows derive, like any
-/// spec — no entry ships that way).
+/// spec — no entry ships that way). Native builds answer
+/// from the transcribed registry below; playground builds
+/// answer from the installed asset — the same data, loaded
+/// at runtime instead of compiled in.
 pub fn shipped_body(name: &str) -> Option<IRNode> {
+    #[cfg(not(feature = "wasm-playground"))]
+    return shipped_body_native(name);
+    #[cfg(feature = "wasm-playground")]
+    return installed_asset()?
+        .bodies
+        .iter()
+        .find(|(entry, _)| entry == name)
+        .map(|(_, body)| body.clone());
+}
+
+/// The transcribed registry of crowned bodies (native
+/// builds). Each arm is the body the production pipeline
+/// crowned for the entry at library-build time, pinned by
+/// tests/phase110_prelude.rs.
+#[cfg(not(feature = "wasm-playground"))]
+fn shipped_body_native(name: &str) -> Option<IRNode> {
     // Transcription helpers for the Phase 111 arms (the
     // Phase 110 `int_abs` arm below predates them and is
     // left in its original longhand).
@@ -245,6 +1547,63 @@ pub fn shipped_body(name: &str) -> Option<IRNode> {
                 cases,
             })
         }
+        // ── Phase 112: String basics ────────────────────
+        // string_is_empty: the equation seed — the row's
+        // own right-hand side, len(s) == 0.
+        "string_is_empty" => Some(bop(
+            IRBinOp::Eq,
+            IRNode::Call {
+                function: "len".into(),
+                args: vec![v("s")],
+            },
+            i(0),
+        )),
+        // ── Phase 112: Result / Option ──────────────────
+        // The match_from_rows seed (Phase 112's one seed-
+        // family addition): each body is the constructor
+        // Match the entry's guarded method rows state.
+        "result_unwrap_or" => Some(IRNode::Match {
+            scrutinee: Box::new(v("r")),
+            cases: vec![
+                (
+                    IRPattern::Constructor("Ok".into(), vec![IRPattern::Variable("v".into())]),
+                    v("v"),
+                ),
+                (
+                    IRPattern::Constructor("Err".into(), vec![IRPattern::Wildcard]),
+                    v("d"),
+                ),
+            ],
+        }),
+        "option_unwrap_or" => Some(IRNode::Match {
+            scrutinee: Box::new(v("o")),
+            cases: vec![
+                (
+                    IRPattern::Constructor("Some".into(), vec![IRPattern::Variable("v".into())]),
+                    v("v"),
+                ),
+                (IRPattern::Constructor("None".into(), vec![]), v("d")),
+            ],
+        }),
+        "option_ok_or" => Some(IRNode::Match {
+            scrutinee: Box::new(v("o")),
+            cases: vec![
+                (
+                    IRPattern::Constructor("Some".into(), vec![IRPattern::Variable("v".into())]),
+                    IRNode::Call {
+                        function: "Ok".into(),
+                        args: vec![v("v")],
+                    },
+                ),
+                (
+                    IRPattern::Constructor("None".into(), vec![]),
+                    IRNode::Call {
+                        function: "Err".into(),
+                        args: vec![v("e")],
+                    },
+                ),
+            ],
+        }),
         _ => None,
     }
 }

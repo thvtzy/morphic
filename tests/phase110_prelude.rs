@@ -15,7 +15,9 @@
 //!   the Int family completed and the Char family added —
 //!   seven Int entries and six Char entries; `int_gcd`
 //!   does not ship, a named blocker recorded in the ROAD
-//!   Phase 111 note);
+//!   Phase 111 note; Phase 112: `string_is_empty` and the
+//!   Result/Option entries `result_unwrap_or`,
+//!   `option_unwrap_or`, `option_ok_or`);
 //! * each entry's shipped body — crowned at library-build
 //!   time, shipped as data — judges Z3-Verified ∧
 //!   golden-exact against its own spec, and is the body the
@@ -149,7 +151,8 @@ fn bundled_library_parses_and_checks_standalone() {
     }
     // The shipped entries, in module order (Phase 110:
     // int_abs alone; Phase 111: the Int family completed
-    // minus the blocked int_gcd, plus the Char family).
+    // minus the blocked int_gcd, plus the Char family;
+    // Phase 112: String basics and Result/Option).
     let specs = stdlib::prelude_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
@@ -168,6 +171,10 @@ fn bundled_library_parses_and_checks_standalone() {
             "char_is_uppercase",
             "char_is_lowercase",
             "char_to_digit",
+            "string_is_empty",
+            "result_unwrap_or",
+            "option_unwrap_or",
+            "option_ok_or",
         ]
     );
     let abs = &specs[0];
@@ -186,6 +193,15 @@ fn bundled_library_parses_and_checks_standalone() {
     let to_digit = &specs[12];
     assert_eq!(to_digit.params[0].ty.to_string(), "Char");
     assert_eq!(to_digit.return_type.to_string(), "Option<Int>");
+    // Spot-check the Phase 112 signatures against the
+    // frozen scope (§2.4 / §2.5).
+    let ok_or = &specs[16];
+    assert_eq!(ok_or.params[0].ty.to_string(), "Option<Int>");
+    assert_eq!(ok_or.params[1].ty.to_string(), "String");
+    assert_eq!(ok_or.return_type.to_string(), "Result<Int, String>");
+    let unwrap_or = &specs[14];
+    assert_eq!(unwrap_or.params[0].ty.to_string(), "Result<Int, String>");
+    assert_eq!(unwrap_or.return_type.to_string(), "Int");
 }
 
 fn chr(c: char) -> IRNode {
@@ -287,6 +303,66 @@ fn expected_body(name: &str) -> IRNode {
             ));
             IRNode::Match { scrutinee: Box::new(var("c")), cases }
         }
+        // Phase 112: the equation seed's body — the row's
+        // own right-hand side.
+        "string_is_empty" => bin(
+            IRBinOp::Eq,
+            IRNode::Call { function: "len".into(), args: vec![var("s")] },
+            int(0),
+        ),
+        // Phase 112: the match_from_rows seed's bodies —
+        // the constructor Matches the guarded rows state.
+        "result_unwrap_or" => IRNode::Match {
+            scrutinee: Box::new(var("r")),
+            cases: vec![
+                (
+                    morphic::synthesis::engine::IRPattern::Constructor(
+                        "Ok".into(),
+                        vec![morphic::synthesis::engine::IRPattern::Variable("v".into())],
+                    ),
+                    var("v"),
+                ),
+                (
+                    morphic::synthesis::engine::IRPattern::Constructor(
+                        "Err".into(),
+                        vec![morphic::synthesis::engine::IRPattern::Wildcard],
+                    ),
+                    var("d"),
+                ),
+            ],
+        },
+        "option_unwrap_or" => IRNode::Match {
+            scrutinee: Box::new(var("o")),
+            cases: vec![
+                (
+                    morphic::synthesis::engine::IRPattern::Constructor(
+                        "Some".into(),
+                        vec![morphic::synthesis::engine::IRPattern::Variable("v".into())],
+                    ),
+                    var("v"),
+                ),
+                (
+                    morphic::synthesis::engine::IRPattern::Constructor("None".into(), vec![]),
+                    var("d"),
+                ),
+            ],
+        },
+        "option_ok_or" => IRNode::Match {
+            scrutinee: Box::new(var("o")),
+            cases: vec![
+                (
+                    morphic::synthesis::engine::IRPattern::Constructor(
+                        "Some".into(),
+                        vec![morphic::synthesis::engine::IRPattern::Variable("v".into())],
+                    ),
+                    IRNode::Call { function: "Ok".into(), args: vec![var("v")] },
+                ),
+                (
+                    morphic::synthesis::engine::IRPattern::Constructor("None".into(), vec![]),
+                    IRNode::Call { function: "Err".into(), args: vec![var("e")] },
+                ),
+            ],
+        },
         other => panic!("no expected body for {other}"),
     }
 }
@@ -310,6 +386,10 @@ const BATTERIES: &[(&str, usize, usize, usize)] = &[
     ("char_is_uppercase", 6, 6, 0),
     ("char_is_lowercase", 6, 6, 0),
     ("char_to_digit", 8, 8, 0),
+    ("string_is_empty", 5, 5, 0),
+    ("result_unwrap_or", 6, 6, 0),
+    ("option_unwrap_or", 5, 5, 0),
+    ("option_ok_or", 4, 4, 0),
 ];
 
 #[test]
