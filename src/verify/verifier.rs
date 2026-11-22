@@ -3141,11 +3141,73 @@ fn encode_constraint(c: &Constraint, env: &SymEnv, ctx: &EvalCtx) -> Option<z3::
             Sym::Bool(b) => Some(b),
             _ => None,
         },
-        // Quantified formulas and named predicates (is_sorted
+        // Forall (Phase 94, encoder extension Part 2):
+        // an Int-binder quantifier whose body is
+        // quantifier-free and encodes with the binders
+        // in scope closes with z3's `forall_const` —
+        // the form Phase 90 measured decisive at every
+        // skip battery point (mirror Proven 12/12,
+        // overshoot Refuted, the invariant consecution
+        // discharged in 5 ms). NO trigger patterns:
+        // the bare form discharged everything measured,
+        // bare and patterned alike (5 vs 6 ms on the
+        // consecution), and a pattern is a second
+        // mechanism that can only restrict
+        // instantiation. The accepted envelope is the
+        // measured one, and everything outside it
+        // declines whole (None), never partially: a
+        // non-Int binder (the CharStr bridge speaks
+        // Int indices), an empty or duplicate binder
+        // list, a body containing a nested quantifier
+        // (unmeasured), or a body the encoder cannot
+        // express with the binders bound.
+        Constraint::Forall { vars, body } => {
+            if vars.is_empty()
+                || vars.iter().any(|(_, ty)| *ty != TypeRef::Int)
+                || vars
+                    .iter()
+                    .enumerate()
+                    .any(|(i, (n, _))| vars[..i].iter().any(|(m, _)| m == n))
+                || constraint_mentions_quantifier(body)
+            {
+                return None;
+            }
+            let mut env = env.clone();
+            let mut bounds: Vec<z3::ast::Int> = Vec::with_capacity(vars.len());
+            for (name, _) in vars {
+                let bound = z3::ast::Int::new_const(name.as_str());
+                env.insert(name.clone(), Sym::Int(bound.clone()));
+                bounds.push(bound);
+            }
+            let f = encode_constraint(body, &env, ctx)?;
+            let bound_refs: Vec<&dyn z3::ast::Ast> =
+                bounds.iter().map(|b| b as &dyn z3::ast::Ast).collect();
+            Some(z3::ast::forall_const(&bound_refs, &[], &f))
+        }
+        // Existentials and named predicates (is_sorted
         // and friends) have no encoding here.
-        Constraint::Forall { .. }
-        | Constraint::Exists { .. }
-        | Constraint::Predicate(..) => None,
+        Constraint::Exists { .. } | Constraint::Predicate(..) => None,
+    }
+}
+
+/// Whether a constraint syntactically contains a
+/// quantifier anywhere below its root — the Forall
+/// arm's nesting guard (a Forall's own body must be
+/// quantifier-free; quantifiers elsewhere in a
+/// constraint tree are reached structurally and judged
+/// on their own envelope).
+#[cfg(feature = "z3-support")]
+fn constraint_mentions_quantifier(c: &Constraint) -> bool {
+    match c {
+        Constraint::Forall { .. } | Constraint::Exists { .. } => true,
+        Constraint::Not(inner) => constraint_mentions_quantifier(inner),
+        Constraint::And(parts) | Constraint::Or(parts) => {
+            parts.iter().any(constraint_mentions_quantifier)
+        }
+        Constraint::Implies(a, b) => {
+            constraint_mentions_quantifier(a) || constraint_mentions_quantifier(b)
+        }
+        _ => false,
     }
 }
 
@@ -6119,8 +6181,14 @@ spec tokenize_all {
 
         // (c) The all-whitespace-between property as a
         // Forall: statable in the dialect (the parser
-        // accepts the formulation), unencodable
-        // through the production encoder.
+        // accepts the formulation). At Phase 87 this
+        // pin asserted it was UNENCODABLE through the
+        // production encoder — Phase 94's forall_const
+        // arm removes that boundary, and the pin flips
+        // in place: the row now encodes. (Whether it
+        // also DECIDES is Phase 94's battery, below;
+        // the row's adoption into the spec stays R1's,
+        // in Phase 96.)
         let forall_row = {
             let src = "T {\n spec probe {\n input: state: TokenizerState\n output: TokenizerState\n constraint: forall i: Int in range(len(output.source)): i < state.pos || i >= output.pos || is_whitespace(output.source[i])\n }\n}";
             let parsed = crate::spec::parser::parse(src).expect("forall row parses");
@@ -6136,10 +6204,10 @@ spec tokenize_all {
         env.insert("state".into(), state_sym(" x", 0, 1, 1));
         env.insert("output".into(), state_sym(" x", 2, 1, 3));
         assert!(
-            encode_constraint(&forall_row, &env, &EvalCtx::root(&index)).is_none(),
-            "the Forall has NO encoding through the production encoder \
-             (quantified formulas are the encoder's stated boundary): \
-             the exact skip pin is encoder research, not a spec edit"
+            encode_constraint(&forall_row, &env, &EvalCtx::root(&index)).is_some(),
+            "Phase 94: the Forall ENCODES through the production encoder \
+             (the forall_const arm) — the boundary this pin recorded \
+             through Phase 93 is removed"
         );
     }
 
@@ -7645,11 +7713,17 @@ spec grow_first {
     /// loop (the §2.2 corollary, in production). The
     /// mechanism is pinned, not just the verdict: the
     /// outcome's exhaustion is satisfiable at each fuel.
-    /// The Forall row (c) also judges Unknown — by the
-    /// other mechanism (its encoding is Phase 94's arm;
-    /// production `encode_constraint` returns None for
-    /// it today), recorded so the two Unknowns are never
-    /// conflated.
+    /// The Forall row (c) also judges Unknown — through
+    /// Phase 93 by the other mechanism (its encoding
+    /// was Phase 94's arm; production `encode_constraint`
+    /// returned None for it). Phase 94 removed that
+    /// mechanism: the block below now pins the flip —
+    /// the row ENCODES over the symbolic outcome, and
+    /// its Unknown is the exhaustion mechanism, the
+    /// same one as every other row here (the per-path
+    /// decomposition is Phase 94's own test). The two
+    /// Unknowns are still never conflated: this test
+    /// asserts the encoding exists.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase93_stmt_skip_symbolic_unknown() {
@@ -7703,18 +7777,45 @@ spec grow_first {
                 judge_ms
             );
         }
-        // The (c) row: Unknown by the unencodable
-        // mechanism (Phase 94's arm), at the same fuel.
+        // The (c) row at the same fuel. Through
+        // Phase 93 this judged Unknown by the
+        // unencodable mechanism; Phase 94's
+        // forall_const arm encodes it, so the pin
+        // flips: the encoding EXISTS over the
+        // symbolic outcome's path env, and the
+        // verdict is Unknown by exhaustion — the
+        // mechanism every other row in this test
+        // judges by.
         let (_, row_c) = p90_module_with_forall_row();
         let ctx = StmtCtx::root(&index, 4, 5_000);
         let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
             .expect("the production skip denotation evaluates symbolically");
-        let (tri, _) = p93_judge(&verifier, &row_c, &skip, &env, &outcome);
+        let mut path_env = env.clone();
+        path_env.insert(
+            "output".into(),
+            outcome
+                .paths
+                .first()
+                .expect("the symbolic outcome has a completed path")
+                .1
+                .clone(),
+        );
+        assert!(
+            encode_constraint(&row_c, &path_env, &EvalCtx::root(&index)).is_some(),
+            "Phase 94: the Forall row (c) ENCODES over the symbolic \
+             outcome (the unencodable mechanism is removed)"
+        );
+        let (tri, ms_c) = p93_judge(&verifier, &row_c, &skip, &env, &outcome);
         assert!(
             matches!(tri, Tri::Unknown),
-            "the Forall row (c) judges Unknown until Phase 94 encodes it"
+            "the Forall row (c) judges Unknown symbolically — by \
+             EXHAUSTION since Phase 94 (it encodes; no completed path \
+             refutes it; the exhaustion gate blocks Proven)"
         );
-        println!("P93|skip-sym|fuel=4|row (c): Unknown (unencodable until Phase 94)");
+        println!(
+            "P93|skip-sym|fuel=4|row (c): Unknown (exhaustion since Phase 94; judge_ms={})",
+            ms_c
+        );
     }
 
     /// Phase 93: symbolic STEP judging and the `" 5"`
@@ -8056,6 +8157,526 @@ spec grow_first {
              (Ok with no token where a token start stands)"
         );
         println!("P93|teeth-step|swapped EOF branches at \"spec\": row 1 Refuted");
+    }
+
+    // ────────────────────────────────────────────────────
+    // Phase 94 — the Forall encoding in production:
+    // the `forall_const` arm in `encode_constraint`
+    // (design §3.3). The Phase 90 probe below stands
+    // as the measurement record; these tests re-run
+    // its evidence through the production encoder and
+    // the production judges. The bounded-expansion
+    // fallback the design priced as a companion is
+    // NOT built: the quantifier arm decides every
+    // point, tooth and symbolic case in this battery,
+    // so the fallback is recorded measured-unnecessary
+    // (ROAD Phase 94 note). No spec is amended — the
+    // (c) row's adoption is R1's, in Phase 96; the row
+    // here comes from the Phase 90 scratch surgery.
+    // ────────────────────────────────────────────────────
+
+    /// Judge one row at a formula level through the
+    /// PRODUCTION encoder: encode (must succeed),
+    /// then satisfiability of the negation.
+    #[cfg(feature = "z3-support")]
+    fn p94_judge_formula(
+        row: &Constraint,
+        env: &SymEnv,
+        ctx: &EvalCtx,
+    ) -> (&'static str, u64) {
+        let f = encode_constraint(row, env, ctx)
+            .expect("the row encodes through the production encoder");
+        match p90_sat_all(&[f.not()]) {
+            (Some(false), ms) => ("Proven", ms),
+            (Some(true), ms) => ("Refuted", ms),
+            (None, ms) => ("Unknown", ms),
+        }
+    }
+
+    /// Phase 94: the (c) row at the 12 skip points,
+    /// through production `encode_constraint` — the
+    /// mirror's outputs Proven 12/12 (Phase 90's probe
+    /// verdicts reproduced exactly, cross-checked
+    /// against the probe encoder), the overshoot
+    /// outputs Refuted, identity/partial admitted;
+    /// and the JOINT (a)+(c) teeth at the whitespace
+    /// point: row (a) Refutes the identity and partial
+    /// outputs that (c) admits, and both rows Prove
+    /// the mirror's output. The exact pin is (a)+(c)
+    /// jointly — neither row oversold.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase94_forall_points_battery() {
+        let (module_c, row_c) = p90_module_with_forall_row();
+        let index = SpecIndex::from_module(&module_c);
+        let ectx = EvalCtx::root(&index);
+        let judge_c = |state: &P90St, output: &P90St| -> (&'static str, u64) {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(state));
+            env.insert("output".into(), p90_state_sym(output));
+            p94_judge_formula(&row_c, &env, &ectx)
+        };
+        let battery: Vec<P90St> = vec![
+            p90_st("", 0, 1, 1),
+            p90_st(" ", 0, 1, 1),
+            p90_st("  \t\n x", 0, 1, 1),
+            p90_st("no-ws", 0, 1, 1),
+            p90_st("\n\nab", 0, 1, 1),
+            p90_st(" \u{A0}x", 0, 1, 1),
+            p90_st("a b", 0, 1, 1),
+            p90_st("\r\n\t", 0, 1, 1),
+            p90_st("a b", 1, 1, 2),
+            p90_st("  \t\n x", 2, 1, 3),
+            p90_st("\n\nab", 1, 1, 2),
+            p90_st(" \u{A0}x", 1, 1, 2),
+        ];
+        for (i, input) in battery.iter().enumerate() {
+            let (mirror, _) = p90_mirror_skip(input);
+            let (verdict, ms) = judge_c(input, &mirror);
+            assert_eq!(
+                verdict, "Proven",
+                "point {}: (c) must PROVE the mirror's output through \
+                 the production encoder",
+                i
+            );
+            // Cross-check: the probe encoder's verdict
+            // on the same point agrees with production.
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(input));
+            env.insert("output".into(), p90_state_sym(&mirror));
+            let pf = p90_encode_forall(&row_c, &env, &ectx)
+                .expect("the probe encoder encodes the Forall at a point");
+            let probe_verdict = match p90_sat_all(&[pf.not()]) {
+                (Some(false), _) => "Proven",
+                (Some(true), _) => "Refuted",
+                (None, _) => "Unknown",
+            };
+            assert_eq!(
+                probe_verdict, verdict,
+                "point {}: probe and production encoders must agree",
+                i
+            );
+            println!(
+                "P94|forall-point|{}|src={:?}|verdict={}|judge_ms={}",
+                i, input.source, verdict, ms
+            );
+        }
+        // Teeth: the overshoot outputs are Refuted.
+        for (src, out_pos) in [("a b", 2i64), ("ab cd", 3i64)] {
+            let input = p90_st(src, 0, 1, 1);
+            let output = p90_st(src, out_pos, 1, out_pos + 1);
+            let (verdict, ms) = judge_c(&input, &output);
+            assert_eq!(
+                verdict, "Refuted",
+                "(c) must REFUTE the overshoot {:?} -> {}",
+                src, out_pos
+            );
+            println!(
+                "P94|forall-tooth|overshoot {:?} -> {}|Refuted|judge_ms={}",
+                src, out_pos, ms
+            );
+        }
+        // The division of labor at the whitespace
+        // point: (c) admits identity and partial
+        // (their crossings are all whitespace); row
+        // (a) Refutes both; the mirror's output is
+        // Proven under both rows jointly.
+        let ws = p90_st("  \t\n x", 0, 1, 1);
+        let (mirror, _) = p90_mirror_skip(&ws);
+        let mut partial = ws.clone();
+        partial.pos = 1;
+        partial.col = 2;
+        let row_a = p90_parse_row(
+            "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
+        );
+        let judge_a = |output: &P90St| -> (&'static str, u64) {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(&ws));
+            env.insert("output".into(), p90_state_sym(output));
+            p94_judge_formula(&row_a, &env, &ectx)
+        };
+        for (label, out) in [("identity", &ws), ("partial", &partial)] {
+            let (vc, msc) = judge_c(&ws, out);
+            assert_eq!(
+                vc, "Proven",
+                "(c) admits the {} output at the point (its crossing \
+                 is all whitespace — the landing is row (a)'s business)",
+                label
+            );
+            let (va, msa) = judge_a(out);
+            assert_eq!(
+                va, "Refuted",
+                "row (a) must REFUTE the {} output at the point \
+                 (it lands on whitespace, short of the boundary)",
+                label
+            );
+            println!(
+                "P94|forall-joint|{}|(c)={} ({} ms)|(a)={} ({} ms)",
+                label, vc, msc, va, msa
+            );
+        }
+        let (vc, msc) = judge_c(&ws, &mirror);
+        let (va, msa) = judge_a(&mirror);
+        assert_eq!(vc, "Proven", "(c) proves the mirror's output");
+        assert_eq!(va, "Proven", "(a) proves the mirror's output");
+        println!(
+            "P94|forall-joint|mirror|(c)={} ({} ms)|(a)={} ({} ms)",
+            vc, msc, va, msa
+        );
+    }
+
+    /// Phase 94: the (c) row through the PRODUCTION
+    /// STATEMENT JUDGE at the 12 points — the Phase 92
+    /// denotation's outcomes, judged by
+    /// `verify_constraint_stmt` with the production
+    /// Forall arm inside: Proven at all 12 points (at
+    /// a point the outcome is complete — exhaustion
+    /// is unsatisfiable — so the BMC discipline
+    /// promotes the per-path silence to Proven).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase94_forall_stmt_judge_points() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let body = index
+            .callee_body("skip_whitespace")
+            .expect("skip denotes after Phase 92");
+        let (_, row_c) = p90_module_with_forall_row();
+        let battery: Vec<P90St> = vec![
+            p90_st("", 0, 1, 1),
+            p90_st(" ", 0, 1, 1),
+            p90_st("  \t\n x", 0, 1, 1),
+            p90_st("no-ws", 0, 1, 1),
+            p90_st("\n\nab", 0, 1, 1),
+            p90_st(" \u{A0}x", 0, 1, 1),
+            p90_st("a b", 0, 1, 1),
+            p90_st("\r\n\t", 0, 1, 1),
+            p90_st("a b", 1, 1, 2),
+            p90_st("  \t\n x", 2, 1, 3),
+            p90_st("\n\nab", 1, 1, 2),
+            p90_st(" \u{A0}x", 1, 1, 2),
+        ];
+        for (i, input) in battery.iter().enumerate() {
+            let (_, trips) = p90_mirror_skip(input);
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(input));
+            let ctx = StmtCtx::root(&index, trips, 5_000);
+            let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+                .expect("the production skip denotation evaluates at a point");
+            assert_eq!(
+                stmt_sat(&[outcome.exhausted.clone()], 5_000),
+                Some(false),
+                "point {}: at the trip-count fuel the outcome is \
+                 complete (exhaustion unsatisfiable)",
+                i
+            );
+            let (tri, ms) = p93_judge(&verifier, &row_c, &skip, &env, &outcome);
+            assert!(
+                matches!(tri, Tri::Proven),
+                "point {}: the production statement judge must PROVE \
+                 (c) over the denoted skip outcome",
+                i
+            );
+            println!(
+                "P94|stmt-point|{}|src={:?}|trips={}|verdict=Proven|judge_ms={}",
+                i, input.source, trips, ms
+            );
+        }
+    }
+
+    /// A state record with its `pos` field advanced
+    /// by `delta` (the other fields carried) — the
+    /// free-symbolic wrong outputs of the next test.
+    #[cfg(feature = "z3-support")]
+    fn p94_with_pos(rec: &Sym, delta: i64) -> Sym {
+        let Sym::Record { type_name, fields } = rec else {
+            panic!("a state record");
+        };
+        let fields = fields
+            .iter()
+            .map(|(n, v)| {
+                if n == "pos" {
+                    let Sym::Int(i) = v else {
+                        panic!("pos is an Int");
+                    };
+                    (
+                        n.clone(),
+                        Sym::Int(z3::ast::Int::add(&[
+                            i,
+                            &z3::ast::Int::from_i64(delta),
+                        ])),
+                    )
+                } else {
+                    (n.clone(), v.clone())
+                }
+            })
+            .collect();
+        Sym::Record {
+            type_name: type_name.clone(),
+            fields,
+        }
+    }
+
+    /// Phase 94: the symbolic mechanism, decomposed.
+    /// Over the production denotation's SYMBOLIC
+    /// outcome (fuel 4): (c) now ENCODES on every
+    /// completed path and NO completed path refutes
+    /// it (pc ∧ ¬exhausted ∧ ¬(c) is UNSAT per path),
+    /// while exhaustion stays satisfiable — so the
+    /// aggregate verdict is Unknown by the exhaustion
+    /// gate alone, the unencodable mechanism removed.
+    /// (Phase 96's invariant route remains the
+    /// designated path to a symbolic Verified.)
+    /// And the wrong free outputs, judged per row
+    /// through `verify_constraint` over a fully
+    /// symbolic state: identity is Proven by (c)
+    /// (vacuous range) and Refuted by (a); the
+    /// overshoot (pos+2) is Refuted by (c) and
+    /// by (a); the bare
+    /// pos+1 output is Refuted by (c) too — (c)
+    /// admits a partial BODY only through its path
+    /// condition (the statement judge above), never
+    /// a bare advance whose crossing is unproven.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase94_forall_symbolic_mechanism() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let body = index
+            .callee_body("skip_whitespace")
+            .expect("skip denotes after Phase 92");
+        let (_, row_c) = p90_module_with_forall_row();
+        let row_a = p90_parse_row(
+            "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
+        );
+        let env = param_env(&skip, &index);
+        let ctx = StmtCtx::root(&index, 4, 5_000);
+        let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+            .expect("the production skip denotation evaluates symbolically");
+        let not_exhausted = outcome.exhausted.not();
+        for (pc, output) in &outcome.paths {
+            let mut penv = env.clone();
+            penv.insert("output".into(), output.clone());
+            let f = encode_constraint(&row_c, &penv, &EvalCtx::root(&index))
+                .expect("Phase 94: (c) ENCODES over a symbolic completed path");
+            assert_eq!(
+                stmt_sat(&[pc.clone(), not_exhausted.clone(), f.not()], 5_000),
+                Some(false),
+                "no completed path of the faithful body refutes (c)"
+            );
+        }
+        assert_eq!(
+            stmt_sat(&[outcome.exhausted.clone()], 5_000),
+            Some(true),
+            "exhaustion stays satisfiable — it alone blocks Proven"
+        );
+        let (tri, ms) = p93_judge(&verifier, &row_c, &skip, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Unknown),
+            "the aggregate symbolic verdict for (c) is Unknown — \
+             by exhaustion, not by unencodability"
+        );
+        println!(
+            "P94|symbolic|faithful body|(c)=Unknown (exhaustion gate)|judge_ms={}",
+            ms
+        );
+        // Wrong free outputs over the symbolic state,
+        // per row through the production judge.
+        let state_sym = env
+            .get("state")
+            .expect("the param env binds state")
+            .clone();
+        let judge = |row: &Constraint, output: &Sym| -> (Tri, u64) {
+            let (res, tri) =
+                verifier.verify_constraint(row, "p94", &skip, &env, &Some(output.clone()));
+            (tri, res.solver_time_ms)
+        };
+        let (tc, mc) = judge(&row_c, &state_sym);
+        assert!(
+            matches!(tc, Tri::Proven),
+            "identity output: (c) is Proven (the crossed range is empty)"
+        );
+        let (ta, ma) = judge(&row_a, &state_sym);
+        assert!(
+            matches!(ta, Tri::Refuted),
+            "identity output: row (a) REFUTES it (a model lands it \
+             on whitespace short of EOF)"
+        );
+        println!(
+            "P94|symbolic|identity|(c)=Proven ({} ms)|(a)=Refuted ({} ms)",
+            mc, ma
+        );
+        let over = p94_with_pos(&state_sym, 2);
+        let (tc, mc) = judge(&row_c, &over);
+        assert!(
+            matches!(tc, Tri::Refuted),
+            "overshoot output (pos+2): (c) REFUTES it (a model \
+             crosses a non-whitespace char)"
+        );
+        let (ta, ma) = judge(&row_a, &over);
+        assert!(
+            matches!(ta, Tri::Refuted),
+            "overshoot output (pos+2): row (a) REFUTES it too \
+             (a model lands it on whitespace short of EOF)"
+        );
+        println!(
+            "P94|symbolic|overshoot|(c)=Refuted ({} ms)|(a)=Refuted ({} ms)",
+            mc, ma
+        );
+        let partial = p94_with_pos(&state_sym, 1);
+        let (tc, mc) = judge(&row_c, &partial);
+        assert!(
+            matches!(tc, Tri::Refuted),
+            "bare pos+1 output: (c) REFUTES it at the free-output \
+             level (the crossed char is unproven) — a partial body \
+             is admitted only through its path condition"
+        );
+        println!(
+            "P94|symbolic|partial (bare)|(c)=Refuted ({} ms)",
+            mc
+        );
+    }
+
+    /// Phase 94: the arm's envelope — what encodes
+    /// and what declines, pinned at the encoder.
+    /// Encodes: Int binders (single and multi-var)
+    /// over quantifier-free encodable bodies.
+    /// Declines whole: non-Int binders, an empty or
+    /// duplicate binder list, a nested quantifier in
+    /// the body, an unencodable body — and Exists,
+    /// whose boundary does not move in this phase.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase94_forall_envelope() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let ectx = EvalCtx::root(&index);
+        let env = SymEnv::new();
+        let parse_row = |src: &str| -> Constraint {
+            let parsed = crate::spec::parser::parse(src).expect("probe row parses");
+            parsed.functions[0].postconditions[0].clone()
+        };
+        // Non-Int binders decline.
+        for (label, src) in [
+            (
+                "Char binder",
+                "T {\n spec probe {\n input: x: Int\n output: Int\n constraint: forall c: Char in range(3): c == c\n }\n}",
+            ),
+            (
+                "String binder",
+                "T {\n spec probe {\n input: x: Int\n output: Int\n constraint: forall s: String in range(3): s == s\n }\n}",
+            ),
+        ] {
+            let row = parse_row(src);
+            assert!(
+                matches!(row, Constraint::Forall { .. }),
+                "{}: the probe row is a Forall",
+                label
+            );
+            assert!(
+                encode_constraint(&row, &env, &ectx).is_none(),
+                "{}: a non-Int binder DECLINES (the bridge speaks Int indices)",
+                label
+            );
+            println!("P94|envelope|{}|declines", label);
+        }
+        // AST-level declines.
+        let int_var = |n: &str| (n.to_string(), TypeRef::Int);
+        let declines: Vec<(&str, Constraint)> = vec![
+            (
+                "empty binder list",
+                Constraint::Forall {
+                    vars: vec![],
+                    body: Box::new(Constraint::True),
+                },
+            ),
+            (
+                "duplicate binders",
+                Constraint::Forall {
+                    vars: vec![int_var("i"), int_var("i")],
+                    body: Box::new(Constraint::True),
+                },
+            ),
+            (
+                "nested Forall",
+                Constraint::Forall {
+                    vars: vec![int_var("i")],
+                    body: Box::new(Constraint::Forall {
+                        vars: vec![int_var("j")],
+                        body: Box::new(Constraint::True),
+                    }),
+                },
+            ),
+            (
+                "Forall nested under And in the body",
+                Constraint::Forall {
+                    vars: vec![int_var("i")],
+                    body: Box::new(Constraint::And(vec![
+                        Constraint::True,
+                        Constraint::Forall {
+                            vars: vec![int_var("j")],
+                            body: Box::new(Constraint::True),
+                        },
+                    ])),
+                },
+            ),
+            (
+                "unencodable body (a named predicate)",
+                Constraint::Forall {
+                    vars: vec![int_var("i")],
+                    body: Box::new(Constraint::Predicate(
+                        "is_sorted".into(),
+                        vec![Expr::Var("i".into())],
+                    )),
+                },
+            ),
+            (
+                "Exists (boundary unmoved)",
+                Constraint::Exists {
+                    vars: vec![int_var("i")],
+                    body: Box::new(Constraint::True),
+                },
+            ),
+        ];
+        for (label, row) in &declines {
+            assert!(
+                encode_constraint(row, &env, &ectx).is_none(),
+                "{}: DECLINES whole",
+                label
+            );
+            println!("P94|envelope|{}|declines", label);
+        }
+        // Multi-var Int binders encode and decide:
+        // the tautology is Proven, the strict order
+        // claim is Refuted (i = j is a countermodel).
+        let taut = parse_row(
+            "T {\n spec probe {\n input: x: Int\n output: Int\n constraint: forall i: Int, j: Int in range(10): i < j || i >= j\n }\n}",
+        );
+        let (verdict, ms) = p94_judge_formula(&taut, &env, &ectx);
+        assert_eq!(
+            verdict, "Proven",
+            "a two-Int-binder Forall over a tautology is Proven"
+        );
+        println!(
+            "P94|envelope|multi-var tautology|Proven|judge_ms={}",
+            ms
+        );
+        let strict = parse_row(
+            "T {\n spec probe {\n input: x: Int\n output: Int\n constraint: forall i: Int, j: Int in range(10): i < j\n }\n}",
+        );
+        let (verdict, ms) = p94_judge_formula(&strict, &env, &ectx);
+        assert_eq!(
+            verdict, "Refuted",
+            "a two-Int-binder Forall claiming i < j universally is Refuted"
+        );
+        println!(
+            "P94|envelope|multi-var strict|Refuted|judge_ms={}",
+            ms
+        );
     }
 
     // ────────────────────────────────────────────────────
@@ -10809,9 +11430,11 @@ spec grow_first {
 
     /// Phase 90, Part 2 — the Forall encoding. The (c)
     /// row is statable and well-typed in the real module
-    /// (scratch surgery; the file is untouched) and
-    /// still unencodable through the production encoder
-    /// (re-pinned). Through the probe's forall_const
+    /// (scratch surgery; the file is untouched) and —
+    /// through Phase 93 — still unencodable through
+    /// the production encoder (the pin below flipped
+    /// when Phase 94 removed that boundary). Through
+    /// the probe's forall_const
     /// encoder it judges the mirror's outputs at the 12
     /// skip points, refutes the overshoot outputs (its
     /// teeth), and — by design — admits the identity and
@@ -10829,13 +11452,22 @@ spec grow_first {
         let index = SpecIndex::from_module(&module_c);
         let ectx = EvalCtx::root(&index);
         // The production boundary, re-pinned on the
-        // typechecked row.
+        // typechecked row. Through Phase 93 this
+        // asserted None (the boundary this probe
+        // measured against); Phase 94's forall_const
+        // arm removes it, so the pin flips to Some in
+        // place. The judging below still runs through
+        // the probe encoder — this test stands as the
+        // measurement record; Phase 94's production
+        // battery re-runs the same points through
+        // production `encode_constraint`.
         let mut env0 = SymEnv::new();
         env0.insert("state".into(), p90_state_sym(&p90_st(" x", 0, 1, 1)));
         env0.insert("output".into(), p90_state_sym(&p90_st(" x", 2, 1, 3)));
         assert!(
-            encode_constraint(&row_c, &env0, &ectx).is_none(),
-            "the production encoder still returns None for the Forall"
+            encode_constraint(&row_c, &env0, &ectx).is_some(),
+            "Phase 94: the production encoder ENCODES the Forall \
+             (the boundary recorded here through Phase 93 is removed)"
         );
         let judge_forall = |state: &P90St, output: &P90St| -> (P90Tri, u64) {
             let mut env = SymEnv::new();
