@@ -5,13 +5,13 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-orange.svg?style=for-the-badge" alt="Language: Rust"></a>
   <a href="https://github.com/thvtzy/morphic/actions"><img src="https://img.shields.io/github/actions/workflow/status/thvtzy/morphic/ci.yml?branch=master&style=for-the-badge&label=CI" alt="CI Status"></a>
   <br>
-  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v0.7.0-brightgreen?style=for-the-badge" alt="Version: v0.7.0"></a>
+  <a href="https://github.com/thvtzy/morphic/blob/master/CHANGELOG.md"><img src="https://img.shields.io/badge/version-v1.0.0-brightgreen?style=for-the-badge" alt="Version: v1.0.0"></a>
   <img src="https://img.shields.io/badge/status-alpha-orange?style=for-the-badge" alt="Status: Alpha">
   <img src="https://img.shields.io/badge/z3-verified-blue?style=for-the-badge" alt="Z3 Verified">
   <img src="https://img.shields.io/badge/LLM-Ollama-purple?style=for-the-badge" alt="LLM: Ollama">
   <br>
   <a href="https://github.com/thvtzy/morphic/stargazers"><img src="https://img.shields.io/github/stars/thvtzy/morphic?style=for-the-badge&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-555%20passed-green?style=for-the-badge" alt="Tests: 555"></a>
+  <a href="https://github.com/thvtzy/morphic/tree/master/src"><img src="https://img.shields.io/badge/tests-666%20passed-green?style=for-the-badge" alt="Tests: 666"></a>
 </p>
 
 <p align="center">
@@ -278,7 +278,7 @@ v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 +
 
 - **Playground (v0.6)** — Morphic in the browser, live at **[thvtzy.github.io/morphic](https://thvtzy.github.io/morphic/)**: the same compiler codebase in its browser profile (a library build — seeded, bounded, LLM-free — compiled to WASM; no Z3, no compiled runner) shipped as a fully static, client-side site. It checks specs with positioned diagnostics and synthesizes implementations judged by executed interpreter tests, with the passed / evaluable / total denominators shown exactly and formal verification labelled unavailable rather than simulated; synthesis runs in Web Workers with cancel, drafts persist on-device only, and the 611,728 B bundle sits under a 673,792 B CI-enforced budget. W1–W5 gates all passed (pinned-corpus agreement with the native CLI at every stage). Browser matrix: Chromium verified end-to-end; the Firefox/WebKit legs were not exercised in the measuring sandbox and are recorded as known-unverified in the release notes.
 
-**555 tests passing.** Recorded residue, itemized in the ROAD: binary_search's crowns still do not compile (i64 index typing — G5), is_sorted's correct template still cannot crown through interpreter judging (owner-reserved), and the mutation stubs and GA/LLM decoupling (G7). Released as **v0.7.0** (2026-11-22, tag `v0.7.0` on master; v0.6.0 before it) — the release that closes the formal M1 gate: the language gained exactly the features the 2026-11-21 deferral named (method calls, IR field access, record literals), plus the Z3 Char encoding, the encoder extension, and the `int_to_str` builtin, and gate re-run #4 passed in full (Phase 103). Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
+**666 tests passing.** The **1.0 standard library** ships: 29 entries + 2 builtins delivered as a compiler prelude (no import — call by plain name in the CLI, the API and the playground), every entry held to the frozen 1.0 gate (Phase 117: PASS on the amended scope) — 18 Tier-1 entries Z3-Verified ∧ golden-exact through the production pipeline, 11 Tier-2 List entries executed-exact on their full batteries with the tier printed in their documentation, the builtins exact on their per-layer battery; cross-target honesty enforced (no silent free-call fallback for library entries); the playground bundle at 680,280 B inside its 771,072 B budget with the library as a separately-loaded asset. One entry was amended out in the open by the owner's decision (Amendment 1): `int_gcd`, returning with the post-1.0 quantified-mod campaign. Recorded residue, itemized in the ROAD: the §3.9 List-element encoder and G4 function values are the headline post-1.0 campaigns; NF-116-1/NF-116-2 stand as named findings. Released as **v1.0.0** (2026-11-23, tag `v1.0.0` on master; v0.7.0 before it) — the release that ships the verified standard library at the frozen gate. Full record: [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
 
 ---
 
@@ -293,7 +293,7 @@ v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 +
 | **0.5** | Self-hosting: Morphic compiler written in Morphic | ✅ Done — M0 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 ✅ gates closed · tokenizer measured (M1 formal gate closed at 0.7) |
 | **0.6** | WASM playground: Morphic in the browser | ✅ Done — audit ✅ · scope ratified (full client-side, staged) · W1 ✅ · W2 ✅ · W3 ✅ · W4 ✅ · W5 public release ✅ — live at [thvtzy.github.io/morphic](https://thvtzy.github.io/morphic/) (Z3 + compiled runner native-only, labelled in the UI) |
 | **0.7** | M1 gate closed: language features + encoder extension + `int_to_str` | ✅ Done — M1-features ✅ · encoder extension ✅ · F2 ✅ · gate re-run #4 PASS (Phase 103) — all eight tokenizer specs Z3-Verified ∧ 100% golden |
-| **1.0** | Production-ready — verified standard library | 🎯 Target |
+| **1.0** | Production-ready — verified standard library | ✅ Done — scope frozen (D1a–D8a) · §3.1 preconditions ✅ · prelude packaging ✅ · 29 entries + 2 builtins ✅ · cross-target honesty ✅ · gate PASS (Phase 117, as amended by Amendment 1) — released as v1.0.0 |
 | **1.1** | Embeddable Morphic: verified functions as ready-to-import packages (npm/WASM + Rust crate), typed host bindings | 🎯 Target — after 1.0 |
 
 **North Star:** Morphic's long-term ambition is to become as well-known as Python and relevant in everyday use, with proven-correct code as its wedge in the AI-agent era — see the Phase 107 note in [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
