@@ -3009,61 +3009,69 @@ spec tokenize_all {
         );
     }
 
-    /// Phase 80 (M1 gate re-run) — the tokenize_one
-    /// end-of-input contradiction, proven mechanically at
-    /// the point, with the production encoder and solver.
+    /// Phase 82 — RE-STATED from Phase 80's
+    /// `phase80_tokenize_one_eof_contradiction`, whose
+    /// pinned fact (row 1 refutes the golden end-of-input
+    /// output) is exactly what the owner-ratified
+    /// amendment A removes (ratified 2026-11-22; Phase
+    /// 80's option A word for word: row 1 gains row 2's
+    /// own end-of-input disjunct,
+    /// `|| state.pos >= len(state.source)`; row 2 is NOT
+    /// amended). The old test was run against the amended
+    /// spec first and failed at its row-1-refutation
+    /// assertion — the flip is the amendment working, not
+    /// a test bug. The point machinery below is Phase
+    /// 80's, unchanged; the assertions that pinned the
+    /// contradiction are replaced by the amended position
+    /// they predicted, and one section is added (D): the
+    /// row's teeth at a mid-input point, proving the
+    /// amendment did not vacate the row — the failure
+    /// mode Phase 80 recorded against the rejected
+    /// option C.
     ///
-    /// The spec's own "end-of-input" test: input
-    /// `TokenizerState { source: "", pos: 0, line: 1,
-    /// col: 1, tokens: [] }`, expected output `Ok` of that
-    /// same state. At that input, len(state.tokens) = 0,
-    /// len(state.source) = 0, and state.pos >=
-    /// len(state.source) holds (0 >= 0). Row 1 —
-    /// `output.is_err() || len(output.unwrap().tokens) ==
-    /// len(state.tokens) + 1` — instantiated at the point:
+    /// The amended position at the spec's own
+    /// "end-of-input" test point (input `TokenizerState
+    /// { source: "", pos: 0, line: 1, col: 1, tokens:
+    /// [] }`, golden output `Ok` of that same state):
     ///
-    ///   * for the golden output itself (Ok, 0 tokens):
-    ///     is_err() = false and len(unwrap().tokens) = 0,
-    ///     so the row reads `false || 0 == 0 + 1` — FALSE.
-    ///     `verify_constraint` must REFUTE row 1 under the
-    ///     golden output (and PROVE row 2, which is not
-    ///     the problem: is_ok() = true).
-    ///   * the outputs that DO satisfy both rows at this
-    ///     input are exactly: Err (row 1 via is_err();
-    ///     row 2 via 0 >= 0 — proven below under a literal
-    ///     Err output), or Ok carrying EXACTLY ONE token
-    ///     (1 == 0 + 1). Both fail the golden test, which
-    ///     expects Ok with zero tokens. The tag case
-    ///     analysis is discharged with a free tag: row 1
-    ///     under a free is_ok flag b and an Ok payload of
-    ///     token-length L encodes to `!b || L == 0 + 1`,
-    ///     so (L=0 ∧ b) is UNSAT, (L=0 ∧ !b) is SAT,
-    ///     (L=1 ∧ b) is SAT, (L=2 ∧ b) is UNSAT — the row
-    ///     admits an Ok output at EOF only with a
-    ///     fabricated token, never with the golden one.
-    ///     (Under a LITERAL Err tag, row 1 is the
-    ///     encoder's named unencodable case — no Ok
-    ///     payload exists to project — which is why the
-    ///     Err branch is discharged through the free tag:
-    ///     there the left disjunct is the very is_err()
-    ///     term that is definitionally true under the
-    ///     literal Err tag.)
+    ///   * row 1 now PROVES under the golden output: the
+    ///     added disjunct is the point's own truth
+    ///     (0 >= len("") = 0), so the row reads
+    ///     `false || 0 == 0 + 1 || true`. Row 2 Proven,
+    ///     as before (is_ok() = true).
+    ///   * the free-tag analysis of row 1 at the point:
+    ///     the disjunct is input-side and true here, so
+    ///     row 1 is satisfied in EVERY case — (L=0 ∧
+    ///     is_ok) SAT (Phase 80: UNSAT — that UNSAT was
+    ///     the contradiction), (L=0 ∧ is_err) SAT,
+    ///     (L=1 ∧ is_ok) SAT, (L=2 ∧ is_ok) SAT (Phase
+    ///     80: UNSAT). The L=2 case is the amendment's
+    ///     named residue, measured rather than smoothed:
+    ///     at end-of-input inputs amended row 1
+    ///     constrains nothing further about the output
+    ///     (row 2's own disjunct is equally true there),
+    ///     and the golden tests are the only judge at
+    ///     EOF.
+    ///   * (D) teeth, at the "keyword-spec" point
+    ///     (source "spec", pos 0, no tokens): an Ok
+    ///     output with NO growth is still REFUTED by
+    ///     row 1 (not err; 0 != 0 + 1; 0 >= 4 false),
+    ///     and the mirror's one-token output is Proven —
+    ///     away from end-of-input the row demands
+    ///     exactly what it demanded before the amendment.
     ///
-    /// Conclusion the gate records: NO body can be both
-    /// test-correct and Z3-Verified against tokenize_one
-    /// as written — a body returning the golden output at
-    /// EOF violates row 1, and every row-satisfying EOF
-    /// output fails the test. The token lists are bound
-    /// as ListLen(n): the rows observe them only through
-    /// len, and ListLen is the encoder's own model of a
-    /// list observed through len.
+    /// The token lists are bound as ListLen(n): the rows
+    /// observe them only through len, and ListLen is the
+    /// encoder's own model of a list observed through
+    /// len.
     #[cfg(feature = "z3-support")]
     #[test]
-    fn phase80_tokenize_one_eof_contradiction() {
+    fn phase82_tokenize_one_eof_admitted_amendment_a() {
         use crate::verify::smt::{SmtResult, Z3Session};
 
         // The REAL completed module (examples/), not the
-        // Phase 76 scratch: the gate judges this file.
+        // Phase 76 scratch: the gate judges this file, and
+        // the amendment lives in it.
         let module = {
             let src = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -3080,6 +3088,10 @@ spec tokenize_all {
         assert!(
             format!("{:?}", spec.postconditions[0]).contains("is_err"),
             "row 1 is the is_err row"
+        );
+        assert!(
+            format!("{:?}", spec.postconditions[0]).contains("pos"),
+            "row 1 carries amendment A's disjunct (it reads state.pos)"
         );
         assert!(
             format!("{:?}", spec.postconditions[1]).contains("is_ok"),
@@ -3138,16 +3150,16 @@ spec tokenize_all {
             "the golden EOF output carries NO token"
         );
 
-        // ── Point instantiation. state := the EOF state;
+        // ── Point instantiation. state := a point state;
         // outputs observed through exactly what the rows
         // read (tag; payload token-list length).
         let int = |n: i64| Sym::Int(z3::ast::Int::from_i64(n));
-        let state_with = |tok_len: i64| Sym::Record {
+        let state_of = |source: &str, tok_len: i64| Sym::Record {
             type_name: "TokenizerState".into(),
             fields: vec![
                 (
                     "source".into(),
-                    Sym::Str(z3::ast::String::from_str("").unwrap()),
+                    Sym::Str(z3::ast::String::from_str(source).unwrap()),
                 ),
                 ("pos".into(), int(0)),
                 ("line".into(), int(1)),
@@ -3158,17 +3170,18 @@ spec tokenize_all {
                 ),
             ],
         };
-        let mut env = SymEnv::new();
-        env.insert("state".into(), state_with(0));
-        let ok_with = |tok_len: i64| Sym::Result {
+        let ok_of = |st: Sym| Sym::Result {
             ok: Tag::True,
-            ok_payload: Some(Box::new(state_with(tok_len))),
+            ok_payload: Some(Box::new(st)),
             err_payload: None,
         };
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("", 0));
 
-        // (A) The golden output: row 1 REFUTED (0 == 0+1),
-        // row 2 Proven.
-        let golden = ok_with(0);
+        // (A) The golden output: row 1 now PROVEN (Phase
+        // 80: REFUTED — 0 == 0 + 1 was false; the added
+        // disjunct is true at this point), row 2 Proven.
+        let golden = ok_of(state_of("", 0));
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[0],
             "row1@golden-eof",
@@ -3177,8 +3190,9 @@ spec tokenize_all {
             &Some(golden.clone()),
         );
         assert!(
-            matches!(tri, Tri::Refuted),
-            "row 1 must refute the golden EOF output: 0 == 0 + 1 is false"
+            matches!(tri, Tri::Proven),
+            "amended row 1 must ADMIT the golden EOF output: \
+             false || 0 == 0 + 1 || 0 >= 0"
         );
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[1],
@@ -3193,7 +3207,7 @@ spec tokenize_all {
         );
 
         // (B) A literal Err output satisfies row 2 at EOF
-        // (0 >= 0): the Err escape the rows leave open.
+        // (0 >= 0): unchanged from Phase 80.
         let err = Sym::Result {
             ok: Tag::False,
             ok_payload: None,
@@ -3213,22 +3227,25 @@ spec tokenize_all {
             "row 2 licenses Err at end of input (pos 0 >= len 0)"
         );
 
-        // (C) Row 1's satisfying set at EOF, by tag case
-        // analysis over a free tag.
+        // (C) Amended row 1's satisfying set at EOF, by
+        // tag case analysis over a free tag: the added
+        // disjunct is input-side and TRUE at this point,
+        // so every case is SAT — including the two whose
+        // UNSAT was Phase 80's contradiction.
         let row1_free = |tok_len: i64, is_ok: &z3::ast::Bool| -> z3::ast::Bool {
             let mut e = env.clone();
             e.insert(
                 "output".into(),
                 Sym::Result {
                     ok: Tag::Free(is_ok.clone()),
-                    ok_payload: Some(Box::new(state_with(tok_len))),
+                    ok_payload: Some(Box::new(state_of("", tok_len))),
                     err_payload: Some(Box::new(
                         Sym::Str(z3::ast::String::from_str("boom").unwrap()),
                     )),
                 },
             );
             encode_constraint(&spec.postconditions[0], &e, &EvalCtx::root(&index))
-                .expect("row 1 encodes under a free tag")
+                .expect("amended row 1 encodes under a free tag")
         };
         let check = |formula: &z3::ast::Bool, extra: &z3::ast::Bool| -> SmtResult {
             let z3 = Z3Session::new(10_000);
@@ -3237,14 +3254,13 @@ spec tokenize_all {
             z3.check()
         };
         let is_ok = z3::ast::Bool::new_const("out_is_ok");
-        // L = 0 (the golden payload): no Ok output
-        // satisfies row 1; the Err branch does.
         assert!(
             matches!(
                 check(&row1_free(0, &is_ok), &is_ok),
-                SmtResult::Unsat
+                SmtResult::Sat(_)
             ),
-            "row 1 ∧ is_ok ∧ 0 tokens: UNSAT — the golden output cannot satisfy row 1"
+            "row 1 ∧ is_ok ∧ 0 tokens: SAT — the golden output is admitted \
+             (Phase 80: UNSAT, the contradiction)"
         );
         assert!(
             matches!(
@@ -3253,23 +3269,512 @@ spec tokenize_all {
             ),
             "row 1 ∧ is_err: SAT — an Err output satisfies row 1 at EOF"
         );
-        // L = 1: an Ok output satisfies row 1 — with a
-        // token the input does not contain.
         assert!(
             matches!(
                 check(&row1_free(1, &is_ok), &is_ok),
                 SmtResult::Sat(_)
             ),
-            "row 1 ∧ is_ok ∧ 1 token: SAT — a fabricated token satisfies row 1"
+            "row 1 ∧ is_ok ∧ 1 token: SAT — growth still satisfies row 1"
         );
-        // L = 2: the row demands EXACTLY one more token.
         assert!(
             matches!(
                 check(&row1_free(2, &is_ok), &is_ok),
-                SmtResult::Unsat
+                SmtResult::Sat(_)
             ),
-            "row 1 ∧ is_ok ∧ 2 tokens: UNSAT — the growth demanded is exactly +1"
+            "row 1 ∧ is_ok ∧ 2 tokens: SAT — at EOF inputs the amended row \
+             constrains nothing further (Phase 80: UNSAT, growth was exactly +1)"
         );
+
+        // (D) Teeth, at the "keyword-spec" point (source
+        // "spec", pos 0, no tokens): away from EOF the
+        // added disjunct is false (0 >= 4), so the row
+        // bites exactly as before.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("spec", 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[0],
+            "row1@spec-nogrowth",
+            spec,
+            &env,
+            &Some(ok_of(state_of("spec", 0))),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "amended row 1 must still refute a mid-input no-growth Ok: \
+             false || 0 == 0 + 1 || 0 >= 4 is false"
+        );
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[0],
+            "row1@spec-growth",
+            spec,
+            &env,
+            &Some(ok_of(state_of("spec", 1))),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "amended row 1 proves for the mirror's one-token output mid-input"
+        );
+    }
+
+    /// The hand-written mirror's tokenize_one, as an IR
+    /// body (structural transcription of
+    /// mirror_tokenize_one in
+    /// src/tokenizer_cross_validation.rs): skip, then the
+    /// peek dispatch — EOF, the ident arm with its
+    /// consumption loop, the nine single-char arms, the
+    /// error arm. The lexeme accumulation inside the loop
+    /// is the one approximate joint (a Char pushed onto a
+    /// String, written as a Concat of the indexed char);
+    /// it sits inside the While, which decides the body's
+    /// encodability on its own.
+    #[cfg(feature = "z3-support")]
+    fn tokenize_one_mirror_body() -> IRNode {
+        let var = |n: &str| IRNode::Var(n.into());
+        let field = |base: IRNode, name: &str| IRNode::FieldAccess {
+            base: Box::new(base),
+            field: name.into(),
+        };
+        let call = |f: &str, args: Vec<IRNode>| IRNode::Call {
+            function: f.into(),
+            args,
+        };
+        let peek_is_none = |s: IRNode| {
+            IRNode::BinOp(
+                IRBinOp::Eq,
+                Box::new(call("peek", vec![s])),
+                Box::new(call("None", vec![])),
+            )
+        };
+        let peeked = |s: IRNode| {
+            IRNode::Index(
+                Box::new(field(s.clone(), "source")),
+                Box::new(field(s, "pos")),
+            )
+        };
+        // push_token(start, end, kind, lexeme): the end
+        // state with one Token appended, the token stamped
+        // with the START state's line/col (D4a).
+        let push_token = |start: IRNode, end: IRNode, kind: i64, lexeme: IRNode| {
+            let tok = IRNode::RecordLit {
+                type_name: "Token".into(),
+                fields: vec![
+                    ("kind".into(), IRNode::Literal(IRLiteral::Int(kind))),
+                    ("lexeme".into(), lexeme),
+                    ("line".into(), field(start.clone(), "line")),
+                    ("col".into(), field(start, "col")),
+                ],
+            };
+            IRNode::RecordLit {
+                type_name: "TokenizerState".into(),
+                fields: vec![
+                    ("source".into(), field(end.clone(), "source")),
+                    ("pos".into(), field(end.clone(), "pos")),
+                    ("line".into(), field(end.clone(), "line")),
+                    ("col".into(), field(end.clone(), "col")),
+                    (
+                        "tokens".into(),
+                        IRNode::BinOp(
+                            IRBinOp::Concat,
+                            Box::new(field(end, "tokens")),
+                            Box::new(IRNode::Collection {
+                                kind: crate::synthesis::engine::CollectionKind::List,
+                                elements: vec![tok],
+                            }),
+                        ),
+                    ),
+                ],
+            }
+        };
+        let single = |kind: i64, ch: char| {
+            call(
+                "Ok",
+                vec![push_token(
+                    var("s1"),
+                    call("next_char", vec![var("s1")]),
+                    kind,
+                    IRNode::Literal(IRLiteral::String(ch.to_string())),
+                )],
+            )
+        };
+        // The nine single-char arms, innermost last arm
+        // first; the fall-through is the error arm.
+        let mut dispatch = call(
+            "Err",
+            vec![IRNode::Literal(IRLiteral::String(
+                "Unexpected character".into(),
+            ))],
+        );
+        for (ch, kind) in [
+            ('=', 12),
+            ('>', 11),
+            ('<', 10),
+            (',', 9),
+            (')', 4),
+            ('(', 3),
+            ('}', 6),
+            ('{', 5),
+            (':', 7),
+        ] {
+            dispatch = IRNode::If {
+                condition: Box::new(IRNode::BinOp(
+                    IRBinOp::Eq,
+                    Box::new(peeked(var("s1"))),
+                    Box::new(IRNode::Literal(IRLiteral::Char(ch))),
+                )),
+                then_branch: Box::new(single(kind, ch)),
+                else_branch: Box::new(dispatch),
+            };
+        }
+        // The ident arm: consume while is_ident_continue,
+        // accumulating the lexeme, then push one Ident
+        // token. The lexeme push (a Char onto a String) is
+        // written as a Concat of the indexed char — the one
+        // approximate joint, inside the While.
+        let ident_arm = IRNode::Let {
+            name: "s".into(),
+            value: Box::new(var("s1")),
+            body: Box::new(IRNode::Let {
+                name: "lex".into(),
+                value: Box::new(IRNode::Literal(IRLiteral::String(String::new()))),
+                body: Box::new(IRNode::Block(vec![
+                    IRNode::While {
+                        condition: Box::new(IRNode::BinOp(
+                            IRBinOp::And,
+                            Box::new(IRNode::BinOp(
+                                IRBinOp::Neq,
+                                Box::new(call("peek", vec![var("s")])),
+                                Box::new(call("None", vec![])),
+                            )),
+                            Box::new(call(
+                                "is_ident_continue",
+                                vec![peeked(var("s"))],
+                            )),
+                        )),
+                        body: Box::new(IRNode::Block(vec![
+                            IRNode::Assign {
+                                target: Box::new(var("lex")),
+                                value: Box::new(IRNode::BinOp(
+                                    IRBinOp::Concat,
+                                    Box::new(var("lex")),
+                                    Box::new(peeked(var("s"))),
+                                )),
+                            },
+                            IRNode::Assign {
+                                target: Box::new(var("s")),
+                                value: Box::new(call(
+                                    "next_char",
+                                    vec![var("s")],
+                                )),
+                            },
+                        ])),
+                        invariant: None,
+                    },
+                    call(
+                        "Ok",
+                        vec![push_token(var("s1"), var("s"), 0, var("lex"))],
+                    ),
+                ])),
+            }),
+        };
+        IRNode::Let {
+            name: "s1".into(),
+            value: Box::new(call("skip_whitespace", vec![var("state")])),
+            body: Box::new(IRNode::If {
+                condition: Box::new(peek_is_none(var("s1"))),
+                then_branch: Box::new(call("Ok", vec![var("s1")])),
+                else_branch: Box::new(IRNode::If {
+                    condition: Box::new(call(
+                        "is_ident_start",
+                        vec![peeked(var("s1"))],
+                    )),
+                    then_branch: Box::new(ident_arm),
+                    else_branch: Box::new(dispatch),
+                }),
+            }),
+        }
+    }
+    /// Phase 82 — the mirror-transcribed tokenize_one
+    /// body against the AMENDED rows (amendment A): the
+    /// contract Phase 83's generation template is built
+    /// against, measured through the production encoder —
+    /// the whole body judged by verify_one, and the
+    /// mirror's own output judged at the point for each
+    /// of the cross-validation battery's input classes.
+    ///
+    /// Whole body: verify_one returns Inconclusive, and
+    /// the body is outside the encodable subset twice
+    /// over, both blockers named: its ident arm is a
+    /// While loop (While is an unencodable arm of
+    /// sym_eval — the standing loop boundary), and its
+    /// first step calls skip_whitespace, for which the
+    /// resolver denotes NO body (its two stated rows are
+    /// field inequalities no builder denotes), so there
+    /// is nothing to inline even before the loop. A
+    /// Phase 83 body that verifies must be an encodable
+    /// formulation of this behavior, not this
+    /// transcription.
+    ///
+    /// Per class (input at pos 0, no tokens; the
+    /// mirror's output judged against both rows at the
+    /// point):
+    ///   ""      EOF           Ok, no token   Proven / Proven — ADMITTED (the amendment's purpose; pre-amendment row 1 refuted it)
+    ///   "spec"  ident         Ok, +1 token   Proven / Proven — admitted by the growth disjunct
+    ///   "  spec" leading ws   Ok, +1 token   Proven / Proven — admitted by growth (input pos 0 < len 6: NOT the EOF disjunct)
+    ///   "\n\nx" newline run   Ok, +1 token   Proven / Proven — admitted by growth
+    ///   ":"     single char   Ok, +1 token   Proven / Proven — admitted by growth
+    ///   " "     ws-only rest  Ok, no token   REFUTED / Proven — row 1 refutes it (the corner, below)
+    ///   "5"     unexpected    Err            row 1 via is_err / REFUTED — row 2 refutes it (below)
+    ///
+    /// The two refuted classes are Phase 83's exact
+    /// obligations, stated as Phase 80 priced them and
+    /// this phase measures them:
+    ///   * The whitespace-only-remainder corner: the
+    ///     input is NOT at end-of-input (pos 0 < len 1),
+    ///     the mirror skips to end-of-input and returns
+    ///     Ok with no new token. Amended row 1's disjunct
+    ///     reads the INPUT's pos, so it does not license
+    ///     the corner; and row 2 bars Err mid-input — so
+    ///     rows 1+2 jointly admit, at this class, ONLY an
+    ///     Ok carrying exactly one more token (pinned
+    ///     below). A verifying body must fabricate a
+    ///     token where the mirror returns none.
+    ///   * The unexpected-character class: the mirror
+    ///     returns Err mid-input; row 2 — UNAMENDED in
+    ///     this phase (its mid-input Err question is
+    ///     Phase 80's adjacent observation, recorded for
+    ///     a future owner decision round) — licenses Err
+    ///     only at end-of-input, so it refutes the
+    ///     mirror here; rows 1+2 jointly admit only an
+    ///     Ok with exactly one more token (pinned below).
+    ///   So under the amended rows NO body is
+    ///   simultaneously Z3-Verified and mirror-exact on
+    ///   the full battery: a Phase 83 template either
+    ///   deviates at exactly these two classes (paying
+    ///   the executed-agreement cost there, visibly) or
+    ///   the classes return to the owner. At EOF inputs,
+    ///   conversely, the rows constrain nothing at all
+    ///   (the companion test's L=2 case) — executed
+    ///   agreement is the only judge there.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase82_tokenize_one_mirror_body_vs_amended_rows() {
+        // The REAL module (examples/): the amendment
+        // lives there, and the gate judges this file.
+        let module = {
+            let src = std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/functional_tokenizer.morph"
+            ))
+            .expect("examples tokenizer reads");
+            let parsed = crate::spec::parser::parse(&src).expect("examples parses");
+            crate::spec::typeck::check(parsed)
+                .expect("examples typechecks")
+                .spec
+        };
+        let spec = restored_spec(&module, "tokenize_one");
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+
+        // ── Whole body: Inconclusive, with both blockers
+        // named. The resolver denotes no body for
+        // skip_whitespace (peek denotes, since Phase 81 —
+        // asserted here so the contrast is pinned, not
+        // anecdotal).
+        assert!(
+            index.callee_body("skip_whitespace").is_none(),
+            "no denotation exists for skip_whitespace: nothing to inline"
+        );
+        assert!(
+            index.callee_body("peek").is_some(),
+            "peek denotes since Phase 81"
+        );
+        let body = tokenize_one_mirror_body();
+        assert!(
+            !body_is_encodable_with(&spec, &body, &index),
+            "the mirror transcription is outside the encodable subset \
+             (While arm; the skip_whitespace call)"
+        );
+        let cand = candidate(&spec, 82, body);
+        assert_eq!(
+            verifier.verify_one(&cand, &spec).status,
+            VerificationStatus::Inconclusive,
+            "the mirror body cannot verify whole: loops do not encode"
+        );
+
+        // ── Per-class point verdicts: the mirror's own
+        // output at each battery input, judged against
+        // both amended rows at the point.
+        let int = |n: i64| Sym::Int(z3::ast::Int::from_i64(n));
+        let state_of = |source: &str, pos: i64, tok_len: i64| Sym::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                (
+                    "source".into(),
+                    Sym::Str(z3::ast::String::from_str(source).unwrap()),
+                ),
+                ("pos".into(), int(pos)),
+                ("line".into(), int(1)),
+                ("col".into(), int(1)),
+                (
+                    "tokens".into(),
+                    Sym::ListLen(z3::ast::Int::from_i64(tok_len)),
+                ),
+            ],
+        };
+        let ok_of = |st: Sym| Sym::Result {
+            ok: Tag::True,
+            ok_payload: Some(Box::new(st)),
+            err_payload: None,
+        };
+        // (class name, input source, mirror output,
+        //  expected row 1, expected row 2). The mirror
+        //  outputs carry its true end pos; the rows read
+        //  only the tag, the payload's token length, and
+        //  the INPUT's pos / source length.
+        let classes: Vec<(&str, &str, Sym, Tri, Tri)> = vec![
+            (
+                "eof",
+                "",
+                ok_of(state_of("", 0, 0)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "ident",
+                "spec",
+                ok_of(state_of("spec", 4, 1)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "leading-ws-ident",
+                "  spec",
+                ok_of(state_of("  spec", 6, 1)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "newline-run",
+                "\n\nx",
+                ok_of(state_of("\n\nx", 3, 1)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "single-colon",
+                ":",
+                ok_of(state_of(":", 1, 1)),
+                Tri::Proven,
+                Tri::Proven,
+            ),
+            (
+                "corner-whitespace-only",
+                " ",
+                ok_of(state_of(" ", 1, 0)),
+                Tri::Refuted,
+                Tri::Proven,
+            ),
+        ];
+        for (name, source, output, want1, want2) in classes {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), state_of(source, 0, 0));
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[0],
+                "row1@class",
+                spec,
+                &env,
+                &Some(output.clone()),
+            );
+            assert!(
+                matches!((&tri, &want1), (Tri::Proven, Tri::Proven)
+                    | (Tri::Refuted, Tri::Refuted)
+                    | (Tri::Unknown, Tri::Unknown)),
+                "class {}: amended row 1 verdict for the mirror output",
+                name
+            );
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[1],
+                "row2@class",
+                spec,
+                &env,
+                &Some(output),
+            );
+            assert!(
+                matches!((&tri, &want2), (Tri::Proven, Tri::Proven)
+                    | (Tri::Refuted, Tri::Refuted)
+                    | (Tri::Unknown, Tri::Unknown)),
+                "class {}: row 2 verdict for the mirror output",
+                name
+            );
+        }
+
+        // The corner's joint admission: at input " " the
+        // ONLY outputs satisfying both rows are Ok with
+        // exactly one more token — an Ok/+1 output proves
+        // against both rows where the mirror's Ok/+0 was
+        // refuted by row 1 above.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of(" ", 0, 0));
+        for (i, label) in ["row1", "row2"].iter().enumerate() {
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[i],
+                label,
+                spec,
+                &env,
+                &Some(ok_of(state_of(" ", 1, 1))),
+            );
+            assert!(
+                matches!(tri, Tri::Proven),
+                "corner: an Ok/+1 (fabricated-token) output satisfies {} \
+                 — the only shape a verifying body may take at this class",
+                label
+            );
+        }
+
+        // The unexpected-character class: the mirror's
+        // Err at input "5". Row 1 is satisfied through
+        // its is_err disjunct — discharged via the free
+        // tag, as in Phase 80 (row 1 under a LITERAL Err
+        // tag is the encoder's named unencodable case);
+        // row 2 REFUTES the literal Err (is_ok false,
+        // input pos 0 < len 1). And the joint admission
+        // is again only Ok/+1.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("5", 0, 0));
+        let err = Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(Sym::Str(
+                z3::ast::String::from_str("Unexpected character '5' at line 1")
+                    .unwrap(),
+            ))),
+        };
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@digit-err",
+            spec,
+            &env,
+            &Some(err),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row 2 (unamended) refutes the mirror's mid-input Err"
+        );
+        for (i, label) in ["row1", "row2"].iter().enumerate() {
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[i],
+                label,
+                spec,
+                &env,
+                &Some(ok_of(state_of("5", 1, 1))),
+            );
+            assert!(
+                matches!(tri, Tri::Proven),
+                "digit class: an Ok/+1 output satisfies {} — the only \
+                 shape a verifying body may take at this class",
+                label
+            );
+        }
     }
 
     #[cfg(feature = "z3-support")]

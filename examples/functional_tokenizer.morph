@@ -106,6 +106,29 @@
 //      pinning the divergence to pinning the agreement.
 //      The mirrors followed the spec throughout; nothing
 //      in this file moved for D4a.
+//
+// ── Phase 82 amendment record (2026-11-22) ─────────────
+//  ONE deliberate deviation from the verbatim restoration
+//  above, owner-ratified 2026-11-22 (Phase 80's amendment
+//  option A, from the gate re-run's decision round):
+//   - tokenize_one's first constraint row gains row 2's
+//     own end-of-input disjunct:
+//     `|| state.pos >= len(state.source)`. As restored,
+//     the row refuted the output this module's own
+//     "end-of-input" test demands — Ok with no new token
+//     at pos >= len(source) reads 0 == 0 + 1 on the row,
+//     proven mechanically in Phase 80 — so no test-correct
+//     body could verify against it. With the disjunct the
+//     rows and the tests are jointly satisfiable. Row 2
+//     is NOT amended. The residue is the one Phase 80
+//     stated for option A, re-measured in Phase 82: at
+//     end-of-input inputs the amended row 1 constrains
+//     nothing further (row 2 and the tests bound the
+//     output there), and the whitespace-only-remainder
+//     corner — skipping to end-of-input from a non-EOF
+//     input and returning Ok without growth — stays
+//     unlicensed, so a mirror-faithful body remains
+//     refutable on that corner.
 
 FunctionalTokenizer {
 
@@ -249,10 +272,16 @@ spec tokenize_one {
     // constraint text is the original's verbatim, spacing
     // included: the one place the module's tight dialect
     // (note 6) is not applied, because the restoration is
-    // verbatim by design. Tests restored in-spec in the
+    // verbatim by design — with ONE owner-ratified
+    // exception (Phase 82, amendment A): row 1 gains row
+    // 2's own end-of-input disjunct,
+    // `|| state.pos >= len(state.source)`, because as
+    // restored the row refuted this spec's own
+    // "end-of-input" test (Phase 80's mechanical proof).
+    // Row 2 stays verbatim. Tests restored in-spec in the
     // D3a named form; the mirror golden in
     // tests/tokenizer_proof.rs keeps its copies.
-    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1
+    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || state.pos >= len(state.source)
     constraint: output.is_ok() || state.pos >= len(state.source)
 
     test "keyword-spec" {
