@@ -38,6 +38,16 @@
 # bytes from here. Measured after the move (Phase 112,
 # 17 entries in the asset): see the ROAD Phase 112 note.
 #
+# Phase 116 (2026-11-23): the number did NOT change. On
+# the final 1.0 library tree (all 29 entries shipped)
+# with the clause-5 cross-target honesty machinery in
+# codegen (the library-call scan, generation-time
+# refusals, the Rust helper emission), the bundle
+# rebuilds at 680,280 B post-wasm-opt (844,289 B
+# pre-pass) — headroom 90,792 B. The stdlib asset stands
+# at 33,476 B. Corpus on the rebuilt bundle: 16/16 check
+# + 6/6 synthesis.
+#
 # Enforced by .github/workflows/playground.yml on every
 # push/PR that touches the playground path. Re-baselining
 # is a deliberate act: change this number only in a phase

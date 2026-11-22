@@ -189,7 +189,7 @@ ERROR: Postcondition violated
 ```
 
 ### 4. Template Library
-9 algorithmic patterns seed the synthesis engine: divide-and-conquer, binary search, two-pointer, sliding window, fold, iterator chain, linear scan, memoization, simple compute. The right template is auto-selected based on spec shape detection.
+3 structural templates (sort primitive, adjacent scan, binary search) plus 15 constraint-seed families seed the synthesis engine, alongside test-induced, LLM and random seeds. The right seeds are selected based on spec shape detection. (An earlier version of this section claimed "9 algorithmic patterns" — v0.4 archaeology, corrected per the Phase 106 audit: the other v0.4 builders were removed in Phase 59.)
 
 ### 5. Self-Optimizing
 The IR that Morphic outputs can be fed back as input. The compiler can **optimize its own generated code.** Morphic functions can call other Morphic functions — each is a spec, not an implementation, so the compiler can cross-optimize.
@@ -226,7 +226,7 @@ morphic/
 │   │   ├── mod.rs                # Synthesis module
 │   │   ├── engine.rs             # MCTS + Genetic + LLM engine
 │   │   ├── eval.rs               # IR interpreter — executes spec tests for real scoring
-│   │   ├── templates.rs          # 9 algorithmic patterns
+│   │   ├── templates.rs          # 3 structural templates
 │   │   ├── selector.rs           # Pareto-optimal candidate selection
 │   │   └── interactive.rs        # Interactive synthesis UI
 │   ├── verify/
