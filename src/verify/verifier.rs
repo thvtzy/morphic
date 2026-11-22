@@ -29,6 +29,12 @@ pub use super::verdict::{
 
 pub struct Verifier {
     timeout_per_constraint_ms: u64,
+    /// Unrolling fuel for statement-mode judging
+    /// (Phase 93): the per-loop iteration bound of the
+    /// statement encoder's BMC discipline when
+    /// `verify_one` engages it. See `STMT_VERIFY_FUEL`
+    /// for the derivation of the default.
+    stmt_fuel: usize,
     /// The module the verified spec lives in, for resolving
     /// spec-to-spec calls by inlining (see `sym_invoke`).
     /// Empty unless built with `with_specs`/`with_index` — a
@@ -38,10 +44,36 @@ pub struct Verifier {
     index: SpecIndex,
 }
 
+/// The production unrolling fuel for statement-mode
+/// judging in `verify_one` (Phase 93). The BMC discipline
+/// (ENCODER_EXTENSION_DESIGN.md §2.2) is sound at ANY
+/// fuel — a higher fuel only completes more paths — so
+/// the default is a cost decision, and it is the smallest
+/// fuel with the full measured symbolic product:
+///
+/// - every symbolic outcome Phase 90 measured is already
+///   decided at fuel 1: skip Unknown (exhaustion is
+///   reachable at every fuel — no fuel Verifies an
+///   unbounded loop symbolically), the STEP body's row 2
+///   Refuted (the `" 5"` countermodel completes within
+///   one iteration), the LOOP body's row Unknown;
+/// - point precision is NOT this fuel's job: battery
+///   points are judged through `sym_eval_stmt` with the
+///   per-point fuel the trip counts dictate (skip = trip
+///   count, STEP = max(skip, ident+1), LOOP = max(outer,
+///   inner)), supplied by the caller;
+/// - the cost wall is real: nested-denotation unrolling
+///   grows ~×8 per iteration in merging mode, and the
+///   LOOP composition at fuel 2 exceeded a 280 s wall in
+///   the Phase 90 measurement. A `verify_one` default
+///   must never be able to do that to a synthesis pool.
+const STMT_VERIFY_FUEL: usize = 1;
+
 impl Default for Verifier {
     fn default() -> Self {
         Self {
             timeout_per_constraint_ms: 5_000,
+            stmt_fuel: STMT_VERIFY_FUEL,
             index: SpecIndex::empty(),
         }
     }
@@ -130,16 +162,50 @@ impl Verifier {
             &EvalCtx::root(&self.index),
         );
 
+        // Statement-mode routing (Phase 93): the
+        // statement encoder engages ONLY where the
+        // expression encoder declined AND the decline is
+        // for statement/loop nodes — in the body itself
+        // or in a denotation it calls. Every other
+        // decline (holes, lambdas, guard patterns,
+        // unresolvable calls) keeps the standing outcome:
+        // no output, every constraint Unknown. When the
+        // statement evaluation itself declines, the same
+        // fallback applies — the outcome below is then
+        // None and the constraint loop is byte-for-byte
+        // the pre-Phase-93 one.
+        let stmt_outcome = if output.is_none()
+            && body_mentions_statements(&candidate.body, &self.index)
+        {
+            let ctx = StmtCtx::root(
+                &self.index,
+                self.stmt_fuel,
+                self.timeout_per_constraint_ms,
+            );
+            sym_eval_stmt(&candidate.body, param_env.clone(), &ctx)
+        } else {
+            None
+        };
+
         let mut any_refuted = false;
         let mut any_unknown = false;
         for (i, c) in spec.postconditions.iter().enumerate() {
-            let (result, tri) = self.verify_constraint(
-                c,
-                &format!("post[{}]", i),
-                spec,
-                &param_env,
-                &output,
-            );
+            let (result, tri) = match (&output, &stmt_outcome) {
+                (None, Some(outcome)) => self.verify_constraint_stmt(
+                    c,
+                    &format!("post[{}]", i),
+                    spec,
+                    &param_env,
+                    outcome,
+                ),
+                _ => self.verify_constraint(
+                    c,
+                    &format!("post[{}]", i),
+                    spec,
+                    &param_env,
+                    &output,
+                ),
+            };
             match tri {
                 Tri::Refuted => {
                     any_refuted = true;
@@ -287,6 +353,120 @@ impl Verifier {
                 if model.is_empty() { None } else { Some(model) },
                 Tri::Refuted,
             ),
+            _ => done(false, None, Tri::Unknown),
+        }
+    }
+
+    /// The statement-mode judge (Phase 93): one
+    /// postcondition against a statement evaluation's
+    /// outcome, under the BMC discipline of
+    /// ENCODER_EXTENSION_DESIGN.md §2.2, verbatim:
+    ///
+    /// - **Refuted** ⟺ some COMPLETED path has
+    ///   `side ∧ pc ∧ ¬exhausted ∧ ¬formula` satisfiable
+    ///   (a countermodel on a path the unrolling ran to
+    ///   completion — a real countermodel);
+    /// - **Proven** ⟺ no completed path refutes AND
+    ///   `side ∧ exhausted` is unsatisfiable (no path
+    ///   was cut off by the fuel bound);
+    /// - **Unknown** otherwise: exhaustion reachable, a
+    ///   solver Unknown anywhere, or the row unencodable
+    ///   on some path (the W8 literal-tag boundaries
+    ///   judge Unknown here exactly as in
+    ///   `verify_constraint`).
+    ///
+    /// The verdict vocabulary is the same `Tri` /
+    /// `VerificationStatus` the expression judge
+    /// produces, and `verify_one` folds it into the
+    /// candidate status by the same rule — the selector
+    /// (`composite_score`, the refutation gate) reads no
+    /// new status and gains no Verified-preference from
+    /// this path: a statement body reaches Verified here
+    /// only when its loops provably exit within the fuel
+    /// on every constructible path, which for the
+    /// unbounded tokenizer loops over symbolic inputs
+    /// never happens (that route is Phase 96's
+    /// invariants, not unrolling).
+    #[cfg(feature = "z3-support")]
+    fn verify_constraint_stmt(
+        &self,
+        constraint: &Constraint,
+        label: &str,
+        spec: &FunctionSpec,
+        param_env: &SymEnv,
+        outcome: &StmtOutcome,
+    ) -> (ConstraintResult, Tri) {
+        let start = crate::timeutil::now();
+        let done = |holds: bool, model: Option<HashMap<String, SmtValue>>, tri: Tri| {
+            (
+                ConstraintResult {
+                    constraint: label.into(),
+                    holds,
+                    solver_time_ms: start.elapsed_ms(),
+                    model,
+                },
+                tri,
+            )
+        };
+
+        // The D5a Char side conditions, asserted exactly
+        // as in `verify_constraint`.
+        let mut side: Vec<z3::ast::Bool> = Vec::new();
+        for p in &spec.params {
+            if let Some(sym) = param_env.get(&p.name) {
+                collect_char_conditions(sym, &mut side);
+            }
+        }
+        // Int parameters, for real counterexample values.
+        let int_params: Vec<(&str, &z3::ast::Int)> = spec
+            .params
+            .iter()
+            .filter_map(|p| match param_env.get(&p.name) {
+                Some(Sym::Int(ast)) => Some((p.name.as_str(), ast)),
+                _ => None,
+            })
+            .collect();
+
+        let not_exhausted = outcome.exhausted.not();
+        let mut any_unknown = false;
+        for (pc, output) in &outcome.paths {
+            let mut env = param_env.clone();
+            env.insert("output".to_string(), output.clone());
+            let Some(formula) =
+                encode_constraint(constraint, &env, &EvalCtx::root(&self.index))
+            else {
+                return done(false, None, Tri::Unknown);
+            };
+            let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+            for cond in &side {
+                z3.assert(cond);
+            }
+            z3.assert(pc);
+            z3.assert(&not_exhausted);
+            z3.assert(&formula.not());
+            match z3.check_and_eval_ints(&int_params) {
+                SmtResult::Sat(model) => {
+                    return done(
+                        false,
+                        if model.is_empty() { None } else { Some(model) },
+                        Tri::Refuted,
+                    );
+                }
+                SmtResult::Unsat => {}
+                _ => any_unknown = true,
+            }
+        }
+        // The exhaustion gate: Proven requires that the
+        // fuel bound cut off NO path — otherwise the
+        // completed paths' silence proves nothing about
+        // the paths that wanted another iteration.
+        let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+        for cond in &side {
+            z3.assert(cond);
+        }
+        z3.assert(&outcome.exhausted);
+        match z3.check() {
+            SmtResult::Unsat if !any_unknown => done(true, None, Tri::Proven),
             _ => done(false, None, Tri::Unknown),
         }
     }
@@ -1775,6 +1955,1133 @@ fn sym_unary_ir(op: IRUnaryOp, v: Sym) -> Option<Sym> {
         // interpreter's evaluable subset too.
         _ => None,
     }
+}
+
+// ── Statement-mode encoding (Phase 93) ───────────────────
+//
+// The production form of the Phase 90 probe evaluator
+// (ENCODER_EXTENSION_DESIGN.md §2.6/§2.7 Layer 1): a
+// path-state symbolic evaluator for the statement subset
+// of the IR — Block / Alloc / Assign / While / Loop /
+// Break / TryPropagate — layered on the expression
+// encoder's primitives (`sym_eval`, `sym_call`,
+// `sym_ite`, `encode_constraint`). Loops unroll to a
+// fuel bound under the §2.2 BMC discipline: evaluation
+// returns (paths, exhausted), and `verify_one`'s
+// statement judge (`verify_constraint_stmt`) turns that
+// into verdicts — Refuted on completed paths, Proven
+// only when exhaustion is unreachable, Unknown
+// otherwise. Symbolic Verified of an unbounded loop is
+// NOT this layer's product (exhaustion is reachable at
+// every fuel); that route is loop invariants (Phase 96).
+//
+// Two execution modes, as measured in Phase 90. GUIDED:
+// while the solver decides a branch/loop condition
+// under the current path (forced-true or forced-false),
+// execution follows the single decided branch — binds
+// replace outright, no ite merge, terms stay
+// one-iteration sized (point evaluation is flat ~5 ms).
+// MERGING: the first undecidable branch flips the state
+// to classic pc-narrowing symbolic execution (binds
+// merge by ite) for the rest of the run. Naive merging
+// from the start grows ~×8 per iteration; guidance is
+// what keeps points cheap, and merging is what keeps
+// symbolic verdicts honest.
+//
+// Value positions delegate to the expression encoder
+// wherever it reaches; the statement layer adds exactly
+// two things there: calls to specs whose denotations
+// are statement-bodied (evaluated by this layer and
+// assembled back into one value), and Append in the
+// forms the statement bodies use (see `stmt_append`).
+// Term identity is Z3 node identity throughout — never
+// Debug strings (Phase 90's measured 96 s trap).
+//
+// Declines, kept honest (all return None → the caller
+// reports Unknown, never a guess): a `Break` carrying a
+// value (the bodies at stake break bare; a valued break
+// is a value-position loop result this layer does not
+// model), a `For` loop, an Assign to a non-Var target,
+// a TryPropagate anywhere but an Alloc's initial value,
+// and anything the expression encoder declines inside a
+// delegated subtree.
+
+/// Statement-evaluation context: the expression
+/// encoder's resolution context (index, cycle guard,
+/// inlining depth) plus the unrolling fuel and the
+/// solver timeout every decision check runs under (the
+/// verifier's per-constraint timeout — a cap hit decides
+/// nothing and surfaces as Unknown, never as a verdict).
+#[cfg(feature = "z3-support")]
+struct StmtCtx<'a> {
+    eval: EvalCtx<'a>,
+    fuel: usize,
+    timeout_ms: u64,
+}
+
+#[cfg(feature = "z3-support")]
+impl<'a> StmtCtx<'a> {
+    fn root(index: &'a SpecIndex, fuel: usize, timeout_ms: u64) -> Self {
+        Self {
+            eval: EvalCtx::root(index),
+            fuel,
+            timeout_ms,
+        }
+    }
+
+    fn child(&self, name: &str) -> Self {
+        Self {
+            eval: self.eval.child(name),
+            fuel: self.fuel,
+            timeout_ms: self.timeout_ms,
+        }
+    }
+}
+
+/// One execution path's state under statement-mode
+/// evaluation.
+#[cfg(feature = "z3-support")]
+#[derive(Clone)]
+struct StmtState {
+    env: SymEnv,
+    /// Path condition under which execution reaches the
+    /// current point.
+    pc: z3::ast::Bool,
+    /// (pc, value) return contributions, in order.
+    rets: Vec<(z3::ast::Bool, Sym)>,
+    /// Path conditions under which a Break fired and has
+    /// not yet been consumed by its loop.
+    breaks: Vec<z3::ast::Bool>,
+    /// Path conditions under which a loop still wanted
+    /// another iteration when its fuel ran out. Where
+    /// the exhaustion disjunction is satisfiable the
+    /// body has NOT been fully evaluated.
+    exhausted: Vec<z3::ast::Bool>,
+    /// The running block value (production Block
+    /// semantics: the last statement's value).
+    last: Option<Sym>,
+    /// Variables bound since this state was created
+    /// (drives the If environment merge).
+    writes: std::collections::HashSet<String>,
+    /// Standing assumptions for solver-guided decisions.
+    assumptions: Vec<z3::ast::Bool>,
+    /// Guided mode: every branch so far was solver-
+    /// DECIDED, so the state is a single path and binds
+    /// replace outright (no ite merge). The first
+    /// undecidable branch flips the state to merging
+    /// mode for the rest of the run.
+    guided: bool,
+}
+
+/// A statement body's evaluated outcome: the per-path
+/// output values and the exhaustion disjunction — the
+/// pair the §2.2 discipline judges over.
+#[cfg(feature = "z3-support")]
+struct StmtOutcome {
+    /// (pc, output value) per return path, plus the
+    /// fall-through value under the remaining pc when
+    /// the body can end without returning.
+    paths: Vec<(z3::ast::Bool, Sym)>,
+    /// Disjunction of every loop-exhaustion path
+    /// condition recorded during the evaluation.
+    exhausted: z3::ast::Bool,
+}
+
+#[cfg(feature = "z3-support")]
+fn stmt_is_true(b: &z3::ast::Bool) -> bool {
+    matches!(b.as_bool(), Some(true))
+}
+
+#[cfg(feature = "z3-support")]
+fn stmt_is_false(b: &z3::ast::Bool) -> bool {
+    matches!(b.as_bool(), Some(false))
+}
+
+#[cfg(feature = "z3-support")]
+fn stmt_or_all(terms: &[z3::ast::Bool]) -> z3::ast::Bool {
+    let mut acc = z3::ast::Bool::from_bool(false);
+    for t in terms {
+        acc = z3::ast::Bool::or(&[&acc, t]);
+    }
+    acc
+}
+
+/// Structural identity of two Sym values, by Z3 NODE
+/// identity per term (Z3 hash-conses; AST `==` is
+/// `Z3_is_eq_ast`, O(1)). Never Debug strings: printing
+/// a shared DAG as a tree is exponential in its depth
+/// (Phase 90 measured 96 s on the STEP body). Used for
+/// the merge fast path below.
+#[cfg(feature = "z3-support")]
+fn stmt_sym_identical(a: &Sym, b: &Sym) -> bool {
+    fn term_eq<T: PartialEq>(x: &T, y: &T) -> bool {
+        x == y
+    }
+    match (a, b) {
+        (Sym::Int(x), Sym::Int(y)) => term_eq(x, y),
+        (Sym::Bool(x), Sym::Bool(y)) => term_eq(x, y),
+        (Sym::Str(x), Sym::Str(y)) => term_eq(x, y),
+        (Sym::Char(x), Sym::Char(y)) => term_eq(x, y),
+        (Sym::CharStr(x), Sym::CharStr(y)) => term_eq(x, y),
+        (Sym::ListLen(x), Sym::ListLen(y)) => term_eq(x, y),
+        (Sym::List(x), Sym::List(y)) => {
+            x.len() == y.len()
+                && x.iter().zip(y.iter()).all(|(u, v)| stmt_sym_identical(u, v))
+        }
+        (
+            Sym::Record {
+                type_name: ta,
+                fields: fa,
+            },
+            Sym::Record {
+                type_name: tb,
+                fields: fb,
+            },
+        ) => {
+            ta == tb
+                && fa.len() == fb.len()
+                && fa.iter().zip(fb.iter()).all(|((na, va), (nb, vb))| {
+                    na == nb && stmt_sym_identical(va, vb)
+                })
+        }
+        (
+            Sym::Option {
+                some: sa,
+                payload: pa,
+            },
+            Sym::Option {
+                some: sb,
+                payload: pb,
+            },
+        ) => {
+            std::mem::discriminant(sa) == std::mem::discriminant(sb)
+                && match (pa, pb) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => stmt_sym_identical(x, y),
+                    _ => false,
+                }
+        }
+        (
+            Sym::Result {
+                ok: oa,
+                ok_payload: pa,
+                err_payload: ea,
+            },
+            Sym::Result {
+                ok: ob,
+                ok_payload: pb,
+                err_payload: eb,
+            },
+        ) => {
+            std::mem::discriminant(oa) == std::mem::discriminant(ob)
+                && match (pa, pb) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => stmt_sym_identical(x, y),
+                    _ => false,
+                }
+                && match (ea, eb) {
+                    (None, None) => true,
+                    (Some(x), Some(y)) => stmt_sym_identical(x, y),
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+/// The statement layer's merge: node-identical sides
+/// merge for free at EVERY level (the tokenizer state
+/// at every step carries its token list unchanged, and
+/// merging it must not rebuild the term); structural
+/// arms recurse through this function; leaf arms defer
+/// to production `sym_ite`.
+#[cfg(feature = "z3-support")]
+fn stmt_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
+    if stmt_sym_identical(&a, &b) {
+        return Some(b);
+    }
+    match (a, b) {
+        (Sym::List(x), Sym::List(y)) => {
+            if x.len() != y.len() {
+                return None;
+            }
+            let mut out = Vec::with_capacity(x.len());
+            for (u, v) in x.into_iter().zip(y) {
+                out.push(stmt_ite(cond, u, v)?);
+            }
+            Some(Sym::List(out))
+        }
+        (
+            Sym::Record {
+                type_name: ta,
+                fields: fa,
+            },
+            Sym::Record {
+                type_name: tb,
+                fields: fb,
+            },
+        ) => {
+            if ta != tb || fa.len() != fb.len() {
+                return None;
+            }
+            let mut merged = Vec::with_capacity(fa.len());
+            for (name, va) in fa {
+                let vb = fb
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| v.clone())?;
+                merged.push((name, stmt_ite(cond, va, vb)?));
+            }
+            Some(Sym::Record {
+                type_name: ta,
+                fields: merged,
+            })
+        }
+        (
+            Sym::Option {
+                some: ta,
+                payload: pa,
+            },
+            Sym::Option {
+                some: tb,
+                payload: pb,
+            },
+        ) => Some(Sym::Option {
+            some: Tag::merge(cond, &ta, &tb),
+            payload: stmt_ite_payload(cond, pa, pb)?,
+        }),
+        (
+            Sym::Result {
+                ok: ta,
+                ok_payload: oa,
+                err_payload: ea,
+            },
+            Sym::Result {
+                ok: tb,
+                ok_payload: ob,
+                err_payload: eb,
+            },
+        ) => Some(Sym::Result {
+            ok: Tag::merge(cond, &ta, &tb),
+            ok_payload: stmt_ite_payload(cond, oa, ob)?,
+            err_payload: stmt_ite_payload(cond, ea, eb)?,
+        }),
+        (a, b) => sym_ite(cond, a, b),
+    }
+}
+
+#[cfg(feature = "z3-support")]
+fn stmt_ite_payload(
+    cond: &z3::ast::Bool,
+    a: Option<Box<Sym>>,
+    b: Option<Box<Sym>>,
+) -> Option<Option<Box<Sym>>> {
+    // Mirrors production `sym_ite_payload`: a slot
+    // present on one side only is observed solely under
+    // that side's tag, so it carries over.
+    match (a, b) {
+        (None, None) => Some(None),
+        (Some(x), None) => Some(Some(x)),
+        (None, Some(y)) => Some(Some(y)),
+        (Some(x), Some(y)) => stmt_ite(cond, *x, *y).map(|v| Some(Box::new(v))),
+    }
+}
+
+/// Append one element, in the forms the statement
+/// bodies use: production `sym_binop_ir`'s Append arms
+/// (concrete list, length-only list, Str+CharStr), plus
+/// the one form Phase 91 deliberately left unarmed in
+/// the expression encoder — a string grown by a NUMERAL
+/// Char. At a concrete point a constant index into a
+/// literal string yields the scalar Char form, and the
+/// lexeme loop's append is exactly that shape; the
+/// character is a known numeral, so the concatenation
+/// is exact, not a conversion guess. This arm lives
+/// only in the statement layer: the routing discipline
+/// keeps it from ever judging a body the expression
+/// encoder declined for non-statement reasons.
+#[cfg(feature = "z3-support")]
+fn stmt_append(cur: Sym, item: Sym) -> Option<Sym> {
+    if let (Sym::Str(s), Sym::Char(c)) = (&cur, &item) {
+        let n = c.as_i64()?;
+        let ch = char::from_u32(n as u32)?;
+        let one = z3::ast::String::from_str(&ch.to_string()).ok()?;
+        return Some(Sym::Str(z3::ast::String::concat(&[s, &one])));
+    }
+    sym_binop_ir(IRBinOp::Append, cur, item)
+}
+
+/// Satisfiability of a conjunction of Bool terms under
+/// the verifier's per-constraint timeout: Some(true) =
+/// SAT, Some(false) = UNSAT, None = the solver could
+/// not decide (Unknown or the cap hit — a cap hit
+/// decides nothing).
+#[cfg(feature = "z3-support")]
+fn stmt_sat(terms: &[z3::ast::Bool], timeout_ms: u64) -> Option<bool> {
+    let z = Z3Session::new(timeout_ms);
+    for t in terms {
+        z.assert(t);
+    }
+    match z.check() {
+        SmtResult::Sat(_) => Some(true),
+        SmtResult::Unsat => Some(false),
+        _ => None,
+    }
+}
+
+/// Solver decision under the state's standing context
+/// (assumptions + Char side conditions + pc):
+/// Some(true) = satisfiable, Some(false) = refuted,
+/// None = the solver could not decide.
+#[cfg(feature = "z3-support")]
+fn stmt_decide(st: &StmtState, f: &z3::ast::Bool, timeout_ms: u64) -> Option<bool> {
+    let mut assertions: Vec<z3::ast::Bool> = st.assumptions.clone();
+    for v in st.env.values() {
+        collect_char_conditions(v, &mut assertions);
+    }
+    assertions.push(st.pc.clone());
+    assertions.push(f.clone());
+    stmt_sat(&assertions, timeout_ms)
+}
+
+/// Bind `name` to `v` under the current path condition:
+/// an unconditional bind replaces; a conditioned bind
+/// merges with the previous value by ite (a merge the
+/// Sym forms cannot express fails the evaluation).
+#[cfg(feature = "z3-support")]
+fn stmt_bind(st: &mut StmtState, name: &str, v: Sym) -> Option<()> {
+    st.writes.insert(name.to_string());
+    if st.guided || stmt_is_true(&st.pc) {
+        // A guided state is a single decided path: the
+        // bind is unconditional on it.
+        st.env.insert(name.to_string(), v);
+        return Some(());
+    }
+    match st.env.get(name) {
+        None => {
+            st.env.insert(name.to_string(), v);
+            Some(())
+        }
+        Some(old) => {
+            let old = old.clone();
+            let merged = stmt_ite(&st.pc, v, old)?;
+            st.env.insert(name.to_string(), merged);
+            Some(())
+        }
+    }
+}
+
+/// Bind the Ok payload of a Result value (the
+/// TryPropagate semantics): on the Err path the
+/// enclosing function returns the Err at once; on the
+/// Ok path execution continues with the payload bound.
+#[cfg(feature = "z3-support")]
+fn stmt_bind_try(st: &mut StmtState, name: &str, v: Sym, ctx: &StmtCtx) -> Option<()> {
+    match v {
+        Sym::Result {
+            ok,
+            ok_payload,
+            err_payload,
+        } => match ok {
+            Tag::True => {
+                let p = ok_payload?;
+                stmt_bind(st, name, *p)
+            }
+            Tag::False => {
+                let e = err_payload?;
+                let ret = Sym::Result {
+                    ok: Tag::False,
+                    ok_payload: None,
+                    err_payload: Some(e),
+                };
+                st.rets.push((st.pc.clone(), ret));
+                st.pc = z3::ast::Bool::from_bool(false);
+                Some(())
+            }
+            Tag::Free(t) => {
+                // Guided: decide the tag under the
+                // standing context first — at a point it
+                // is always decidable, and the decided
+                // path stays merge-free.
+                if st.guided {
+                    match (
+                        stmt_decide(st, &t, ctx.timeout_ms),
+                        stmt_decide(st, &t.not(), ctx.timeout_ms),
+                    ) {
+                        (Some(true), Some(false)) => {
+                            let p = ok_payload?;
+                            st.pc = z3::ast::Bool::and(&[&st.pc, &t]);
+                            return stmt_bind(st, name, *p);
+                        }
+                        (Some(false), Some(true)) => {
+                            let e = err_payload?;
+                            let ret = Sym::Result {
+                                ok: Tag::False,
+                                ok_payload: None,
+                                err_payload: Some(e),
+                            };
+                            st.rets.push((st.pc.clone(), ret));
+                            st.pc = z3::ast::Bool::from_bool(false);
+                            return Some(());
+                        }
+                        _ => {
+                            st.guided = false;
+                        }
+                    }
+                }
+                let p = ok_payload?;
+                let e = err_payload?;
+                let err_ret = Sym::Result {
+                    ok: Tag::False,
+                    ok_payload: None,
+                    err_payload: Some(e),
+                };
+                let err_pc = z3::ast::Bool::and(&[&st.pc, &t.not()]);
+                st.rets.push((err_pc, err_ret));
+                st.pc = z3::ast::Bool::and(&[&st.pc, &t]);
+                stmt_bind(st, name, *p)
+            }
+        },
+        _ => None,
+    }
+}
+
+/// Assemble a denoted sub-evaluation's paths into one
+/// value: by ite where the Sym forms allow, else — the
+/// point case, where every path condition is a closed
+/// term — by solver concretization (exactly one live
+/// path). The assembled value is observed only on
+/// completed paths: the caller's judging conjoins
+/// ¬exhausted, which excludes exactly the region where
+/// the fold's fallback value is arbitrary.
+#[cfg(feature = "z3-support")]
+fn stmt_assemble(paths: &[(z3::ast::Bool, Sym)], timeout_ms: u64) -> Option<Sym> {
+    if paths.len() == 1 {
+        return Some(paths[0].1.clone());
+    }
+    let mut acc: Option<Sym> = None;
+    let mut ite_ok = true;
+    for (pc, v) in paths.iter().rev() {
+        match acc.take() {
+            None => acc = Some(v.clone()),
+            Some(rest) => match stmt_ite(pc, v.clone(), rest) {
+                Some(m) => acc = Some(m),
+                None => {
+                    ite_ok = false;
+                    break;
+                }
+            },
+        }
+    }
+    if ite_ok {
+        return acc;
+    }
+    let mut live: Option<Sym> = None;
+    for (pc, v) in paths {
+        match stmt_sat(&[pc.clone()], timeout_ms) {
+            Some(true) => {
+                if live.is_some() {
+                    return None;
+                }
+                live = Some(v.clone());
+            }
+            Some(false) => {}
+            None => return None,
+        }
+    }
+    live
+}
+
+/// Invoke a call whose callee's denotation is
+/// statement-bodied (the expression encoder's
+/// `sym_invoke` declines on it): the callee body is
+/// evaluated by THIS layer in a fresh environment
+/// binding the callee's parameters to the argument
+/// values — substituting values, not syntax, exactly
+/// as `sym_invoke` does — under the same inlining
+/// discipline (depth cap + cycle guard, via
+/// `EvalCtx::can_inline`). The callee's exhaustion is
+/// gated by the caller's current path condition and
+/// recorded on the caller; a callee that exhausts on
+/// every path kills the caller's path BY EXHAUSTION
+/// (recorded, never silently) and hands back a
+/// placeholder no live path observes.
+#[cfg(feature = "z3-support")]
+fn stmt_invoke_value(
+    st: &mut StmtState,
+    ctx: &StmtCtx,
+    name: &str,
+    args: &[IRNode],
+) -> Option<Sym> {
+    let spec = ctx.eval.index.get(name)?;
+    let body = ctx.eval.index.callee_body(name)?;
+    if !ctx.eval.can_inline(name) || spec.params.len() != args.len() {
+        return None;
+    }
+    let mut argv = Vec::with_capacity(args.len());
+    for a in args {
+        argv.push(stmt_eval_value(a, st, ctx)?);
+    }
+    let mut env = SymEnv::new();
+    for (p, v) in spec.params.iter().zip(argv) {
+        env.insert(p.name.clone(), v);
+    }
+    let outcome = sym_eval_stmt(&body, env, &ctx.child(name))?;
+    if !stmt_is_false(&outcome.exhausted) {
+        let gated = z3::ast::Bool::and(&[&st.pc, &outcome.exhausted]);
+        st.exhausted.push(gated);
+    }
+    if outcome.paths.is_empty() {
+        st.pc = z3::ast::Bool::from_bool(false);
+        return Some(Sym::Opaque);
+    }
+    stmt_assemble(&outcome.paths, ctx.timeout_ms)
+}
+
+/// Expression-position evaluation for the statement
+/// layer: the production symbolic evaluator wherever it
+/// reaches (which since Phase 91 includes constructor
+/// Match and Clone), plus the two statement-layer
+/// additions — calls the expression encoder leaves
+/// undenoted because their denotations are
+/// statement-bodied, and Append in `stmt_append`'s
+/// forms. Anything else the expression encoder declines
+/// inside a delegated subtree declines here too.
+#[cfg(feature = "z3-support")]
+fn stmt_eval_value(node: &IRNode, st: &mut StmtState, ctx: &StmtCtx) -> Option<Sym> {
+    match node {
+        IRNode::Call { function, args } => {
+            let mut env = st.env.clone();
+            if let Some(v) = sym_call(function, args, &mut env, &ctx.eval) {
+                return Some(v);
+            }
+            stmt_invoke_value(st, ctx, function, args)
+        }
+        IRNode::BinOp(IRBinOp::Append, l, r) => {
+            let lv = stmt_eval_value(l, st, ctx)?;
+            let rv = stmt_eval_value(r, st, ctx)?;
+            stmt_append(lv, rv)
+        }
+        _ => {
+            let mut env = st.env.clone();
+            sym_eval(node, &mut env, &ctx.eval)
+        }
+    }
+}
+
+/// Statement-mode evaluation. Mirrors the compiled
+/// semantics the cross-validation runner executes:
+/// Alloc binds, Assign rebinds, Break leaves the
+/// innermost loop, Return leaves the function, and
+/// loops repeat — bounded by ctx.fuel, with the paths
+/// that wanted more recorded as exhaustion.
+#[cfg(feature = "z3-support")]
+fn stmt_eval(node: &IRNode, st: &mut StmtState, ctx: &StmtCtx) -> Option<()> {
+    if stmt_is_false(&st.pc) {
+        return Some(());
+    }
+    match node {
+        IRNode::Block(stmts) => {
+            for s in stmts {
+                stmt_eval(s, st, ctx)?;
+            }
+            Some(())
+        }
+        IRNode::Alloc { name, initial, .. } => {
+            if let IRNode::TryPropagate(inner) = &**initial {
+                let v = stmt_eval_value(inner, st, ctx)?;
+                if stmt_is_false(&st.pc) {
+                    // The call died by exhaustion
+                    // mid-statement; the path is dead
+                    // and its value a placeholder.
+                    return Some(());
+                }
+                return stmt_bind_try(st, name, v, ctx);
+            }
+            let v = stmt_eval_value(initial, st, ctx)?;
+            if stmt_is_false(&st.pc) {
+                return Some(());
+            }
+            st.last = Some(v.clone());
+            stmt_bind(st, name, v)
+        }
+        IRNode::Assign { target, value } => {
+            let IRNode::Var(name) = &**target else {
+                return None;
+            };
+            let v = stmt_eval_value(value, st, ctx)?;
+            if stmt_is_false(&st.pc) {
+                return Some(());
+            }
+            st.last = Some(v.clone());
+            stmt_bind(st, name, v)
+        }
+        IRNode::Return(inner) => {
+            let v = stmt_eval_value(inner, st, ctx)?;
+            st.rets.push((st.pc.clone(), v));
+            st.pc = z3::ast::Bool::from_bool(false);
+            Some(())
+        }
+        IRNode::Break { value } => {
+            // A valued Break is a value-position loop
+            // result, which this layer does not model:
+            // decline rather than drop the value.
+            if value.is_some() {
+                return None;
+            }
+            st.breaks.push(st.pc.clone());
+            st.pc = z3::ast::Bool::from_bool(false);
+            Some(())
+        }
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let cond = match stmt_eval_value(condition, st, ctx)? {
+                Sym::Bool(b) => b,
+                _ => return None,
+            };
+            if st.guided {
+                // Guided path: decide the condition
+                // under the standing context and take
+                // the single decided branch in place —
+                // no clone, no merge.
+                let can_then = stmt_decide(st, &cond, ctx.timeout_ms);
+                let can_else = stmt_decide(st, &cond.not(), ctx.timeout_ms);
+                match (can_then, can_else) {
+                    (Some(true), Some(false)) => {
+                        st.pc = z3::ast::Bool::and(&[&st.pc, &cond]);
+                        return stmt_eval(then_branch, st, ctx);
+                    }
+                    (Some(false), Some(true)) => {
+                        st.pc = z3::ast::Bool::and(&[&st.pc, &cond.not()]);
+                        return stmt_eval(else_branch, st, ctx);
+                    }
+                    _ => {
+                        // Undecidable here: merging
+                        // mode from this point on.
+                        st.guided = false;
+                    }
+                }
+            }
+            let base_pc = st.pc.clone();
+            let fresh = |pc: z3::ast::Bool| StmtState {
+                env: st.env.clone(),
+                pc,
+                rets: Vec::new(),
+                breaks: Vec::new(),
+                exhausted: Vec::new(),
+                last: None,
+                writes: std::collections::HashSet::new(),
+                assumptions: st.assumptions.clone(),
+                guided: false,
+            };
+            let mut then_st = fresh(z3::ast::Bool::and(&[&base_pc, &cond]));
+            stmt_eval(then_branch, &mut then_st, ctx)?;
+            let mut else_st = fresh(z3::ast::Bool::and(&[&base_pc, &cond.not()]));
+            stmt_eval(else_branch, &mut else_st, ctx)?;
+            // Continuation: the paths that neither
+            // returned nor broke inside either branch.
+            let mut cont = base_pc.clone();
+            for (pc, _) in then_st.rets.iter().chain(else_st.rets.iter()) {
+                cont = z3::ast::Bool::and(&[&cont, &pc.not()]);
+            }
+            for pc in then_st.breaks.iter().chain(else_st.breaks.iter()) {
+                cont = z3::ast::Bool::and(&[&cont, &pc.not()]);
+            }
+            st.rets.extend(then_st.rets.iter().cloned());
+            st.rets.extend(else_st.rets.iter().cloned());
+            st.breaks.extend(then_st.breaks.iter().cloned());
+            st.breaks.extend(else_st.breaks.iter().cloned());
+            st.exhausted.extend(then_st.exhausted.iter().cloned());
+            st.exhausted.extend(else_st.exhausted.iter().cloned());
+            if stmt_is_false(&cont) {
+                // No live continuation: the merged
+                // environment is dead. Keep the pre-If
+                // one — it is never observed on a live
+                // path.
+                st.pc = cont;
+                return Some(());
+            }
+            // Merge the branch environments. A variable
+            // neither branch wrote carries the pre-If
+            // value on both sides. A written variable
+            // merges by ite when both sides hold it; a
+            // variable only one side holds is
+            // branch-local (read, for the bodies at
+            // stake, only inside its own branch).
+            let mut merged = SymEnv::new();
+            let keys: std::collections::HashSet<&String> = then_st
+                .env
+                .keys()
+                .chain(else_st.env.keys())
+                .collect();
+            for k in keys {
+                let written =
+                    then_st.writes.contains(k) || else_st.writes.contains(k);
+                match (then_st.env.get(k), else_st.env.get(k)) {
+                    (Some(a), Some(b)) if written => {
+                        merged.insert(k.clone(), stmt_ite(&cond, a.clone(), b.clone())?);
+                    }
+                    (Some(a), _) => {
+                        merged.insert(k.clone(), a.clone());
+                    }
+                    (None, Some(b)) => {
+                        merged.insert(k.clone(), b.clone());
+                    }
+                    (None, None) => unreachable!(),
+                }
+            }
+            st.env = merged;
+            st.writes.extend(then_st.writes.iter().cloned());
+            st.writes.extend(else_st.writes.iter().cloned());
+            st.last = match (then_st.last, else_st.last) {
+                (Some(a), Some(b)) => stmt_ite(&cond, a, b),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => st.last.clone(),
+            };
+            st.pc = cont;
+            Some(())
+        }
+        IRNode::While {
+            condition, body, ..
+        } => stmt_loop(Some(condition), body, st, ctx),
+        IRNode::Loop { body } => stmt_loop(None, body, st, ctx),
+        IRNode::BinOp(IRBinOp::Append, l, r) => {
+            // A statement-position Append rebinds its
+            // target (the compiled rendering is a push
+            // on the binding).
+            let IRNode::Var(name) = &**l else {
+                return None;
+            };
+            let cur = st.env.get(name)?.clone();
+            let item = stmt_eval_value(r, st, ctx)?;
+            if stmt_is_false(&st.pc) {
+                return Some(());
+            }
+            let v = stmt_append(cur, item)?;
+            st.last = Some(v.clone());
+            stmt_bind(st, name, v)
+        }
+        _ => {
+            // Any other statement is an expression
+            // statement: its value is the block's
+            // running value, discarded unless last.
+            let v = stmt_eval_value(node, st, ctx)?;
+            st.last = Some(match st.last.take() {
+                Some(old) if !stmt_is_true(&st.pc) => stmt_ite(&st.pc, v, old)?,
+                _ => v,
+            });
+            Some(())
+        }
+    }
+}
+
+/// One loop (While or Loop), unrolled to ctx.fuel
+/// iterations. Two modes. GUIDED: while the solver
+/// decides the condition under the current path
+/// (forced-true or forced-false), the loop follows the
+/// single decided branch — the path condition
+/// accumulates the decided facts and NO ite merge
+/// happens, so terms stay one-iteration sized. MERGING:
+/// once a condition is genuinely undecided, the loop
+/// narrows the pc and merges binds by ite, as a
+/// standard symbolic unrolling. In both modes the
+/// paths that would iterate past the fuel are recorded
+/// as exhaustion and excluded from the continuation —
+/// never silently treated as exits (the BMC
+/// discipline).
+#[cfg(feature = "z3-support")]
+fn stmt_loop(
+    condition: Option<&IRNode>,
+    body: &IRNode,
+    st: &mut StmtState,
+    ctx: &StmtCtx,
+) -> Option<()> {
+    let breaks0 = st.breaks.len();
+    let mut iter = 0usize;
+    let mut merging = false;
+    loop {
+        let c = match condition {
+            Some(cn) => match stmt_eval_value(cn, st, ctx)? {
+                Sym::Bool(b) => b,
+                _ => return None,
+            },
+            None => z3::ast::Bool::from_bool(true),
+        };
+        let live = st.pc.clone();
+        if !merging {
+            // Guided decisions: does any live path
+            // iterate (pc ∧ c satisfiable)? Does any
+            // live path exit (pc ∧ ¬c satisfiable)?
+            let can_iter = stmt_decide(st, &c, ctx.timeout_ms);
+            let can_exit = stmt_decide(st, &c.not(), ctx.timeout_ms);
+            match (can_iter, can_exit) {
+                (Some(false), _) => {
+                    // Forced exit: no exhaustion, the
+                    // loop is done on every live path.
+                    let mut exit_pc = live;
+                    for b in st.breaks.iter().skip(breaks0) {
+                        exit_pc = z3::ast::Bool::or(&[&exit_pc, b]);
+                    }
+                    st.breaks.truncate(breaks0);
+                    st.pc = exit_pc;
+                    return Some(());
+                }
+                (_, Some(false)) => {
+                    // Forced iteration.
+                    if iter >= ctx.fuel {
+                        st.exhausted.push(live);
+                        let mut exit_pc = z3::ast::Bool::from_bool(false);
+                        for b in st.breaks.iter().skip(breaks0) {
+                            exit_pc = z3::ast::Bool::or(&[&exit_pc, b]);
+                        }
+                        st.breaks.truncate(breaks0);
+                        st.pc = exit_pc;
+                        return Some(());
+                    }
+                    st.pc = z3::ast::Bool::and(&[&live, &c]);
+                    stmt_eval(body, st, ctx)?;
+                    iter += 1;
+                    if stmt_is_false(&st.pc) {
+                        let mut exit_pc = z3::ast::Bool::from_bool(false);
+                        for b in st.breaks.iter().skip(breaks0) {
+                            exit_pc = z3::ast::Bool::or(&[&exit_pc, b]);
+                        }
+                        st.breaks.truncate(breaks0);
+                        st.pc = exit_pc;
+                        return Some(());
+                    }
+                    continue;
+                }
+                _ => {
+                    // Genuinely symbolic (or the solver
+                    // could not decide): merge from
+                    // here on.
+                    merging = true;
+                    st.guided = false;
+                }
+            }
+        }
+        if iter >= ctx.fuel {
+            // Out of fuel: the paths where the loop
+            // still wants another iteration are the
+            // exhaustion; the paths where it does not
+            // (plus this loop's break paths) leave.
+            let still = z3::ast::Bool::and(&[&live, &c]);
+            if !stmt_is_false(&still) {
+                st.exhausted.push(still);
+            }
+            let mut exit_pc = z3::ast::Bool::and(&[&live, &c.not()]);
+            for b in st.breaks.iter().skip(breaks0) {
+                exit_pc = z3::ast::Bool::or(&[&exit_pc, b]);
+            }
+            st.breaks.truncate(breaks0);
+            st.pc = exit_pc;
+            return Some(());
+        }
+        let iter_pc = z3::ast::Bool::and(&[&live, &c]);
+        if stmt_is_false(&iter_pc) {
+            // The loop has exited on every live path.
+            let mut exit_pc = live;
+            for b in st.breaks.iter().skip(breaks0) {
+                exit_pc = z3::ast::Bool::or(&[&exit_pc, b]);
+            }
+            st.breaks.truncate(breaks0);
+            st.pc = exit_pc;
+            return Some(());
+        }
+        st.pc = iter_pc;
+        stmt_eval(body, st, ctx)?;
+        iter += 1;
+        if stmt_is_false(&st.pc) {
+            // Every path through the body returned or
+            // broke: only the break paths fall through
+            // the loop.
+            let mut exit_pc = z3::ast::Bool::from_bool(false);
+            for b in st.breaks.iter().skip(breaks0) {
+                exit_pc = z3::ast::Bool::or(&[&exit_pc, b]);
+            }
+            st.breaks.truncate(breaks0);
+            st.pc = exit_pc;
+            return Some(());
+        }
+    }
+}
+
+/// Run a statement body to its outcome: the per-path
+/// outputs and the exhaustion disjunction. An outcome
+/// with NO paths and NO exhaustion is not an outcome
+/// (the body produced no value on any path) and
+/// declines; an empty path set WITH an exhaustion
+/// record is a real outcome (every path wanted more
+/// fuel) — judges read it as unresolved, never Proven.
+#[cfg(feature = "z3-support")]
+fn sym_eval_stmt(body: &IRNode, env: SymEnv, ctx: &StmtCtx) -> Option<StmtOutcome> {
+    let mut st = StmtState {
+        env,
+        pc: z3::ast::Bool::from_bool(true),
+        rets: Vec::new(),
+        breaks: Vec::new(),
+        exhausted: Vec::new(),
+        last: None,
+        writes: std::collections::HashSet::new(),
+        assumptions: Vec::new(),
+        guided: true,
+    };
+    stmt_eval(body, &mut st, ctx)?;
+    let mut paths = st.rets.clone();
+    if let Some(v) = st.last.clone() {
+        // The fall-through path is genuine only if the
+        // final pc is satisfiable — a body whose every
+        // branch returned leaves a pc that is
+        // unsatisfiable but not literally `false` (it is
+        // the negation of the return pcs), and its
+        // `last` (a branch's running value) is not an
+        // output. Ask the solver; keep the path only
+        // when fall-through is possible or undecidable.
+        // A second guard: when returns exist, a
+        // fall-through whose value is of a different Sym
+        // family than the returns is a statement
+        // artifact (a branch's running value on an
+        // exhaustion-adjacent path), not an output of
+        // this body.
+        let verdict = if stmt_is_false(&st.pc) {
+            Some(false)
+        } else {
+            stmt_decide(&st, &z3::ast::Bool::from_bool(true), ctx.timeout_ms)
+        };
+        let family_match = match st.rets.first() {
+            None => true,
+            Some((_, rv)) => {
+                std::mem::discriminant(&v) == std::mem::discriminant(rv)
+            }
+        };
+        if verdict != Some(false) && family_match {
+            paths.push((st.pc.clone(), v));
+        }
+    }
+    if paths.is_empty() && st.exhausted.is_empty() {
+        return None;
+    }
+    Some(StmtOutcome {
+        paths,
+        exhausted: stmt_or_all(&st.exhausted),
+    })
+}
+
+/// At a battery point the evaluation's path conditions
+/// are closed terms: exactly one path is live. Returns
+/// that path's output — or None when the fuel ran out
+/// on the live path (exhaustion satisfiable), when two
+/// paths are live, or when the solver cannot decide a
+/// path.
+#[cfg(feature = "z3-support")]
+fn stmt_concretize(outcome: &StmtOutcome, timeout_ms: u64) -> Option<Sym> {
+    if stmt_sat(&[outcome.exhausted.clone()], timeout_ms) != Some(false) {
+        return None;
+    }
+    let mut live: Option<Sym> = None;
+    for (pc, v) in &outcome.paths {
+        match stmt_sat(&[pc.clone()], timeout_ms) {
+            Some(true) => {
+                if live.is_some() {
+                    return None;
+                }
+                live = Some(v.clone());
+            }
+            Some(false) => {}
+            None => return None,
+        }
+    }
+    live
+}
+
+/// The statement encoder's engagement predicate
+/// (Phase 93): does this body contain a statement/loop
+/// node — While / Loop / Break / Alloc / Assign /
+/// TryPropagate — in its own tree or in the denotation
+/// of a spec it calls (transitively, under the
+/// inlining discipline)? `verify_one` engages the
+/// statement layer only where this holds AND the
+/// expression encoder declined, so a body the
+/// expression encoder declined for any other reason
+/// (a hole, a lambda, a guard pattern, an Append form
+/// it leaves unarmed) keeps its standing Inconclusive
+/// without ever touching this layer.
+#[cfg(feature = "z3-support")]
+fn body_mentions_statements(node: &IRNode, index: &SpecIndex) -> bool {
+    fn walk(
+        node: &IRNode,
+        index: &SpecIndex,
+        visiting: &mut Vec<String>,
+        depth: usize,
+    ) -> bool {
+        match node {
+            IRNode::While { .. }
+            | IRNode::Loop { .. }
+            | IRNode::Break { .. }
+            | IRNode::Alloc { .. }
+            | IRNode::Assign { .. }
+            | IRNode::TryPropagate(_) => true,
+            IRNode::Call { function, args } => {
+                if args.iter().any(|a| walk(a, index, visiting, depth)) {
+                    return true;
+                }
+                if depth >= MAX_INLINE_DEPTH || visiting.iter().any(|v| v == function) {
+                    return false;
+                }
+                match index.callee_body(function) {
+                    Some(body) => {
+                        visiting.push(function.clone());
+                        let found = walk(&body, index, visiting, depth + 1);
+                        visiting.pop();
+                        found
+                    }
+                    None => false,
+                }
+            }
+            IRNode::Block(stmts) => {
+                stmts.iter().any(|s| walk(s, index, visiting, depth))
+            }
+            IRNode::Let { value, body, .. } => {
+                walk(value, index, visiting, depth)
+                    || walk(body, index, visiting, depth)
+            }
+            IRNode::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                walk(condition, index, visiting, depth)
+                    || walk(then_branch, index, visiting, depth)
+                    || walk(else_branch, index, visiting, depth)
+            }
+            IRNode::Match { scrutinee, cases } => {
+                walk(scrutinee, index, visiting, depth)
+                    || cases
+                        .iter()
+                        .any(|(_, b)| walk(b, index, visiting, depth))
+            }
+            IRNode::BinOp(_, l, r) | IRNode::Index(l, r) => {
+                walk(l, index, visiting, depth) || walk(r, index, visiting, depth)
+            }
+            IRNode::UnaryOp(_, inner)
+            | IRNode::Return(inner)
+            | IRNode::Typed { node: inner, .. } => walk(inner, index, visiting, depth),
+            IRNode::Collection { elements, .. } => {
+                elements.iter().any(|e| walk(e, index, visiting, depth))
+            }
+            IRNode::FieldAccess { base, .. } => walk(base, index, visiting, depth),
+            IRNode::RecordLit { fields, .. } => fields
+                .iter()
+                .any(|(_, v)| walk(v, index, visiting, depth)),
+            _ => false,
+        }
+    }
+    walk(node, index, &mut Vec::new(), 0)
 }
 
 // ── Constraint → Z3 Translation ────────────────────────────
@@ -5685,6 +6992,25 @@ spec grow_first {
     /// today, but sym_eval still has no While/Loop arm
     /// (Phase 93), so anything whose judgment must pass
     /// through them stays Inconclusive — never Verified.
+    ///
+    /// Phase 93 re-pin (reason recorded, per the Phase
+    /// 92 precedent): the Phase 93 statement encoder now
+    /// judges through both denotations, and the two
+    /// halves land where the design says they must. The
+    /// skip half's status is UNCHANGED (Inconclusive) but
+    /// reached by judging: the While body evaluates, and
+    /// its rows judge Unknown because exhaustion is
+    /// reachable at the production fuel — not because
+    /// nothing could evaluate it. The step half's status
+    /// MOVES, Inconclusive → VerificationFailed: row 2
+    /// is Refuted on a completed path (the `" 5"`
+    /// countermodel, ENCODER_EXTENSION_DESIGN.md §2.4)
+    /// while row 1 stays Unknown (exhaustion). That is
+    /// Layer 1's designed product — decisive verdicts
+    /// where they exist — not a denotation smuggling a
+    /// pass: the step body is refuted by its own spec's
+    /// standing rows, and the residue is R2's
+    /// ratification (Phase 96), not an encoder gap.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase92_statement_denotations_manufacture_no_verdicts() {
@@ -5692,11 +7018,11 @@ spec grow_first {
         let index = SpecIndex::from_module(&module);
         let verifier = Verifier::with_module(&module);
         // A candidate for skip_whitespace whose whole
-        // body is the call to skip: the resolver now
-        // supplies the While body, the encoder still
-        // cannot evaluate it — Inconclusive, exactly the
-        // Phase 93 dependency, not a failure and not a
-        // pass.
+        // body is the call to skip: the resolver supplies
+        // the While body and (Phase 93) the statement
+        // encoder evaluates it — the verdict is
+        // Inconclusive by exhaustion, the honest outcome
+        // for an unbounded loop judged symbolically.
         let skip = restored_spec(&module, "skip_whitespace").clone();
         let call_skip = IRNode::Call {
             function: "skip_whitespace".to_string(),
@@ -5710,13 +7036,14 @@ spec grow_first {
         assert_eq!(
             verifier.verify_one(&cand, &skip).status,
             VerificationStatus::Inconclusive,
-            "judging through skip's denotation waits for the Phase 93 While arm"
+            "judging through skip's denotation lands Inconclusive: \
+             exhaustion is reachable at the production fuel"
         );
         // The step denotation itself, as a candidate for
-        // tokenize_one: available, and Inconclusive —
-        // the denotation does not smuggle the verdict
-        // its executed agreement (9/10) cannot yet earn
-        // symbolically.
+        // tokenize_one: judged by the Phase 93 statement
+        // encoder and REFUTED by standing row 2 (the
+        // `" 5"` countermodel) — see the re-pin note
+        // above.
         let one = restored_spec(&module, "tokenize_one").clone();
         let step = index
             .callee_body("tokenize_one")
@@ -5728,8 +7055,9 @@ spec grow_first {
         let cand = candidate(&one, 9212, step);
         assert_eq!(
             verifier.verify_one(&cand, &one).status,
-            VerificationStatus::Inconclusive,
-            "the STEP denotation must not verify before the Phase 93 encoder"
+            VerificationStatus::VerificationFailed,
+            "the STEP denotation is REFUTED by standing row 2 through \
+             the Phase 93 statement encoder (the \" 5\" countermodel)"
         );
     }
 
@@ -6013,6 +7341,721 @@ spec grow_first {
              denotations: the residue is the R2-β-skip ratification"
         );
         println!("P92|step-diag|\" 5\": row 2 Refuted through production denotations");
+    }
+
+    // ────────────────────────────────────────────────────
+    // Phase 93 — the statement-mode encoder in
+    // production: the Phase 90 probe batteries re-run
+    // through `sym_eval_stmt` + `verify_constraint_stmt`
+    // (the production evaluator and judge), on the
+    // production denotations of Phase 92. The probe
+    // suite below stands as the measurement record;
+    // these tests are the regression form of the same
+    // evidence.
+    // ────────────────────────────────────────────────────
+
+    /// Judge one row over one statement outcome through
+    /// the production statement judge, returning the
+    /// verdict and the judge's solver time.
+    #[cfg(feature = "z3-support")]
+    fn p93_judge(
+        verifier: &Verifier,
+        row: &Constraint,
+        spec: &FunctionSpec,
+        env: &SymEnv,
+        outcome: &StmtOutcome,
+    ) -> (Tri, u64) {
+        let (res, tri) = verifier.verify_constraint_stmt(row, "p93", spec, env, outcome);
+        (tri, res.solver_time_ms)
+    }
+
+    /// Phase 93: the skip battery at points, through the
+    /// production statement encoder — the production
+    /// denotation body (Phase 92) resolves at exactly
+    /// the trip count, its outputs equal the mirror's,
+    /// and the production statement judge Proves the
+    /// current rows and strengthening row (a) at all 12
+    /// points (the BMC result Phase 92 reproduced
+    /// through the probe, now through production code).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase93_stmt_skip_points_battery() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let body = index
+            .callee_body("skip_whitespace")
+            .expect("skip denotes after Phase 92");
+        let row_a = p90_parse_row(
+            "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
+        );
+        let mut spec_a = skip.clone();
+        spec_a.postconditions.push(row_a.clone());
+        let battery: Vec<P90St> = vec![
+            p90_st("", 0, 1, 1),
+            p90_st(" ", 0, 1, 1),
+            p90_st("  \t\n x", 0, 1, 1),
+            p90_st("no-ws", 0, 1, 1),
+            p90_st("\n\nab", 0, 1, 1),
+            p90_st(" \u{A0}x", 0, 1, 1),
+            p90_st("a b", 0, 1, 1),
+            p90_st("\r\n\t", 0, 1, 1),
+            p90_st("a b", 1, 1, 2),
+            p90_st("  \t\n x", 2, 1, 3),
+            p90_st("\n\nab", 1, 1, 2),
+            p90_st(" \u{A0}x", 1, 1, 2),
+        ];
+        for (i, input) in battery.iter().enumerate() {
+            let (mirror, trips) = p90_mirror_skip(input);
+            let expected = p90_state_sym(&mirror);
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(input));
+            // Below the trip count the live path is cut
+            // off: no concretization (the fuel
+            // discipline, in production).
+            if trips >= 1 {
+                let ctx = StmtCtx::root(&index, trips - 1, 5_000);
+                let short = sym_eval_stmt(&body, env.clone(), &ctx)
+                    .expect("the production skip denotation evaluates below the trip count");
+                assert!(
+                    stmt_concretize(&short, 5_000).is_none(),
+                    "point {} ({:?} from {}): fuel {} (one below the trip count {}) \
+                     must NOT resolve — the live path is exhausted there",
+                    i, input.source, input.pos, trips - 1, trips
+                );
+            }
+            let ctx = StmtCtx::root(&index, trips, 5_000);
+            let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+                .expect("the production skip denotation evaluates in statement mode");
+            let out = stmt_concretize(&outcome, 5_000).unwrap_or_else(|| {
+                panic!(
+                    "point {} ({:?} from {}): the production skip denotation \
+                     must resolve at the trip count {}",
+                    i, input.source, input.pos, trips
+                )
+            });
+            assert!(
+                p90_values_equal(&out, &expected),
+                "point {} ({:?} from {}): the production denotation's output \
+                 must equal the mirror's",
+                i, input.source, input.pos
+            );
+            let mut judge_ms = 0u64;
+            for (j, row) in skip.postconditions.iter().enumerate() {
+                let (tri, ms) = p93_judge(&verifier, row, &skip, &env, &outcome);
+                judge_ms += ms;
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "point {} current row {} must be Proven through the \
+                     production statement judge",
+                    i, j
+                );
+            }
+            let (tri, ms) = p93_judge(&verifier, &row_a, &spec_a, &env, &outcome);
+            judge_ms += ms;
+            assert!(
+                matches!(tri, Tri::Proven),
+                "point {} row (a) must be Proven through the production \
+                 statement judge",
+                i
+            );
+            println!(
+                "P93|skip-point|{}|src={:?}|from={}|trips={}|judge_ms={}",
+                i, input.source, input.pos, trips, judge_ms
+            );
+        }
+    }
+
+    /// Phase 93: the STEP battery at points, through the
+    /// production statement encoder — the production
+    /// STEP denotation resolves at the predicted fuels,
+    /// its Ok outputs equal the mirror's, and the
+    /// production statement judge Proves both rows at Ok
+    /// points; at the Err point row 1 (index 0) judges
+    /// Unknown (the W8 literal-Err unwrap boundary) and
+    /// row 2 (index 1) Proven.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase93_stmt_step_points_battery() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let body = index
+            .callee_body("tokenize_one")
+            .expect("tokenize_one denotes after Phase 92");
+        let battery: Vec<P90St> = vec![
+            p90_st("spec", 0, 1, 1),
+            p90_st("", 0, 1, 1),
+            p90_st("  spec", 0, 1, 1),
+            p90_st(":", 0, 1, 1),
+            p90_st("{", 0, 1, 1),
+            p90_st("=", 0, 1, 1),
+            p90_st("5", 0, 1, 1),
+            p90_st(" ", 0, 1, 1),
+            p90_st("a b", 0, 1, 1),
+            p90_st("\n\nx", 0, 1, 1),
+        ];
+        for (i, input) in battery.iter().enumerate() {
+            let (mirror, sk, id) = p90_mirror_one(input);
+            let pred = if id >= 1 { sk.max(id + 1) } else { sk };
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(input));
+            let ctx = StmtCtx::root(&index, pred, 5_000);
+            let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+                .expect("the production STEP denotation evaluates in statement mode");
+            let out = stmt_concretize(&outcome, 5_000).unwrap_or_else(|| {
+                panic!(
+                    "point {} ({:?}): the production STEP denotation must \
+                     resolve at the predicted fuel {}",
+                    i, input.source, pred
+                )
+            });
+            match (&mirror, &out) {
+                (Ok(_), Sym::Result { ok: Tag::True, .. }) => {
+                    assert!(
+                        p90_values_equal(&out, &p90_result_sym(&mirror)),
+                        "point {} ({:?}): the STEP output must equal the mirror's",
+                        i, input.source
+                    );
+                }
+                (Err(_), Sym::Result { ok: Tag::False, .. }) => {
+                    // Tag agreement; the message text is
+                    // the standing F2 deviation.
+                }
+                _ => panic!(
+                    "point {} ({:?}): tag disagreement with the mirror",
+                    i, input.source
+                ),
+            }
+            let is_err = matches!(&mirror, Err(_));
+            let mut judge_ms = 0u64;
+            for (j, row) in spec.postconditions.iter().enumerate() {
+                let (tri, ms) = p93_judge(&verifier, row, &spec, &env, &outcome);
+                judge_ms += ms;
+                if is_err && j == 0 {
+                    assert!(
+                        matches!(tri, Tri::Unknown),
+                        "point {} ({:?}) row 0 at an Err output must judge \
+                         Unknown through the statement judge (literal-Err \
+                         unwrap boundary)",
+                        i, input.source
+                    );
+                    continue;
+                }
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "point {} ({:?}) row {} must be Proven through the \
+                     production statement judge",
+                    i, input.source, j
+                );
+            }
+            println!(
+                "P93|step-point|{}|src={:?}|skip_trips={}|ident_trips={}|fuel={}|judge_ms={}",
+                i, input.source, sk, id, pred, judge_ms
+            );
+        }
+    }
+
+    /// Phase 93: the LOOP battery at points, through the
+    /// production statement encoder — the template LOOP
+    /// body over the production STEP denotation resolves
+    /// at the predicted fuels, its token lists equal the
+    /// mirror's, and tokenize_all's row judges Proven at
+    /// Ok sources and Unknown at the Err source (W8)
+    /// through the production statement judge.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase93_stmt_loop_points_battery() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "tokenize_all").clone();
+        let body = p90_template_body(&module, "tokenize_all");
+        for src in ["", "spec sort", "spec{input:()}", "spec 5", "  \n ", "a", "x{y}:(,)", "a\nb"] {
+            let input = p90_st(src, 0, 1, 1);
+            let (mirror, outer, inner) = p90_mirror_all(&input);
+            let pred = outer.max(inner);
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(&input));
+            let ctx = StmtCtx::root(&index, pred, 5_000);
+            let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+                .expect("the LOOP body evaluates over the production step denotation");
+            let out = stmt_concretize(&outcome, 5_000).unwrap_or_else(|| {
+                panic!(
+                    "{:?}: the LOOP body must resolve at the predicted fuel {} \
+                     over production denotations",
+                    src, pred
+                )
+            });
+            match (&mirror, &out) {
+                (Ok(toks), Sym::Result { ok: Tag::True, ok_payload, .. }) => {
+                    let expected = Sym::List(toks.iter().map(p90_token_sym).collect());
+                    let payload = ok_payload.as_ref().expect("Ok payload");
+                    assert!(
+                        p90_values_equal(payload, &expected),
+                        "{:?}: the LOOP output token list must equal the mirror's",
+                        src
+                    );
+                }
+                (Err(_), Sym::Result { ok: Tag::False, .. }) => {
+                    // Tag agrees; the message text is the
+                    // F2 deviation, not judged here.
+                }
+                _ => panic!("{:?}: tag disagreement with the mirror", src),
+            }
+            let (tri, ms) = p93_judge(
+                &verifier,
+                &spec.postconditions[0],
+                &spec,
+                &env,
+                &outcome,
+            );
+            if matches!(&mirror, Err(_)) {
+                assert!(
+                    matches!(tri, Tri::Unknown),
+                    "{:?}: tokenize_all's row at an Err output must judge \
+                     Unknown through the statement judge (literal-Err \
+                     unwrap boundary)",
+                    src
+                );
+            } else {
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "{:?}: tokenize_all's row must be Proven through the \
+                     production statement judge",
+                    src
+                );
+            }
+            println!(
+                "P93|loop-point|src={:?}|outer={}|inner={}|fuel={}|judge_ms={}",
+                src, outer, inner, pred, ms
+            );
+        }
+    }
+
+    /// Phase 93: symbolic skip judging through the
+    /// production statement encoder — the production
+    /// denotation over a fully symbolic state judges
+    /// Unknown at fuels 1/2/4 under the current rows and
+    /// under strengthening row (a): exhaustion is
+    /// reachable at every fuel, so unrolling refutes and
+    /// decides points but never Verifies an unbounded
+    /// loop (the §2.2 corollary, in production). The
+    /// mechanism is pinned, not just the verdict: the
+    /// outcome's exhaustion is satisfiable at each fuel.
+    /// The Forall row (c) also judges Unknown — by the
+    /// other mechanism (its encoding is Phase 94's arm;
+    /// production `encode_constraint` returns None for
+    /// it today), recorded so the two Unknowns are never
+    /// conflated.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase93_stmt_skip_symbolic_unknown() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let body = index
+            .callee_body("skip_whitespace")
+            .expect("skip denotes after Phase 92");
+        let env = param_env(&skip, &index);
+        let row_a = p90_parse_row(
+            "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
+        );
+        let mut spec_a = skip.clone();
+        spec_a.postconditions.push(row_a.clone());
+        for fuel in [1usize, 2, 4] {
+            let ctx = StmtCtx::root(&index, fuel, 5_000);
+            let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+                .expect("the production skip denotation evaluates symbolically");
+            assert_eq!(
+                stmt_sat(&[outcome.exhausted.clone()], 5_000),
+                Some(true),
+                "fuel {}: exhaustion must be REACHABLE — that reachability, \
+                 not an encoding gap, is why no symbolic verdict here is Proven",
+                fuel
+            );
+            let mut judge_ms = 0u64;
+            for (j, row) in skip.postconditions.iter().enumerate() {
+                let (tri, ms) = p93_judge(&verifier, row, &skip, &env, &outcome);
+                judge_ms += ms;
+                assert!(
+                    matches!(tri, Tri::Unknown),
+                    "fuel {}: bounded unrolling must NOT Verify the skip \
+                     symbolically (exhaustion is always reachable), row {}",
+                    fuel, j
+                );
+            }
+            let (tri, ms) = p93_judge(&verifier, &row_a, &spec_a, &env, &outcome);
+            judge_ms += ms;
+            assert!(
+                matches!(tri, Tri::Unknown),
+                "fuel {}: row (a) must judge Unknown symbolically — the \
+                 faithful body completes only on bounded runs",
+                fuel
+            );
+            println!(
+                "P93|skip-sym|fuel={}|paths={}|judge_ms={}",
+                fuel,
+                outcome.paths.len(),
+                judge_ms
+            );
+        }
+        // The (c) row: Unknown by the unencodable
+        // mechanism (Phase 94's arm), at the same fuel.
+        let (_, row_c) = p90_module_with_forall_row();
+        let ctx = StmtCtx::root(&index, 4, 5_000);
+        let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+            .expect("the production skip denotation evaluates symbolically");
+        let (tri, _) = p93_judge(&verifier, &row_c, &skip, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Unknown),
+            "the Forall row (c) judges Unknown until Phase 94 encodes it"
+        );
+        println!("P93|skip-sym|fuel=4|row (c): Unknown (unencodable until Phase 94)");
+    }
+
+    /// Phase 93: symbolic STEP judging and the `" 5"`
+    /// diagnostic, end to end through production paths.
+    /// Symbolically (verify_one's own route, production
+    /// fuel): row 1 (index 0) Unknown by exhaustion, row
+    /// 2 (index 1) REFUTED — the candidate status is
+    /// VerificationFailed with a counterexample. At the
+    /// concrete diagnostic point the faithful body errs
+    /// and the production statement judge Refutes row 2
+    /// over the production outcome (row 1 Unknown, W8).
+    /// The LOOP body and the skip denotation, as
+    /// candidates, stay Inconclusive symbolically —
+    /// their rows judge Unknown, nothing refutes them.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase93_stmt_step_symbolic_and_diag() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let step = index
+            .callee_body("tokenize_one")
+            .expect("tokenize_one denotes after Phase 92");
+        // Symbolic judging through the production
+        // evaluator + judge at the production fuel.
+        let env = param_env(&spec, &index);
+        let ctx = StmtCtx::root(&index, STMT_VERIFY_FUEL, 5_000);
+        let outcome = sym_eval_stmt(&step, env.clone(), &ctx)
+            .expect("the STEP denotation evaluates symbolically in production");
+        let (tri0, ms0) = p93_judge(&verifier, &spec.postconditions[0], &spec, &env, &outcome);
+        let (tri1, ms1) = p93_judge(&verifier, &spec.postconditions[1], &spec, &env, &outcome);
+        assert!(
+            matches!(tri0, Tri::Unknown),
+            "row 1 (index 0) must judge Unknown symbolically (exhaustion-bounded)"
+        );
+        assert!(
+            matches!(tri1, Tri::Refuted),
+            "row 2 (index 1) must be REFUTED symbolically — the \" 5\" \
+             countermodel completes on a bounded path"
+        );
+        println!(
+            "P93|step-sym|fuel={}|paths={}|row0_ms={}|row1_ms={}",
+            STMT_VERIFY_FUEL,
+            outcome.paths.len(),
+            ms0,
+            ms1
+        );
+        // verify_one's own verdict on the denotation.
+        let cand = candidate(&spec, 9301, step.clone());
+        let result = verifier.verify_one(&cand, &spec);
+        assert_eq!(
+            result.status,
+            VerificationStatus::VerificationFailed,
+            "verify_one must REFUTE the STEP denotation under standing row 2"
+        );
+        assert!(
+            result.counterexample.is_some(),
+            "a refutation carries its counterexample"
+        );
+        assert!(
+            result.constraint_results.iter().all(|r| !r.holds),
+            "neither row holds for the STEP denotation symbolically"
+        );
+        println!(
+            "P93|step-verify-one|status=VerificationFailed|time_ms={}",
+            result.verification_time_ms
+        );
+        // The diagnostic point, through the production
+        // judge over the production outcome.
+        let diag = p90_st(" 5", 0, 1, 1);
+        let mut env = SymEnv::new();
+        env.insert("state".into(), p90_state_sym(&diag));
+        let ctx = StmtCtx::root(&index, 2, 5_000);
+        let outcome = sym_eval_stmt(&step, env.clone(), &ctx)
+            .expect("STEP evaluates at the diagnostic point");
+        let out = stmt_concretize(&outcome, 5_000).expect("the diagnostic point resolves");
+        assert!(
+            matches!(&out, Sym::Result { ok: Tag::False, .. }),
+            "the faithful body errs at \" 5\""
+        );
+        let (tri, _) = p93_judge(&verifier, &spec.postconditions[1], &spec, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row 2 REFUTES the faithful body at \" 5\" through the \
+             production statement judge: the residue is the R2-β-skip \
+             ratification (Phase 96)"
+        );
+        let (tri, _) = p93_judge(&verifier, &spec.postconditions[0], &spec, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Unknown),
+            "row 1 at the Err point judges Unknown (W8 literal-Err boundary)"
+        );
+        println!("P93|step-diag|\" 5\": row 2 Refuted, row 1 Unknown (production judge)");
+        // The LOOP body as a candidate: Inconclusive.
+        let all_spec = restored_spec(&module, "tokenize_all").clone();
+        let loop_body = p90_template_body(&module, "tokenize_all");
+        let cand = candidate(&all_spec, 9302, loop_body);
+        let result = verifier.verify_one(&cand, &all_spec);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Inconclusive,
+            "the LOOP body stays Inconclusive symbolically (row Unknown, \
+             nothing refuted)"
+        );
+        println!(
+            "P93|loop-verify-one|status=Inconclusive|time_ms={}",
+            result.verification_time_ms
+        );
+        // The skip denotation as a candidate:
+        // Inconclusive (its rows judge Unknown).
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let skip_body = index
+            .callee_body("skip_whitespace")
+            .expect("skip denotes after Phase 92");
+        let cand = candidate(&skip, 9303, skip_body);
+        let result = verifier.verify_one(&cand, &skip);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Inconclusive,
+            "the skip denotation stays Inconclusive symbolically \
+             (exhaustion-bounded rows)"
+        );
+        println!(
+            "P93|skip-verify-one|status=Inconclusive|time_ms={}",
+            result.verification_time_ms
+        );
+    }
+
+    /// Phase 93 teeth: wrong bodies Refute through the
+    /// production statement judge where the discipline
+    /// says they must — and the routing gate, not
+    /// capability, decides what gets judged at all.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase93_stmt_teeth() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let one = restored_spec(&module, "tokenize_one").clone();
+        let step = index
+            .callee_body("tokenize_one")
+            .expect("tokenize_one denotes after Phase 92");
+        // ── The routing gate: engagement is syntactic
+        // (statement/loop nodes in the body or its
+        // denotations), never capability-based.
+        assert!(
+            body_mentions_statements(&step, &index),
+            "the STEP body itself carries Loop/Alloc nodes"
+        );
+        let call_skip = IRNode::Call {
+            function: "skip_whitespace".to_string(),
+            args: vec![IRNode::Var("state".to_string())],
+        };
+        assert!(
+            body_mentions_statements(&call_skip, &index),
+            "a bare call engages through its statement-bodied denotation"
+        );
+        let append_char = IRNode::BinOp(
+            IRBinOp::Append,
+            Box::new(IRNode::Literal(IRLiteral::String("x".to_string()))),
+            Box::new(IRNode::Literal(IRLiteral::Char('y'))),
+        );
+        assert!(
+            !body_mentions_statements(&append_char, &index),
+            "an Append the expression encoder leaves unarmed mentions \
+             no statements — the statement layer must not engage for it"
+        );
+        let cand = candidate(&one, 9311, append_char);
+        assert_eq!(
+            verifier.verify_one(&cand, &one).status,
+            VerificationStatus::Inconclusive,
+            "a body declined for a NON-statement reason keeps its standing \
+             Inconclusive even though stmt_append could evaluate it: \
+             routing, not capability, gates the statement layer"
+        );
+        // ── Identity-as-skip at a whitespace point: the
+        // current rows Proven (the standing scandal,
+        // reproduced through the production judge), row
+        // (a) Refuted.
+        let row_a = p90_parse_row(
+            "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
+        );
+        let mut spec_a = skip.clone();
+        spec_a.postconditions.push(row_a.clone());
+        let identity = IRNode::Return(Box::new(IRNode::Var("state".to_string())));
+        let ws_start = p90_st("  \t\n x", 0, 1, 1);
+        let mut env = SymEnv::new();
+        env.insert("state".into(), p90_state_sym(&ws_start));
+        let ctx = StmtCtx::root(&index, 0, 5_000);
+        let outcome = sym_eval_stmt(&identity, env.clone(), &ctx)
+            .expect("the identity body evaluates in statement mode");
+        for row in skip.postconditions.iter() {
+            let (tri, _) = p93_judge(&verifier, row, &skip, &env, &outcome);
+            assert!(
+                matches!(tri, Tri::Proven),
+                "the identity body satisfies the current rows (the standing scandal)"
+            );
+        }
+        let (tri, _) = p93_judge(&verifier, &row_a, &spec_a, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row (a) REFUTES the identity body at a whitespace start \
+             through the production statement judge"
+        );
+        // ── Partial skip (≤ 1 char): (a) Refutes it on a
+        // run of 5, Proves it on a run of 1.
+        let partial = p90_partial_skip_body();
+        let outcome = sym_eval_stmt(&partial, env.clone(), &ctx)
+            .expect("the partial skip evaluates in statement mode");
+        let (tri, _) = p93_judge(&verifier, &row_a, &spec_a, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row (a) REFUTES the partial skip on a run of 5"
+        );
+        let one_ws = p90_st(" ", 0, 1, 1);
+        let mut env1 = SymEnv::new();
+        env1.insert("state".into(), p90_state_sym(&one_ws));
+        let outcome = sym_eval_stmt(&partial, env1.clone(), &ctx)
+            .expect("the partial skip evaluates in statement mode");
+        let (tri, _) = p93_judge(&verifier, &row_a, &spec_a, &env1, &outcome);
+        assert!(
+            matches!(tri, Tri::Proven),
+            "the partial skip is exactly right on a run of 1: (a) admits it there"
+        );
+        println!("P93|teeth-skip|identity: current Proven, (a) Refuted; partial: (a) Refuted on run 5, Proven on run 1");
+        // ── Double-append: a step-shaped body that
+        // appends the token TWICE at ":" — tokenize_one's
+        // row 1 (exactly one more token) Refutes it
+        // through the production judge; row 2 admits the
+        // Ok.
+        let v = |n: &str| IRNode::Var(n.to_string());
+        let fa = |base: IRNode, field: &str| IRNode::FieldAccess {
+            base: Box::new(base),
+            field: field.to_string(),
+        };
+        let call = |f: &str, args: Vec<IRNode>| IRNode::Call {
+            function: f.to_string(),
+            args,
+        };
+        let state_ty = TypeRef::Named("TokenizerState".to_string());
+        let token_lit = IRNode::RecordLit {
+            type_name: "Token".to_string(),
+            fields: vec![
+                ("kind".to_string(), IRNode::Literal(IRLiteral::Int(3))),
+                (
+                    "lexeme".to_string(),
+                    IRNode::Literal(IRLiteral::String("(".to_string())),
+                ),
+                ("line".to_string(), fa(v("s"), "line")),
+                ("col".to_string(), fa(v("s"), "col")),
+            ],
+        };
+        let double_append = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "s".to_string(),
+                ty: state_ty.clone(),
+                initial: Box::new(call("skip_whitespace", vec![v("state")])),
+            },
+            IRNode::Alloc {
+                name: "toks".to_string(),
+                ty: TypeRef::List(Box::new(TypeRef::Named("Token".to_string()))),
+                initial: Box::new(fa(v("s"), "tokens")),
+            },
+            IRNode::BinOp(
+                IRBinOp::Append,
+                Box::new(v("toks")),
+                Box::new(token_lit.clone()),
+            ),
+            IRNode::BinOp(IRBinOp::Append, Box::new(v("toks")), Box::new(token_lit)),
+            IRNode::Return(Box::new(call(
+                "Ok",
+                vec![IRNode::RecordLit {
+                    type_name: "TokenizerState".to_string(),
+                    fields: vec![
+                        ("source".to_string(), fa(v("s"), "source")),
+                        ("pos".to_string(), fa(v("s"), "pos")),
+                        ("line".to_string(), fa(v("s"), "line")),
+                        ("col".to_string(), fa(v("s"), "col")),
+                        ("tokens".to_string(), v("toks")),
+                    ],
+                }],
+            ))),
+        ]);
+        let colon = p90_st(":", 0, 1, 1);
+        let mut env = SymEnv::new();
+        env.insert("state".into(), p90_state_sym(&colon));
+        let ctx = StmtCtx::root(&index, 1, 5_000);
+        let outcome = sym_eval_stmt(&double_append, env.clone(), &ctx)
+            .expect("the double-append body evaluates in statement mode");
+        let (tri, _) = p93_judge(&verifier, &one.postconditions[0], &one, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row 1 REFUTES the double-append body (two tokens where \
+             exactly one more is licensed)"
+        );
+        let (tri, _) = p93_judge(&verifier, &one.postconditions[1], &one, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Proven),
+            "row 2 admits the double-append body's Ok (it discriminates \
+             the count, not the tag)"
+        );
+        println!("P93|teeth-step|double-append at \":\": row 1 Refuted, row 2 Proven");
+        // ── Swapped arms: the STEP denotation with its
+        // EOF dispatch branches exchanged — at "spec" it
+        // returns Ok with NO token consumed, and row 1
+        // Refutes it.
+        let IRNode::Block(top) = &step else {
+            panic!("the STEP denotation is a Block");
+        };
+        assert_eq!(top.len(), 2, "the STEP body is [skip alloc, EOF dispatch]");
+        let IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } = &top[1]
+        else {
+            panic!("the STEP body's second statement is the EOF dispatch If");
+        };
+        let swapped = IRNode::Block(vec![
+            top[0].clone(),
+            IRNode::If {
+                condition: condition.clone(),
+                then_branch: else_branch.clone(),
+                else_branch: then_branch.clone(),
+            },
+        ]);
+        let spec_point = p90_st("spec", 0, 1, 1);
+        let mut env = SymEnv::new();
+        env.insert("state".into(), p90_state_sym(&spec_point));
+        let ctx = StmtCtx::root(&index, 5, 5_000);
+        let outcome = sym_eval_stmt(&swapped, env.clone(), &ctx)
+            .expect("the swapped body evaluates in statement mode");
+        let (tri, _) = p93_judge(&verifier, &one.postconditions[0], &one, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "row 1 REFUTES the branch-swapped STEP body at \"spec\" \
+             (Ok with no token where a token start stands)"
+        );
+        println!("P93|teeth-step|swapped EOF branches at \"spec\": row 1 Refuted");
     }
 
     // ────────────────────────────────────────────────────
