@@ -294,6 +294,7 @@ v0.5 self-hosting: the **M2, M3, M4 and M5 gates are all closed**. The M2–M4 +
 | **0.6** | WASM playground: Morphic in the browser | ✅ Done — audit ✅ · scope ratified (full client-side, staged) · W1 ✅ · W2 ✅ · W3 ✅ · W4 ✅ · W5 public release ✅ — live at [thvtzy.github.io/morphic](https://thvtzy.github.io/morphic/) (Z3 + compiled runner native-only, labelled in the UI) |
 | **0.7** | M1 gate closed: language features + encoder extension + `int_to_str` | ✅ Done — M1-features ✅ · encoder extension ✅ · F2 ✅ · gate re-run #4 PASS (Phase 103) — all eight tokenizer specs Z3-Verified ∧ 100% golden |
 | **1.0** | Production-ready — verified standard library | 🎯 Target |
+| **1.1** | Embeddable Morphic: verified functions as ready-to-import packages (npm/WASM + Rust crate), typed host bindings | 🎯 Target — after 1.0 |
 
 ---
 
