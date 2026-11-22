@@ -21,7 +21,10 @@
 //  THE GENERATED SIDE is the module's actual synthesis
 //  output, assembled exactly as Phase 85's Leg 2 assembly
 //  assembled it (the composition whose executed agreement
-//  Phase 85 measured at 9/10 + 7/8):
+//  Phase 85 measured at 9/10 + 7/8; Phase 101 re-pin:
+//  the F2 payoff closed the Err-text deviation, and the
+//  composition's executed agreement now stands at
+//  10/10 + 8/8 — see the cross-validation crowns):
 //   - is_whitespace / is_ident_start / is_ident_continue:
 //     the pools' equation seeds — also the crowned winners
 //     (Phases 76/81: deterministic Verified crowns).
@@ -74,11 +77,16 @@
 //  Both workloads checksum every produced token (kind,
 //  lexeme bytes, line, col) plus a bare error marker —
 //  the error MESSAGE text never enters the checksum
-//  (it is the Phase 85 named deviation: template
+//  (the Phase 85 named deviation: template
 //  "Unexpected character" vs mirror "Unexpected
-//  character '5' at line 1"). The instrument asserts the
-//  two sides' checksums, token counts, error counts and
-//  anomaly counts are EQUAL before any timing is
+//  character '5' at line 1" — Phase 101 re-pin: that
+//  deviation is CLOSED, the template now builds the
+//  mirror's full interpolated text; the checksum still
+//  excludes message text by design, and full-text
+//  equality is the cross-validation crowns' evidence,
+//  10/10 + 8/8 on both routes). The instrument asserts
+//  the two sides' checksums, token counts, error counts
+//  and anomaly counts are EQUAL before any timing is
 //  reported: the timed work is the same work.
 //
 //  PROFILE: each side is a single standalone file

@@ -2,7 +2,7 @@
 //  SYNTHESIZED CODEGEN — GENERATED FILE. DO NOT EDIT.
 //
 //  The bootstrap artifact of M5-S1 (Phase 51): the M3 Codegen
-//  module's 129 synthesized winners, compiled into this crate
+//  module's 130 synthesized winners, compiled into this crate
 //  and called directly by the bootstrap adapter
 //  (src/codegen/bootstrap_adapter.rs). Each winner is rendered
 //  through the ORIGINAL `codegen::generate` and wrapped in its
@@ -13,8 +13,10 @@
 //  spec amendments; re-derived in Phase 62 after the
 //  Clone-bound amendment; re-derived in Phase 78 after the
 //  new-kind amendment; re-derived in Phase 85 after the
-//  call/index-form amendment): 124 constraint-derived seeds —
-//  equation 66, guard_table 40, composition_guard 7,
+//  call/index-form amendment; re-derived in Phase 102 after
+//  the int_to_str call-form amendment): 125 constraint-derived
+//  seeds —
+//  equation 67, guard_table 40, composition_guard 7,
 //  pair_guard_table 5, expr_pin_guard 3, guarded_identity 1,
 //  multi_guard 1, mixed_pair_guard_table 1 — plus the 5
 //  by-design seedless pool winners (rust_ident_empty,
@@ -31,9 +33,10 @@
 //
 //  Two mechanical adaptations separate this file from the M3
 //  gate's raw render (target/m3-gate/synthesized_codegen.rs,
-//  145,404 B); winner function bodies are byte-identical:
+//  157,967 B at the Phase 102 re-derivation); winner function
+//  bodies are byte-identical:
 //  (1) each winner's generated `#[cfg(test)] mod tests` block
-//      is stripped (64 of 129 winners carry one): verbatim
+//      is stripped (65 of 130 winners carry one): verbatim
 //      inclusion breaks `cargo test` compilation — the
 //      generated tests pass &str literals to String parameters
 //      (E0308, the Phase 20 record) — and the M3 gate compiles
@@ -1656,7 +1659,7 @@ pub fn rust_sort_text(coll: String, cmp: String) -> String {
 }
 
 pub(crate) mod rust_call_text {
-//! The plain call template of ir_to_rust_expr (src/codegen/mod.rs:810-813): the rust_ident-rendered function name + '(' + the argument renderings joined ', ' + ')'. The name arrives rendered (slice 3 owns rust_ident) and the arguments pre-joined (the join is iteration, mirror-only); each argument is rendered by ir_to_rust_expr itself, UNTYPED -- a String argument renders as a bare &str literal even where the callee takes String (the same placement property as rust_test_case's, one walker down). Since the Phase 85 amendment (2026-11-22) this is family 0 of rust_call_form's dispatch -- the forms the seed and resolver bodies actually emit (the parser's list pseudo-call, the bare 'None', the 'len' builtin) take their own families there; every genuine function call, and pseudo-calls like Some(x) whose Rust form is the call itself, render here. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
+//! The plain call template of ir_to_rust_expr (src/codegen/mod.rs:810-813): the rust_ident-rendered function name + '(' + the argument renderings joined ', ' + ')'. The name arrives rendered (slice 3 owns rust_ident) and the arguments pre-joined (the join is iteration, mirror-only); each argument is rendered by ir_to_rust_expr itself, UNTYPED -- a String argument renders as a bare &str literal even where the callee takes String (the same placement property as rust_test_case's, one walker down). Since the Phase 85 amendment (2026-11-22) this is family 0 of rust_call_form's dispatch -- the forms the seed and resolver bodies actually emit (the parser's list pseudo-call, the bare 'None', the 'len' builtin) take their own families there, and the 'int_to_str' builtin joins them at family 4 since the Phase 102 amendment (2026-11-22); every genuine function call, and pseudo-calls like Some(x) whose Rust form is the call itself, render here. Multi-input spec: no in-spec tests; golden in tests/m3_proof.rs.
 
 pub fn rust_call_text(func: String, args: String) -> String {
     (((func.clone() + "(") + &args) + ")")
@@ -1664,7 +1667,7 @@ pub fn rust_call_text(func: String, args: String) -> String {
 }
 
 pub(crate) mod rust_call_form {
-//! Which rendering an IR Call in ir_to_rust_expr takes (Phase 85 amendment, 2026-11-22), keyed by the call's EFFECTIVE name: 0 = the plain call template (rust_call_text) -- every genuine function call and pseudo-calls like Some(x); 1 = the vec-literal template (rust_expr_list_text) for the parser's list pseudo-call 'List', which the Phase 77+ seed and resolver bodies emit as IR (the spec-side twin is rust_expr_call_form family 1); 2 = the bare constructor: 'None' renders as the bare name with no parentheses (its pseudo-call carries no arguments, so the plain template produced 'None()', which is not a value -- the E0618 class the Phase 81 cross-validation measured); 3 = the 'len' builtin, sub-dispatched by rust_call_len_form over the argument's shape. The key is effective because the argument count is folded in by the walker: 'None' carrying arguments and 'len' carrying any count but one take the plain form, and the walker passes the empty name for them -- the empty name is itself off-table, so the fold is exact, with no sentinel collision (the rust_expr_method_form fold). The rows are String-equality guards -- the rust_expr_call_form shape: fully statable in the spec, and (like it) outside every admitted seed family, whose guards key on Int/Bool/Char only. The test set below states the complete classification (every special name, an ordinary pseudo-call, a case near-miss, the empty key), as rust_expr_call_form's test set states its: a partial set leaves this seedless classification winnerless (Phase 78 measurement).
+//! Which rendering an IR Call in ir_to_rust_expr takes (Phase 85 amendment, 2026-11-22), keyed by the call's EFFECTIVE name: 0 = the plain call template (rust_call_text) -- every genuine function call and pseudo-calls like Some(x); 1 = the vec-literal template (rust_expr_list_text) for the parser's list pseudo-call 'List', which the Phase 77+ seed and resolver bodies emit as IR (the spec-side twin is rust_expr_call_form family 1); 2 = the bare constructor: 'None' renders as the bare name with no parentheses (its pseudo-call carries no arguments, so the plain template produced 'None()', which is not a value -- the E0618 class the Phase 81 cross-validation measured); 3 = the 'len' builtin, sub-dispatched by rust_call_len_form over the argument's shape; 4 = the 'int_to_str' builtin (Phase 102 amendment, 2026-11-22), rendered by rust_call_int_to_str_text -- the Phase 100 native arm's decimal-text form, taught to this dispatch so the synthesized emitter renders the conversion the language now has (before the amendment the generic form emitted a free 'int_to_str(...)' call no prelude defines -- the E0425 the Phase 101 crown measurement caught under the bootstrap feature). The key is effective because the argument count is folded in by the walker: 'None' carrying arguments, 'len' carrying any count but one, and 'int_to_str' carrying any count but one take the plain form, and the walker passes the empty name for them -- the empty name is itself off-table, so the fold is exact, with no sentinel collision (the rust_expr_method_form fold). The rows are String-equality guards -- the rust_expr_call_form shape: fully statable in the spec, and (like it) outside every admitted seed family, whose guards key on Int/Bool/Char only. The test set below states the complete classification (every special name, an ordinary pseudo-call, case near-misses, the empty key), as rust_expr_call_form's test set states its: a partial set leaves this seedless classification winnerless (Phase 78 measurement).
 
 pub fn rust_call_form(name: String) -> i64 {
     match name.as_str() {
@@ -1677,6 +1680,9 @@ pub fn rust_call_form(name: String) -> i64 {
         "len" => {
             3
         },
+        "int_to_str" => {
+            4
+        },
         "Some" => {
             0
         },
@@ -1684,6 +1690,9 @@ pub fn rust_call_form(name: String) -> i64 {
             0
         },
         "Len" => {
+            0
+        },
+        "Int_to_str" => {
             0
         },
         "" => {
@@ -1727,6 +1736,15 @@ pub(crate) mod rust_call_len_char_text {
 
 pub fn rust_call_len_char_text(arg: String) -> String {
     (("(".to_string() + &arg) + ").chars().count() as i64")
+}
+
+}
+
+pub(crate) mod rust_call_int_to_str_text {
+//! The decimal-text rendering of the 'int_to_str' builtin (Phase 102 amendment, 2026-11-22): '(' + the argument's rendering + ').to_string()' -- Rust's own Display for i64, the Phase 100 native arm's form exactly (ir_call_text, src/codegen/mod.rs), so the compiled route matches the interpreter and the encoder's literal fold, negatives and i64 extremes included. The argument arrives rendered by ir_to_rust_expr itself. WHICH calls take it is rust_call_form family 4. Multi-input shape (single String input): in-spec tests below.
+
+pub fn rust_call_int_to_str_text(arg: String) -> String {
+    (("(".to_string() + &arg) + ").to_string()")
 }
 
 }
@@ -2405,7 +2423,7 @@ pub fn rust_stmt_sort_text(pad: String, coll: String, cmp: String) -> String {
 }
 
 pub(crate) mod rust_stmt_expr_text {
-//! The fallback arm of ir_to_rust (src/codegen/mod.rs:496): pad + the node's ir_to_rust_expr rendering + ';' + newline. This arm serves exactly rust_stmt_form family 17 -- the expression shapes in statement position (Literal, Var, BinOp, UnaryOp, Lambda, Closure, Index, Loop, Break, StructDef, TryPropagate): each keeps its expression rendering whole (a statement Loop keeps the 'loop {...}' block form; a statement StructDef keeps its block-wrapped definition) and is merely terminated. The ';' after a block-form rendering ('};') is part of the pinned text. Since the Phase 85 amendment (2026-11-22) the statement walker's Call arm ALSO terminates through this template for every rust_call_form family but the plain one (family 0 keeps rust_stmt_call_text, whose template already carries the terminator): the dispatched expression rendering (a vec literal, the bare 'None', a len form) arrives complete and is merely terminated, exactly as the native arm composes ir_call_text's result with the same terminator.
+//! The fallback arm of ir_to_rust (src/codegen/mod.rs:496): pad + the node's ir_to_rust_expr rendering + ';' + newline. This arm serves exactly rust_stmt_form family 17 -- the expression shapes in statement position (Literal, Var, BinOp, UnaryOp, Lambda, Closure, Index, Loop, Break, StructDef, TryPropagate): each keeps its expression rendering whole (a statement Loop keeps the 'loop {...}' block form; a statement StructDef keeps its block-wrapped definition) and is merely terminated. The ';' after a block-form rendering ('};') is part of the pinned text. Since the Phase 85 amendment (2026-11-22) the statement walker's Call arm ALSO terminates through this template for every rust_call_form family but the plain one (family 0 keeps rust_stmt_call_text, whose template already carries the terminator): the dispatched expression rendering (a vec literal, the bare 'None', a len form, the int_to_str form since the Phase 102 amendment) arrives complete and is merely terminated, exactly as the native arm composes ir_call_text's result with the same terminator.
 
 pub fn rust_stmt_expr_text(pad: String, rendered: String) -> String {
     ((pad.clone() + &rendered) + ";\n")

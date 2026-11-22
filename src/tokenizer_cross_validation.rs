@@ -1824,6 +1824,16 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
     /// agreement is mirror-exact for skip and capped
     /// only by the F2 Err-message text for the tokenize
     /// pair — identically on both execution routes.
+    ///
+    /// Phase 101 re-pin (reason recorded, same
+    /// precedent): the F2 payoff landed — the STEP
+    /// construction builds the mirror's interpolated
+    /// message through `int_to_str` — so the tokenize
+    /// pair's cap is CLOSED: both compositions are now
+    /// mirror-exact (10/10 and 8/8, disagreements
+    /// empty) on both routes, and the Z3 standings are
+    /// unmoved (Verified; the STEP and LOOP verdicts
+    /// hold with the UF-carried payload).
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase97_composition_crowns() {
@@ -1856,9 +1866,10 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         assert_eq!((m.inproc_agree, m.inproc_total), (12, 12));
         assert!(m.compiled.disagreements.is_empty() && m.inproc_disagreements.is_empty());
 
-        // tokenize_one: Verified; 9/10 on both routes,
-        // the sole disagreement the F2 Err text at "5"
-        // (both sides carry the Err tag).
+        // tokenize_one: Verified; 10/10 on both routes
+        // (Phase 101 re-pin: 9/10 through Phase 100, the
+        // sole disagreement the F2 Err text at "5"; the
+        // payoff closed it — disagreements now empty).
         let m = measure_composition(
             "tokenize_one",
             &functions,
@@ -1875,22 +1886,19 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         assert_eq!(m.z3_status, verify::VerificationStatus::Verified);
         assert_eq!((m.z3_held, m.z3_total), (2, 2));
         assert_eq!(m.compiled.exec, "ok");
-        assert_eq!((m.compiled.agree, m.compiled.total), (9, 10));
-        assert_eq!((m.inproc_agree, m.inproc_total), (9, 10));
-        for dis in [&m.compiled.disagreements, &m.inproc_disagreements] {
-            assert_eq!(dis.len(), 1, "exactly one disagreement per route: {dis:?}");
-            assert!(
-                dis[0].contains("\"5\"")
-                    && dis[0].contains("winner ERR|")
-                    && dis[0].contains("mirror ERR|"),
-                "the sole deviation is the Err message text at \"5\" (F2 cap): {}",
-                dis[0]
-            );
-        }
+        assert_eq!((m.compiled.agree, m.compiled.total), (10, 10));
+        assert_eq!((m.inproc_agree, m.inproc_total), (10, 10));
+        assert!(
+            m.compiled.disagreements.is_empty() && m.inproc_disagreements.is_empty(),
+            "no disagreement on either route: {:?} / {:?}",
+            m.compiled.disagreements, m.inproc_disagreements
+        );
 
-        // tokenize_all: Verified; 7/8 on both routes,
-        // the sole disagreement the same F2 text at
-        // "spec 5".
+        // tokenize_all: Verified; 8/8 on both routes
+        // (Phase 101 re-pin: 7/8 through Phase 100, the
+        // sole disagreement the same F2 text at
+        // "spec 5"; the payoff closed it through the
+        // STEP's propagated Err — disagreements empty).
         let m = measure_composition(
             "tokenize_all",
             &functions,
@@ -1907,18 +1915,13 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         assert_eq!(m.z3_status, verify::VerificationStatus::Verified);
         assert_eq!((m.z3_held, m.z3_total), (1, 1));
         assert_eq!(m.compiled.exec, "ok");
-        assert_eq!((m.compiled.agree, m.compiled.total), (7, 8));
-        assert_eq!((m.inproc_agree, m.inproc_total), (7, 8));
-        for dis in [&m.compiled.disagreements, &m.inproc_disagreements] {
-            assert_eq!(dis.len(), 1, "exactly one disagreement per route: {dis:?}");
-            assert!(
-                dis[0].contains("\"spec 5\"")
-                    && dis[0].contains("winner ERR|")
-                    && dis[0].contains("mirror ERR|"),
-                "the sole deviation is the Err message text at \"spec 5\" (F2 cap): {}",
-                dis[0]
-            );
-        }
+        assert_eq!((m.compiled.agree, m.compiled.total), (8, 8));
+        assert_eq!((m.inproc_agree, m.inproc_total), (8, 8));
+        assert!(
+            m.compiled.disagreements.is_empty() && m.inproc_disagreements.is_empty(),
+            "no disagreement on either route: {:?} / {:?}",
+            m.compiled.disagreements, m.inproc_disagreements
+        );
     }
 
     #[test]
@@ -2662,6 +2665,14 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
     //  subset's effect is on composed bodies (this test's
     //  batteries and in-spec runs), not on the raw pool
     //  score. Selection standings are unchanged.
+    //
+    //  Phase 101 re-pin: the F2 payoff (the STEP Err
+    //  arm builds the mirror's interpolated message
+    //  through `int_to_str`) moved both batteries to
+    //  FULL agreement — 10/10 and 8/8 below. The
+    //  9/10 + 7/8 figures in this header are the
+    //  standings as Phase 95 found them; the battery
+    //  assertions carry the re-pin at their sites.
     // ─────────────────────────────────────────────────────
 
     #[test]
@@ -2833,10 +2844,12 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
             })
         };
 
-        // STEP battery: 9/10 in-process, sole deviation the
-        // Err message text at the "5" point (F2) — the
-        // compiled runner's standing, now reproduced by
-        // the interpreter.
+        // STEP battery: 10/10 in-process (Phase 101
+        // re-pin: 9/10 through Phase 100, sole deviation
+        // the Err message text at the "5" point (F2);
+        // the payoff closed it — the interpreter now
+        // reproduces the compiled runner's full
+        // agreement, disagreements empty).
         let mut agree = 0;
         let mut disagreements: Vec<(State, String, String)> = Vec::new();
         for st in tokenize_one_battery() {
@@ -2849,17 +2862,17 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
             }
         }
         println!("TOK95|tokenize_one|in_process={agree}/10");
-        assert_eq!(agree, 9);
-        assert_eq!(disagreements.len(), 1);
-        let (st, got, want) = &disagreements[0];
-        assert_eq!(st.source, "5");
+        assert_eq!(agree, 10);
         assert!(
-            got.starts_with("ERR|") && want.starts_with("ERR|"),
-            "the sole deviation is the Err tag's text: got {got}, want {want}"
+            disagreements.is_empty(),
+            "no in-process disagreement: {disagreements:?}"
         );
 
-        // LOOP battery: 7/8 in-process, sole deviation the
-        // same Err text at the "spec 5" point.
+        // LOOP battery: 8/8 in-process (Phase 101
+        // re-pin: 7/8 through Phase 100, sole deviation
+        // the same Err text at the "spec 5" point; the
+        // payoff closed it through the STEP's
+        // propagated Err — disagreements empty).
         let mut agree = 0;
         let mut disagreements: Vec<(State, String, String)> = Vec::new();
         for st in tokenize_all_battery() {
@@ -2872,13 +2885,10 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
             }
         }
         println!("TOK95|tokenize_all|in_process={agree}/8");
-        assert_eq!(agree, 7);
-        assert_eq!(disagreements.len(), 1);
-        let (st, got, want) = &disagreements[0];
-        assert_eq!(st.source, "spec 5");
+        assert_eq!(agree, 8);
         assert!(
-            got.starts_with("ERR|") && want.starts_with("ERR|"),
-            "the sole deviation is the Err tag's text: got {got}, want {want}"
+            disagreements.is_empty(),
+            "no in-process disagreement: {disagreements:?}"
         );
     }
 

@@ -173,6 +173,11 @@ fn check_constraint(constraint: &Constraint, env: &TypeEnv) -> Result<(), TypeEr
 fn stdlib_return_type(name: &str) -> Option<TypeRef> {
     match name {
         "len" | "sum" | "product" => Some(TypeRef::Int),
+        // F2 (Phase 100, D1a/D2a): the Int→decimal-text
+        // conversion. Its argument is additionally
+        // VALIDATED at the call site in `check_expr` —
+        // see the `int_to_str` arm there.
+        "int_to_str" => Some(TypeRef::String),
         "is_sorted" | "is_permutation" | "contains" | "all" | "any" => Some(TypeRef::Bool),
         "range" => Some(TypeRef::List(Box::new(TypeRef::Int))),
         "reverse" | "sort" | "filter" | "map" | "zip" | "take" | "drop" => {
@@ -279,6 +284,52 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
             // library fallback below.
             if let Some(f) = env.function_sigs.get(name) {
                 return Ok(f.return_type.clone());
+            }
+            // F2 (Phase 100, D1a/D2a/D3a): `int_to_str` is
+            // the one stdlib entry whose argument this
+            // checker validates. The table's standing
+            // coarseness (no argument inspection, inherited
+            // by `len` and friends) would let
+            // `int_to_str("x")` through to layers that can
+            // only decline it as unencodable/unevaluable —
+            // but a conversion's argument type is the whole
+            // content of the builtin, so a wrong arity or a
+            // non-integer argument is a type error HERE.
+            // The integer family is accepted (Int and the
+            // fixed widths): every layer below carries all
+            // of them as the same i64 value, so the checker
+            // invents no distinction they would not honor.
+            if name == "int_to_str" {
+                let is_integer = |t: &TypeRef| {
+                    matches!(
+                        t,
+                        TypeRef::Int
+                            | TypeRef::I8
+                            | TypeRef::I16
+                            | TypeRef::I32
+                            | TypeRef::I64
+                            | TypeRef::U8
+                            | TypeRef::U16
+                            | TypeRef::U32
+                            | TypeRef::U64
+                    )
+                };
+                return match arg_tys.as_slice() {
+                    [t] if is_integer(t) => Ok(TypeRef::String),
+                    _ => Err(TypeError {
+                        message: format!(
+                            "`int_to_str` expects exactly one Int argument, got {} argument(s) of type ({})",
+                            arg_tys.len(),
+                            arg_tys
+                                .iter()
+                                .map(|t| t.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        function: None,
+                        span: None,
+                    }),
+                };
             }
             // Standard library functions are assumed to be available
             // (LANGUAGE_REFERENCE Appendix A) — the same assumption
@@ -1655,6 +1706,91 @@ mod tests {
             result.is_ok(),
             "field access on an undeclared type must still defer, got: {:?}",
             result.err().map(|e| e.message)
+        );
+    }
+
+    // ── Phase 100 (F2): the `int_to_str` builtin ────────
+
+    #[test]
+    fn int_to_str_call_typechecks_as_string() {
+        // F2 (Phase 100, D1a/D2a/D3a): `int_to_str` is a
+        // builtin `Int -> String` in the Appendix A call
+        // tradition. A well-formed use types as String in
+        // constraints and in test expectations alike.
+        let src = r#"
+        T {
+        spec f {
+            input: n: Int
+            output: String
+
+            constraint: output == int_to_str(n)
+
+            test "five" { input: 5; expect: int_to_str(5) }
+        }
+        }
+        "#;
+        let result = check_src(src);
+        assert!(
+            result.is_ok(),
+            "int_to_str(n) must typecheck as String, got: {:?}",
+            result.err().map(|e| e.message)
+        );
+    }
+
+    #[test]
+    fn int_to_str_wrong_argument_type_is_a_type_error() {
+        // The conversion's argument IS its type: a String
+        // argument is a type error at check time, not a
+        // downstream surprise (Phase 100 teeth).
+        let src = r#"
+        T {
+        spec f {
+            input: s: String
+            output: String
+
+            constraint: output == int_to_str(s)
+        }
+        }
+        "#;
+        let err = check_src(src).err().unwrap();
+        assert!(
+            err.message.contains("int_to_str"),
+            "error must name the builtin: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn int_to_str_wrong_arity_is_a_type_error() {
+        // Exactly one argument (Phase 100 teeth): two
+        // arguments and zero arguments both fail here.
+        let two = r#"
+        T {
+        spec f {
+            input: n: Int
+            output: String
+
+            constraint: output == int_to_str(n, n)
+        }
+        }
+        "#;
+        assert!(
+            check_src(two).is_err(),
+            "int_to_str(1, 2) must be a type error"
+        );
+        let zero = r#"
+        T {
+        spec f {
+            input: n: Int
+            output: String
+
+            constraint: output == int_to_str()
+        }
+        }
+        "#;
+        assert!(
+            check_src(zero).is_err(),
+            "int_to_str() must be a type error"
         );
     }
 }

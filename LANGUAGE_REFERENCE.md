@@ -647,6 +647,7 @@ Functions assumed to be available in constraints:
 | `is_sorted` | `List<T>, fn(T,T)->Bool → Bool` | Elements are in order |
 | `is_permutation` | `List<T>, List<T> → Bool` | Same elements, possibly rearranged |
 | `len` | `List<T> → Int` | Number of elements |
+| `int_to_str` | `Int → String` | Decimal text of the integer (see below) |
 | `contains` | `List<T>, T → Bool` | Element exists in list |
 | `reverse` | `List<T> → List<T>` | Reversed list |
 | `sort` | `List<T> → List<T>` | Sorted copy |
@@ -663,6 +664,27 @@ Functions assumed to be available in constraints:
 | `zip` | `List<T>, List<U> → List<(T,U)>` | Pair elements |
 | `take` | `List<T>, Int → List<T>` | First n elements |
 | `drop` | `List<T>, Int → List<T>` | Skip first n elements |
+
+**`int_to_str` (F2, added Phase 100).** The Int→decimal-text
+conversion: `int_to_str(n)` is the decimal rendering of `n`
+exactly as Rust's `Display` for `i64` renders it — no leading
+zeros, no `+`, a single leading `-` for negatives
+(`int_to_str(0)` is `"0"`, `int_to_str(-42)` is `"-42"`). It
+takes exactly one integer argument; any other arity or an
+argument of a non-integer type is a type error. It is
+available in constraints and in implementation bodies (it is
+a plain call — `Expr::Call` / `IRNode::Call`; there is no
+dedicated syntax). The name is reserved by the builtin: a
+user spec named `int_to_str` does not shadow it in the
+interpreter or the verifier, the standing treatment of `len`
+and the constructors. Verification note: the Z3 encoder
+evaluates the conversion exactly at literal arguments
+(a literal fold) and treats a symbolic argument as an
+uninterpreted function of the integer — proofs therefore
+hold for the real conversion, while a refutation that
+would rest on the uninterpreted value is reported as
+inconclusive instead (the refutation-degradation rule,
+F2_DESIGN.md §2.3).
 
 ---
 

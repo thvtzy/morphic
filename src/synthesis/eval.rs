@@ -670,6 +670,19 @@ fn eval_call(
             [Value::Str(s)] => Ok(Value::Int(s.chars().count() as i64)),
             _ => Err(not_evaluable("len expects one List or String argument")),
         },
+        // F2 (Phase 100, D1a/D2a/D3a): the Int→decimal-text
+        // conversion. Rust's own `Display` IS the
+        // implementation, so negatives and the i64
+        // extremes are exact by construction (the Phase 99
+        // probe 5 table is the test obligation, carried by
+        // `eval_int_to_str_battery`). Wrong arity/type is
+        // a named failure, as `len`'s arm.
+        "int_to_str" => match values.as_slice() {
+            [Value::Int(n)] => Ok(Value::Str(format!("{}", n))),
+            _ => Err(not_evaluable(
+                "int_to_str expects exactly one Int argument",
+            )),
+        },
         // Template-internal pseudo-calls ("first", "rest",
         // "push", "combine", …) and spec-to-spec calls are not
         // builtins: there is no definition to execute here.
@@ -1359,6 +1372,107 @@ mod tests {
             args: vec![string("abcd")],
         };
         assert_eq!(eval(&len_call, &env), Ok(Value::Int(4)));
+    }
+
+    // ── Phase 100 (F2): the `int_to_str` builtin ─────────
+
+    /// The conversion battery (Phase 99 probe 5's table,
+    /// plus the tokenizer's line numbers): the interpreter
+    /// must render each value EXACTLY as Rust's `Display`
+    /// — the same values the encoder's literal fold and
+    /// the compiled emitter are judged against in their
+    /// own Phase 100 tests.
+    const INT_TO_STR_BATTERY: &[(i64, &str)] = &[
+        (0, "0"),
+        (1, "1"),
+        (2, "2"),
+        (3, "3"),
+        (9, "9"),
+        (10, "10"),
+        (42, "42"),
+        (-1, "-1"),
+        (-42, "-42"),
+        (1_000_000, "1000000"),
+        (i64::MAX, "9223372036854775807"),
+        (i64::MIN, "-9223372036854775808"),
+    ];
+
+    #[test]
+    fn eval_int_to_str_battery() {
+        let env = Env::new();
+        for (n, want) in INT_TO_STR_BATTERY {
+            let call = IRNode::Call {
+                function: "int_to_str".into(),
+                args: vec![int(*n)],
+            };
+            assert_eq!(
+                eval(&call, &env),
+                Ok(Value::Str(want.to_string())),
+                "int_to_str({}) must render as Rust Display",
+                n
+            );
+        }
+        // A variable argument converts its bound value.
+        let env = env_with(&[("line", Value::Int(7))]);
+        let call = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![var("line")],
+        };
+        assert_eq!(eval(&call, &env), Ok(Value::Str("7".into())));
+    }
+
+    #[test]
+    fn eval_int_to_str_wrong_shape_is_not_evaluable() {
+        // Wrong type and wrong arity are named failures,
+        // never guessed values (the `len` arm's discipline).
+        let env = Env::new();
+        let bad_type = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![string("x")],
+        };
+        assert!(
+            matches!(eval(&bad_type, &env), Err(EvalError::NotEvaluable(_))),
+            "int_to_str(\"x\") must be NotEvaluable"
+        );
+        let bad_arity = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![int(1), int(2)],
+        };
+        assert!(
+            matches!(eval(&bad_arity, &env), Err(EvalError::NotEvaluable(_))),
+            "int_to_str(1, 2) must be NotEvaluable"
+        );
+        let zero_arity = IRNode::Call {
+            function: "int_to_str".into(),
+            args: vec![],
+        };
+        assert!(
+            matches!(eval(&zero_arity, &env), Err(EvalError::NotEvaluable(_))),
+            "int_to_str() must be NotEvaluable"
+        );
+    }
+
+    #[test]
+    fn eval_int_to_str_in_statement_position() {
+        // The Phase 95 statement subset evaluates calls
+        // through `eval_call`: a statement body that binds
+        // the conversion and returns it judges identically.
+        let body = IRNode::Block(vec![
+            IRNode::Alloc {
+                name: "msg".into(),
+                ty: crate::spec::ast::TypeRef::String,
+                initial: Box::new(IRNode::Call {
+                    function: "int_to_str".into(),
+                    args: vec![int(-42)],
+                }),
+            },
+            IRNode::Return(Box::new(var("msg"))),
+        ]);
+        assert_eq!(
+            eval(&body, &Env::new()),
+            Ok(Value::Str("-42".into())),
+            "statement-position int_to_str must evaluate"
+        );
     }
 
     // ── Control flow ──────────────────────────────────────

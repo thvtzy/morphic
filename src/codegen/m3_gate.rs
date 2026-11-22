@@ -41,9 +41,15 @@
 //    pool winners (rust_call_form joins the seedless
 //    set: the IR Call dispatch, String-equality guards
 //    and a complete exemplar test set, like its
-//    spec-side twin).
+//    spec-side twin). Phase 102 re-record
+//    (2026-11-22): the int_to_str call-form amendment
+//    adds one spec (rust_call_int_to_str_text, an
+//    equation template) and widens rust_call_form's
+//    classification by family 4 — the module holds 130
+//    specs and the fixed set is 125 constraint seeds +
+//    the same 5 by-design pool winners.
 //
-//  * The synthesized-codegen ARTIFACT is the 129 winners
+//  * The synthesized-codegen ARTIFACT is the 130 winners
 //    rendered through the ORIGINAL `generate` into one Rust
 //    module (each winner file wrapped in its own `mod`, so
 //    the per-file `mod tests` cannot collide), compiled with
@@ -1329,8 +1335,11 @@ impl<'a> Composed<'a> {
     /// the emitter decides then renders: the effective
     /// name (the argument-count fold) classifies through
     /// rust_call_form; family 3 sub-dispatches through
-    /// rust_call_len_form over the argument's shape.
-    /// Shared by the expression and statement walkers.
+    /// rust_call_len_form over the argument's shape;
+    /// family 4 (Phase 102: the 'int_to_str' builtin)
+    /// renders through rust_call_int_to_str_text over
+    /// the single argument. Shared by the expression
+    /// and statement walkers.
     fn call_dispatched_text(
         &self,
         function: &str,
@@ -1339,6 +1348,7 @@ impl<'a> Composed<'a> {
         let eff_name: &str = match function {
             "None" if !args.is_empty() => "",
             "len" if args.len() != 1 => "",
+            "int_to_str" if args.len() != 1 => "",
             other => other,
         };
         let form = self.w.call_int("rust_call_form", &[v_text(eff_name)])?;
@@ -1350,6 +1360,13 @@ impl<'a> Composed<'a> {
                     .call_text("rust_expr_list_text", &[v_text(&rendered?.join(", "))])
             }
             2 => Ok(rust_ident(function)),
+            4 => {
+                let arg_text = self.expr_text(&args[0])?;
+                self.w.call_text(
+                    "rust_call_int_to_str_text",
+                    &[v_text(&arg_text)],
+                )
+            }
             3 => {
                 let argform: i64 = match &args[0] {
                     IRNode::FieldAccess { .. } => 1,
@@ -1813,6 +1830,7 @@ impl<'a> Composed<'a> {
                 let eff_name: &str = match function.as_str() {
                     "None" if !args.is_empty() => "",
                     "len" if args.len() != 1 => "",
+                    "int_to_str" if args.len() != 1 => "",
                     other => other,
                 };
                 let form = self.w.call_int("rust_call_form", &[v_text(eff_name)])?;
@@ -3158,6 +3176,28 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             call("len", vec![vr("a"), vr("b")]),
             "len(a, b)",
         ),
+        // ── Phase 102: the int_to_str form (family 4) ──
+        (
+            "call-int-to-str-field",
+            call(
+                "int_to_str",
+                vec![IRNode::FieldAccess {
+                    base: Box::new(vr("state")),
+                    field: "line".to_string(),
+                }],
+            ),
+            "(state.line).to_string()",
+        ),
+        (
+            "call-int-to-str-var",
+            call("int_to_str", vec![vr("n")]),
+            "(n).to_string()",
+        ),
+        (
+            "call-int-to-str-two-args",
+            call("int_to_str", vec![vr("a"), vr("b")]),
+            "int_to_str(a, b)",
+        ),
         (
             "index-field-string",
             IRNode::Index(
@@ -3328,6 +3368,21 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             0,
             TypeRef::Int,
             "vec![1];\n",
+        ),
+        // Phase 102: the int_to_str form in statement
+        // position terminates the same way.
+        (
+            "stmt-call-int-to-str",
+            call(
+                "int_to_str",
+                vec![IRNode::FieldAccess {
+                    base: Box::new(vr("state")),
+                    field: "line".to_string(),
+                }],
+            ),
+            0,
+            TypeRef::Int,
+            "(state.line).to_string();\n",
         ),
         (
             "stmt-map",
@@ -4160,7 +4215,7 @@ fn m3_gate() {
 
     // ── 1. Winner extraction, twice (reproducibility) ──
     let functions3 = load_module("codegen.morph");
-    assert_eq!(functions3.len(), 129, "Codegen module spec count");
+    assert_eq!(functions3.len(), 130, "Codegen module spec count");
     let pass1 = extract_winners(&functions3);
     let pass2 = extract_winners(&functions3);
     for name in &pass1.order {
@@ -4193,7 +4248,7 @@ fn m3_gate() {
         "GATE3|winners|seeds={}|pool={:?}",
         seed_count, pool
     ));
-    assert_eq!(seed_count, 124, "Phase 85 measured 124 constraint seeds (Phase 78: 119; + three equation templates, the len guard table, the index pair guard table)");
+    assert_eq!(seed_count, 125, "Phase 102 measured 125 constraint seeds (Phase 85: 124; + the int_to_str equation template)");
     assert_eq!(
         pool,
         vec![
@@ -4280,7 +4335,7 @@ fn m3_gate() {
             name, out, spec.return_type
         );
     }
-    writelnr("GATE3|executor-smoke|129/129 winners execute on canonical inputs");
+    writelnr("GATE3|executor-smoke|130/130 winners execute on canonical inputs");
 
     // ── 2. M2 winners (corpus sources) ──
     let mut m2_sets: Vec<(&str, WinnerSet)> = Vec::new();
@@ -4306,7 +4361,7 @@ fn m3_gate() {
     // ── 3. The synthesized-codegen artifact ──
     let mut module_text = String::new();
     module_text.push_str(
-        "// The synthesized codegen: the Codegen module's 129 winners,\n\
+        "// The synthesized codegen: the Codegen module's 130 winners,\n\
          // each rendered by the original `generate` and wrapped in its\n\
          // own module (so the per-file `mod tests` cannot collide).\n\
          // Judged by the M3 gate harness (src/codegen/m3_gate.rs).\n\n",
