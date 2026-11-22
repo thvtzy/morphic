@@ -129,6 +129,52 @@
 //     input and returning Ok without growth — stays
 //     unlicensed, so a mirror-faithful body remains
 //     refutable on that corner.
+//
+// ── Phase 84 amendment record (2026-11-22) ─────────────
+//  Round-2 amendment, owner-ratified 2026-11-22 (Phase
+//  83's option 1: A′ + R2-α, callee form). The Phase 82
+//  record above states the corner its amendment left
+//  open; Phase 82's contract measured a second refuted
+//  class beside it, and Phase 83 measured spec-side
+//  formulations licensing both. The owner ratified:
+//   - Row 1 (A′): the end-of-input disjunct now reads
+//     the OUTPUT state's position —
+//     `|| output.unwrap().pos >= len(output.unwrap().source)`
+//     replaces amendment A's
+//     `|| state.pos >= len(state.source)`. The
+//     input-side form refuted the whitespace-only-
+//     remainder corner (skip to end-of-input from a
+//     non-EOF input, return Ok without growth); the
+//     output-side form licenses it. Residue, measured
+//     in Phase 83: the row cannot distinguish a skip
+//     to end-of-input from a pos jump to end-of-input —
+//     the golden tests and executed agreement judge
+//     that shape.
+//   - Row 2 (R2-α, callee form): gains an Err license
+//     for a non-token-start character at the input's
+//     current position, stated in the module's own
+//     classifier vocabulary —
+//     `|| (is_ident_start(state.source[state.pos]) == false
+//       && is_whitespace(state.source[state.pos]) == false
+//       && state.source[state.pos] != ':' && … != '=')`
+//     (nine indexed-char disequalities: the mirror's
+//     single-char punctuations). The mirror errors
+//     mid-input on such characters; row 2 previously
+//     licensed Err only at end-of-input and refuted
+//     it. Residue, measured in Phase 83: the license
+//     reads the PRE-skip character, so the whitespace-
+//     then-bad-char subclass (e.g. " 5") stays refuted
+//     — no spec-side formulation reaches it (the peek
+//     form over-licenses, the skip form is
+//     unencodable, and a skip_whitespace denotation is
+//     underivable from its two rows); it stands as the
+//     rows' one named deviation from the mirror.
+//  Jointly (Phase 83's table, re-pinned against this
+//  file in Phase 84): the mirror's outputs are admitted
+//  at all seven cross-validation battery classes, and
+//  the rows' teeth — no-growth Ok at a token start; Err
+//  at identifier, punctuation, and whitespace
+//  positions — stay refuted.
 
 FunctionalTokenizer {
 
@@ -278,11 +324,22 @@ spec tokenize_one {
     // `|| state.pos >= len(state.source)`, because as
     // restored the row refuted this spec's own
     // "end-of-input" test (Phase 80's mechanical proof).
-    // Row 2 stays verbatim. Tests restored in-spec in the
+    // Round 2 (Phase 84, owner-ratified 2026-11-22;
+    // Phase 83's option 1, A′ + R2-α callee form): row
+    // 1's disjunct now reads the OUTPUT state's pos —
+    // `|| output.unwrap().pos >= len(output.unwrap().source)`
+    // (A′) — because amendment A's input-side form left
+    // the whitespace-only-remainder corner refuted; and
+    // row 2 gains the callee-form Err license for a
+    // non-token-start character at the input's current
+    // position (R2-α), because the mirror errors
+    // mid-input there and row 2 licensed Err only at
+    // end-of-input. See the Phase 84 amendment record in
+    // the module header. Tests restored in-spec in the
     // D3a named form; the mirror golden in
     // tests/tokenizer_proof.rs keeps its copies.
-    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || state.pos >= len(state.source)
-    constraint: output.is_ok() || state.pos >= len(state.source)
+    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || output.unwrap().pos >= len(output.unwrap().source)
+    constraint: output.is_ok() || state.pos >= len(state.source) || (is_ident_start(state.source[state.pos]) == false && is_whitespace(state.source[state.pos]) == false && state.source[state.pos] != ':' && state.source[state.pos] != '{' && state.source[state.pos] != '}' && state.source[state.pos] != '(' && state.source[state.pos] != ')' && state.source[state.pos] != ',' && state.source[state.pos] != '<' && state.source[state.pos] != '>' && state.source[state.pos] != '=')
 
     test "keyword-spec" {
         input: TokenizerState { source: "spec", pos: 0, line: 1, col: 1, tokens: [] }

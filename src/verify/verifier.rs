@@ -3009,56 +3009,52 @@ spec tokenize_all {
         );
     }
 
-    /// Phase 82 — RE-STATED from Phase 80's
-    /// `phase80_tokenize_one_eof_contradiction`, whose
-    /// pinned fact (row 1 refutes the golden end-of-input
-    /// output) is exactly what the owner-ratified
-    /// amendment A removes (ratified 2026-11-22; Phase
-    /// 80's option A word for word: row 1 gains row 2's
-    /// own end-of-input disjunct,
-    /// `|| state.pos >= len(state.source)`; row 2 is NOT
-    /// amended). The old test was run against the amended
-    /// spec first and failed at its row-1-refutation
-    /// assertion — the flip is the amendment working, not
-    /// a test bug. The point machinery below is Phase
-    /// 80's, unchanged; the assertions that pinned the
-    /// contradiction are replaced by the amended position
-    /// they predicted, and one section is added (D): the
-    /// row's teeth at a mid-input point, proving the
-    /// amendment did not vacate the row — the failure
-    /// mode Phase 80 recorded against the rejected
-    /// option C.
+    /// Phase 84 — RE-STATED from Phase 82's
+    /// `phase82_tokenize_one_eof_admitted_amendment_a`,
+    /// whose pinned position (amendment A: row 1's
+    /// disjunct reads the INPUT's pos; row 2 unamended)
+    /// is superseded by the owner-ratified round-2
+    /// amendment (ratified 2026-11-22; Phase 83's option
+    /// 1, applied in this phase): A′ moves row 1's
+    /// end-of-input disjunct to the OUTPUT state —
+    /// `|| output.unwrap().pos >= len(output.unwrap().source)`
+    /// — and R2-α (callee form) gives row 2 an Err
+    /// license for a non-token-start character at the
+    /// input's current position. The point machinery
+    /// below is Phase 80's, unchanged; what moves is
+    /// exactly what the round-2 rows move:
     ///
-    /// The amended position at the spec's own
-    /// "end-of-input" test point (input `TokenizerState
-    /// { source: "", pos: 0, line: 1, col: 1, tokens:
-    /// [] }`, golden output `Ok` of that same state):
-    ///
-    ///   * row 1 now PROVES under the golden output: the
-    ///     added disjunct is the point's own truth
-    ///     (0 >= len("") = 0), so the row reads
-    ///     `false || 0 == 0 + 1 || true`. Row 2 Proven,
-    ///     as before (is_ok() = true).
-    ///   * the free-tag analysis of row 1 at the point:
-    ///     the disjunct is input-side and true here, so
-    ///     row 1 is satisfied in EVERY case — (L=0 ∧
-    ///     is_ok) SAT (Phase 80: UNSAT — that UNSAT was
-    ///     the contradiction), (L=0 ∧ is_err) SAT,
-    ///     (L=1 ∧ is_ok) SAT, (L=2 ∧ is_ok) SAT (Phase
-    ///     80: UNSAT). The L=2 case is the amendment's
-    ///     named residue, measured rather than smoothed:
-    ///     at end-of-input inputs amended row 1
-    ///     constrains nothing further about the output
-    ///     (row 2's own disjunct is equally true there),
-    ///     and the golden tests are the only judge at
-    ///     EOF.
-    ///   * (D) teeth, at the "keyword-spec" point
-    ///     (source "spec", pos 0, no tokens): an Ok
-    ///     output with NO growth is still REFUTED by
-    ///     row 1 (not err; 0 != 0 + 1; 0 >= 4 false),
-    ///     and the mirror's one-token output is Proven —
-    ///     away from end-of-input the row demands
-    ///     exactly what it demanded before the amendment.
+    ///   * (A) row 1 still PROVES under the golden EOF
+    ///     output, now through the output-side disjunct:
+    ///     the golden output's own pos 0 >= len("") = 0,
+    ///     so the row reads `false || 0 == 0 + 1 || true`
+    ///     with the truth on the output side. Row 2's
+    ///     verdict at this literal point becomes
+    ///     UNKNOWN — the literal-OOB artifact Phase 83
+    ///     named: row 2 now mentions
+    ///     `state.source[state.pos]`, and a constant
+    ///     out-of-bounds index into the literal empty
+    ///     string is what sym_index refuses. The
+    ///     admission itself is proven on the symbolic
+    ///     path in phase84_symbolic_state_encodability.
+    ///   * (B) the literal Err at EOF moves the same
+    ///     way (Proven under A → Unknown at the literal
+    ///     point), discharged symbolically in the same
+    ///     companion test.
+    ///   * (C) the free-tag analysis of row 1 at the
+    ///     point is SAT in every case, as under A — the
+    ///     reasoning moves sides: the free payload IS
+    ///     the EOF state, so the output-side disjunct
+    ///     (0 >= 0) is true of it. The (L=2 ∧ is_ok)
+    ///     case remains the rows' named EOF residue:
+    ///     at end-of-input inputs the rows constrain
+    ///     nothing further, and the golden tests are
+    ///     the only judge at EOF.
+    ///   * (D) teeth at the "keyword-spec" point,
+    ///     unchanged in verdict: a mid-input no-growth
+    ///     Ok is REFUTED by row 1 (the output's pos
+    ///     0 >= 4 is false on the output side now), and
+    ///     the mirror's one-token output is Proven.
     ///
     /// The token lists are bound as ListLen(n): the rows
     /// observe them only through len, and ListLen is the
@@ -3066,18 +3062,33 @@ spec tokenize_all {
     /// len.
     #[cfg(feature = "z3-support")]
     #[test]
-    fn phase82_tokenize_one_eof_admitted_amendment_a() {
+    fn phase84_tokenize_one_eof_admitted_round2() {
         use crate::verify::smt::{SmtResult, Z3Session};
 
         // The REAL completed module (examples/), not the
         // Phase 76 scratch: the gate judges this file, and
-        // the amendment lives in it.
+        // the round-2 amendment lives in it. The two row
+        // lines are pinned textually first — the needles
+        // are the full lines, so the header's prose quotes
+        // cannot match; each occurs exactly once.
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/functional_tokenizer.morph"
+        ))
+        .expect("examples tokenizer reads");
+        let row1_line = "    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || output.unwrap().pos >= len(output.unwrap().source)";
+        let row2_line = "    constraint: output.is_ok() || state.pos >= len(state.source) || (is_ident_start(state.source[state.pos]) == false && is_whitespace(state.source[state.pos]) == false && state.source[state.pos] != ':' && state.source[state.pos] != '{' && state.source[state.pos] != '}' && state.source[state.pos] != '(' && state.source[state.pos] != ')' && state.source[state.pos] != ',' && state.source[state.pos] != '<' && state.source[state.pos] != '>' && state.source[state.pos] != '=')";
+        assert_eq!(
+            src.matches(row1_line).count(),
+            1,
+            "round-2 row 1 (A′) is the file's row 1"
+        );
+        assert_eq!(
+            src.matches(row2_line).count(),
+            1,
+            "round-2 row 2 (R2-α, callee form) is the file's row 2"
+        );
         let module = {
-            let src = std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/examples/functional_tokenizer.morph"
-            ))
-            .expect("examples tokenizer reads");
             let parsed = crate::spec::parser::parse(&src).expect("examples parses");
             crate::spec::typeck::check(parsed)
                 .expect("examples typechecks")
@@ -3088,10 +3099,6 @@ spec tokenize_all {
         assert!(
             format!("{:?}", spec.postconditions[0]).contains("is_err"),
             "row 1 is the is_err row"
-        );
-        assert!(
-            format!("{:?}", spec.postconditions[0]).contains("pos"),
-            "row 1 carries amendment A's disjunct (it reads state.pos)"
         );
         assert!(
             format!("{:?}", spec.postconditions[1]).contains("is_ok"),
@@ -3178,9 +3185,16 @@ spec tokenize_all {
         let mut env = SymEnv::new();
         env.insert("state".into(), state_of("", 0));
 
-        // (A) The golden output: row 1 now PROVEN (Phase
-        // 80: REFUTED — 0 == 0 + 1 was false; the added
-        // disjunct is true at this point), row 2 Proven.
+        // (A) The golden output: row 1 PROVEN — under A′
+        // the truth is the OUTPUT-side disjunct (the
+        // golden output's own pos 0 >= len("") = 0).
+        // Row 2 at this literal point is UNKNOWN: the α
+        // license mentions state.source[state.pos], and
+        // sym_index refuses the constant out-of-bounds
+        // index into the literal empty string (Phase
+        // 83's named artifact); the admission is proven
+        // symbolically in
+        // phase84_symbolic_state_encodability.
         let golden = ok_of(state_of("", 0));
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[0],
@@ -3191,8 +3205,8 @@ spec tokenize_all {
         );
         assert!(
             matches!(tri, Tri::Proven),
-            "amended row 1 must ADMIT the golden EOF output: \
-             false || 0 == 0 + 1 || 0 >= 0"
+            "round-2 row 1 must ADMIT the golden EOF output: \
+             false || 0 == 0 + 1 || (output pos 0 >= len 0)"
         );
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[1],
@@ -3202,12 +3216,18 @@ spec tokenize_all {
             &Some(golden),
         );
         assert!(
-            matches!(tri, Tri::Proven),
-            "row 2 holds for the golden output (is_ok)"
+            matches!(tri, Tri::Unknown),
+            "row 2 at the literal EOF point is the OOB-index artifact \
+             (its admission is proven on the symbolic path)"
         );
 
-        // (B) A literal Err output satisfies row 2 at EOF
-        // (0 >= 0): unchanged from Phase 80.
+        // (B) A literal Err output at EOF: under
+        // amendment A row 2 was Proven here (0 >= 0);
+        // under R2-α the literal point is the same
+        // OOB-index artifact as in (A) — Unknown — and
+        // the license (the row's own EOF disjunct) is
+        // proven on the symbolic path in the companion
+        // test.
         let err = Sym::Result {
             ok: Tag::False,
             ok_payload: None,
@@ -3223,15 +3243,19 @@ spec tokenize_all {
             &Some(err),
         );
         assert!(
-            matches!(tri, Tri::Proven),
-            "row 2 licenses Err at end of input (pos 0 >= len 0)"
+            matches!(tri, Tri::Unknown),
+            "row 2 at the literal EOF point is the OOB-index artifact \
+             for an Err output too (symbolic-path admission in the \
+             companion test)"
         );
 
-        // (C) Amended row 1's satisfying set at EOF, by
-        // tag case analysis over a free tag: the added
-        // disjunct is input-side and TRUE at this point,
-        // so every case is SAT — including the two whose
-        // UNSAT was Phase 80's contradiction.
+        // (C) Round-2 row 1's satisfying set at EOF, by
+        // tag case analysis over a free tag: the free
+        // payload below IS the EOF state, so A′'s
+        // output-side disjunct (its pos 0 >= len 0) is
+        // true of it and every case is SAT — including
+        // the two whose UNSAT was Phase 80's
+        // contradiction.
         let row1_free = |tok_len: i64, is_ok: &z3::ast::Bool| -> z3::ast::Bool {
             let mut e = env.clone();
             e.insert(
@@ -3286,9 +3310,10 @@ spec tokenize_all {
         );
 
         // (D) Teeth, at the "keyword-spec" point (source
-        // "spec", pos 0, no tokens): away from EOF the
-        // added disjunct is false (0 >= 4), so the row
-        // bites exactly as before.
+        // "spec", pos 0, no tokens): the no-growth
+        // output's own pos is 0 and its source length 4,
+        // so A′'s output-side disjunct is false there
+        // (0 >= 4) and the row bites exactly as before.
         let mut env = SymEnv::new();
         env.insert("state".into(), state_of("spec", 0));
         let (_, tri) = verifier.verify_constraint(
@@ -3300,8 +3325,8 @@ spec tokenize_all {
         );
         assert!(
             matches!(tri, Tri::Refuted),
-            "amended row 1 must still refute a mid-input no-growth Ok: \
-             false || 0 == 0 + 1 || 0 >= 4 is false"
+            "round-2 row 1 must still refute a mid-input no-growth Ok: \
+             false || 0 == 0 + 1 || (output pos 0 >= 4) is false"
         );
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[0],
@@ -3312,7 +3337,7 @@ spec tokenize_all {
         );
         assert!(
             matches!(tri, Tri::Proven),
-            "amended row 1 proves for the mirror's one-token output mid-input"
+            "round-2 row 1 proves for the mirror's one-token output mid-input"
         );
     }
 
@@ -3493,73 +3518,78 @@ spec tokenize_all {
             }),
         }
     }
-    /// Phase 82 — the mirror-transcribed tokenize_one
-    /// body against the AMENDED rows (amendment A): the
-    /// contract Phase 83's generation template is built
-    /// against, measured through the production encoder —
+    /// Phase 84 — RE-STATED from Phase 82's
+    /// `phase82_tokenize_one_mirror_body_vs_amended_rows`:
+    /// the mirror-transcribed tokenize_one body against
+    /// the ROUND-2 rows (A′ + R2-α, owner-ratified
+    /// 2026-11-22, applied in this phase) — the contract
+    /// the generation campaign (Phase 85) is built
+    /// against, measured through the production encoder:
     /// the whole body judged by verify_one, and the
     /// mirror's own output judged at the point for each
     /// of the cross-validation battery's input classes.
+    /// Phase 82's table pinned two REFUTED classes under
+    /// amendment A; Phase 83 measured the round-2
+    /// formulations on scratch copies; this re-statement
+    /// pins Phase 83's joint table against the REAL
+    /// module — both classes are closed, and the one
+    /// surviving deviation is stated at its own point
+    /// below.
     ///
     /// Whole body: verify_one returns Inconclusive, and
     /// the body is outside the encodable subset twice
-    /// over, both blockers named: its ident arm is a
-    /// While loop (While is an unencodable arm of
-    /// sym_eval — the standing loop boundary), and its
-    /// first step calls skip_whitespace, for which the
-    /// resolver denotes NO body (its two stated rows are
-    /// field inequalities no builder denotes), so there
-    /// is nothing to inline even before the loop. A
-    /// Phase 83 body that verifies must be an encodable
-    /// formulation of this behavior, not this
+    /// over, both blockers named (unchanged): its ident
+    /// arm is a While loop (While is an unencodable arm
+    /// of sym_eval — the standing loop boundary), and
+    /// its first step calls skip_whitespace, for which
+    /// the resolver denotes NO body (its two stated rows
+    /// are field inequalities no builder denotes), so
+    /// there is nothing to inline even before the loop.
+    /// A Phase 85 body that verifies must be an
+    /// encodable formulation of this behavior, not this
     /// transcription.
     ///
     /// Per class (input at pos 0, no tokens; the
     /// mirror's output judged against both rows at the
     /// point):
-    ///   ""      EOF           Ok, no token   Proven / Proven — ADMITTED (the amendment's purpose; pre-amendment row 1 refuted it)
+    ///   ""      EOF           Ok, no token   Proven / Unknown — row 1 admits; row 2's literal point is the OOB artifact (admission proven symbolically, companion test)
     ///   "spec"  ident         Ok, +1 token   Proven / Proven — admitted by the growth disjunct
-    ///   "  spec" leading ws   Ok, +1 token   Proven / Proven — admitted by growth (input pos 0 < len 6: NOT the EOF disjunct)
+    ///   "  spec" leading ws   Ok, +1 token   Proven / Proven — admitted by growth
     ///   "\n\nx" newline run   Ok, +1 token   Proven / Proven — admitted by growth
     ///   ":"     single char   Ok, +1 token   Proven / Proven — admitted by growth
-    ///   " "     ws-only rest  Ok, no token   REFUTED / Proven — row 1 refutes it (the corner, below)
-    ///   "5"     unexpected    Err            row 1 via is_err / REFUTED — row 2 refutes it (below)
+    ///   " "     ws-only rest  Ok, no token   Proven / Proven — ADMITTED (class W closed by A′; Phase 82: row 1 refuted it)
+    ///   "5"     unexpected    Err            free tag / Proven — ADMITTED (class E closed by R2-α; Phase 82: row 2 refuted it)
+    ///   "é"     unexpected    Err            free tag / Proven — α licenses a non-ASCII bad char too
     ///
-    /// The two refuted classes are Phase 83's exact
-    /// obligations, stated as Phase 80 priced them and
-    /// this phase measures them:
-    ///   * The whitespace-only-remainder corner: the
-    ///     input is NOT at end-of-input (pos 0 < len 1),
-    ///     the mirror skips to end-of-input and returns
-    ///     Ok with no new token. Amended row 1's disjunct
-    ///     reads the INPUT's pos, so it does not license
-    ///     the corner; and row 2 bars Err mid-input — so
-    ///     rows 1+2 jointly admit, at this class, ONLY an
-    ///     Ok carrying exactly one more token (pinned
-    ///     below). A verifying body must fabricate a
-    ///     token where the mirror returns none.
-    ///   * The unexpected-character class: the mirror
-    ///     returns Err mid-input; row 2 — UNAMENDED in
-    ///     this phase (its mid-input Err question is
-    ///     Phase 80's adjacent observation, recorded for
-    ///     a future owner decision round) — licenses Err
-    ///     only at end-of-input, so it refutes the
-    ///     mirror here; rows 1+2 jointly admit only an
-    ///     Ok with exactly one more token (pinned below).
-    ///   So under the amended rows NO body is
-    ///   simultaneously Z3-Verified and mirror-exact on
-    ///   the full battery: a Phase 83 template either
-    ///   deviates at exactly these two classes (paying
-    ///   the executed-agreement cost there, visibly) or
-    ///   the classes return to the owner. At EOF inputs,
-    ///   conversely, the rows constrain nothing at all
-    ///   (the companion test's L=2 case) — executed
-    ///   agreement is the only judge there.
+    /// The one surviving deviation, named: at " 5"
+    /// (whitespace, then a bad char) the mirror's Err
+    /// stays REFUTED by row 2 — α reads the PRE-skip
+    /// character, a space — and the joint rows admit
+    /// only the fabricated Ok/+1 there. Phase 83 priced
+    /// this subclass as unreachable from the spec side
+    /// (the peek form over-licenses; the skip form is
+    /// unencodable; a skip denotation is underivable);
+    /// it stands as the rows' one named deviation from
+    /// the mirror — the generation campaign's one named
+    /// executed-agreement gap.
+    ///
+    /// Teeth under the joint rows, pinned below: a
+    /// no-growth Ok at a token start is refuted by row
+    /// 1; Err at identifier, punctuation, and whitespace
+    /// positions is refuted by row 2. A′'s residue is
+    /// pinned too: a no-growth Ok whose pos jumps to
+    /// end-of-input is admitted by row 1 (the row cannot
+    /// tell a skip-to-EOF from a teleport; the golden
+    /// tests judge that shape). At EOF inputs the rows
+    /// constrain nothing further (the companion test's
+    /// L=2 case) — executed agreement is the only judge
+    /// there.
     #[cfg(feature = "z3-support")]
     #[test]
-    fn phase82_tokenize_one_mirror_body_vs_amended_rows() {
-        // The REAL module (examples/): the amendment
-        // lives there, and the gate judges this file.
+    fn phase84_tokenize_one_mirror_body_vs_round2_rows() {
+        // The REAL module (examples/): the round-2
+        // amendment lives there, and the gate judges
+        // this file.
         let module = {
             let src = std::fs::read_to_string(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -3603,7 +3633,7 @@ spec tokenize_all {
 
         // ── Per-class point verdicts: the mirror's own
         // output at each battery input, judged against
-        // both amended rows at the point.
+        // both round-2 rows at the point.
         let int = |n: i64| Sym::Int(z3::ast::Int::from_i64(n));
         let state_of = |source: &str, pos: i64, tok_len: i64| Sym::Record {
             type_name: "TokenizerState".into(),
@@ -3629,15 +3659,17 @@ spec tokenize_all {
         // (class name, input source, mirror output,
         //  expected row 1, expected row 2). The mirror
         //  outputs carry its true end pos; the rows read
-        //  only the tag, the payload's token length, and
-        //  the INPUT's pos / source length.
+        //  the tag, the payload's token length, the
+        //  OUTPUT's pos / source length (row 1's A′
+        //  disjunct), and the INPUT's pos / source
+        //  length / indexed char (row 2's α license).
         let classes: Vec<(&str, &str, Sym, Tri, Tri)> = vec![
             (
                 "eof",
                 "",
                 ok_of(state_of("", 0, 0)),
                 Tri::Proven,
-                Tri::Proven,
+                Tri::Unknown,
             ),
             (
                 "ident",
@@ -3671,7 +3703,7 @@ spec tokenize_all {
                 "corner-whitespace-only",
                 " ",
                 ok_of(state_of(" ", 1, 0)),
-                Tri::Refuted,
+                Tri::Proven,
                 Tri::Proven,
             ),
         ];
@@ -3689,7 +3721,7 @@ spec tokenize_all {
                 matches!((&tri, &want1), (Tri::Proven, Tri::Proven)
                     | (Tri::Refuted, Tri::Refuted)
                     | (Tri::Unknown, Tri::Unknown)),
-                "class {}: amended row 1 verdict for the mirror output",
+                "class {}: round-2 row 1 verdict for the mirror output",
                 name
             );
             let (_, tri) = verifier.verify_constraint(
@@ -3708,37 +3740,16 @@ spec tokenize_all {
             );
         }
 
-        // The corner's joint admission: at input " " the
-        // ONLY outputs satisfying both rows are Ok with
-        // exactly one more token — an Ok/+1 output proves
-        // against both rows where the mirror's Ok/+0 was
-        // refuted by row 1 above.
-        let mut env = SymEnv::new();
-        env.insert("state".into(), state_of(" ", 0, 0));
-        for (i, label) in ["row1", "row2"].iter().enumerate() {
-            let (_, tri) = verifier.verify_constraint(
-                &spec.postconditions[i],
-                label,
-                spec,
-                &env,
-                &Some(ok_of(state_of(" ", 1, 1))),
-            );
-            assert!(
-                matches!(tri, Tri::Proven),
-                "corner: an Ok/+1 (fabricated-token) output satisfies {} \
-                 — the only shape a verifying body may take at this class",
-                label
-            );
-        }
-
-        // The unexpected-character class: the mirror's
-        // Err at input "5". Row 1 is satisfied through
-        // its is_err disjunct — discharged via the free
-        // tag, as in Phase 80 (row 1 under a LITERAL Err
-        // tag is the encoder's named unencodable case);
-        // row 2 REFUTES the literal Err (is_ok false,
-        // input pos 0 < len 1). And the joint admission
-        // is again only Ok/+1.
+        // The unexpected-character class, closed: the
+        // mirror's Err at input "5". Row 2 now PROVES it
+        // — the α license fires on the indexed char '5'
+        // (not ident-start, not whitespace, not a
+        // punctuation) where the unamended row 2 refuted
+        // it in Phase 82. Row 1 is satisfied through its
+        // is_err disjunct — discharged via the free tag,
+        // as in Phase 80 (row 1 under a LITERAL Err tag
+        // is the encoder's named unencodable case). The
+        // non-ASCII point ("é") is admitted the same way.
         let mut env = SymEnv::new();
         env.insert("state".into(), state_of("5", 0, 0));
         let err = Sym::Result {
@@ -3757,8 +3768,86 @@ spec tokenize_all {
             &Some(err),
         );
         assert!(
+            matches!(tri, Tri::Proven),
+            "round-2 row 2 ADMITS the mirror's mid-input Err at \"5\" \
+             (the α license; Phase 82: refuted)"
+        );
+        let is_ok = z3::ast::Bool::new_const("out_is_ok");
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("5", 0, 0));
+        env.insert(
+            "output".into(),
+            Sym::Result {
+                ok: Tag::Free(is_ok.clone()),
+                ok_payload: Some(Box::new(state_of("5", 1, 1))),
+                err_payload: Some(Box::new(
+                    Sym::Str(z3::ast::String::from_str("boom").unwrap()),
+                )),
+            },
+        );
+        let formula = encode_constraint(
+            &spec.postconditions[0],
+            &env,
+            &EvalCtx::root(&index),
+        )
+        .expect("row 1 encodes under a free tag");
+        {
+            use crate::verify::smt::{SmtResult, Z3Session};
+            let z3 = Z3Session::new(10_000);
+            z3.assert(&formula);
+            z3.assert(&is_ok.not());
+            assert!(
+                matches!(z3.check(), SmtResult::Sat(_)),
+                "row 1 is satisfiable by the class-E Err (free tag)"
+            );
+        }
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("é", 0, 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@eacute-err",
+            spec,
+            &env,
+            &Some(Sym::Result {
+                ok: Tag::False,
+                ok_payload: None,
+                err_payload: Some(Box::new(Sym::Str(
+                    z3::ast::String::from_str("Unexpected character").unwrap(),
+                ))),
+            }),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "round-2 row 2 admits the mirror's Err at a non-ASCII bad char"
+        );
+
+        // The surviving deviation, at its own point: at
+        // " 5" the mirror's Err stays REFUTED by row 2
+        // (α reads the pre-skip char — a space), and the
+        // only shape the joint rows admit is the
+        // fabricated Ok/+1. This subclass is the rows'
+        // one named deviation from the mirror.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of(" 5", 0, 0));
+        let err5 = Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(Sym::Str(
+                z3::ast::String::from_str("Unexpected character '5' at line 1")
+                    .unwrap(),
+            ))),
+        };
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "row2@ws-digit-err",
+            spec,
+            &env,
+            &Some(err5),
+        );
+        assert!(
             matches!(tri, Tri::Refuted),
-            "row 2 (unamended) refutes the mirror's mid-input Err"
+            "\" 5\" residue: the mirror's Err stays refuted — α reads \
+             the pre-skip char"
         );
         for (i, label) in ["row1", "row2"].iter().enumerate() {
             let (_, tri) = verifier.verify_constraint(
@@ -3766,61 +3855,113 @@ spec tokenize_all {
                 label,
                 spec,
                 &env,
-                &Some(ok_of(state_of("5", 1, 1))),
+                &Some(ok_of(state_of(" 5", 2, 1))),
             );
             assert!(
                 matches!(tri, Tri::Proven),
-                "digit class: an Ok/+1 output satisfies {} — the only \
-                 shape a verifying body may take at this class",
+                "\" 5\" residue: only the fabricated Ok/+1 is admitted ({})",
                 label
             );
         }
+
+        // Teeth under the joint rows: Err at an
+        // identifier start, at a punctuation start, and
+        // at the whitespace corner is refuted by row 2 —
+        // the α license does not over-admit. (Row 1's
+        // teeth — the no-growth Ok at a token start —
+        // are pinned in the companion test's section D.)
+        for (source, label) in [
+            ("spec", "identifier start"),
+            (":", "punctuation start"),
+            (" ", "whitespace corner"),
+        ] {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), state_of(source, 0, 0));
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[1],
+                "row2@teeth",
+                spec,
+                &env,
+                &Some(Sym::Result {
+                    ok: Tag::False,
+                    ok_payload: None,
+                    err_payload: Some(Box::new(Sym::Str(
+                        z3::ast::String::from_str("x").unwrap(),
+                    ))),
+                }),
+            );
+            assert!(
+                matches!(tri, Tri::Refuted),
+                "teeth: Err at a {} stays refuted by row 2",
+                label
+            );
+        }
+
+        // A′'s residue in the joint context: a no-growth
+        // Ok whose pos jumps to end-of-input is admitted
+        // by row 1 — the row cannot distinguish it from
+        // the class-W skip; the golden tests judge it.
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state_of("spec", 0, 0));
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[0],
+            "row1@teleport",
+            spec,
+            &env,
+            &Some(ok_of(state_of("spec", 4, 0))),
+        );
+        assert!(
+            matches!(tri, Tri::Proven),
+            "A′ residue: a no-growth Ok whose pos reaches EOF is \
+             admitted by row 1"
+        );
     }
 
-    // ── Phase 83: amendment round-2 feasibility ──────
+    // ── Phase 84: round-2 rows, standing pins ────────
     //
-    // MEASUREMENT ONLY. Nothing in this section amends
-    // any spec: candidate rows are substituted into an
-    // in-memory copy of the examples module (the file on
-    // disk is never touched) and judged through the
-    // production encoder + verifier in the Phase 80/82
-    // point style. Phase 82's contract: under amendment
-    // A the mirror's outputs are refuted at exactly two
-    // battery classes — W (whitespace-only remainder,
-    // row 1: the EOF disjunct reads the INPUT's pos) and
-    // E (unexpected character, row 2: Err is licensed
-    // only at end-of-input) — and at both classes the
-    // rows jointly admit only an Ok carrying exactly one
-    // more token. The candidates below ask whether
-    // spec-side round-2 formulations can license the
-    // mirror's behavior at both classes.
+    // Phase 83 measured the round-2 candidates on
+    // SCRATCH copies of the examples module (a
+    // substitution builder plus five Z3-gated tests).
+    // The owner ratified option 1 (A′ + R2-α, callee
+    // form) on 2026-11-22 and this phase applied it to
+    // examples/functional_tokenizer.morph — so the
+    // scratch apparatus is retired here: the
+    // substitution builder and the candidate-row
+    // constants are removed, and the five measurement
+    // tests are disposed of as follows.
+    //
+    //   * phase83_a_prime_output_pos_disjunct and
+    //     phase83_joint_a_prime_alpha_battery: their
+    //     surviving assertions are the standing battery
+    //     itself — folded into
+    //     phase84_tokenize_one_mirror_body_vs_round2_rows
+    //     (above), judged against the REAL module. The
+    //     A/A′ contrast assertion (the real file refutes
+    //     the class-W output) is dropped: its premise
+    //     is what this phase removes.
+    //   * phase83_row2_alpha_err_license: the callee
+    //     half's case table is the real row 2 now and
+    //     is pinned in the same battery (class E, the
+    //     teeth, the non-ASCII point); the direct half
+    //     measured an unratified formulation — its
+    //     verdicts stand in the Phase 83 record, not in
+    //     the suite.
+    //   * phase83_row2_beta_formulations_fail: retired.
+    //     Its subject (formulations that are not rows
+    //     of any spec) does not belong against the real
+    //     module; its one load-bearing pin — the
+    //     resolver denotes no body for skip_whitespace —
+    //     stands in the mirror-body test above, and the
+    //     β verdicts are recorded in the Phase 83 note.
+    //   * phase83_symbolic_state_encodability:
+    //     RE-STATED below against the real module — the
+    //     symbolic-path facts are not point facts and
+    //     do not fold into the battery.
 
-    /// The examples module with tokenize_one's two rows
-    /// replaced by the given texts. Both current lines
-    /// must occur exactly once (the needles are the full
-    /// lines, so the header's prose quotes cannot match).
+    /// The real examples module (round-2 rows as
+    /// applied in this phase).
     #[cfg(feature = "z3-support")]
-    fn phase83_scratch_module(row1: &str, row2: &str) -> Spec {
-        let src = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/examples/functional_tokenizer.morph"
-        ))
-        .expect("examples tokenizer reads");
-        let cur1 = "    constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || state.pos >= len(state.source)";
-        let cur2 = "    constraint: output.is_ok() || state.pos >= len(state.source)";
-        assert_eq!(src.matches(cur1).count(), 1, "row 1 anchor unique");
-        assert_eq!(src.matches(cur2).count(), 1, "row 2 anchor unique");
-        let src = src.replacen(cur1, &format!("    constraint: {}", row1), 1);
-        let src = src.replacen(cur2, &format!("    constraint: {}", row2), 1);
-        let parsed = crate::spec::parser::parse(&src).expect("scratch module parses");
-        crate::spec::typeck::check(parsed)
-            .expect("scratch module typechecks")
-            .spec
-    }
-
-    /// The real examples module (amendment A as applied).
-    #[cfg(feature = "z3-support")]
-    fn phase83_real_module() -> Spec {
+    fn phase84_real_module() -> Spec {
         let src = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/examples/functional_tokenizer.morph"
@@ -3832,39 +3973,12 @@ spec tokenize_all {
             .spec
     }
 
-    #[cfg(feature = "z3-support")]
-    const ROW1_AMENDMENT_A: &str = "output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || state.pos >= len(state.source)";
-    /// A′: the third disjunct reads the OUTPUT state.
-    #[cfg(feature = "z3-support")]
-    const ROW1_A_PRIME: &str = "output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || output.unwrap().pos >= len(output.unwrap().source)";
-    #[cfg(feature = "z3-support")]
-    const ROW2_CURRENT: &str = "output.is_ok() || state.pos >= len(state.source)";
-    /// R2-α, callee form: the Err license stated in the
-    /// module's own classifier vocabulary over the
-    /// indexed char at the input's current position.
-    #[cfg(feature = "z3-support")]
-    const ROW2_ALPHA_CALLEE: &str = "output.is_ok() || state.pos >= len(state.source) || (is_ident_start(state.source[state.pos]) == false && is_whitespace(state.source[state.pos]) == false && state.source[state.pos] != ':' && state.source[state.pos] != '{' && state.source[state.pos] != '}' && state.source[state.pos] != '(' && state.source[state.pos] != ')' && state.source[state.pos] != ',' && state.source[state.pos] != '<' && state.source[state.pos] != '>' && state.source[state.pos] != '=')";
-    /// R2-α, direct form: the same license spelled out
-    /// as CharStr range/equality comparisons, no callees.
-    #[cfg(feature = "z3-support")]
-    const ROW2_ALPHA_DIRECT: &str = r"output.is_ok() || state.pos >= len(state.source) || ((state.source[state.pos] < 'a' || state.source[state.pos] > 'z') && (state.source[state.pos] < 'A' || state.source[state.pos] > 'Z') && state.source[state.pos] != '_' && state.source[state.pos] != ' ' && state.source[state.pos] != '\t' && state.source[state.pos] != '\n' && state.source[state.pos] != '\r' && state.source[state.pos] != ':' && state.source[state.pos] != '{' && state.source[state.pos] != '}' && state.source[state.pos] != '(' && state.source[state.pos] != ')' && state.source[state.pos] != ',' && state.source[state.pos] != '<' && state.source[state.pos] != '>' && state.source[state.pos] != '=')";
-    /// R2-β over peek: license Err when the peeked char
-    /// is none of the thirteen enumerable non-error
-    /// chars (4 whitespace + 9 punctuation).
-    #[cfg(feature = "z3-support")]
-    const ROW2_BETA_PEEK: &str = r"output.is_ok() || state.pos >= len(state.source) || (peek(state) != Some(':') && peek(state) != Some('{') && peek(state) != Some('}') && peek(state) != Some('(') && peek(state) != Some(')') && peek(state) != Some(',') && peek(state) != Some('<') && peek(state) != Some('>') && peek(state) != Some('=') && peek(state) != Some(' ') && peek(state) != Some('\t') && peek(state) != Some('\n') && peek(state) != Some('\r'))";
-    /// R2-β over skip_whitespace: the license stated at
-    /// the SKIPPED position — the only form that would
-    /// judge " 5" as the mirror does.
-    #[cfg(feature = "z3-support")]
-    const ROW2_BETA_SKIP: &str = "output.is_ok() || state.pos >= len(state.source) || (is_ident_start(state.source[skip_whitespace(state).pos]) == false && is_whitespace(state.source[skip_whitespace(state).pos]) == false)";
-
     /// Point Syms in the Phase 82 shapes: a state is
     /// observed through exactly what the rows read (the
     /// source as a literal string, pos, the token list
     /// through its length).
     #[cfg(feature = "z3-support")]
-    fn phase83_state(source: &str, pos: i64, tok_len: i64) -> Sym {
+    fn phase84_state(source: &str, pos: i64, tok_len: i64) -> Sym {
         let int = |n: i64| Sym::Int(z3::ast::Int::from_i64(n));
         Sym::Record {
             type_name: "TokenizerState".into(),
@@ -3885,7 +3999,7 @@ spec tokenize_all {
     }
 
     #[cfg(feature = "z3-support")]
-    fn phase83_ok(st: Sym) -> Sym {
+    fn phase84_ok(st: Sym) -> Sym {
         Sym::Result {
             ok: Tag::True,
             ok_payload: Some(Box::new(st)),
@@ -3894,7 +4008,7 @@ spec tokenize_all {
     }
 
     #[cfg(feature = "z3-support")]
-    fn phase83_err(msg: &str) -> Sym {
+    fn phase84_err(msg: &str) -> Sym {
         Sym::Result {
             ok: Tag::False,
             ok_payload: None,
@@ -3904,302 +4018,54 @@ spec tokenize_all {
         }
     }
 
-    /// Judge one row (0 = row 1, 1 = row 2) at one point.
-    #[cfg(feature = "z3-support")]
-    fn phase83_judge(
-        verifier: &Verifier,
-        spec: &FunctionSpec,
-        row: usize,
-        state: Sym,
-        output: Sym,
-    ) -> Tri {
-        let mut env = SymEnv::new();
-        env.insert("state".into(), state);
-        let (_, tri) = verifier.verify_constraint(
-            &spec.postconditions[row],
-            "phase83@point",
-            spec,
-            &env,
-            &Some(output),
-        );
-        tri
-    }
-
-    /// Phase 83 — candidate A′ (row 1): the third
-    /// disjunct stops reading the INPUT's pos and states
-    /// instead that the OUTPUT state has reached
-    /// end-of-input:
-    /// `output.unwrap().pos >= len(output.unwrap().source)`.
-    /// The formulation the encoder accepts is this pure
-    /// output-side form — unwrap projects the payload
-    /// record, Field projects pos/source, len reads the
-    /// string's length; every case below returns a real
-    /// verdict (Proven/Refuted), never Unknown, for Ok
-    /// outputs. Case table (row 1 alone, row 2 current):
+    /// Phase 84 — RE-STATED from Phase 83's
+    /// `phase83_symbolic_state_encodability`, which
+    /// measured the candidate rows on scratch modules.
+    /// The rows are the module's own now (A′ row 1;
+    /// R2-α callee row 2 — the direct formulation was
+    /// not ratified and its measurement loop is dropped;
+    /// its verdicts stand in the Phase 83 record), the
+    /// scratch substitution is gone, and this test reads
+    /// the real examples module throughout.
     ///
-    ///   ""     golden Ok/+0 (pos 0)   Proven — EOF admitted (0 >= 0), as under A
-    ///   " "    mirror Ok/+0 (pos 1)   Proven — CLASS W ADMITTED (1 >= 1); A refutes it
-    ///   "spec" Ok/+0 (pos 0)          Refuted — the teeth: no growth at a token start
-    ///   "spec" mirror Ok/+1 (pos 4)   Proven — keyword-spec, by the growth disjunct
-    ///   "spec" Ok/+0 (pos 4)          Proven — A′ RESIDUE (below)
-    ///   ""     Ok/+2 (pos 0)          Proven — at EOF inputs the row constrains nothing (as under A)
-    ///
-    /// The residue, measured not smoothed: A′ admits a
-    /// no-growth Ok whose pos JUMPS to end-of-input —
-    /// the row observes only (tag, token length, output
-    /// pos, output source length), so it cannot
-    /// distinguish "skipped whitespace to EOF" (the
-    /// mirror at class W) from "teleported to EOF".
-    /// Amendment A refutes that output; the golden
-    /// tests and executed agreement remain its judge,
-    /// the same division of labor amendment A already
-    /// accepts at EOF inputs. A mixed form reading
-    /// `len(state.source)` instead of the output's own
-    /// source was not needed: the pure form encodes,
-    /// and it is the faithful statement (the mirror
-    /// carries source unchanged, but the row should
-    /// speak about the output it licenses).
-    #[cfg(feature = "z3-support")]
-    #[test]
-    fn phase83_a_prime_output_pos_disjunct() {
-        let module = phase83_scratch_module(ROW1_A_PRIME, ROW2_CURRENT);
-        let spec = restored_spec(&module, "tokenize_one");
-        let verifier = Verifier::with_module(&module);
-        let row1 = |state: Sym, output: Sym| phase83_judge(&verifier, spec, 0, state, output);
-
-        assert!(
-            matches!(
-                row1(phase83_state("", 0, 0), phase83_ok(phase83_state("", 0, 0))),
-                Tri::Proven
-            ),
-            "A′ row 1 admits the golden EOF output: false || 0 == 0 + 1 || 0 >= 0"
-        );
-        assert!(
-            matches!(
-                row1(phase83_state(" ", 0, 0), phase83_ok(phase83_state(" ", 1, 0))),
-                Tri::Proven
-            ),
-            "A′ row 1 admits the class-W mirror output: output pos 1 >= len 1"
-        );
-        // The A/A′ contrast at the class-W point, stated
-        // by this one instrument: amendment A (the real
-        // file) refutes the same output — Phase 82's pin.
-        let real = phase83_real_module();
-        let real_spec = restored_spec(&real, "tokenize_one");
-        let real_verifier = Verifier::with_module(&real);
-        assert!(
-            matches!(
-                phase83_judge(
-                    &real_verifier,
-                    real_spec,
-                    0,
-                    phase83_state(" ", 0, 0),
-                    phase83_ok(phase83_state(" ", 1, 0)),
-                ),
-                Tri::Refuted
-            ),
-            "amendment A refutes the class-W output (its disjunct reads the input's pos)"
-        );
-        assert!(
-            matches!(
-                row1(
-                    phase83_state("spec", 0, 0),
-                    phase83_ok(phase83_state("spec", 0, 0))
-                ),
-                Tri::Refuted
-            ),
-            "A′ teeth: a mid-input no-growth Ok stays refuted: \
-             false || 0 == 0 + 1 || 0 >= 4"
-        );
-        assert!(
-            matches!(
-                row1(
-                    phase83_state("spec", 0, 0),
-                    phase83_ok(phase83_state("spec", 4, 1))
-                ),
-                Tri::Proven
-            ),
-            "A′ row 1 admits the mirror's keyword-spec output (growth)"
-        );
-        assert!(
-            matches!(
-                row1(
-                    phase83_state("spec", 0, 0),
-                    phase83_ok(phase83_state("spec", 4, 0))
-                ),
-                Tri::Proven
-            ),
-            "A′ RESIDUE: a no-growth Ok whose pos jumps to end-of-input \
-             is admitted — the row cannot tell a skip-to-EOF from a teleport"
-        );
-        assert!(
-            matches!(
-                row1(phase83_state("", 0, 0), phase83_ok(phase83_state("", 0, 2))),
-                Tri::Proven
-            ),
-            "at EOF inputs A′ constrains nothing further (as under A): \
-             an over-growth Ok is admitted and the tests are the only judge"
-        );
-        // The literal-Err point stays the encoder's named
-        // unencodable case (the row routes through
-        // unwrap, whose payload slot is absent under a
-        // literal Err tag): Unknown — A′ changes nothing
-        // there; Err outputs are discharged through the
-        // free tag, as in Phases 80/82.
-        assert!(
-            matches!(
-                row1(
-                    phase83_state("spec", 0, 0),
-                    phase83_err("Unexpected character")
-                ),
-                Tri::Unknown
-            ),
-            "row 1 under a literal Err output is the named unencodable case, unchanged by A′"
-        );
-    }
-
-    /// Phase 83 — candidate R2-α (row 2): the Err license
-    /// gains a disjunct for the character at the INPUT's
-    /// current position not being a token start — not an
-    /// identifier start, not whitespace, not one of the
-    /// mirror's nine single-char punctuations
-    /// {':','{','}','(',')',',','<','>','='}. Two
-    /// formulations, measured side by side:
-    ///
-    ///   * callee — the license stated in the module's
-    ///     own classifier vocabulary:
-    ///     `is_ident_start(state.source[state.pos]) == false
-    ///      && is_whitespace(state.source[state.pos]) == false
-    ///      && <nine indexed-char disequalities>`.
-    ///     The callees inline through sym_invoke with the
-    ///     indexed char as the argument.
-    ///   * direct — the same license with the classifiers
-    ///     spelled out as range/equality comparisons on
-    ///     the indexed char, no callees.
-    ///
-    /// At the literal points below the index is a
-    /// constant into a literal string, so sym_index
-    /// yields the exact Char and both formulations judge
-    /// identically; their symbolic-index behavior is
-    /// measured in phase83_symbolic_state_encodability.
-    /// Case table (row 2 alone, Err output at pos 0):
-    ///
-    ///   "5"    Proven — CLASS E ADMITTED ('5' starts no token)
-    ///   "spec" Refuted — TEETH: Err at an identifier start stays unlicensed
-    ///   ":"    Refuted — a punctuation token start: Err stays unlicensed
-    ///   " "    Refuted — whitespace at pos: the corner's output stays Ok-only
-    ///   " 5"   Refuted — APPROXIMATION BOUNDARY (below)
-    ///   "é"    Proven — a non-ASCII bad char: the mirror errors; α licenses
-    ///   ""     Unknown — the literal-OOB artifact (below)
-    ///
-    /// The boundary, stated exactly: α reads the char at
-    /// the PRE-skip position. At " 5" that char is a
-    /// space, so α judges " 5" exactly as it judges a
-    /// whitespace input — the mirror's Err (it skips the
-    /// space, then errors on '5') stays REFUTED, and the
-    /// joint rows admit only Ok/+1 there. α closes class
-    /// E except its whitespace-then-bad-char subclass.
-    ///
-    /// The EOF point is Unknown, not a formulation
-    /// failure: the row now mentions
-    /// `state.source[state.pos]`, and at the literal EOF
-    /// point that is a constant out-of-bounds index into
-    /// a literal string, which sym_index refuses (it
-    /// mirrors the interpreter's evaluation failure
-    /// where the value is known). Real judging is
-    /// symbolic — the EOF Err license is the row's own
-    /// first disjunct, and its admission under the
-    /// symbolic path is proven in
-    /// phase83_symbolic_state_encodability.
-    #[cfg(feature = "z3-support")]
-    #[test]
-    fn phase83_row2_alpha_err_license() {
-        for (label, row2) in [
-            ("callee", ROW2_ALPHA_CALLEE),
-            ("direct", ROW2_ALPHA_DIRECT),
-        ] {
-            let module = phase83_scratch_module(ROW1_AMENDMENT_A, row2);
-            let spec = restored_spec(&module, "tokenize_one");
-            let verifier = Verifier::with_module(&module);
-            let judge = |src: &str| {
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state(src, 0, 0),
-                    phase83_err("Unexpected character"),
-                )
-            };
-            assert!(
-                matches!(judge("5"), Tri::Proven),
-                "{}: α row 2 admits the mirror's Err at \"5\" (class E)",
-                label
-            );
-            assert!(
-                matches!(judge("spec"), Tri::Refuted),
-                "{}: α teeth — Err at an identifier start stays refuted",
-                label
-            );
-            assert!(
-                matches!(judge(":"), Tri::Refuted),
-                "{}: α teeth — Err at a punctuation token start stays refuted",
-                label
-            );
-            assert!(
-                matches!(judge(" "), Tri::Refuted),
-                "{}: α — Err at a whitespace position stays refuted (Ok-only corner)",
-                label
-            );
-            assert!(
-                matches!(judge(" 5"), Tri::Refuted),
-                "{}: α boundary — the mirror's Err at \" 5\" stays refuted: \
-                 α reads the pre-skip char (a space)",
-                label
-            );
-            assert!(
-                matches!(judge("é"), Tri::Proven),
-                "{}: α admits Err at a non-ASCII bad char, as the mirror errors",
-                label
-            );
-            assert!(
-                matches!(judge(""), Tri::Unknown),
-                "{}: α at the literal EOF point is the OOB-index refusal, \
-                 an artifact of literal points — see the symbolic-path test",
-                label
-            );
-        }
-    }
-
-    /// Phase 83 — the symbolic-index question, measured.
-    /// The case tables judge literal points, where
-    /// sym_index is exact; production judging
-    /// (verify_one) binds the state SYMBOLICALLY, so a
-    /// candidate row must also encode — and judge — with
-    /// a free source and a free pos, where
+    /// The battery's case tables judge literal points,
+    /// where sym_index is exact; production judging
+    /// (verify_one) binds the state SYMBOLICALLY, so the
+    /// rows must also encode — and judge — with a free
+    /// source and a free pos, where
     /// `state.source[state.pos]` takes the CharStr bridge
     /// form (`str.at` of a symbolic index).
     ///
-    /// Measured: both α formulations ENCODE under a
-    /// fully free state (encode_constraint returns a
-    /// formula; the callee form inlines both classifiers
-    /// over the CharStr argument), and under that path
-    /// the EOF Err admission the literal table could not
-    /// judge is PROVEN: with len(source) == 0 ∧ pos == 0
-    /// asserted, the row's negation has no model (the
-    /// license is the row's own EOF disjunct). The digit
-    /// admission is likewise proven symbolically
-    /// (source == "5" ∧ pos == 0: no countermodel — the
-    /// license fires through the bridge). A′ row 1
-    /// encodes both against a point Ok output and
-    /// against a fully free Ok payload (its disjunct is
-    /// Int >= len(Str) over free terms). As a control,
-    /// α row 2 under a free state and an Err output is
-    /// NOT valid (a countermodel exists — a token-start
-    /// char): the row genuinely discriminates, it does
-    /// not merely encode.
+    /// Measured, against the real rows:
+    ///   * α row 2 ENCODES under a fully free state (the
+    ///     callee form inlines both classifiers over the
+    ///     CharStr argument), and under that path the
+    ///     EOF Err admission the literal table cannot
+    ///     judge (the OOB artifact) is PROVEN: with
+    ///     len(source) == 0 ∧ pos == 0 asserted, the
+    ///     row's negation has no model — the license is
+    ///     the row's own EOF disjunct. The digit
+    ///     admission is likewise proven symbolically
+    ///     (source == "5" ∧ pos == 0: no countermodel —
+    ///     the license fires through the bridge, not
+    ///     only at literal points).
+    ///   * The EOF admission for the golden OK output —
+    ///     Unknown at the literal points in the standing
+    ///     tests (the same artifact) — is proven on this
+    ///     path: a free state with a free Ok payload,
+    ///     under the EOF facts, admits no countermodel.
+    ///   * A′ row 1 encodes both against a point Ok
+    ///     output and against a fully free Ok payload
+    ///     (its disjunct is Int >= len(Str) over free
+    ///     terms).
+    ///   * Control: α row 2 under a free state and an
+    ///     Err output is NOT valid (a countermodel
+    ///     exists — a token-start char): the row
+    ///     genuinely discriminates, it does not merely
+    ///     encode.
     #[cfg(feature = "z3-support")]
     #[test]
-    fn phase83_symbolic_state_encodability() {
+    fn phase84_symbolic_state_encodability() {
         use crate::verify::smt::{SmtResult, Z3Session};
 
         // A state whose fields are free constants, in
@@ -4229,99 +4095,7 @@ spec tokenize_all {
             };
             (st, source, pos)
         };
-
-        for (label, row2) in [
-            ("callee", ROW2_ALPHA_CALLEE),
-            ("direct", ROW2_ALPHA_DIRECT),
-        ] {
-            let module = phase83_scratch_module(ROW1_AMENDMENT_A, row2);
-            let spec = restored_spec(&module, "tokenize_one");
-            let index = SpecIndex::from_module(&module);
-            let verifier = Verifier::with_module(&module);
-            let (state, source, pos) = free_state();
-            let mut env = SymEnv::new();
-            env.insert("state".into(), state);
-            env.insert("output".into(), phase83_err("Unexpected character"));
-            let formula = encode_constraint(
-                &spec.postconditions[1],
-                &env,
-                &EvalCtx::root(&index),
-            );
-            assert!(
-                formula.is_some(),
-                "{}: α row 2 ENCODES under a symbolic state — the symbolic \
-                 index takes the CharStr bridge form",
-                label
-            );
-            let formula = formula.unwrap();
-
-            // Admission at end-of-input, symbolic path:
-            // under len(source) == 0 ∧ pos == 0 the
-            // negated row has no model.
-            let z3 = Z3Session::new(10_000);
-            z3.assert(&formula.not());
-            z3.assert(&source.length().eq(&z3::ast::Int::from_i64(0)));
-            z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
-            assert!(
-                matches!(z3.check(), SmtResult::Unsat),
-                "{}: α row 2 admits Err at end-of-input under the symbolic path",
-                label
-            );
-            // Admission at the digit point, symbolic path:
-            // under source == "5" ∧ pos == 0 the negated
-            // row has no model — the license fires
-            // through the bridge, not only at literal
-            // points.
-            let z3 = Z3Session::new(10_000);
-            z3.assert(&formula.not());
-            z3.assert(
-                &source.eq(&z3::ast::String::from_str("5").unwrap()),
-            );
-            z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
-            assert!(
-                matches!(z3.check(), SmtResult::Unsat),
-                "{}: α row 2 admits Err at \"5\" under the symbolic path",
-                label
-            );
-            // Control: with no facts, the row under an Err
-            // output is not valid — a countermodel exists
-            // (the free char may be a token start).
-            let mut env = SymEnv::new();
-            let (state, _, _) = free_state();
-            env.insert("state".into(), state);
-            let (_, tri) = verifier.verify_constraint(
-                &spec.postconditions[1],
-                "alpha@free-state-err",
-                spec,
-                &env,
-                &Some(phase83_err("Unexpected character")),
-            );
-            assert!(
-                matches!(tri, Tri::Refuted),
-                "{}: α row 2 discriminates under a free state (not vacuous)",
-                label
-            );
-        }
-
-        // A′ row 1 under symbolic shapes: a free state
-        // with a point Ok output encodes, and so does a
-        // fully free Ok payload.
-        let module = phase83_scratch_module(ROW1_A_PRIME, ROW2_CURRENT);
-        let spec = restored_spec(&module, "tokenize_one");
-        let index = SpecIndex::from_module(&module);
-        let (state, _, _) = free_state();
-        let mut env = SymEnv::new();
-        env.insert("state".into(), state);
-        env.insert(
-            "output".into(),
-            phase83_ok(phase83_state("spec", 4, 1)),
-        );
-        assert!(
-            encode_constraint(&spec.postconditions[0], &env, &EvalCtx::root(&index))
-                .is_some(),
-            "A′ row 1 encodes with a symbolic state and a point Ok output"
-        );
-        let free_payload = Sym::Record {
+        let free_payload = || Sym::Record {
             type_name: "TokenizerState".into(),
             fields: vec![
                 (
@@ -4346,435 +4120,120 @@ spec tokenize_all {
                 ),
             ],
         };
-        env.insert("output".into(), phase83_ok(free_payload));
+
+        let module = phase84_real_module();
+        let spec = restored_spec(&module, "tokenize_one");
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+
+        // α row 2 under a symbolic state, Err output:
+        // encodability, then the two admissions.
+        let (state, source, pos) = free_state();
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state);
+        env.insert("output".into(), phase84_err("Unexpected character"));
+        let formula = encode_constraint(
+            &spec.postconditions[1],
+            &env,
+            &EvalCtx::root(&index),
+        );
+        assert!(
+            formula.is_some(),
+            "α row 2 ENCODES under a symbolic state — the symbolic \
+             index takes the CharStr bridge form"
+        );
+        let formula = formula.unwrap();
+
+        // Admission at end-of-input, symbolic path:
+        // under len(source) == 0 ∧ pos == 0 the negated
+        // row has no model.
+        let z3 = Z3Session::new(10_000);
+        z3.assert(&formula.not());
+        z3.assert(&source.length().eq(&z3::ast::Int::from_i64(0)));
+        z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
+        assert!(
+            matches!(z3.check(), SmtResult::Unsat),
+            "α row 2 admits Err at end-of-input under the symbolic path"
+        );
+        // Admission at the digit point, symbolic path:
+        // under source == "5" ∧ pos == 0 the negated row
+        // has no model — the license fires through the
+        // bridge, not only at literal points.
+        let z3 = Z3Session::new(10_000);
+        z3.assert(&formula.not());
+        z3.assert(
+            &source.eq(&z3::ast::String::from_str("5").unwrap()),
+        );
+        z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
+        assert!(
+            matches!(z3.check(), SmtResult::Unsat),
+            "α row 2 admits Err at \"5\" under the symbolic path"
+        );
+        // Control: with no facts, the row under an Err
+        // output is not valid — a countermodel exists
+        // (the free char may be a token start).
+        let mut env = SymEnv::new();
+        let (state, _, _) = free_state();
+        env.insert("state".into(), state);
+        let (_, tri) = verifier.verify_constraint(
+            &spec.postconditions[1],
+            "alpha@free-state-err",
+            spec,
+            &env,
+            &Some(phase84_err("Unexpected character")),
+        );
+        assert!(
+            matches!(tri, Tri::Refuted),
+            "α row 2 discriminates under a free state (not vacuous)"
+        );
+
+        // The EOF admission for an Ok output (the golden
+        // output's symbolic counterpart): a free state
+        // with a free Ok payload; under the EOF facts
+        // the negated row has no model. This discharges
+        // the literal points' Unknown artifact in the
+        // standing tests.
+        let (state, source, pos) = free_state();
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state);
+        env.insert("output".into(), phase84_ok(free_payload()));
+        let formula = encode_constraint(
+            &spec.postconditions[1],
+            &env,
+            &EvalCtx::root(&index),
+        )
+        .expect("α row 2 encodes with a symbolic state and a free Ok output");
+        let z3 = Z3Session::new(10_000);
+        z3.assert(&formula.not());
+        z3.assert(&source.length().eq(&z3::ast::Int::from_i64(0)));
+        z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
+        assert!(
+            matches!(z3.check(), SmtResult::Unsat),
+            "α row 2 admits the golden Ok output at end-of-input \
+             under the symbolic path"
+        );
+
+        // A′ row 1 under symbolic shapes: a free state
+        // with a point Ok output encodes, and so does a
+        // fully free Ok payload.
+        let (state, _, _) = free_state();
+        let mut env = SymEnv::new();
+        env.insert("state".into(), state);
+        env.insert(
+            "output".into(),
+            phase84_ok(phase84_state("spec", 4, 1)),
+        );
+        assert!(
+            encode_constraint(&spec.postconditions[0], &env, &EvalCtx::root(&index))
+                .is_some(),
+            "A′ row 1 encodes with a symbolic state and a point Ok output"
+        );
+        env.insert("output".into(), phase84_ok(free_payload()));
         assert!(
             encode_constraint(&spec.postconditions[0], &env, &EvalCtx::root(&index))
                 .is_some(),
             "A′ row 1 encodes with a fully free Ok payload: \
              pos >= len(source) over free terms"
-        );
-    }
-
-    /// Phase 83 — candidate R2-β: formulations over the
-    /// module's denoted machinery (peek / skip_whitespace)
-    /// instead of the raw indexed char. Both fail, for
-    /// different measured reasons:
-    ///
-    ///   * β-peek licenses Err when peek(state) is none
-    ///     of the thirteen enumerable non-error chars.
-    ///     It admits the class-E Err at "5" — and admits
-    ///     Err at "spec" too: an Option<Char> payload
-    ///     cannot be range-tested in the constraint
-    ///     dialect (the D1a table has no Option
-    ///     projection), so identifier starts are
-    ///     invisible to it and the row's teeth fail. An
-    ///     over-license is not a formulation: a body
-    ///     returning Err at identifier inputs would no
-    ///     longer be refuted by the row (the golden
-    ///     tests would be its only judge).
-    ///   * β-skip states the license at the SKIPPED
-    ///     position — the only form that would judge
-    ///     " 5" as the mirror does. It encodes NOWHERE:
-    ///     the resolver denotes no body for
-    ///     skip_whitespace (its two rows are field
-    ///     inequalities no builder denotes — Phase 82's
-    ///     pin, re-asserted here), so sym_invoke has
-    ///     nothing to inline and any row mentioning
-    ///     `skip_whitespace(state)` is unencodable as a
-    ///     whole, at the very points it was written for.
-    ///
-    /// What a skip_whitespace denotation would even
-    /// mean, priced: it cannot be DERIVED — the spec's
-    /// two rows (output.pos >= state.pos;
-    /// len(output.source) == len(state.source)) are
-    /// satisfied by the identity and by every partial
-    /// skip, so they underdetermine the function. The
-    /// G-campaign precedent is a spec-keyed TEMPLATE: a
-    /// hand-authored body keyed on the spec's identity,
-    /// stating "advance while is_whitespace" — but that
-    /// body is a While loop, and sym_eval has no While
-    /// arm, so inlining it into a constraint would
-    /// STILL be unencodable. A skip denotation therefore
-    /// does not serve R2 at any price short of an
-    /// encoder extension (bounded loop unrolling or
-    /// Forall — the Phase 80 option D boundary), which
-    /// is encoder research, not a spec formulation. The
-    /// whitespace-then-bad-char subclass of class E is
-    /// not closable from the spec side.
-    #[cfg(feature = "z3-support")]
-    #[test]
-    fn phase83_row2_beta_formulations_fail() {
-        // β-peek.
-        let module = phase83_scratch_module(ROW1_AMENDMENT_A, ROW2_BETA_PEEK);
-        let spec = restored_spec(&module, "tokenize_one");
-        let verifier = Verifier::with_module(&module);
-        let err = phase83_err("Unexpected character");
-        assert!(
-            matches!(
-                phase83_judge(&verifier, spec, 1, phase83_state("5", 0, 0), err.clone()),
-                Tri::Proven
-            ),
-            "β-peek licenses the class-E Err at \"5\""
-        );
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state("spec", 0, 0),
-                    err.clone()
-                ),
-                Tri::Proven
-            ),
-            "β-peek ALSO licenses Err at \"spec\" — over-license: the teeth fail"
-        );
-        assert!(
-            matches!(
-                phase83_judge(&verifier, spec, 1, phase83_state(":", 0, 0), err.clone()),
-                Tri::Refuted
-            ),
-            "β-peek sees only its thirteen enumerable chars: Err at ':' stays refuted"
-        );
-
-        // β-skip.
-        let module = phase83_scratch_module(ROW1_AMENDMENT_A, ROW2_BETA_SKIP);
-        let spec = restored_spec(&module, "tokenize_one");
-        let index = SpecIndex::from_module(&module);
-        assert!(
-            index.callee_body("skip_whitespace").is_none(),
-            "no denotation exists for skip_whitespace (Phase 82 pin, this module)"
-        );
-        let verifier = Verifier::with_module(&module);
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state(" 5", 0, 0),
-                    phase83_err("Unexpected character")
-                ),
-                Tri::Unknown
-            ),
-            "β-skip's row is unencodable at the very point it was written for"
-        );
-        let mut env = SymEnv::new();
-        env.insert("state".into(), phase83_state("5", 0, 0));
-        env.insert("output".into(), phase83_err("Unexpected character"));
-        assert!(
-            encode_constraint(&spec.postconditions[1], &env, &EvalCtx::root(&index))
-                .is_none(),
-            "any row mentioning skip_whitespace(state) is unencodable as a whole"
-        );
-    }
-
-    /// Phase 83 — the joint candidate: A′ row 1 + R2-α
-    /// row 2 (callee form; the direct form spot-checked
-    /// at the two fixed classes). The Phase 82 per-class
-    /// table re-run against the joint rows: the mirror's
-    /// outputs are admitted at ALL SEVEN classes — the
-    /// two Phase 82 refutations are closed — the teeth
-    /// cases stay refuted, and the one surviving residue
-    /// is stated at its own point (" 5"). One literal-
-    /// point artifact is carried openly: at the EOF
-    /// class, row 2's verdict is Unknown rather than
-    /// Proven, because the α row mentions the indexed
-    /// char and sym_index refuses a constant
-    /// out-of-bounds index into the literal empty
-    /// string; the admission itself is proven under the
-    /// symbolic path in
-    /// phase83_symbolic_state_encodability (and the
-    /// class's row 1 verdict is Proven at the point).
-    /// Disturbance: the scratch module differs from the
-    /// real module in tokenize_one's rows ONLY — every
-    /// other spec's postconditions, tokenize_all's
-    /// included, are Debug-identical, and the scratch
-    /// module typechecks whole (the builder asserts it).
-    #[cfg(feature = "z3-support")]
-    #[test]
-    fn phase83_joint_a_prime_alpha_battery() {
-        use crate::verify::smt::{SmtResult, Z3Session};
-
-        let real = phase83_real_module();
-        let module = phase83_scratch_module(ROW1_A_PRIME, ROW2_ALPHA_CALLEE);
-        for f in &module.functions {
-            let g = restored_spec(&real, &f.name);
-            if f.name == "tokenize_one" {
-                assert_ne!(
-                    format!("{:?}", f.postconditions),
-                    format!("{:?}", g.postconditions),
-                    "the joint candidate changes tokenize_one's rows"
-                );
-            } else {
-                assert_eq!(
-                    format!("{:?}", f.postconditions),
-                    format!("{:?}", g.postconditions),
-                    "spec {} is untouched by the joint candidate",
-                    f.name
-                );
-            }
-        }
-        let spec = restored_spec(&module, "tokenize_one");
-        let verifier = Verifier::with_module(&module);
-
-        // The Phase 82 battery classes whose points
-        // encode literally: the mirror's output admitted
-        // by BOTH joint rows.
-        let classes: Vec<(&str, &str, Sym)> = vec![
-            (
-                "ident",
-                "spec",
-                phase83_ok(phase83_state("spec", 4, 1)),
-            ),
-            (
-                "leading-ws-ident",
-                "  spec",
-                phase83_ok(phase83_state("  spec", 6, 1)),
-            ),
-            (
-                "newline-run",
-                "\n\nx",
-                phase83_ok(phase83_state("\n\nx", 3, 1)),
-            ),
-            (
-                "single-colon",
-                ":",
-                phase83_ok(phase83_state(":", 1, 1)),
-            ),
-            (
-                "corner-whitespace-only",
-                " ",
-                phase83_ok(phase83_state(" ", 1, 0)),
-            ),
-        ];
-        for (name, source, output) in classes {
-            for row in 0..2 {
-                let tri = phase83_judge(
-                    &verifier,
-                    spec,
-                    row,
-                    phase83_state(source, 0, 0),
-                    output.clone(),
-                );
-                assert!(
-                    matches!(tri, Tri::Proven),
-                    "joint: class {} row {} admits the mirror output",
-                    name,
-                    row + 1
-                );
-            }
-        }
-        // The EOF class at the literal point: row 1
-        // Proven; row 2 Unknown — the OOB artifact, with
-        // the admission proven symbolically in the
-        // companion test.
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    0,
-                    phase83_state("", 0, 0),
-                    phase83_ok(phase83_state("", 0, 0)),
-                ),
-                Tri::Proven
-            ),
-            "joint: EOF row 1 admits the golden output"
-        );
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state("", 0, 0),
-                    phase83_ok(phase83_state("", 0, 0)),
-                ),
-                Tri::Unknown
-            ),
-            "joint: EOF row 2 at the literal point is the OOB-index artifact \
-             (symbolic-path admission proven in the companion test)"
-        );
-        // Class E at the point: row 2 Proven; row 1
-        // discharged through the free tag (the literal
-        // Err unwrap case), as in Phases 80/82.
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state("5", 0, 0),
-                    phase83_err("Unexpected character '5' at line 1"),
-                ),
-                Tri::Proven
-            ),
-            "joint: row 2 admits the class-E Err"
-        );
-        let index = SpecIndex::from_module(&module);
-        let is_ok = z3::ast::Bool::new_const("out_is_ok");
-        let mut env = SymEnv::new();
-        env.insert("state".into(), phase83_state("5", 0, 0));
-        env.insert(
-            "output".into(),
-            Sym::Result {
-                ok: Tag::Free(is_ok.clone()),
-                ok_payload: Some(Box::new(phase83_state("5", 1, 1))),
-                err_payload: Some(Box::new(
-                    Sym::Str(z3::ast::String::from_str("boom").unwrap()),
-                )),
-            },
-        );
-        let formula = encode_constraint(
-            &spec.postconditions[0],
-            &env,
-            &EvalCtx::root(&index),
-        )
-        .expect("joint row 1 encodes under a free tag");
-        let z3 = Z3Session::new(10_000);
-        z3.assert(&formula);
-        z3.assert(&is_ok.not());
-        assert!(
-            matches!(z3.check(), SmtResult::Sat(_)),
-            "joint: row 1 is satisfiable by the class-E Err (free tag)"
-        );
-
-        // The surviving residue, at its own point: at
-        // " 5" the mirror's Err stays REFUTED by row 2
-        // (α reads the pre-skip char), and the only
-        // admitted shape is the fabricated Ok/+1 — the
-        // subclass a template would still deviate at
-        // under the joint rows.
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state(" 5", 0, 0),
-                    phase83_err("Unexpected character '5' at line 1"),
-                ),
-                Tri::Refuted
-            ),
-            "joint residue: the mirror's Err at \" 5\" stays refuted"
-        );
-        for row in 0..2 {
-            assert!(
-                matches!(
-                    phase83_judge(
-                        &verifier,
-                        spec,
-                        row,
-                        phase83_state(" 5", 0, 0),
-                        phase83_ok(phase83_state(" 5", 2, 1)),
-                    ),
-                    Tri::Proven
-                ),
-                "joint residue: at \" 5\" only the fabricated Ok/+1 is admitted (row {})",
-                row + 1
-            );
-        }
-
-        // Teeth under the joint rows.
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    0,
-                    phase83_state("spec", 0, 0),
-                    phase83_ok(phase83_state("spec", 0, 0)),
-                ),
-                Tri::Refuted
-            ),
-            "joint teeth: a no-growth Ok at a token start is refuted by row 1"
-        );
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state("spec", 0, 0),
-                    phase83_err("x"),
-                ),
-                Tri::Refuted
-            ),
-            "joint teeth: Err at an identifier start is refuted by row 2"
-        );
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state(":", 0, 0),
-                    phase83_err("x"),
-                ),
-                Tri::Refuted
-            ),
-            "joint teeth: Err at a punctuation start is refuted by row 2"
-        );
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    1,
-                    phase83_state(" ", 0, 0),
-                    phase83_err("x"),
-                ),
-                Tri::Refuted
-            ),
-            "joint teeth: Err at the whitespace corner is refuted by row 2 \
-             (the corner's output is Ok-only)"
-        );
-        // A′'s residue restated in the joint context.
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier,
-                    spec,
-                    0,
-                    phase83_state("spec", 0, 0),
-                    phase83_ok(phase83_state("spec", 4, 0)),
-                ),
-                Tri::Proven
-            ),
-            "joint residue: A′ admits a no-growth Ok whose pos reaches EOF"
-        );
-
-        // The direct formulation agrees at the two fixed
-        // classes.
-        let module2 = phase83_scratch_module(ROW1_A_PRIME, ROW2_ALPHA_DIRECT);
-        let spec2 = restored_spec(&module2, "tokenize_one");
-        let verifier2 = Verifier::with_module(&module2);
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier2,
-                    spec2,
-                    0,
-                    phase83_state(" ", 0, 0),
-                    phase83_ok(phase83_state(" ", 1, 0)),
-                ),
-                Tri::Proven
-            ),
-            "α-direct joint: class W admitted"
-        );
-        assert!(
-            matches!(
-                phase83_judge(
-                    &verifier2,
-                    spec2,
-                    1,
-                    phase83_state("5", 0, 0),
-                    phase83_err("x"),
-                ),
-                Tri::Proven
-            ),
-            "α-direct joint: class E admitted"
         );
     }
 
