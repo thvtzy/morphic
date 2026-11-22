@@ -284,6 +284,354 @@ impl Verifier {
     }
 
     #[cfg(feature = "z3-support")]
+    /// Phase 96: resolve statement-bodied calls inside
+    /// a constraint before encoding. R2's ratified row
+    /// (the β-skip license) names `skip_whitespace(state)`
+    /// in a postcondition — a call the expression
+    /// encoder cannot evaluate (its denotation is a
+    /// While body; `sym_invoke` declines), so without
+    /// this step the amended row would judge Unknown in
+    /// every judge, forever, and the ratification would
+    /// be inert. The resolution: each distinct call to a
+    /// statement-bodied spec function is evaluated ONCE
+    /// by the statement layer (the same evaluation
+    /// `stmt_invoke_value` performs), and when the
+    /// callee's outcome is a SINGLE completed path with
+    /// no satisfiable exhaustion, the call is replaced
+    /// by a fresh variable bound to that path's value
+    /// and the path's condition joins the returned
+    /// facts — the judge asserts the facts alongside
+    /// the encoded row, so the row reads the callee's
+    /// result WITH its frame facts, exactly as a caller
+    /// body does since this phase's fact export in
+    /// `stmt_invoke_value`. Any other outcome (multiple
+    /// paths, reachable exhaustion, an evaluation
+    /// decline, a call under a quantifier binder its
+    /// arguments mention) declines the whole resolution
+    /// and the caller falls back to plain encoding —
+    /// which declines at the same call, Unknown either
+    /// way. A constraint with no statement-bodied call
+    /// returns itself untouched: zero behavior change
+    /// for every pre-Phase-96 row.
+    #[cfg(feature = "z3-support")]
+    fn resolve_stmt_calls(
+        &self,
+        constraint: &Constraint,
+        env: &SymEnv,
+    ) -> Option<(Constraint, SymEnv, Vec<z3::ast::Bool>)> {
+        if !constraint_has_stmt_call(constraint, &self.index) {
+            return Some((constraint.clone(), env.clone(), Vec::new()));
+        }
+        let mut env = env.clone();
+        let mut facts: Vec<z3::ast::Bool> = Vec::new();
+        let mut seq = 0usize;
+        let mut memo: Vec<(String, String)> = Vec::new();
+        let rewritten = self.rewrite_stmt_calls(
+            constraint,
+            &mut env,
+            &mut facts,
+            &mut seq,
+            &mut memo,
+            &[],
+        )?;
+        Some((rewritten, env, facts))
+    }
+
+    #[cfg(feature = "z3-support")]
+    fn rewrite_stmt_calls(
+        &self,
+        c: &Constraint,
+        env: &mut SymEnv,
+        facts: &mut Vec<z3::ast::Bool>,
+        seq: &mut usize,
+        memo: &mut Vec<(String, String)>,
+        binders: &[String],
+    ) -> Option<Constraint> {
+        match c {
+            Constraint::True => Some(Constraint::True),
+            Constraint::Expr(e) => Some(Constraint::Expr(
+                self.rewrite_stmt_calls_expr(e, env, facts, seq, memo, binders)?,
+            )),
+            Constraint::Forall { vars, body } => {
+                let mut inner_binders: Vec<String> = binders.to_vec();
+                inner_binders.extend(vars.iter().map(|(n, _)| n.clone()));
+                Some(Constraint::Forall {
+                    vars: vars.clone(),
+                    body: Box::new(self.rewrite_stmt_calls(
+                        body,
+                        env,
+                        facts,
+                        seq,
+                        memo,
+                        &inner_binders,
+                    )?),
+                })
+            }
+            Constraint::Exists { vars, body } => {
+                let mut inner_binders: Vec<String> = binders.to_vec();
+                inner_binders.extend(vars.iter().map(|(n, _)| n.clone()));
+                Some(Constraint::Exists {
+                    vars: vars.clone(),
+                    body: Box::new(self.rewrite_stmt_calls(
+                        body,
+                        env,
+                        facts,
+                        seq,
+                        memo,
+                        &inner_binders,
+                    )?),
+                })
+            }
+            Constraint::Implies(a, b) => Some(Constraint::Implies(
+                Box::new(self.rewrite_stmt_calls(a, env, facts, seq, memo, binders)?),
+                Box::new(self.rewrite_stmt_calls(b, env, facts, seq, memo, binders)?),
+            )),
+            Constraint::And(parts) => Some(Constraint::And(
+                parts
+                    .iter()
+                    .map(|p| self.rewrite_stmt_calls(p, env, facts, seq, memo, binders))
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            Constraint::Or(parts) => Some(Constraint::Or(
+                parts
+                    .iter()
+                    .map(|p| self.rewrite_stmt_calls(p, env, facts, seq, memo, binders))
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            Constraint::Not(inner) => Some(Constraint::Not(Box::new(
+                self.rewrite_stmt_calls(inner, env, facts, seq, memo, binders)?,
+            ))),
+            Constraint::Eq(a, b) => Some(Constraint::Eq(
+                self.rewrite_stmt_calls_expr(a, env, facts, seq, memo, binders)?,
+                self.rewrite_stmt_calls_expr(b, env, facts, seq, memo, binders)?,
+            )),
+            Constraint::Order(op, a, b) => Some(Constraint::Order(
+                *op,
+                self.rewrite_stmt_calls_expr(a, env, facts, seq, memo, binders)?,
+                self.rewrite_stmt_calls_expr(b, env, facts, seq, memo, binders)?,
+            )),
+            Constraint::Predicate(name, args) => Some(Constraint::Predicate(
+                name.clone(),
+                args.iter()
+                    .map(|a| self.rewrite_stmt_calls_expr(a, env, facts, seq, memo, binders))
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    fn rewrite_stmt_calls_expr(
+        &self,
+        e: &Expr,
+        env: &mut SymEnv,
+        facts: &mut Vec<z3::ast::Bool>,
+        seq: &mut usize,
+        memo: &mut Vec<(String, String)>,
+        binders: &[String],
+    ) -> Option<Expr> {
+        match e {
+            Expr::Call(name, args) => {
+                // Children first: a nested statement call
+                // inside an argument is resolved before
+                // the enclosing call is considered.
+                let args: Vec<Expr> = args
+                    .iter()
+                    .map(|a| self.rewrite_stmt_calls_expr(a, env, facts, seq, memo, binders))
+                    .collect::<Option<Vec<_>>>()?;
+                if !self.is_stmt_call(name) {
+                    return Some(Expr::Call(name.clone(), args));
+                }
+                // Capture guard: the call's arguments
+                // must not mention a quantifier binder in
+                // scope (the evaluation is binder-free).
+                let mut arg_vars = std::collections::HashSet::new();
+                for a in &args {
+                    expr_free_vars(a, &mut arg_vars);
+                }
+                if arg_vars.iter().any(|v| binders.contains(v)) {
+                    return None;
+                }
+                // Dedup: the same call (same callee,
+                // same rewritten arguments — the R2 row
+                // names `skip_whitespace(state)` at every
+                // use) resolves ONCE; later occurrences
+                // reuse the bound variable and its facts.
+                // The key is an AST-level Debug rendering
+                // of the call — a memo key, not a term
+                // identity (the Phase 90 trap was about
+                // Z3 node identity in hot merge paths;
+                // this map is per-row and tiny).
+                let key = format!("{name}({args:?})");
+                if let Some((_, fresh)) = memo.iter().find(|(k, _)| *k == key) {
+                    return Some(Expr::Var(fresh.clone()));
+                }
+                // Evaluate the arguments in the current
+                // (growing) environment and run the
+                // callee through the statement layer.
+                let ectx = EvalCtx::root(&self.index);
+                let mut argv = Vec::with_capacity(args.len());
+                for a in &args {
+                    argv.push(encode_expr(a, env, &ectx)?);
+                }
+                let outcome = self.eval_stmt_call_values(name, argv)?;
+                if outcome.paths.len() != 1 {
+                    return None;
+                }
+                if stmt_sat(&[outcome.exhausted.clone()], self.timeout_per_constraint_ms)
+                    != Some(false)
+                {
+                    return None;
+                }
+                let (pc, value) = &outcome.paths[0];
+                facts.push(pc.clone());
+                collect_char_conditions(value, facts);
+                *seq += 1;
+                let fresh = format!("p96call_{seq}_{name}");
+                if env.contains_key(&fresh) {
+                    return None;
+                }
+                env.insert(fresh.clone(), value.clone());
+                memo.push((key, fresh.clone()));
+                Some(Expr::Var(fresh))
+            }
+            Expr::Field(inner, f) => Some(Expr::Field(
+                Box::new(self.rewrite_stmt_calls_expr(inner, env, facts, seq, memo, binders)?),
+                f.clone(),
+            )),
+            Expr::Index(c, i) => Some(Expr::Index(
+                Box::new(self.rewrite_stmt_calls_expr(c, env, facts, seq, memo, binders)?),
+                Box::new(self.rewrite_stmt_calls_expr(i, env, facts, seq, memo, binders)?),
+            )),
+            Expr::BinOp(op, l, r) => Some(Expr::BinOp(
+                *op,
+                Box::new(self.rewrite_stmt_calls_expr(l, env, facts, seq, memo, binders)?),
+                Box::new(self.rewrite_stmt_calls_expr(r, env, facts, seq, memo, binders)?),
+            )),
+            Expr::UnaryOp(op, inner) => Some(Expr::UnaryOp(
+                *op,
+                Box::new(self.rewrite_stmt_calls_expr(inner, env, facts, seq, memo, binders)?),
+            )),
+            Expr::Length(inner) => Some(Expr::Length(Box::new(
+                self.rewrite_stmt_calls_expr(inner, env, facts, seq, memo, binders)?,
+            ))),
+            Expr::MethodCall {
+                receiver,
+                name,
+                args,
+            } => Some(Expr::MethodCall {
+                receiver: Box::new(
+                    self.rewrite_stmt_calls_expr(receiver, env, facts, seq, memo, binders)?,
+                ),
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| self.rewrite_stmt_calls_expr(a, env, facts, seq, memo, binders))
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            Expr::RecordLit { type_name, fields } => Some(Expr::RecordLit {
+                type_name: type_name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, v)| {
+                        self.rewrite_stmt_calls_expr(v, env, facts, seq, memo, binders)
+                            .map(|nv| (n.clone(), nv))
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            Expr::Lambda(params, body) => {
+                let mut inner_binders: Vec<String> = binders.to_vec();
+                inner_binders.extend(params.iter().map(|(n, _)| n.clone()));
+                Some(Expr::Lambda(
+                    params.clone(),
+                    Box::new(self.rewrite_stmt_calls_expr(
+                        body,
+                        env,
+                        facts,
+                        seq,
+                        memo,
+                        &inner_binders,
+                    )?),
+                ))
+            }
+            Expr::Comprehension {
+                binder,
+                collection,
+                body,
+            } => {
+                let collection = self.rewrite_stmt_calls_expr(
+                    collection,
+                    env,
+                    facts,
+                    seq,
+                    memo,
+                    binders,
+                )?;
+                let mut inner_binders: Vec<String> = binders.to_vec();
+                inner_binders.push(binder.clone());
+                let body = self.rewrite_stmt_calls_expr(
+                    body,
+                    env,
+                    facts,
+                    seq,
+                    memo,
+                    &inner_binders,
+                )?;
+                Some(Expr::Comprehension {
+                    binder: binder.clone(),
+                    collection: Box::new(collection),
+                    body: Box::new(body),
+                })
+            }
+            _ => Some(e.clone()),
+        }
+    }
+
+    /// Is `name` a call the constraint resolution owns:
+    /// a spec function whose denotation is
+    /// statement-bodied (the expression encoder declines
+    /// those by construction)?
+    #[cfg(feature = "z3-support")]
+    fn is_stmt_call(&self, name: &str) -> bool {
+        if self.index.get(name).is_none() {
+            return false;
+        }
+        match self.index.callee_body(name) {
+            Some(body) => body_mentions_statements(&body, &self.index),
+            None => false,
+        }
+    }
+
+    /// Evaluate a statement-bodied callee from argument
+    /// VALUES (the constraint-resolution counterpart of
+    /// `stmt_invoke_value`, which takes IR arguments):
+    /// bind the parameters, run the production statement
+    /// evaluation at the production fuel.
+    #[cfg(feature = "z3-support")]
+    fn eval_stmt_call_values(
+        &self,
+        name: &str,
+        argv: Vec<Sym>,
+    ) -> Option<StmtOutcome> {
+        let spec = self.index.get(name)?;
+        let body = self.index.callee_body(name)?;
+        let ectx = EvalCtx::root(&self.index);
+        if !ectx.can_inline(name) || spec.params.len() != argv.len() {
+            return None;
+        }
+        let mut env = SymEnv::new();
+        for (p, v) in spec.params.iter().zip(argv) {
+            env.insert(p.name.clone(), v);
+        }
+        let ctx = StmtCtx::root(
+            &self.index,
+            self.stmt_fuel,
+            self.timeout_per_constraint_ms,
+        )
+        .child(name);
+        sym_eval_stmt(&body, env, &ctx)
+    }
+
+    #[cfg(feature = "z3-support")]
     fn verify_constraint(
         &self,
         constraint: &Constraint,
@@ -313,11 +661,24 @@ impl Verifier {
         };
         let mut env = param_env.clone();
         env.insert("output".to_string(), output.clone());
-        let Some(formula) = encode_constraint(constraint, &env, &EvalCtx::root(&self.index)) else {
+        // Phase 96: statement-bodied calls in the row
+        // (R2's license names `skip_whitespace(state)`)
+        // are resolved by the statement layer before
+        // encoding; the resolution's facts are asserted
+        // with the row below.
+        let Some((resolved, env, call_facts)) =
+            self.resolve_stmt_calls(constraint, &env)
+        else {
+            return done(false, None, Tri::Unknown);
+        };
+        let Some(formula) = encode_constraint(&resolved, &env, &EvalCtx::root(&self.index)) else {
             return done(false, None, Tri::Unknown);
         };
 
         let z3 = Z3Session::new(self.timeout_per_constraint_ms);
+        for fact in &call_facts {
+            z3.assert(fact);
+        }
         // D5a side conditions: every Char parameter (and
         // every Char nested in a record/Option/Result
         // parameter) ranges over the Unicode scalar values
@@ -432,14 +793,26 @@ impl Verifier {
         for (pc, output) in &outcome.paths {
             let mut env = param_env.clone();
             env.insert("output".to_string(), output.clone());
+            // Phase 96: statement-bodied calls in the
+            // row resolve per path, exactly as in
+            // `verify_constraint`; a resolution decline
+            // is this judge's unencodable case.
+            let Some((resolved, env, call_facts)) =
+                self.resolve_stmt_calls(constraint, &env)
+            else {
+                return done(false, None, Tri::Unknown);
+            };
             let Some(formula) =
-                encode_constraint(constraint, &env, &EvalCtx::root(&self.index))
+                encode_constraint(&resolved, &env, &EvalCtx::root(&self.index))
             else {
                 return done(false, None, Tri::Unknown);
             };
             let z3 = Z3Session::new(self.timeout_per_constraint_ms);
             for cond in &side {
                 z3.assert(cond);
+            }
+            for fact in &call_facts {
+                z3.assert(fact);
             }
             z3.assert(pc);
             z3.assert(&not_exhausted);
@@ -2535,6 +2908,27 @@ fn stmt_invoke_value(
         st.pc = z3::ast::Bool::from_bool(false);
         return Some(Sym::Opaque);
     }
+    // Phase 96: a callee with exactly ONE completed path
+    // exports that path's condition into the caller's
+    // path condition. The path condition is a relation
+    // between the argument terms and the callee's fresh
+    // exit terms — the frame facts a caller row reads
+    // (a skipped state's token count, a consumed state's
+    // source) travel with the value exactly this way.
+    // Soundness: the caller path now ranges only over
+    // executions where the callee took that path; where
+    // the callee instead exhausts, the exhaustion gate
+    // above has already recorded it, and the judge's
+    // checks always conjoin ¬exhaustion alongside. A
+    // multi-path callee exports nothing — its per-path
+    // conditions belong to its own assembly, which the
+    // caller reads through the assembled value alone.
+    if outcome.paths.len() == 1 {
+        let path_pc = outcome.paths[0].0.clone();
+        if !stmt_is_true(&path_pc) {
+            st.pc = z3_and(&st.pc, &path_pc);
+        }
+    }
     stmt_assemble(&outcome.paths, ctx.timeout_ms)
 }
 
@@ -2746,9 +3140,19 @@ fn stmt_eval(node: &IRNode, st: &mut StmtState, ctx: &StmtCtx) -> Option<()> {
             Some(())
         }
         IRNode::While {
-            condition, body, ..
-        } => stmt_loop(Some(condition), body, st, ctx),
-        IRNode::Loop { body } => stmt_loop(None, body, st, ctx),
+            condition,
+            body,
+            invariant,
+        } => stmt_loop_dispatch(
+            Some(condition),
+            body,
+            invariant.as_deref(),
+            st,
+            ctx,
+        ),
+        IRNode::Loop { body, invariant } => {
+            stmt_loop_dispatch(None, body, invariant.as_deref(), st, ctx)
+        }
         IRNode::BinOp(IRBinOp::Append, l, r) => {
             // A statement-position Append rebinds its
             // target (the compiled rendering is a push
@@ -2908,6 +3312,755 @@ fn stmt_loop(
             st.pc = exit_pc;
             return Some(());
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────
+// Phase 96: loop invariants in the statement judge.
+//
+// An IR loop (While or Loop) may carry `invariant` text:
+// spec-syntax constraint rows over the LOOP'S ENVIRONMENT
+// — the function's parameters plus every local bound
+// before the loop, by name, in the module dialect (field
+// / index / call expressions; calls resolve through the
+// same SpecIndex denotations as postconditions). The text
+// is one constraint per row, rows separated by `;` (or
+// newlines) — one line in the string, exactly as a
+// module's `constraint:` lines are separate rows — parsed
+// by the spec parser's own constraint parser
+// (`parse_constraint_text`), their conjunction being the
+// invariant. The text may NOT reference `output` (no
+// output exists mid-body) nor any variable first bound
+// inside the loop body: an unbound name fails the scope
+// check and the route declines.
+//
+// The judge's route for a loop WITH an invariant is
+// lazy-hybrid, and the order matters:
+//
+// 1. Phase 93's bounded unrolling runs first, on a
+//    cloned state. If it completes with NO new
+//    exhaustion, its outcome is adopted untouched —
+//    at concrete points (and wherever the fuel covers
+//    the trip count) the unrolled evaluation is exact,
+//    and every Phase 93/95 standing is preserved bit
+//    for bit.
+// 2. Only where unrolling cannot complete (symbolic
+//    states: exhaustion is structural there, Phase 90)
+//    does the invariant route engage, on the untouched
+//    entry state. It discharges the classic three
+//    obligations — INITIATION (the invariant holds on
+//    loop entry), CONSECUCTION (one arbitrary iteration
+//    from an arbitrary invariant state preserves it),
+//    EXIT (the state after the loop is an arbitrary
+//    invariant state with the condition false) — and
+//    replaces the loop with the exit construction:
+//    every variable the body may write is havoc'd to a
+//    fresh value of its shape, the invariant and
+//    ¬condition are conjoined into the path condition.
+//    Any obligation that does not discharge — a solver
+//    SAT or Unknown on a negated obligation, an
+//    unencodable invariant row, a body evaluation that
+//    declines or exhausts during consecution — fails
+//    the route: the loop's entry path is recorded as
+//    EXHAUSTION (the Phase 93 unresolved verdict),
+//    never a pass. Loops without an invariant never
+//    come here.
+//
+// Soundness notes, stated once: the havoc'd exit state
+// over-approximates the real post-loop states exactly
+// when initiation + consecution hold (every reachable
+// loop-head state satisfies the invariant, so the exit
+// state ranges over a superset). Return paths recorded
+// during the consecution evaluation are carried into
+// the caller's return set: they are evaluated over the
+// havoc'd loop-head state, so they over-approximate the
+// real in-loop returns the same way — the judge checks
+// rows over a superset of paths, which can only cost
+// verdicts, never invent a Proven; a Refuted drawn from
+// such a path is the one documented over-approximation
+// (Phase 96 ROAD note). A While whose body breaks out
+// of the loop itself is declined outright (no measured
+// body needs it; the Loop form's breaks ARE its exit
+// and are discharged by the exit obligation).
+
+/// Fresh-name sequence for invariant havoc: every
+/// loop evaluation instance havocs under its own tag,
+/// so two loops' (or two evaluations') fresh constants
+/// can never be conflated into a manufactured relation.
+#[cfg(feature = "z3-support")]
+static INVARIANT_SEQ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(feature = "z3-support")]
+fn invariant_fresh_tag() -> u64 {
+    INVARIANT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Parse invariant text into its constraint rows.
+#[cfg(feature = "z3-support")]
+fn parse_invariant_rows(text: &str) -> Option<Vec<Constraint>> {
+    let mut rows = Vec::new();
+    for piece in text.split([';', '\n']) {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        rows.push(crate::spec::parser::parse_constraint_text(piece).ok()?);
+    }
+    if rows.is_empty() {
+        None
+    } else {
+        Some(rows)
+    }
+}
+
+#[cfg(feature = "z3-support")]
+fn expr_free_vars(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    match e {
+        Expr::Var(n) => {
+            out.insert(n.clone());
+        }
+        Expr::Field(inner, _) => expr_free_vars(inner, out),
+        Expr::Index(c, i) => {
+            expr_free_vars(c, out);
+            expr_free_vars(i, out);
+        }
+        Expr::Call(_, args) => {
+            for a in args {
+                expr_free_vars(a, out);
+            }
+        }
+        Expr::BinOp(_, l, r) => {
+            expr_free_vars(l, out);
+            expr_free_vars(r, out);
+        }
+        Expr::UnaryOp(_, inner) => expr_free_vars(inner, out),
+        Expr::Length(inner) => expr_free_vars(inner, out),
+        Expr::Lambda(_, body) => expr_free_vars(body, out),
+        Expr::Comprehension {
+            collection, body, ..
+        } => {
+            expr_free_vars(collection, out);
+            expr_free_vars(body, out);
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_free_vars(receiver, out);
+            for a in args {
+                expr_free_vars(a, out);
+            }
+        }
+        Expr::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                expr_free_vars(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(feature = "z3-support")]
+fn constraint_free_vars(c: &Constraint, out: &mut std::collections::HashSet<String>) {
+    match c {
+        Constraint::True => {}
+        Constraint::Expr(e) => expr_free_vars(e, out),
+        Constraint::Forall { vars, body } | Constraint::Exists { vars, body } => {
+            let mut inner = std::collections::HashSet::new();
+            constraint_free_vars(body, &mut inner);
+            for v in inner {
+                if !vars.iter().any(|(n, _)| n == &v) {
+                    out.insert(v);
+                }
+            }
+        }
+        Constraint::Implies(a, b) => {
+            constraint_free_vars(a, out);
+            constraint_free_vars(b, out);
+        }
+        Constraint::And(parts) | Constraint::Or(parts) => {
+            for p in parts {
+                constraint_free_vars(p, out);
+            }
+        }
+        Constraint::Not(inner) => constraint_free_vars(inner, out),
+        Constraint::Eq(a, b) => {
+            expr_free_vars(a, out);
+            expr_free_vars(b, out);
+        }
+        Constraint::Order(_, a, b) => {
+            expr_free_vars(a, out);
+            expr_free_vars(b, out);
+        }
+        Constraint::Predicate(_, args) => {
+            for a in args {
+                expr_free_vars(a, out);
+            }
+        }
+    }
+}
+
+/// Direct children of an IR node, for the invariant
+/// machinery's syntactic walks (a local mirror of the
+/// selector's walker — the statement layer keeps its
+/// own, as it does its other helpers).
+#[cfg(feature = "z3-support")]
+fn stmt_children(node: &IRNode) -> Vec<&IRNode> {
+    match node {
+        IRNode::Hole { .. } | IRNode::Literal(_) | IRNode::Var(_) => vec![],
+        IRNode::Block(stmts) => stmts.iter().collect(),
+        IRNode::Let { value, body, .. } => vec![value.as_ref(), body.as_ref()],
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => vec![
+            condition.as_ref(),
+            then_branch.as_ref(),
+            else_branch.as_ref(),
+        ],
+        IRNode::While {
+            condition, body, ..
+        } => vec![condition.as_ref(), body.as_ref()],
+        IRNode::For {
+            start, end, body, ..
+        } => vec![start.as_ref(), end.as_ref(), body.as_ref()],
+        IRNode::Match { scrutinee, cases } => {
+            let mut out = vec![scrutinee.as_ref()];
+            out.extend(cases.iter().map(|(_, b)| b));
+            out
+        }
+        IRNode::Call { args, .. } => args.iter().collect(),
+        IRNode::Return(inner) => vec![inner.as_ref()],
+        IRNode::BinOp(_, l, r) => vec![l.as_ref(), r.as_ref()],
+        IRNode::UnaryOp(_, inner) => vec![inner.as_ref()],
+        IRNode::Lambda { body, .. } | IRNode::Closure { body, .. } => {
+            vec![body.as_ref()]
+        }
+        IRNode::Collection { elements, .. } => elements.iter().collect(),
+        IRNode::Map { function, over } | IRNode::Filter { predicate: function, over } => {
+            vec![function.as_ref(), over.as_ref()]
+        }
+        IRNode::Fold {
+            operation,
+            initial,
+            over,
+        } => vec![operation.as_ref(), initial.as_ref(), over.as_ref()],
+        IRNode::Sort {
+            comparator,
+            collection,
+        } => vec![comparator.as_ref(), collection.as_ref()],
+        IRNode::Alloc { initial, .. } => vec![initial.as_ref()],
+        IRNode::Assign { target, value } => vec![target.as_ref(), value.as_ref()],
+        IRNode::Typed { node, .. } => vec![node.as_ref()],
+        IRNode::Index(c, i) => vec![c.as_ref(), i.as_ref()],
+        IRNode::Loop { body, .. } => vec![body.as_ref()],
+        IRNode::Break { value } => value
+            .as_ref()
+            .map(|v| vec![v.as_ref()])
+            .unwrap_or_default(),
+        IRNode::StructDef { body, .. } => vec![body.as_ref()],
+        IRNode::TryPropagate(inner) => vec![inner.as_ref()],
+        IRNode::FieldAccess { base, .. } => vec![base.as_ref()],
+        IRNode::RecordLit { fields, .. } => fields.iter().map(|(_, v)| v).collect(),
+    }
+}
+
+/// The variables a loop body may write, restricted to
+/// names bound at loop entry (a name first bound inside
+/// the body is loop-local and absent from the exit
+/// environment by construction). The written set drives
+/// the havoc: under-approximating it would let the exit
+/// construction claim stale relations for a variable
+/// the body actually changed, so the walk is syntactic
+/// and conservative — Assign targets, statement-position
+/// Append targets, and re-Alloc'd entry names — and it
+/// does not descend into Lambda/Closure bodies, whose
+/// writes are their own scope's.
+#[cfg(feature = "z3-support")]
+fn loop_written_vars(
+    node: &IRNode,
+    entry: &SymEnv,
+    out: &mut std::collections::HashSet<String>,
+) {
+    match node {
+        IRNode::Lambda { .. } | IRNode::Closure { .. } => {}
+        IRNode::Assign { target, .. } => {
+            if let IRNode::Var(name) = target.as_ref() {
+                if entry.contains_key(name) {
+                    out.insert(name.clone());
+                }
+            }
+            for c in stmt_children(node) {
+                loop_written_vars(c, entry, out);
+            }
+        }
+        IRNode::Alloc { name, .. } => {
+            if entry.contains_key(name) {
+                out.insert(name.clone());
+            }
+            for c in stmt_children(node) {
+                loop_written_vars(c, entry, out);
+            }
+        }
+        IRNode::BinOp(IRBinOp::Append, left, _) => {
+            if let IRNode::Var(name) = left.as_ref() {
+                if entry.contains_key(name) {
+                    out.insert(name.clone());
+                }
+            }
+            for c in stmt_children(node) {
+                loop_written_vars(c, entry, out);
+            }
+        }
+        _ => {
+            for c in stmt_children(node) {
+                loop_written_vars(c, entry, out);
+            }
+        }
+    }
+}
+
+/// Does this body break out of THIS loop (a Break not
+/// nested inside an inner loop or function value)?
+#[cfg(feature = "z3-support")]
+fn loop_has_own_break(node: &IRNode) -> bool {
+    match node {
+        IRNode::Break { .. } => true,
+        IRNode::While { .. }
+        | IRNode::Loop { .. }
+        | IRNode::For { .. }
+        | IRNode::Lambda { .. }
+        | IRNode::Closure { .. } => false,
+        _ => stmt_children(node).iter().any(|c| loop_has_own_break(c)),
+    }
+}
+
+/// A fresh value of `v`'s shape, for the havoc: every
+/// component the value's shape exposes becomes a fresh
+/// constant under `path`; a concrete list becomes its
+/// length-only form (an over-approximation — the exit
+/// facts the rows read are length facts). Shapes with
+/// no sound fresh form decline: a CharStr (its
+/// length-≤1 discipline is the string term itself) and
+/// an Option/Result whose absent payload carries no
+/// shape to freshen.
+#[cfg(feature = "z3-support")]
+fn stmt_havoc(v: &Sym, path: &str, index: &SpecIndex) -> Option<Sym> {
+    match v {
+        Sym::Int(_) => Some(Sym::Int(z3::ast::Int::new_const(path))),
+        Sym::Bool(_) => Some(Sym::Bool(z3::ast::Bool::new_const(path))),
+        Sym::Str(_) => Some(Sym::Str(z3::ast::String::new_const(path))),
+        Sym::Char(_) => Some(Sym::Char(z3::ast::Int::new_const(path))),
+        Sym::ListLen(_) | Sym::List(_) => {
+            Some(Sym::ListLen(z3::ast::Int::new_const(path)))
+        }
+        Sym::Record { type_name, .. } => {
+            let (resolved, fields) = index.record_fields(type_name)?;
+            Some(Sym::Record {
+                type_name: resolved,
+                fields: fields
+                    .iter()
+                    .map(|(fname, fty)| {
+                        (
+                            fname.clone(),
+                            fresh_sym(fty, &format!("{path}.{fname}"), index, 0),
+                        )
+                    })
+                    .collect(),
+            })
+        }
+        Sym::Option { payload, .. } => Some(Sym::Option {
+            some: Tag::Free(z3::ast::Bool::new_const(
+                format!("{path}.is_some").as_str(),
+            )),
+            payload: Some(Box::new(stmt_havoc(
+                payload.as_deref()?,
+                &format!("{path}.some"),
+                index,
+            )?)),
+        }),
+        Sym::Result {
+            ok_payload,
+            err_payload,
+            ..
+        } => Some(Sym::Result {
+            ok: Tag::Free(z3::ast::Bool::new_const(
+                format!("{path}.is_ok").as_str(),
+            )),
+            ok_payload: Some(Box::new(stmt_havoc(
+                ok_payload.as_deref()?,
+                &format!("{path}.ok"),
+                index,
+            )?)),
+            err_payload: Some(Box::new(stmt_havoc(
+                err_payload.as_deref()?,
+                &format!("{path}.err"),
+                index,
+            )?)),
+        }),
+        Sym::CharStr(_) => None,
+        Sym::Opaque => Some(Sym::Opaque),
+    }
+}
+
+/// The solver context for an invariant obligation: the
+/// state's standing assumptions, the Char range side
+/// conditions owed by the environment's values, and the
+/// path condition in force.
+#[cfg(feature = "z3-support")]
+fn inv_context(
+    env: &SymEnv,
+    assumptions: &[z3::ast::Bool],
+    pc: &z3::ast::Bool,
+) -> Vec<z3::ast::Bool> {
+    let mut terms: Vec<z3::ast::Bool> = assumptions.to_vec();
+    for v in env.values() {
+        collect_char_conditions(v, &mut terms);
+    }
+    terms.push(pc.clone());
+    terms
+}
+
+/// An obligation is discharged exactly when its terms
+/// are UNSAT; SAT and solver-Unknown discharge nothing.
+#[cfg(feature = "z3-support")]
+fn inv_discharged(terms: &[z3::ast::Bool], timeout_ms: u64) -> bool {
+    stmt_sat(terms, timeout_ms) == Some(false)
+}
+
+/// ¬(f₁ ∧ f₂ ∧ …) as one term.
+#[cfg(feature = "z3-support")]
+fn inv_negated_conjunction(fs: &[z3::ast::Bool]) -> z3::ast::Bool {
+    if fs.is_empty() {
+        return z3::ast::Bool::from_bool(false);
+    }
+    let negs: Vec<z3::ast::Bool> = fs.iter().map(|f| f.not()).collect();
+    let refs: Vec<&z3::ast::Bool> = negs.iter().collect();
+    z3::ast::Bool::or(&refs)
+}
+
+#[cfg(feature = "z3-support")]
+fn inv_conjunction(fs: &[z3::ast::Bool]) -> z3::ast::Bool {
+    let mut acc = z3::ast::Bool::from_bool(true);
+    for f in fs {
+        acc = z3_and(&acc, f);
+    }
+    acc
+}
+
+#[cfg(feature = "z3-support")]
+enum InvClose {
+    /// All obligations discharged; the exit
+    /// construction has been applied to the state.
+    Closed,
+    /// Some obligation could not be discharged (or the
+    /// route does not apply); the state is untouched.
+    Failed,
+}
+
+/// The invariant route proper: discharge initiation,
+/// consecution and exit for the loop whose entry state
+/// is `st`, and on success replace the loop by its exit
+/// construction in `st`. On failure `st` is untouched
+/// and the caller applies the exhaustion verdict.
+#[cfg(feature = "z3-support")]
+fn stmt_invariant_close(
+    condition: Option<&IRNode>,
+    body: &IRNode,
+    text: &str,
+    st: &mut StmtState,
+    ctx: &StmtCtx,
+) -> InvClose {
+    let fail = InvClose::Failed;
+    let index = ctx.eval.index;
+    // Scope: every name the invariant reads must be
+    // bound at loop entry.
+    let rows = match parse_invariant_rows(text) {
+        Some(r) => r,
+        None => return fail,
+    };
+    let mut free = std::collections::HashSet::new();
+    for r in &rows {
+        constraint_free_vars(r, &mut free);
+    }
+    if free.iter().any(|v| !st.env.contains_key(v)) {
+        return fail;
+    }
+    // A While whose body breaks out of itself: the
+    // exit construction has no break case; decline.
+    if condition.is_some() && loop_has_own_break(body) {
+        return fail;
+    }
+    let inv_in = |env: &SymEnv| -> Option<Vec<z3::ast::Bool>> {
+        rows.iter()
+            .map(|r| encode_constraint(r, env, &ctx.eval))
+            .collect()
+    };
+    // ── Initiation: entry context ∧ ¬I(entry) UNSAT.
+    let inv_entry = match inv_in(&st.env) {
+        Some(f) => f,
+        None => return fail,
+    };
+    {
+        let mut terms = inv_context(&st.env, &st.assumptions, &st.pc);
+        terms.push(inv_negated_conjunction(&inv_entry));
+        if !inv_discharged(&terms, ctx.timeout_ms) {
+            return fail;
+        }
+    }
+    // ── The havoc'd loop-head state E*: every variable
+    // the body may write becomes a fresh value of its
+    // shape; the rest carry over.
+    let mut written = std::collections::HashSet::new();
+    loop_written_vars(body, &st.env, &mut written);
+    let havoc_env = |tag: u64, st: &StmtState| -> Option<SymEnv> {
+        let mut env = SymEnv::new();
+        for (name, val) in &st.env {
+            if written.contains(name) {
+                env.insert(
+                    name.clone(),
+                    stmt_havoc(val, &format!("inv{tag}:{name}"), index)?,
+                );
+            } else {
+                env.insert(name.clone(), val.clone());
+            }
+        }
+        Some(env)
+    };
+    let estar = match havoc_env(invariant_fresh_tag(), st) {
+        Some(e) => e,
+        None => return fail,
+    };
+    let inv_star = match inv_in(&estar) {
+        Some(f) => f,
+        None => return fail,
+    };
+    // pc* = I(E*) ∧ cond(E*) for a While; I(E*) for a
+    // Loop (its head is unconditional).
+    let mut pc_star = inv_conjunction(&inv_star);
+    if let Some(cond) = condition {
+        let mut scratch = StmtState {
+            env: estar.clone(),
+            pc: z3::ast::Bool::from_bool(true),
+            rets: Vec::new(),
+            breaks: Vec::new(),
+            exhausted: Vec::new(),
+            last: None,
+            writes: std::collections::HashSet::new(),
+            assumptions: st.assumptions.clone(),
+            guided: true,
+        };
+        match stmt_eval_value(cond, &mut scratch, ctx) {
+            Some(Sym::Bool(b)) => pc_star = z3_and(&pc_star, &b),
+            _ => return fail,
+        }
+    }
+    // ── One arbitrary iteration from E*.
+    let mut bs = StmtState {
+        env: estar,
+        pc: pc_star,
+        rets: Vec::new(),
+        breaks: Vec::new(),
+        exhausted: Vec::new(),
+        last: None,
+        writes: std::collections::HashSet::new(),
+        assumptions: st.assumptions.clone(),
+        guided: false,
+    };
+    if stmt_eval(body, &mut bs, ctx).is_none() {
+        return fail;
+    }
+    if !bs.exhausted.is_empty() {
+        // The one-iteration evaluation itself could not
+        // complete (an inner loop exhausted): nothing
+        // about preservation is established.
+        return fail;
+    }
+    let inv_after = match inv_in(&bs.env) {
+        Some(f) => f,
+        None => return fail,
+    };
+    // ── Consecution: the fall-through state satisfies I.
+    if !stmt_is_false(&bs.pc) {
+        let mut terms = inv_context(&bs.env, &st.assumptions, &bs.pc);
+        terms.push(inv_negated_conjunction(&inv_after));
+        if !inv_discharged(&terms, ctx.timeout_ms) {
+            return fail;
+        }
+    }
+    // ── Exit obligation for the break-exited form:
+    // every break path's state satisfies I (the break
+    // state's written variables are read through the
+    // ite-merged fall-through environment under the
+    // break's path condition — the merge IS the state
+    // the break was taken in).
+    if condition.is_none() {
+        for b in &bs.breaks {
+            if stmt_is_false(b) {
+                continue;
+            }
+            let mut terms = inv_context(&bs.env, &st.assumptions, b);
+            terms.push(inv_negated_conjunction(&inv_after));
+            if !inv_discharged(&terms, ctx.timeout_ms) {
+                return fail;
+            }
+        }
+    } else if !bs.breaks.is_empty() {
+        // Defensive: own-breaks were excluded
+        // syntactically and inner loops consume theirs;
+        // a break reaching here has no sound exit case.
+        return fail;
+    }
+    // ── Exit construction on the live state: a fresh
+    // havoc'd environment (a second tag — the
+    // consecution state's constants are spent), the
+    // invariant and ¬condition as path facts.
+    let eprime = match havoc_env(invariant_fresh_tag(), st) {
+        Some(e) => e,
+        None => return fail,
+    };
+    let inv_exit = match inv_in(&eprime) {
+        Some(f) => f,
+        None => return fail,
+    };
+    let mut exit_pc = st.pc.clone();
+    for f in &inv_exit {
+        exit_pc = z3_and(&exit_pc, f);
+    }
+    {
+        let mut side: Vec<z3::ast::Bool> = Vec::new();
+        for v in eprime.values() {
+            collect_char_conditions(v, &mut side);
+        }
+        for f in &side {
+            exit_pc = z3_and(&exit_pc, f);
+        }
+    }
+    if let Some(cond) = condition {
+        let mut scratch = StmtState {
+            env: eprime.clone(),
+            pc: z3::ast::Bool::from_bool(true),
+            rets: Vec::new(),
+            breaks: Vec::new(),
+            exhausted: Vec::new(),
+            last: None,
+            writes: std::collections::HashSet::new(),
+            assumptions: st.assumptions.clone(),
+            guided: true,
+        };
+        match stmt_eval_value(cond, &mut scratch, ctx) {
+            Some(Sym::Bool(b)) => exit_pc = z3_and(&exit_pc, &b.not()),
+            _ => return fail,
+        }
+    }
+    st.env = eprime;
+    st.pc = exit_pc;
+    // Return paths out of the loop body, evaluated over
+    // the havoc'd head state during consecution: an
+    // over-approximation of the real in-loop returns
+    // (see the header note).
+    st.rets.extend(bs.rets.iter().cloned());
+    for name in &written {
+        st.writes.insert(name.clone());
+    }
+    // The exit state is a merge point: later branches
+    // merge by ite, never by guided replacement.
+    st.guided = false;
+    InvClose::Closed
+}
+
+/// Loop dispatch in the statement judge: a loop WITH an
+/// invariant first gets Phase 93's unrolling on a cloned
+/// state (adopted untouched when it completes without
+/// new exhaustion — the exact-evaluation case); only an
+/// incomplete or declined unrolling engages the
+/// invariant route, and a failed route yields the
+/// exhaustion verdict (or preserves the decline).
+#[cfg(feature = "z3-support")]
+fn stmt_loop_dispatch(
+    condition: Option<&IRNode>,
+    body: &IRNode,
+    invariant: Option<&str>,
+    st: &mut StmtState,
+    ctx: &StmtCtx,
+) -> Option<()> {
+    let Some(text) = invariant else {
+        return stmt_loop(condition, body, st, ctx);
+    };
+    let exh0 = st.exhausted.len();
+    let mut trial = st.clone();
+    match stmt_loop(condition, body, &mut trial, ctx) {
+        Some(()) if trial.exhausted.len() == exh0 => {
+            *st = trial;
+            Some(())
+        }
+        Some(()) => match stmt_invariant_close(condition, body, text, st, ctx) {
+            InvClose::Closed => Some(()),
+            InvClose::Failed => {
+                let entry_pc = st.pc.clone();
+                st.exhausted.push(entry_pc);
+                st.pc = z3::ast::Bool::from_bool(false);
+                Some(())
+            }
+        },
+        None => match stmt_invariant_close(condition, body, text, st, ctx) {
+            InvClose::Closed => Some(()),
+            InvClose::Failed => None,
+        },
+    }
+}
+
+/// Does a constraint mention a call the Phase 96
+/// resolution owns (a spec function whose denotation is
+/// statement-bodied)? The scan is purely syntactic —
+/// it decides only whether the resolution step runs at
+/// all; constraints without such a call are encoded
+/// exactly as before.
+#[cfg(feature = "z3-support")]
+fn constraint_has_stmt_call(c: &Constraint, index: &SpecIndex) -> bool {
+    fn expr_has(e: &Expr, index: &SpecIndex) -> bool {
+        match e {
+            Expr::Call(name, args) => {
+                let qualifies = index.get(name).is_some()
+                    && match index.callee_body(name) {
+                        Some(body) => body_mentions_statements(&body, index),
+                        None => false,
+                    };
+                qualifies || args.iter().any(|a| expr_has(a, index))
+            }
+            Expr::Field(inner, _) => expr_has(inner, index),
+            Expr::Index(c, i) => expr_has(c, index) || expr_has(i, index),
+            Expr::BinOp(_, l, r) => expr_has(l, index) || expr_has(r, index),
+            Expr::UnaryOp(_, inner) => expr_has(inner, index),
+            Expr::Length(inner) => expr_has(inner, index),
+            Expr::Lambda(_, body) => expr_has(body, index),
+            Expr::Comprehension {
+                collection, body, ..
+            } => expr_has(collection, index) || expr_has(body, index),
+            Expr::MethodCall { receiver, args, .. } => {
+                expr_has(receiver, index) || args.iter().any(|a| expr_has(a, index))
+            }
+            Expr::RecordLit { fields, .. } => {
+                fields.iter().any(|(_, v)| expr_has(v, index))
+            }
+            _ => false,
+        }
+    }
+    match c {
+        Constraint::True => false,
+        Constraint::Expr(e) => expr_has(e, index),
+        Constraint::Forall { body, .. } | Constraint::Exists { body, .. } => {
+            constraint_has_stmt_call(body, index)
+        }
+        Constraint::Implies(a, b) => {
+            constraint_has_stmt_call(a, index) || constraint_has_stmt_call(b, index)
+        }
+        Constraint::And(parts) | Constraint::Or(parts) => {
+            parts.iter().any(|p| constraint_has_stmt_call(p, index))
+        }
+        Constraint::Not(inner) => constraint_has_stmt_call(inner, index),
+        Constraint::Eq(a, b) => expr_has(a, index) || expr_has(b, index),
+        Constraint::Order(_, a, b) => expr_has(a, index) || expr_has(b, index),
+        Constraint::Predicate(_, args) => args.iter().any(|a| expr_has(a, index)),
     }
 }
 
@@ -5375,12 +6528,18 @@ spec tokenize_all {
             "round-2 row 2 admits the mirror's Err at a non-ASCII bad char"
         );
 
-        // The surviving deviation, at its own point: at
-        // " 5" the mirror's Err stays REFUTED by row 2
-        // (α reads the pre-skip char — a space), and the
-        // only shape the joint rows admit is the
-        // fabricated Ok/+1. This subclass is the rows'
-        // one named deviation from the mirror.
+        // The round-2 deviation, closed in round 3: at
+        // " 5" the mirror's Err was REFUTED by round-2
+        // row 2 (α reads the pre-skip char — a space).
+        // Phase 96's R2 amendment adds the β-skip
+        // license, which reads the POST-skip character
+        // ('5': not ident-start, not whitespace, not a
+        // punctuation, and the skip lands before
+        // end-of-input), so the faithful Err is now
+        // ADMITTED — judged through the verifier's
+        // constraint-call resolution, which evaluates
+        // the row's `skip_whitespace(state)` call
+        // through the statement layer.
         let mut env = SymEnv::new();
         env.insert("state".into(), state_of(" 5", 0, 0));
         let err5 = Sym::Result {
@@ -5399,9 +6558,9 @@ spec tokenize_all {
             &Some(err5),
         );
         assert!(
-            matches!(tri, Tri::Refuted),
-            "\" 5\" residue: the mirror's Err stays refuted — α reads \
-             the pre-skip char"
+            matches!(tri, Tri::Proven),
+            "\" 5\" round 3: the mirror's Err is ADMITTED by the β-skip \
+             license (Phase 84: refuted — α read the pre-skip char)"
         );
         for (i, label) in ["row1", "row2"].iter().enumerate() {
             let (_, tri) = verifier.verify_constraint(
@@ -5413,7 +6572,7 @@ spec tokenize_all {
             );
             assert!(
                 matches!(tri, Tri::Proven),
-                "\" 5\" residue: only the fabricated Ok/+1 is admitted ({})",
+                "\" 5\": the fabricated Ok/+1 shape stays admitted ({})",
                 label
             );
         }
@@ -5680,28 +6839,46 @@ spec tokenize_all {
         let index = SpecIndex::from_module(&module);
         let verifier = Verifier::with_module(&module);
 
-        // α row 2 under a symbolic state, Err output:
-        // encodability, then the two admissions.
+        // Round-3 row 2 under a symbolic state, Err
+        // output: encodability, then the admissions.
+        // Phase 96 re-pin: the row now names
+        // `skip_whitespace(state)` (the β license), a
+        // statement-bodied call the RAW expression
+        // encoder declines — pinned first — so the row
+        // encodes through the Phase 96 resolution:
+        // resolve the call (the statement layer
+        // evaluates skip over the free state; the
+        // invariant route closes its While), encode the
+        // rewritten row, and assert the resolution's
+        // facts alongside the formula in every manual
+        // session below.
         let (state, source, pos) = free_state();
         let mut env = SymEnv::new();
         env.insert("state".into(), state);
         env.insert("output".into(), phase84_err("Unexpected character"));
-        let formula = encode_constraint(
-            &spec.postconditions[1],
-            &env,
-            &EvalCtx::root(&index),
-        );
         assert!(
-            formula.is_some(),
-            "α row 2 ENCODES under a symbolic state — the symbolic \
-             index takes the CharStr bridge form"
+            encode_constraint(&spec.postconditions[1], &env, &EvalCtx::root(&index))
+                .is_none(),
+            "Phase 96: round-3 row 2 does NOT encode raw — its \
+             skip_whitespace call is the resolution layer's"
         );
-        let formula = formula.unwrap();
+        let encode_row2 = |env: &SymEnv| -> (z3::ast::Bool, Vec<z3::ast::Bool>) {
+            let (resolved, env2, facts) =
+                verifier.resolve_stmt_calls(&spec.postconditions[1], env)
+                    .expect("round-3 row 2 resolves its skip call");
+            let f = encode_constraint(&resolved, &env2, &EvalCtx::root(&index))
+                .expect("the resolved row 2 encodes");
+            (f, facts)
+        };
+        let (formula, facts) = encode_row2(&env);
 
         // Admission at end-of-input, symbolic path:
         // under len(source) == 0 ∧ pos == 0 the negated
         // row has no model.
         let z3 = Z3Session::new(10_000);
+        for fact in &facts {
+            z3.assert(fact);
+        }
         z3.assert(&formula.not());
         z3.assert(&source.length().eq(&z3::ast::Int::from_i64(0)));
         z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
@@ -5714,6 +6891,9 @@ spec tokenize_all {
         // has no model — the license fires through the
         // bridge, not only at literal points.
         let z3 = Z3Session::new(10_000);
+        for fact in &facts {
+            z3.assert(fact);
+        }
         z3.assert(&formula.not());
         z3.assert(
             &source.eq(&z3::ast::String::from_str("5").unwrap()),
@@ -5722,6 +6902,27 @@ spec tokenize_all {
         assert!(
             matches!(z3.check(), SmtResult::Unsat),
             "α row 2 admits Err at \"5\" under the symbolic path"
+        );
+        // Admission at the whitespace-then-digit point,
+        // symbolic path (Phase 96, the β license): under
+        // source == " 5" ∧ pos == 0 the negated row has
+        // no model — α reads the space and refuses, β
+        // reads the post-skip '5' and licenses. The
+        // resolution facts are what tie the row's
+        // `skip_whitespace(state)` to this state.
+        let z3 = Z3Session::new(10_000);
+        for fact in &facts {
+            z3.assert(fact);
+        }
+        z3.assert(&formula.not());
+        z3.assert(
+            &source.eq(&z3::ast::String::from_str(" 5").unwrap()),
+        );
+        z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
+        assert!(
+            matches!(z3.check(), SmtResult::Unsat),
+            "β row 2 admits Err at \" 5\" under the symbolic path \
+             (the round-3 license, through the resolution facts)"
         );
         // Control: with no facts, the row under an Err
         // output is not valid — a countermodel exists
@@ -5751,13 +6952,11 @@ spec tokenize_all {
         let mut env = SymEnv::new();
         env.insert("state".into(), state);
         env.insert("output".into(), phase84_ok(free_payload()));
-        let formula = encode_constraint(
-            &spec.postconditions[1],
-            &env,
-            &EvalCtx::root(&index),
-        )
-        .expect("α row 2 encodes with a symbolic state and a free Ok output");
+        let (formula, facts) = encode_row2(&env);
         let z3 = Z3Session::new(10_000);
+        for fact in &facts {
+            z3.assert(fact);
+        }
         z3.assert(&formula.not());
         z3.assert(&source.length().eq(&z3::ast::Int::from_i64(0)));
         z3.assert(&pos.eq(&z3::ast::Int::from_i64(0)));
@@ -5880,6 +7079,24 @@ spec tokenize_all {
     /// refuted wrong winner and a spec that states
     /// the boundary; it cannot buy a Verified
     /// correct skip.
+    ///
+    /// Phase 96 re-pin (reason recorded): the owner
+    /// ratified (a)+(c) jointly (R1) and both rows are
+    /// now IN the module, so this test's "current rows"
+    /// are the strengthened ones and its baseline is
+    /// made explicit instead: `old_skip` below is the
+    /// spec with only the two original rows (the real
+    /// spec's first two — asserted), and every
+    /// measurement above is re-run against it
+    /// unchanged. The priced trade the note above
+    /// stated has now been TAKEN, and its terms are
+    /// re-measured in Phase 96's own tests: the pool
+    /// crowns no Verified winner under the strengthened
+    /// rows (the tail section's zero stands), and the
+    /// Verified correct skip the note said no spec
+    /// edit could buy is bought by the invariant
+    /// machinery instead — the denotation Verifies
+    /// against the strengthened spec.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase87_skip_strengthening_measurement() {
@@ -5912,8 +7129,22 @@ spec tokenize_all {
         let row_b = parse_row(
             "output.pos == state.pos || is_whitespace(output.source[output.pos - 1])",
         );
-        let strengthened = |row: &Constraint| {
+        // Phase 96 re-pin: the pre-R1 baseline — the
+        // module's skip spec with only its two original
+        // rows (R1 appended (a) and (c) after them).
+        assert_eq!(
+            skip.postconditions.len(),
+            4,
+            "Phase 96: the module's skip spec carries the two original \
+             rows plus ratified (a) and (c)"
+        );
+        let old_skip = {
             let mut s = skip.clone();
+            s.postconditions.truncate(2);
+            s
+        };
+        let strengthened = |row: &Constraint| {
+            let mut s = old_skip.clone();
             s.postconditions.push(row.clone());
             s
         };
@@ -6089,19 +7320,20 @@ spec tokenize_all {
             );
         }
 
-        // The crowned winner under the CURRENT rows,
-        // judged against each strengthened spec: (a)
-        // refutes it, (b) does not, (a)+(b) refutes it
-        // through (a).
-        let pool = synthesize_with_module_spec(&skip, 1, &module)
-            .expect("skip synthesis under current rows");
+        // The crowned winner under the OLD rows (the
+        // Phase 96 re-pin's explicit baseline), judged
+        // against each strengthened spec: (a) refutes
+        // it, (b) does not, (a)+(b) refutes it through
+        // (a).
+        let pool = synthesize_with_module_spec(&old_skip, 1, &module)
+            .expect("skip synthesis under the old rows");
         let verified = verifier
-            .verify_all(pool, &skip)
-            .expect("verify pool under current rows");
-        let winner = select_best(verified, &skip).expect("a crowned winner exists");
+            .verify_all(pool, &old_skip)
+            .expect("verify pool under the old rows");
+        let winner = select_best(verified, &old_skip).expect("a crowned winner exists");
         assert!(
             winner.verified,
-            "the standing winner is Verified under the current rows"
+            "the standing winner is Verified under the old rows"
         );
         assert_eq!(
             verifier.verify_one(&winner, &strengthened(&row_a)).status,
@@ -6113,7 +7345,7 @@ spec tokenize_all {
             VerificationStatus::Verified,
             "row (b) alone leaves the crowned winner standing (vacuous bite)"
         );
-        let mut both = skip.clone();
+        let mut both = old_skip.clone();
         both.postconditions.push(row_a.clone());
         both.postconditions.push(row_b.clone());
         assert_eq!(
@@ -7079,6 +8311,36 @@ spec grow_first {
     /// pass: the step body is refuted by its own spec's
     /// standing rows, and the residue is R2's
     /// ratification (Phase 96), not an encoder gap.
+    ///
+    /// Phase 96 re-pin (reason recorded, same
+    /// precedent): the skip half's status MOVES again,
+    /// Inconclusive → Verified. The denotation's While
+    /// now carries its Phase 96 invariant, and where
+    /// bounded unrolling exhausts (every symbolic
+    /// judging) the invariant route discharges
+    /// initiation / consecution / exit and the rows
+    /// Prove — a verdict earned by discharged
+    /// obligations, still not a denotation smuggling a
+    /// pass: the same test's step half stays Refuted
+    /// by its own rows below, and the identity /
+    /// partial-skip teeth against the strengthened
+    /// skip rows are Phase 96's own tests. The step
+    /// half is unchanged by this re-pin (R2's flip is
+    /// recorded with the amendment itself).
+    ///
+    /// Phase 96, second re-pin (the step half): R2
+    /// landed in the same phase, so the step half
+    /// moves too — VerificationFailed → Inconclusive.
+    /// Row 2 no longer refutes (the β-skip license
+    /// admits the faithful Err paths, Proven
+    /// symbolically); what remains is row 1's W8
+    /// literal-Err encode boundary on the outcome's
+    /// Err path, named in Phase 96's tests. The
+    /// denotation still manufactures no pass: the one
+    /// Verified verdict in this test (skip) is bought
+    /// with discharged proof obligations, and the
+    /// teeth that remain — W8 — bite the faithful
+    /// body itself.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase92_statement_denotations_manufacture_no_verdicts() {
@@ -7087,10 +8349,11 @@ spec grow_first {
         let verifier = Verifier::with_module(&module);
         // A candidate for skip_whitespace whose whole
         // body is the call to skip: the resolver supplies
-        // the While body and (Phase 93) the statement
-        // encoder evaluates it — the verdict is
-        // Inconclusive by exhaustion, the honest outcome
-        // for an unbounded loop judged symbolically.
+        // the While body and the statement encoder
+        // evaluates it — since Phase 96 the verdict is
+        // Verified, earned by the invariant route's
+        // discharged obligations where unrolling
+        // exhausts (see the re-pin note above).
         let skip = restored_spec(&module, "skip_whitespace").clone();
         let call_skip = IRNode::Call {
             function: "skip_whitespace".to_string(),
@@ -7103,15 +8366,18 @@ spec grow_first {
         let cand = candidate(&skip, 9211, call_skip);
         assert_eq!(
             verifier.verify_one(&cand, &skip).status,
-            VerificationStatus::Inconclusive,
-            "judging through skip's denotation lands Inconclusive: \
-             exhaustion is reachable at the production fuel"
+            VerificationStatus::Verified,
+            "judging through skip's denotation Verifies since Phase 96: \
+             the invariant route discharges the While symbolically"
         );
         // The step denotation itself, as a candidate for
         // tokenize_one: judged by the Phase 93 statement
-        // encoder and REFUTED by standing row 2 (the
-        // `" 5"` countermodel) — see the re-pin note
-        // above.
+        // encoder. Phase 96 re-pin: round-2 row 2
+        // REFUTED it (the " 5" countermodel); R2 landed,
+        // row 2 now Proves, and row 1's W8 literal-Err
+        // encode boundary is the only remaining block —
+        // the status is Inconclusive (measured and
+        // named in Phase 96's own tests).
         let one = restored_spec(&module, "tokenize_one").clone();
         let step = index
             .callee_body("tokenize_one")
@@ -7123,9 +8389,10 @@ spec grow_first {
         let cand = candidate(&one, 9212, step);
         assert_eq!(
             verifier.verify_one(&cand, &one).status,
-            VerificationStatus::VerificationFailed,
-            "the STEP denotation is REFUTED by standing row 2 through \
-             the Phase 93 statement encoder (the \" 5\" countermodel)"
+            VerificationStatus::Inconclusive,
+            "Phase 96: the STEP denotation is no longer refuted under \
+             the amended rows — Inconclusive, blocked only by row 1's \
+             W8 literal-Err encode boundary"
         );
     }
 
@@ -7388,9 +8655,12 @@ spec grow_first {
         }
         // The diagnostic point, through production
         // denotations end to end: the faithful body errs
-        // at " 5" and standing row 2 Refutes it — the
-        // residue is R2's β-skip ratification (Phase 96),
-        // not an encoder gap.
+        // at " 5". Round-2 standing row 2 Refuted it —
+        // the residue was R2's β-skip ratification, not
+        // an encoder gap. Phase 96 landed R2: the
+        // standing row now ADMITS the faithful Err,
+        // judged through the constraint-call resolution
+        // over the production denotation.
         let diag = p90_st(" 5", 0, 1, 1);
         let outcome = run_step(&diag, 2).expect("STEP evaluates at the diagnostic point");
         let out = p90_concretize(&outcome).expect("the diagnostic point resolves");
@@ -7404,11 +8674,11 @@ spec grow_first {
             &spec.postconditions[1], "p92@diag-row2", &spec, &env, &Some(out.clone()),
         );
         assert!(
-            matches!(tri, Tri::Refuted),
-            "row 2 REFUTES the faithful body at \" 5\" through production \
-             denotations: the residue is the R2-β-skip ratification"
+            matches!(tri, Tri::Proven),
+            "Phase 96: standing row 2 ADMITS the faithful body at \" 5\" \
+             through production denotations (the R2 β-skip license, landed)"
         );
-        println!("P92|step-diag|\" 5\": row 2 Refuted through production denotations");
+        println!("P92|step-diag|\" 5\": row 2 Proven through production denotations (Phase 96)");
     }
 
     // ────────────────────────────────────────────────────
@@ -7479,19 +8749,38 @@ spec grow_first {
             let expected = p90_state_sym(&mirror);
             let mut env = SymEnv::new();
             env.insert("state".into(), p90_state_sym(input));
-            // Below the trip count the live path is cut
-            // off: no concretization (the fuel
-            // discipline, in production).
+            // Below the trip count, unrolling alone
+            // cannot resolve the loop — Phase 93 pinned
+            // exactly that here (no concretization: the
+            // fuel discipline). Phase 96 supersedes the
+            // pin for this body: the denotation's While
+            // now carries an invariant, so below fuel
+            // the invariant route closes the loop by
+            // proof and the outcome is the exit
+            // construction — an over-approximation, for
+            // which no concretization claim is made.
+            // The discipline that survives is verdict-
+            // level: judged at the point, every row
+            // (the standing rows and row (a)) still
+            // Proves. The fuel discipline itself is
+            // unchanged for loops WITHOUT an invariant.
             if trips >= 1 {
                 let ctx = StmtCtx::root(&index, trips - 1, 5_000);
                 let short = sym_eval_stmt(&body, env.clone(), &ctx)
                     .expect("the production skip denotation evaluates below the trip count");
-                assert!(
-                    stmt_concretize(&short, 5_000).is_none(),
-                    "point {} ({:?} from {}): fuel {} (one below the trip count {}) \
-                     must NOT resolve — the live path is exhausted there",
-                    i, input.source, input.pos, trips - 1, trips
-                );
+                for row in skip
+                    .postconditions
+                    .iter()
+                    .chain(std::iter::once(&row_a))
+                {
+                    let (tri, _) = p93_judge(&verifier, row, &skip, &env, &short);
+                    assert!(
+                        matches!(tri, Tri::Proven),
+                        "point {} ({:?} from {}): below the trip count the \
+                         invariant route's outcome must still Prove every row",
+                        i, input.source, input.pos
+                    );
+                }
             }
             let ctx = StmtCtx::root(&index, trips, 5_000);
             let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
@@ -7724,6 +9013,15 @@ spec grow_first {
     /// decomposition is Phase 94's own test). The two
     /// Unknowns are still never conflated: this test
     /// asserts the encoding exists.
+    ///
+    /// Phase 96 re-pin (reason recorded): the
+    /// corollary now applies to the invariant-FREE
+    /// body only — the test runs both halves (the
+    /// stripped body keeps every pin above; the
+    /// production body, invariant attached, Verifies
+    /// against the strengthened rows with exhaustion
+    /// UNSAT), and row (c)'s verdict flips to Proven
+    /// over the invariant-closed outcome.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase93_stmt_skip_symbolic_unknown() {
@@ -7740,15 +9038,44 @@ spec grow_first {
         );
         let mut spec_a = skip.clone();
         spec_a.postconditions.push(row_a.clone());
+        // Phase 96 re-pin: this test's subject — the
+        // §2.2 corollary that bounded unrolling never
+        // Verifies an unbounded loop — now has TWO
+        // bodies to pin against. The STRIPPED body
+        // (the production denotation with its Phase 96
+        // invariant removed) keeps the corollary
+        // exactly: exhaustion reachable at every fuel,
+        // every row Unknown. The PRODUCTION body
+        // (invariant attached) is the corollary's
+        // designated exception: the invariant route
+        // closes the loop, exhaustion is UNSAT, and
+        // every standing row — the strengthened four —
+        // Proves. Both halves are asserted; neither is
+        // allowed to drift into the other.
+        let mut stripped = body.clone();
+        match &mut stripped {
+            IRNode::Block(stmts) => {
+                let mut found = false;
+                for s in stmts.iter_mut() {
+                    if let IRNode::While { invariant, .. } = s {
+                        *invariant = None;
+                        found = true;
+                    }
+                }
+                assert!(found, "the denotation's While carries the invariant");
+            }
+            _ => panic!("the skip denotation is a Block"),
+        }
         for fuel in [1usize, 2, 4] {
             let ctx = StmtCtx::root(&index, fuel, 5_000);
-            let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
-                .expect("the production skip denotation evaluates symbolically");
+            let outcome = sym_eval_stmt(&stripped, env.clone(), &ctx)
+                .expect("the stripped skip denotation evaluates symbolically");
             assert_eq!(
                 stmt_sat(&[outcome.exhausted.clone()], 5_000),
                 Some(true),
-                "fuel {}: exhaustion must be REACHABLE — that reachability, \
-                 not an encoding gap, is why no symbolic verdict here is Proven",
+                "fuel {}: exhaustion must be REACHABLE for the invariant-free \
+                 body — that reachability, not an encoding gap, is why no \
+                 symbolic verdict here is Proven",
                 fuel
             );
             let mut judge_ms = 0u64;
@@ -7757,8 +9084,9 @@ spec grow_first {
                 judge_ms += ms;
                 assert!(
                     matches!(tri, Tri::Unknown),
-                    "fuel {}: bounded unrolling must NOT Verify the skip \
-                     symbolically (exhaustion is always reachable), row {}",
+                    "fuel {}: bounded unrolling must NOT Verify the \
+                     invariant-free skip symbolically (exhaustion is \
+                     always reachable), row {}",
                     fuel, j
                 );
             }
@@ -7766,12 +9094,43 @@ spec grow_first {
             judge_ms += ms;
             assert!(
                 matches!(tri, Tri::Unknown),
-                "fuel {}: row (a) must judge Unknown symbolically — the \
-                 faithful body completes only on bounded runs",
+                "fuel {}: row (a) must judge Unknown symbolically over \
+                 the invariant-free body — the faithful body completes \
+                 only on bounded runs",
                 fuel
             );
             println!(
-                "P93|skip-sym|fuel={}|paths={}|judge_ms={}",
+                "P93|skip-sym|stripped|fuel={}|paths={}|judge_ms={}",
+                fuel,
+                outcome.paths.len(),
+                judge_ms
+            );
+        }
+        for fuel in [1usize, 2, 4] {
+            let ctx = StmtCtx::root(&index, fuel, 5_000);
+            let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+                .expect("the production skip denotation evaluates symbolically");
+            assert_eq!(
+                stmt_sat(&[outcome.exhausted.clone()], 5_000),
+                Some(false),
+                "fuel {}: Phase 96 — the invariant route closes the \
+                 production body's loop; exhaustion is UNSAT",
+                fuel
+            );
+            let mut judge_ms = 0u64;
+            for (j, row) in skip.postconditions.iter().enumerate() {
+                let (tri, ms) = p93_judge(&verifier, row, &skip, &env, &outcome);
+                judge_ms += ms;
+                assert!(
+                    matches!(tri, Tri::Proven),
+                    "fuel {}: Phase 96 — the production body VERIFIES \
+                     symbolically against strengthened row {} through \
+                     the invariant route",
+                    fuel, j
+                );
+            }
+            println!(
+                "P93|skip-sym|production|fuel={}|paths={}|judge_ms={}",
                 fuel,
                 outcome.paths.len(),
                 judge_ms
@@ -7786,6 +9145,10 @@ spec grow_first {
         // verdict is Unknown by exhaustion — the
         // mechanism every other row in this test
         // judges by.
+        // Phase 96: the verdict flips once more, to
+        // Proven — the outcome is the invariant-closed
+        // one (see the production half above); the
+        // encoding-exists pin is unchanged.
         let (_, row_c) = p90_module_with_forall_row();
         let ctx = StmtCtx::root(&index, 4, 5_000);
         let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
@@ -7807,13 +9170,13 @@ spec grow_first {
         );
         let (tri, ms_c) = p93_judge(&verifier, &row_c, &skip, &env, &outcome);
         assert!(
-            matches!(tri, Tri::Unknown),
-            "the Forall row (c) judges Unknown symbolically — by \
-             EXHAUSTION since Phase 94 (it encodes; no completed path \
-             refutes it; the exhaustion gate blocks Proven)"
+            matches!(tri, Tri::Proven),
+            "Phase 96: the Forall row (c) judges Proven symbolically — \
+             it encodes (Phase 94), no completed path refutes it, and \
+             the invariant route removed the exhaustion that gated it"
         );
         println!(
-            "P93|skip-sym|fuel=4|row (c): Unknown (exhaustion since Phase 94; judge_ms={})",
+            "P93|skip-sym|fuel=4|row (c): Proven (invariant route; judge_ms={})",
             ms_c
         );
     }
@@ -7830,6 +9193,31 @@ spec grow_first {
     /// The LOOP body and the skip denotation, as
     /// candidates, stay Inconclusive symbolically —
     /// their rows judge Unknown, nothing refutes them.
+    ///
+    /// Phase 96 re-pin (reason recorded): R2 landed and
+    /// the invariant route closed both of STEP's loops,
+    /// so the standings move on every axis this test
+    /// pins. The outcome's exhaustion is now UNSAT
+    /// (asserted below — skip's While and the ident
+    /// Loop close by their invariants inside the STEP
+    /// evaluation). Row 2 is PROVEN symbolically (the
+    /// β-skip license admits the faithful Err paths).
+    /// Row 1 stays Unknown — but the mechanism is now
+    /// named exactly: the row ENCODES on 11 of the
+    /// outcome's 12 paths and fails only on the
+    /// literal-Err path, where `output.unwrap()` is
+    /// the W8 boundary (the is_err disjunct would
+    /// admit that path, but a row encodes whole or
+    /// not at all). That single path is the whole
+    /// remaining distance to a Verified STEP — Phase
+    /// 97 inherits it. The candidate status is
+    /// therefore Inconclusive (was VerificationFailed),
+    /// the diagnostic point's row 2 flips Refuted →
+    /// Proven, and the skip candidate flips
+    /// Inconclusive → Verified against its
+    /// strengthened rows. The LOOP candidate stays
+    /// Inconclusive (its row hits the same W8 boundary
+    /// on the Err paths the LOOP body propagates).
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase93_stmt_step_symbolic_and_diag() {
@@ -7850,12 +9238,22 @@ spec grow_first {
         let (tri1, ms1) = p93_judge(&verifier, &spec.postconditions[1], &spec, &env, &outcome);
         assert!(
             matches!(tri0, Tri::Unknown),
-            "row 1 (index 0) must judge Unknown symbolically (exhaustion-bounded)"
+            "row 1 (index 0) must judge Unknown symbolically — since \
+             Phase 96 by the W8 literal-Err encode boundary on the \
+             outcome's Err path, NOT by exhaustion (asserted UNSAT below)"
         );
+        assert_eq!(
+            stmt_sat(&[outcome.exhausted.clone()], 5_000),
+            Some(false),
+            "Phase 96: the STEP outcome's exhaustion is UNSAT — both \
+             inner loops closed by their invariants"
+        );
+
         assert!(
-            matches!(tri1, Tri::Refuted),
-            "row 2 (index 1) must be REFUTED symbolically — the \" 5\" \
-             countermodel completes on a bounded path"
+            matches!(tri1, Tri::Proven),
+            "Phase 96: row 2 (index 1) is PROVEN symbolically — the β-skip \
+             license (R2, landed) admits the faithful Err paths the \
+             round-2 row refuted, through the constraint-call resolution"
         );
         println!(
             "P93|step-sym|fuel={}|paths={}|row0_ms={}|row1_ms={}",
@@ -7869,19 +9267,21 @@ spec grow_first {
         let result = verifier.verify_one(&cand, &spec);
         assert_eq!(
             result.status,
-            VerificationStatus::VerificationFailed,
-            "verify_one must REFUTE the STEP denotation under standing row 2"
+            VerificationStatus::Inconclusive,
+            "Phase 96: verify_one no longer REFUTES the STEP denotation \
+             (row 2 Proven under R2); row 1's W8 boundary keeps it \
+             Inconclusive"
         );
         assert!(
-            result.counterexample.is_some(),
-            "a refutation carries its counterexample"
+            result.counterexample.is_none(),
+            "no refutation, no counterexample"
         );
         assert!(
-            result.constraint_results.iter().all(|r| !r.holds),
-            "neither row holds for the STEP denotation symbolically"
+            !result.constraint_results[0].holds && result.constraint_results[1].holds,
+            "row 1 does not hold (W8 Unknown), row 2 holds (Proven)"
         );
         println!(
-            "P93|step-verify-one|status=VerificationFailed|time_ms={}",
+            "P93|step-verify-one|status=Inconclusive|time_ms={}",
             result.verification_time_ms
         );
         // The diagnostic point, through the production
@@ -7899,17 +9299,18 @@ spec grow_first {
         );
         let (tri, _) = p93_judge(&verifier, &spec.postconditions[1], &spec, &env, &outcome);
         assert!(
-            matches!(tri, Tri::Refuted),
-            "row 2 REFUTES the faithful body at \" 5\" through the \
-             production statement judge: the residue is the R2-β-skip \
-             ratification (Phase 96)"
+            matches!(tri, Tri::Proven),
+            "Phase 96: row 2 ADMITS the faithful body at \" 5\" through \
+             the production statement judge — the β-skip license (R2) \
+             resolves the row's skip call at the concrete point \
+             (round 2: Refuted)"
         );
         let (tri, _) = p93_judge(&verifier, &spec.postconditions[0], &spec, &env, &outcome);
         assert!(
             matches!(tri, Tri::Unknown),
             "row 1 at the Err point judges Unknown (W8 literal-Err boundary)"
         );
-        println!("P93|step-diag|\" 5\": row 2 Refuted, row 1 Unknown (production judge)");
+        println!("P93|step-diag|\" 5\": row 2 Proven, row 1 Unknown (production judge)");
         // The LOOP body as a candidate: Inconclusive.
         let all_spec = restored_spec(&module, "tokenize_all").clone();
         let loop_body = p90_template_body(&module, "tokenize_all");
@@ -7925,8 +9326,10 @@ spec grow_first {
             "P93|loop-verify-one|status=Inconclusive|time_ms={}",
             result.verification_time_ms
         );
-        // The skip denotation as a candidate:
-        // Inconclusive (its rows judge Unknown).
+        // The skip denotation as a candidate: Verified
+        // since Phase 96 (the invariant route closes
+        // its While; the rows are the strengthened
+        // four).
         let skip = restored_spec(&module, "skip_whitespace").clone();
         let skip_body = index
             .callee_body("skip_whitespace")
@@ -7935,12 +9338,12 @@ spec grow_first {
         let result = verifier.verify_one(&cand, &skip);
         assert_eq!(
             result.status,
-            VerificationStatus::Inconclusive,
-            "the skip denotation stays Inconclusive symbolically \
-             (exhaustion-bounded rows)"
+            VerificationStatus::Verified,
+            "Phase 96: the skip denotation VERIFIES symbolically \
+             against the strengthened rows (invariant route)"
         );
         println!(
-            "P93|skip-verify-one|status=Inconclusive|time_ms={}",
+            "P93|skip-verify-one|status=Verified|time_ms={}",
             result.verification_time_ms
         );
     }
@@ -7993,10 +9396,17 @@ spec grow_first {
              Inconclusive even though stmt_append could evaluate it: \
              routing, not capability, gates the statement layer"
         );
-        // ── Identity-as-skip at a whitespace point: the
-        // current rows Proven (the standing scandal,
-        // reproduced through the production judge), row
-        // (a) Refuted.
+        // ── Identity-as-skip at a whitespace point:
+        // the two original rows Proven (the standing
+        // scandal, reproduced through the production
+        // judge), ratified row (a) Refuted, row (c)
+        // vacuous at zero progress.
+        //
+        // Phase 96 re-pin: (a) and (c) are standing
+        // rows now (R1), so the loop reads all four:
+        // the scandal is closed by the rows themselves,
+        // and the separate (a) judgment below stands as
+        // the per-row measurement.
         let row_a = p90_parse_row(
             "output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false",
         );
@@ -8009,12 +9419,24 @@ spec grow_first {
         let ctx = StmtCtx::root(&index, 0, 5_000);
         let outcome = sym_eval_stmt(&identity, env.clone(), &ctx)
             .expect("the identity body evaluates in statement mode");
-        for row in skip.postconditions.iter() {
+        for (j, row) in skip.postconditions.iter().enumerate() {
             let (tri, _) = p93_judge(&verifier, row, &skip, &env, &outcome);
-            assert!(
-                matches!(tri, Tri::Proven),
-                "the identity body satisfies the current rows (the standing scandal)"
-            );
+            match j {
+                0 | 1 => assert!(
+                    matches!(tri, Tri::Proven),
+                    "the identity body satisfies original row {} (the standing scandal)",
+                    j
+                ),
+                2 => assert!(
+                    matches!(tri, Tri::Refuted),
+                    "Phase 96: standing row (a) REFUTES the identity body \
+                     through the production statement judge"
+                ),
+                _ => assert!(
+                    matches!(tri, Tri::Proven),
+                    "row (c) is vacuous for the identity body (empty range)"
+                ),
+            }
         }
         let (tri, _) = p93_judge(&verifier, &row_a, &spec_a, &env, &outcome);
         assert!(
@@ -8439,6 +9861,17 @@ spec grow_first {
     /// admits a partial BODY only through its path
     /// condition (the statement judge above), never
     /// a bare advance whose crossing is unproven.
+    ///
+    /// Phase 96 re-pin (reason recorded): the
+    /// invariant route has landed, and it is exactly
+    /// the designated path the note above pointed at.
+    /// The outcome at fuel 4 is now the invariant-
+    /// closed one: exhaustion is UNSAT (the gate has
+    /// nothing left to block), the per-path (c)
+    /// decomposition is unchanged, and the aggregate
+    /// verdict for (c) is Proven. The wrong-output
+    /// sections below are untouched — they judge rows
+    /// over free outputs, no loop involved.
     #[cfg(feature = "z3-support")]
     #[test]
     fn phase94_forall_symbolic_mechanism() {
@@ -8471,17 +9904,18 @@ spec grow_first {
         }
         assert_eq!(
             stmt_sat(&[outcome.exhausted.clone()], 5_000),
-            Some(true),
-            "exhaustion stays satisfiable — it alone blocks Proven"
+            Some(false),
+            "Phase 96: exhaustion is UNSAT over the invariant-closed \
+             outcome — the gate has nothing left to block"
         );
         let (tri, ms) = p93_judge(&verifier, &row_c, &skip, &env, &outcome);
         assert!(
-            matches!(tri, Tri::Unknown),
-            "the aggregate symbolic verdict for (c) is Unknown — \
-             by exhaustion, not by unencodability"
+            matches!(tri, Tri::Proven),
+            "Phase 96: the aggregate symbolic verdict for (c) is \
+             Proven — the invariant route discharged the loop"
         );
         println!(
-            "P94|symbolic|faithful body|(c)=Unknown (exhaustion gate)|judge_ms={}",
+            "P94|symbolic|faithful body|(c)=Proven (invariant route)|judge_ms={}",
             ms
         );
         // Wrong free outputs over the symbolic state,
@@ -9520,7 +10954,7 @@ spec grow_first {
             IRNode::While {
                 condition, body, ..
             } => p90_loop(Some(condition), body, st, ctx),
-            IRNode::Loop { body } => p90_loop(None, body, st, ctx),
+            IRNode::Loop { body, .. } => p90_loop(None, body, st, ctx),
             IRNode::BinOp(IRBinOp::Append, l, r) => {
                 // A statement-position Append rebinds
                 // its target (the compiled rendering is
@@ -9800,7 +11234,7 @@ spec grow_first {
                 ty: ty.clone(),
             },
             IRNode::Index(c, i) => IRNode::Index(d(c), d(i)),
-            IRNode::Loop { body } => IRNode::Loop { body: d(body) },
+            IRNode::Loop { body, .. } => IRNode::Loop { body: d(body), invariant: None },
             IRNode::Break { value } => IRNode::Break {
                 value: value.as_ref().map(|v| d(v)),
             },
@@ -10746,11 +12180,22 @@ spec grow_first {
             );
         }
         // Teeth: the identity body (the standing
-        // Verified winner's shape) satisfies the current
-        // rows and is REFUTED by (a) at a whitespace
-        // start; the partial skip (≤ 1 char) is refuted
-        // by (a) on a longer run and stands where it is
-        // correct.
+        // Verified winner's shape) satisfies the two
+        // ORIGINAL rows and is REFUTED by (a) at a
+        // whitespace start; the partial skip (≤ 1 char)
+        // is refuted by (a) on a longer run and stands
+        // where it is correct.
+        //
+        // Phase 96 re-pin: (a) and (c) are IN the spec
+        // now (R1), so the loop below reads the four
+        // standing rows: the original two still admit
+        // the identity (the scandal Phase 90 named),
+        // (a) refutes it, and (c) is vacuous at zero
+        // progress (its range is empty — (c)'s teeth
+        // are the overshoot shape, pinned in Phase 94
+        // and in Phase 96's own tests). The scandal is
+        // closed jointly: no row set member alone was
+        // ever the claim — (a)+(c) together are.
         let identity = IRNode::Return(Box::new(IRNode::Var("state".to_string())));
         let ws_start = p90_st("  \t\n x", 0, 1, 1);
         let mut env = SymEnv::new();
@@ -10759,13 +12204,25 @@ spec grow_first {
             &run_at(&identity, &ws_start, 0).expect("identity evaluates"),
         )
         .expect("identity resolves at fuel 0");
-        for row in skip.postconditions.iter() {
+        for (j, row) in skip.postconditions.iter().enumerate() {
             let (_, tri) =
                 verifier.verify_constraint(row, "p90@identity", &skip, &env, &Some(out.clone()));
-            assert!(
-                matches!(tri, Tri::Proven),
-                "the identity body satisfies the current rows (the standing scandal)"
-            );
+            match j {
+                0 | 1 => assert!(
+                    matches!(tri, Tri::Proven),
+                    "the identity body satisfies original row {} (the standing scandal)"
+                    , j
+                ),
+                2 => assert!(
+                    matches!(tri, Tri::Refuted),
+                    "Phase 96: ratified row (a) REFUTES the identity body \
+                     at a whitespace start"
+                ),
+                _ => assert!(
+                    matches!(tri, Tri::Proven),
+                    "row (c) is vacuous for the identity body (empty range)"
+                ),
+            }
         }
         let (_, tri) =
             verifier.verify_constraint(&row_a, "p90@identity-a", &spec_a, &env, &Some(out));
@@ -10933,8 +12390,17 @@ spec grow_first {
         }
         // The diagnostic point: " 5" — whitespace, then a
         // bad char. The faithful body errs; row 1 admits
-        // (is_err), row 2 REFUTES (its license reads the
-        // pre-skip char, a space).
+        // (is_err). Round-2 row 2 REFUTED here (its
+        // license read the pre-skip char, a space);
+        // Phase 96's R2 amendment adds the β-skip
+        // license to the standing row, so the standing
+        // row now ADMITS the faithful Err — judged
+        // through the constraint-call resolution (the
+        // row's `skip_whitespace(state)` is evaluated
+        // by the statement layer at this concrete
+        // input). The in-test β construction below
+        // remains as the mechanism's independent
+        // measurement.
         let diag = p90_st(" 5", 0, 1, 1);
         let outcome = run_at(&diag, 2).expect("STEP evaluates at the diagnostic point");
         let out = p90_concretize(&outcome).expect("the diagnostic point resolves");
@@ -10957,10 +12423,10 @@ spec grow_first {
             &spec.postconditions[1], "p90@diag-row2", &spec, &env, &Some(out.clone()),
         );
         assert!(
-            matches!(tri, Tri::Refuted),
-            "row 2 REFUTES the faithful body at \" 5\": no encoder can verify \
-             this body against the standing rows — the residue is the \
-             R2-β-skip ratification, not an encoder gap"
+            matches!(tri, Tri::Proven),
+            "Phase 96: standing row 2 ADMITS the faithful body at \" 5\" — \
+             the β-skip license is in the row (round 2: Refuted; the \
+             residue was the R2-β-skip ratification, now landed)"
         );
         // The β-skip license over the DENOTED skip: the
         // skipped state's char decides. Built from the
@@ -11641,6 +13107,320 @@ spec grow_first {
             );
         }
         println!("P90|forall-teeth|overshoot Refuted by (c) and by the bounded expansion; identity/partial admitted by (c) (row (a)'s business)");
+    }
+
+    // ────────────────────────────────────────────────────
+    // Phase 96 — loop invariants + the ratified round-3
+    // amendments (R1: skip rows (a)+(c); R2: tokenize_one
+    // row 2's β-skip license). The re-pins of the Phase
+    // 84/87/90/92/93/94 pins above carry most of the
+    // before→after evidence; the tests below pin what
+    // only this phase can: the invariant route's
+    // obligations and failure discipline, the teeth flip
+    // at candidate level, the β license's post-skip
+    // teeth, and the LOOP's exact remaining block.
+    // ────────────────────────────────────────────────────
+
+    /// Phase 96, WS1+WS2: the denoted skip body Verifies
+    /// symbolically against the STRENGTHENED spec (the
+    /// four standing rows), through the invariant route:
+    /// at the production fuel the unrolling exhausts, the
+    /// route discharges initiation / consecution / exit,
+    /// and the outcome's exhaustion is UNSAT. The whole
+    /// evaluation at fuel 1 is (to within the Alloc and
+    /// the Return) the obligations' solver time — the
+    /// Phase 90 probe measured the ∀-between consecution
+    /// alone at 5–6 ms; the printed time is the full
+    /// three-obligation route over the four-fact
+    /// invariant.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase96_skip_verifies_symbolically_via_invariant_route() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        assert_eq!(
+            skip.postconditions.len(),
+            4,
+            "R1 landed: skip carries the two original rows plus (a) and (c)"
+        );
+        let body = index
+            .callee_body("skip_whitespace")
+            .expect("skip denotes after Phase 92");
+        let env = param_env(&skip, &index);
+        let start = crate::timeutil::now();
+        let ctx = StmtCtx::root(&index, STMT_VERIFY_FUEL, 5_000);
+        let outcome = sym_eval_stmt(&body, env.clone(), &ctx)
+            .expect("the production skip denotation evaluates symbolically");
+        let eval_ms = start.elapsed_ms();
+        assert_eq!(
+            stmt_sat(&[outcome.exhausted.clone()], 5_000),
+            Some(false),
+            "the invariant route closes the While: exhaustion is UNSAT"
+        );
+        let mut judge_ms = 0u64;
+        for (j, row) in skip.postconditions.iter().enumerate() {
+            let (tri, ms) = p93_judge(&verifier, row, &skip, &env, &outcome);
+            judge_ms += ms;
+            assert!(
+                matches!(tri, Tri::Proven),
+                "strengthened row {} must be Proven symbolically through \
+                 the invariant route",
+                j
+            );
+        }
+        println!(
+            "P96|inv|skip|eval_ms={}|rows_judge_ms={}|paths={}",
+            eval_ms,
+            judge_ms,
+            outcome.paths.len()
+        );
+        let cand = candidate(&skip, 9601, body);
+        let result = verifier.verify_one(&cand, &skip);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Verified,
+            "the denoted skip body Verifies against the strengthened spec"
+        );
+        println!(
+            "P96|inv|skip|verify_one_ms={}",
+            result.verification_time_ms
+        );
+    }
+
+    /// Phase 96, WS1 failure discipline: an invariant
+    /// that does not discharge — false (consecution
+    /// fails), out-of-scope (names `output`), or
+    /// malformed — fails the ROUTE, and the loop falls
+    /// back to the exhaustion verdict: satisfiable
+    /// exhaustion, rows Unknown, candidate Inconclusive.
+    /// Never a pass, never a refutation.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase96_invariant_route_failure_is_unknown_never_a_pass() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let body = index
+            .callee_body("skip_whitespace")
+            .expect("skip denotes after Phase 92");
+        let env = param_env(&skip, &index);
+        let with_invariant = |text: &str| -> IRNode {
+            let mut b = body.clone();
+            match &mut b {
+                IRNode::Block(stmts) => {
+                    for s in stmts.iter_mut() {
+                        if let IRNode::While { invariant, .. } = s {
+                            *invariant = Some(text.to_string());
+                        }
+                    }
+                }
+                _ => panic!("the skip denotation is a Block"),
+            }
+            b
+        };
+        for (label, text) in [
+            ("false-invariant", "cur.pos == state.pos"),
+            ("out-of-scope", "output.pos >= 0"),
+            ("malformed", "cur.pos >>"),
+        ] {
+            let variant = with_invariant(text);
+            let ctx = StmtCtx::root(&index, STMT_VERIFY_FUEL, 5_000);
+            let outcome = sym_eval_stmt(&variant, env.clone(), &ctx)
+                .expect("a failed invariant route still evaluates (exhaustion semantics)");
+            assert_eq!(
+                stmt_sat(&[outcome.exhausted.clone()], 5_000),
+                Some(true),
+                "{}: a failed route records satisfiable exhaustion",
+                label
+            );
+            let (tri, _) = p93_judge(
+                &verifier,
+                &skip.postconditions[0],
+                &skip,
+                &env,
+                &outcome,
+            );
+            assert!(
+                matches!(tri, Tri::Unknown),
+                "{}: the verdict is Unknown — never a pass, never a refutation",
+                label
+            );
+            let cand = candidate(&skip, 9602, variant);
+            assert_eq!(
+                verifier.verify_one(&cand, &skip).status,
+                VerificationStatus::Inconclusive,
+                "{}: the candidate stays Inconclusive",
+                label
+            );
+            println!("P96|inv|failure|{}|Unknown (exhaustion semantics)", label);
+        }
+    }
+
+    /// Phase 96, WS2 teeth flip at candidate level: the
+    /// identity body and the partial-skip body — the
+    /// shapes the old two rows admitted (the identity
+    /// was the standing Verified winner under them) —
+    /// are REFUTED under the strengthened spec.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase96_r1_teeth_flip_at_candidate_level() {
+        let module = phase84_real_module();
+        let verifier = Verifier::with_module(&module);
+        let skip = restored_spec(&module, "skip_whitespace").clone();
+        let identity = IRNode::Return(Box::new(IRNode::Var("state".to_string())));
+        let cand = candidate(&skip, 9611, identity);
+        assert_eq!(
+            verifier.verify_one(&cand, &skip).status,
+            VerificationStatus::VerificationFailed,
+            "the identity body is REFUTED under the strengthened rows \
+             (Verified under the old two — R1's flip)"
+        );
+        let partial = p90_partial_skip_body();
+        let cand = candidate(&skip, 9612, partial);
+        assert_eq!(
+            verifier.verify_one(&cand, &skip).status,
+            VerificationStatus::VerificationFailed,
+            "the partial-skip body is REFUTED under the strengthened rows"
+        );
+        println!("P96|r1-teeth|identity=Failed|partial=Failed (both admitted pre-R1)");
+    }
+
+    /// Phase 96, WS3: the β-skip license's teeth, at the
+    /// POST-skip positions the license actually reads —
+    /// fabricated Errs at a post-skip identifier start,
+    /// at post-skip punctuation, and at post-skip
+    /// end-of-input are REFUTED by the amended row 2,
+    /// while a faithful Err past a nonzero position is
+    /// admitted (the license reads the skipped state,
+    /// not the input's first char).
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase96_r2_beta_license_post_skip_teeth() {
+        let module = phase84_real_module();
+        let spec = restored_spec(&module, "tokenize_one").clone();
+        let verifier = Verifier::with_module(&module);
+        let err = || Sym::Result {
+            ok: Tag::False,
+            ok_payload: None,
+            err_payload: Some(Box::new(Sym::Str(
+                z3::ast::String::from_str("Unexpected character").unwrap(),
+            ))),
+        };
+        let judge_row2 = |input: &P90St| -> Tri {
+            let mut env = SymEnv::new();
+            env.insert("state".into(), p90_state_sym(input));
+            let (_, tri) = verifier.verify_constraint(
+                &spec.postconditions[1],
+                "p96@beta",
+                &spec,
+                &env,
+                &Some(err()),
+            );
+            tri
+        };
+        for (label, input) in [
+            ("post-skip ident start", p90_st(" x", 0, 1, 1)),
+            ("post-skip punctuation", p90_st(" :", 0, 1, 1)),
+            ("post-skip end-of-input", p90_st(" ", 0, 1, 1)),
+            ("post-skip ident, no skip", p90_st("x", 0, 1, 1)),
+        ] {
+            let tri = judge_row2(&input);
+            assert!(
+                matches!(tri, Tri::Refuted),
+                "β teeth: Err at {} must stay REFUTED by amended row 2",
+                label
+            );
+            println!("P96|r2-teeth|{}=Refuted", label);
+        }
+        // The faithful Err at a nonzero position: the
+        // input at pos 2 of "a 5" skips to '5'.
+        let tri = judge_row2(&p90_st("a 5", 2, 1, 3));
+        assert!(
+            matches!(tri, Tri::Proven),
+            "β license: the faithful Err at a post-skip bad char past a \
+             nonzero position is ADMITTED"
+        );
+        println!("P96|r2-teeth|faithful Err past pos 2=Proven");
+    }
+
+    /// Phase 96, WS1+WS3: the LOOP (tokenize_all)
+    /// standing, measured directly. The accumulation
+    /// loop's invariant discharges inside the LOOP
+    /// body's own evaluation — the outcome's exhaustion
+    /// is UNSAT at the production fuel, the invariant
+    /// route having closed the loop — and the spec's
+    /// one row still judges Unknown: it ENCODES on the
+    /// Ok exit path and fails on the propagated Err
+    /// paths, where `output.unwrap()` meets a literal
+    /// Err tag (the W8 boundary — the same single
+    /// boundary that blocks tokenize_one's row 1).
+    /// verify_one therefore lands Inconclusive, and
+    /// W8 is the whole of what Phase 97 inherits for
+    /// both tokenize specs.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase96_loop_tokenize_all_standing() {
+        let module = phase84_real_module();
+        let index = SpecIndex::from_module(&module);
+        let verifier = Verifier::with_module(&module);
+        let all_spec = restored_spec(&module, "tokenize_all").clone();
+        let loop_body = p90_template_body(&module, "tokenize_all");
+        let env = param_env(&all_spec, &index);
+        let start = crate::timeutil::now();
+        let ctx = StmtCtx::root(&index, STMT_VERIFY_FUEL, 5_000);
+        let outcome = sym_eval_stmt(&loop_body, env.clone(), &ctx)
+            .expect("the LOOP body evaluates symbolically in production");
+        let eval_ms = start.elapsed_ms();
+        assert_eq!(
+            stmt_sat(&[outcome.exhausted.clone()], 5_000),
+            Some(false),
+            "the LOOP invariant closes the accumulation loop: \
+             exhaustion is UNSAT"
+        );
+        let row = &all_spec.postconditions[0];
+        let mut encodes = 0usize;
+        let mut declines = 0usize;
+        for (_, output) in &outcome.paths {
+            let mut penv = env.clone();
+            penv.insert("output".into(), output.clone());
+            if encode_constraint(row, &penv, &EvalCtx::root(&index)).is_some() {
+                encodes += 1;
+            } else {
+                declines += 1;
+            }
+        }
+        assert!(
+            encodes >= 1 && declines >= 1,
+            "the row encodes on the Ok exit path(s) and declines on \
+             the propagated Err path(s) (W8): encodes={}, declines={}",
+            encodes, declines
+        );
+        let (tri, ms) = p93_judge(&verifier, row, &all_spec, &env, &outcome);
+        assert!(
+            matches!(tri, Tri::Unknown),
+            "tokenize_all's row judges Unknown — W8 on the Err paths, \
+             nothing else"
+        );
+        println!(
+            "P96|inv|loop|eval_ms={}|paths={}|row=Unknown (W8)|judge_ms={}",
+            eval_ms,
+            outcome.paths.len(),
+            ms
+        );
+        let cand = candidate(&all_spec, 9621, loop_body);
+        let result = verifier.verify_one(&cand, &all_spec);
+        assert_eq!(
+            result.status,
+            VerificationStatus::Inconclusive,
+            "the LOOP body stays Inconclusive — blocked only by W8"
+        );
+        println!(
+            "P96|inv|loop|verify_one_ms={}",
+            result.verification_time_ms
+        );
     }
 }
 

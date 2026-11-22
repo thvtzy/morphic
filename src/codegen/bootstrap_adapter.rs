@@ -822,7 +822,7 @@ impl Adapter {
                 let inner = self.stmt_text(node, 0, &TypeRef::Unit)?;
                 syn::rust_block_text::rust_block_text(inner.trim_end().to_string())
             }
-            IRNode::Loop { body } => {
+            IRNode::Loop { body, .. } => {
                 let inner = self.stmt_text(body, 0, &TypeRef::Unit)?;
                 syn::rust_loop_text::rust_loop_text(inner.trim_end().to_string())
             }

@@ -651,8 +651,9 @@ fn rebuild_children(
             ty: ty.clone(),
         },
         Index(c, i) => Index(Box::new(f(c)?), Box::new(f(i)?)),
-        Loop { body } => Loop {
+        Loop { body, invariant } => Loop {
             body: Box::new(f(body)?),
+            invariant: invariant.clone(),
         },
         Break { value } => Break {
             value: match value {
@@ -1524,7 +1525,7 @@ impl<'a> Composed<'a> {
                 let inner = self.stmt_text(node, 0, &TypeRef::Unit)?;
                 self.text1("rust_block_text", v_text(inner.trim_end()))?
             }
-            IRNode::Loop { body } => {
+            IRNode::Loop { body, .. } => {
                 let inner = self.stmt_text(body, 0, &TypeRef::Unit)?;
                 self.text1("rust_loop_text", v_text(inner.trim_end()))?
             }
@@ -2994,6 +2995,7 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             "loop-call",
             IRNode::Loop {
                 body: Box::new(call("tick", vec![])),
+                invariant: None,
             },
             "loop {\ntick();}",
         ),
@@ -4479,7 +4481,8 @@ pub(super) fn hand_set(cands: Vec<CandidateImplementation>) -> WinnerSet {
 fn gate_kind_codes() {
     assert_eq!(
         node_kind(&IRNode::Loop {
-            body: Box::new(vr("x"))
+            body: Box::new(vr("x")),
+            invariant: None
         }),
         24
     );

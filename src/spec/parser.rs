@@ -12,6 +12,29 @@ pub fn parse(source: &str) -> Result<Spec, ParseError> {
     Parser::new(source).parse_spec()
 }
 
+/// Parse ONE constraint from bare text — the whole input
+/// must be that constraint (trailing whitespace/comments
+/// allowed). This is the entry the verifier's loop-
+/// invariant machinery uses (Phase 96): an IR loop's
+/// `invariant` string is spec-syntax constraint text over
+/// the loop's environment, and it is parsed by exactly the
+/// constraint machinery the spec parser applies to a
+/// module's `constraint:` lines — no second dialect.
+pub fn parse_constraint_text(source: &str) -> Result<Constraint, ParseError> {
+    let mut parser = Parser::new(source);
+    let constraint = parser.parse_constraint()?;
+    parser.skip_whitespace_and_comments();
+    if !parser.is_eof() {
+        return Err(ParseError {
+            message: "trailing input after constraint".to_string(),
+            line: parser.line,
+            column: parser.col,
+            snippet: source.to_string(),
+        });
+    }
+    Ok(constraint)
+}
+
 #[derive(Debug, Clone)]
 pub struct ParseError {
     pub message: String,

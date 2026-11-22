@@ -608,7 +608,10 @@ mod xval_tok {
                 ty: ty.clone(),
             },
             Index(c, i) => Index(Box::new(f(c)?), Box::new(f(i)?)),
-            Loop { body } => Loop { body: Box::new(f(body)?) },
+            Loop { body, invariant } => Loop {
+                body: Box::new(f(body)?),
+                invariant: invariant.clone(),
+            },
             Break { value } => Break {
                 value: match value {
                     Some(v) => Some(Box::new(f(v)?)),

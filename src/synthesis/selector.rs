@@ -289,7 +289,7 @@ fn child_nodes(node: &IRNode) -> Vec<&IRNode> {
         IRNode::Assign { target, value } => vec![target.as_ref(), value.as_ref()],
         IRNode::Typed { node, .. } => vec![node.as_ref()],
         IRNode::Index(c, i) => vec![c.as_ref(), i.as_ref()],
-        IRNode::Loop { body } => vec![body.as_ref()],
+        IRNode::Loop { body, .. } => vec![body.as_ref()],
         IRNode::Break { value } => value
             .as_ref()
             .map(|v| vec![v.as_ref()])

@@ -108,7 +108,7 @@ mod probe_tok {
             Assign { target, value } => count_holes(target) + count_holes(value),
             Typed { node, .. } => count_holes(node),
             Index(c, i) => count_holes(c) + count_holes(i),
-            Loop { body } => count_holes(body),
+            Loop { body, .. } => count_holes(body),
             Break { value } => value.as_ref().map(|v| count_holes(v)).unwrap_or(0),
             StructDef { body, .. } => count_holes(body),
             TryPropagate(e) => count_holes(e),
@@ -218,7 +218,7 @@ mod probe_tok {
                     walk(c, calls, concat, has_match);
                     walk(i, calls, concat, has_match);
                 }
-                Loop { body } => walk(body, calls, concat, has_match),
+                Loop { body, .. } => walk(body, calls, concat, has_match),
                 Break { value } => {
                     if let Some(v) = value {
                         walk(v, calls, concat, has_match);

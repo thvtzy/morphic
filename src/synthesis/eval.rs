@@ -368,7 +368,7 @@ fn eval_flow(
             Ok(Flow::Normal(Value::Unit))
         }
 
-        IRNode::Loop { body } => {
+        IRNode::Loop { body, .. } => {
             loop {
                 spend_iteration(budget)?;
                 match eval_flow(body, env, budget)? {
@@ -2613,6 +2613,7 @@ mod tests {
         let valued = IRNode::Block(vec![
             alloc("n", int(0)),
             IRNode::Loop {
+                invariant: None,
                 body: Box::new(IRNode::Block(vec![
                     assign("n", binop(IRBinOp::Add, var("n"), int(1))),
                     IRNode::If {
@@ -2683,6 +2684,7 @@ mod tests {
         // A bare Loop with no Break: the same judgment.
         let forever = IRNode::Loop {
             body: Box::new(IRNode::Literal(IRLiteral::Unit)),
+            invariant: None,
         };
         assert!(matches!(
             eval(&forever, &Env::new()),

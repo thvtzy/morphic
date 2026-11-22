@@ -1346,7 +1346,7 @@ fn ir_to_rust_expr(node: &IRNode) -> String {
         IRNode::Let { .. } | IRNode::While { .. } | IRNode::For { .. } => {
             expr_block_stmt(node)
         }
-        IRNode::Loop { body } => {
+        IRNode::Loop { body, .. } => {
             let neutral = TypeRef::Unit;
             format!(
                 "loop {{\n{}}}",
@@ -2835,6 +2835,7 @@ mod tests {
             IRNode::Index(Box::new(IRNode::Var("kind".into())), leaf()),
             IRNode::Loop {
                 body: Box::new(IRNode::Block(vec![])),
+                invariant: None,
             },
             IRNode::Break { value: None },
             IRNode::Break { value: Some(leaf()) },

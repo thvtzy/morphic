@@ -305,8 +305,20 @@ pub enum IRNode {
 
     // ── v0.5 Self-Hosting IR additions ──────────────────
 
-    /// Infinite loop with body (until Break)
-    Loop { body: Box<IRNode> },
+    /// Infinite loop with body (until Break). The
+    /// `invariant` field is Phase 96's addition, the
+    /// `While` precedent's sibling: raw spec-syntax
+    /// constraint text over the loop's environment,
+    /// given semantics by the verifier's statement judge
+    /// (initiation / consecution / exit obligations) and
+    /// by nothing else — codegen ignores it, exactly as
+    /// it treats a `While` invariant as comment text.
+    /// A field addition to an existing variant: no IR
+    /// kind code moves.
+    Loop {
+        body: Box<IRNode>,
+        invariant: Option<String>, // Z3 loop invariant
+    },
 
     /// Break from a Loop, optionally returning a value
     Break { value: Option<Box<IRNode>> },
@@ -5367,6 +5379,19 @@ fn tokenize_step_body(
                 initial: Box::new(vc("s")),
             },
             IRNode::Loop {
+                // Phase 96 invariant (the verifier's
+                // statement judge gives this text its
+                // semantics; see `stmt_invariant_close`):
+                // the frame + progress facts the step's
+                // rows read off the consumed state —
+                // next_char carries source and tokens
+                // unchanged and advances pos, so all
+                // three are preserved by construction
+                // and the consecution discharges.
+                invariant: Some(
+                    "cur.source == s.source; len(cur.tokens) == len(s.tokens); cur.pos >= s.pos"
+                        .to_string(),
+                ),
                 body: Box::new(IRNode::Block(vec![
                     IRNode::Alloc {
                         name: "ch".to_string(),
@@ -5663,6 +5688,12 @@ fn tokenize_template_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option
                 initial: Box::new(fa(v("s"), "pos")),
             },
             IRNode::Loop {
+                // Phase 96 invariant: the token-
+                // accumulation frame the spec's one row
+                // reads — the step never shrinks the
+                // token list, so its length stays at or
+                // above the input's at every loop head.
+                invariant: Some(format!("len(s.tokens) >= len({}.tokens)", param)),
                 body: Box::new(IRNode::Block(vec![
                     IRNode::Alloc {
                         name: "step".to_string(),
@@ -5793,7 +5824,23 @@ fn skip_denotation_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode
                 target: Box::new(v("cur")),
                 value: Box::new(call("next_char", vec![v("cur")])),
             }])),
-            invariant: None,
+            // Phase 96 invariant: the frame (source
+            // and token count carried unchanged), the
+            // progress floor (pos never retreats), and
+            // the ∀-between fact in row (c)'s own shape
+            // — everything between the entry position
+            // and the current one is whitespace. The
+            // verifier's statement judge discharges
+            // initiation / consecution / exit over this
+            // text; the interpreter and codegen ignore
+            // it, as they do every loop invariant.
+            invariant: Some(format!(
+                "cur.source == {p}.source; cur.pos >= {p}.pos; \
+                 len(cur.tokens) == len({p}.tokens); \
+                 forall i: Int in range(len(cur.source)): \
+                 i < {p}.pos || i >= cur.pos || is_whitespace(cur.source[i])",
+                p = param
+            )),
         },
         IRNode::Return(Box::new(v("cur"))),
     ]))
@@ -7433,7 +7480,7 @@ fn ast_depth(node: &IRNode) -> usize {
         IRNode::Assign { target, value } => 1 + ast_depth(target).max(ast_depth(value)),
         IRNode::Typed { node, .. } => 1 + ast_depth(node),
         IRNode::Index(coll, idx) => 1 + ast_depth(coll).max(ast_depth(idx)),
-        IRNode::Loop { body } => 1 + ast_depth(body),
+        IRNode::Loop { body, .. } => 1 + ast_depth(body),
         IRNode::Break { value } => 1 + value.as_ref().map(|v| ast_depth(v)).unwrap_or(0),
         IRNode::StructDef { body, .. } => 1 + ast_depth(body),
         IRNode::TryPropagate(inner) => 1 + ast_depth(inner),
@@ -7510,7 +7557,7 @@ fn ast_node_count(node: &IRNode) -> usize {
         IRNode::Assign { target, value } => 1 + ast_node_count(target) + ast_node_count(value),
         IRNode::Typed { node, .. } => 1 + ast_node_count(node),
         IRNode::Index(coll, idx) => 1 + ast_node_count(coll) + ast_node_count(idx),
-        IRNode::Loop { body } => 1 + ast_node_count(body),
+        IRNode::Loop { body, .. } => 1 + ast_node_count(body),
         IRNode::Break { value } => 1 + value.as_ref().map(|v| ast_node_count(v)).unwrap_or(0),
         IRNode::StructDef { body, .. } => 1 + ast_node_count(body),
         IRNode::TryPropagate(inner) => 1 + ast_node_count(inner),
@@ -9588,7 +9635,19 @@ spec exclaim {
                     target: Box::new(v("cur")),
                     value: Box::new(call("next_char", vec![v("cur")])),
                 }])),
-                invariant: None,
+                // Phase 96: the denotation's While
+                // carries its invariant (frame +
+                // progress + the ∀-between fact) — the
+                // text the verifier's statement judge
+                // discharges; every other consumer
+                // ignores it.
+                invariant: Some(
+                    "cur.source == state.source; cur.pos >= state.pos; \
+                     len(cur.tokens) == len(state.tokens); \
+                     forall i: Int in range(len(cur.source)): \
+                     i < state.pos || i >= cur.pos || is_whitespace(cur.source[i])"
+                        .to_string(),
+                ),
             },
             IRNode::Return(Box::new(v("cur"))),
         ]);
@@ -13914,7 +13973,7 @@ spec exclaim {
                 assert_vars_in_scope(c, scope);
                 assert_vars_in_scope(i, scope);
             }
-            IRNode::Loop { body } => assert_vars_in_scope(body, scope),
+            IRNode::Loop { body, .. } => assert_vars_in_scope(body, scope),
             IRNode::Break { value } => {
                 if let Some(v) = value {
                     assert_vars_in_scope(v, scope);
