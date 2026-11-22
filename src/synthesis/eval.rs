@@ -1,16 +1,24 @@
 // ┌──────────────────────────────────────────────────────────┐
 // │  IR INTERPRETER — candidate test execution               │
 // │                                                          │
-// │  A small, total evaluator for the *expression subset*    │
-// │  of the IR. `evaluate_candidate` uses it to run a        │
-// │  candidate body against a spec's tests and measure a     │
-// │  real pass ratio, instead of assuming every test passes. │
+// │  A small, total evaluator for the IR. `evaluate_         │
+// │  candidate` uses it to run a candidate body against a    │
+// │  spec's tests and measure a real pass ratio, instead     │
+// │  of assuming every test passes.                          │
 // │                                                          │
-// │  Anything outside the subset — Holes, loops, mutation,   │
-// │  lambdas, higher-order combinators, calls to functions   │
-// │  that are not known pure builtins — returns              │
-// │  `EvalError::NotEvaluable` with a reason. The evaluator  │
-// │  never panics and never guesses a value.                 │
+// │  The evaluable subset is the expression subset plus,     │
+// │  since Phase 95 (encoder extension, W9), the statement/  │
+// │  loop subset the denoted and template bodies are made    │
+// │  of: Block sequencing (always present), Alloc, Assign,   │
+// │  While, Loop, Break, TryPropagate, constructor-pattern   │
+// │  Match, and Clone. Loops carry an explicit iteration     │
+// │  bound (see MAX_LOOP_ITERATIONS): exceeding it is a      │
+// │  judged `NotEvaluable`, never a hang and never a         │
+// │  fabricated value. Anything still outside the subset —   │
+// │  Holes, For, lambdas, higher-order combinators, calls    │
+// │  to functions that are not known pure builtins —         │
+// │  returns `EvalError::NotEvaluable` with a reason. The    │
+// │  evaluator never panics and never guesses a value.       │
 // └──────────────────────────────────────────────────────────┘
 
 use super::engine::{IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp};
@@ -70,29 +78,72 @@ fn not_evaluable(reason: impl Into<String>) -> EvalError {
 }
 
 /// Internal control flow: `Return` unwinds to the top of the
-/// candidate body, everything else is a plain value.
+/// candidate body, `Break` unwinds to the innermost enclosing
+/// loop (Phase 95), everything else is a plain value.
 enum Flow {
     Normal(Value),
     Returned(Value),
+    /// A `Break` in flight: `Some(v)` for the valued form,
+    /// `None` for the bare form. Only a loop may consume it;
+    /// anywhere else it is the named failure "Break outside
+    /// a loop" (see `into_value` and `eval`).
+    Broke(Option<Value>),
 }
 
 impl Flow {
-    fn unwrap(self) -> Value {
+    /// The value of a flow at a position that needs a plain
+    /// value (an operand, a scrutinee, a call argument…).
+    /// `Returned` unwraps to its value — the standing
+    /// laxness of the expression subset (a `Return` nested
+    /// inside an expression is read as the value it carries),
+    /// unchanged by Phase 95. A `Break` in flight at such a
+    /// position has no enclosing loop to land in: a named
+    /// failure, never a guessed value.
+    fn into_value(self) -> Result<Value, EvalError> {
         match self {
-            Flow::Normal(v) | Flow::Returned(v) => v,
+            Flow::Normal(v) | Flow::Returned(v) => Ok(v),
+            Flow::Broke(_) => Err(not_evaluable("Break outside a loop")),
         }
     }
 }
+
+/// The loop-iteration budget of one top-level `eval` call
+/// (Phase 95): the total number of While/Loop iterations —
+/// nested loops share the one counter — an evaluation may
+/// perform before the evaluation is judged `NotEvaluable`
+/// ("loop iteration bound exceeded"). The bound exists so
+/// in-process judging is total: a non-terminating candidate
+/// (a `while true` body, a loop whose progress step is
+/// missing) is a judged non-answer, never a hang.
+///
+/// Size rationale: the largest honest consumers are the
+/// tokenizer compositions — the cross-validation batteries'
+/// worst point totals a few hundred iterations (an outer
+/// tokenize loop over a ≤ 25-char source, each step running
+/// a skip loop and an identifier loop bounded by the source
+/// length). 10,000 is more than an order of magnitude above
+/// that and three orders above the in-spec tests, while
+/// keeping one runaway evaluation in the millisecond range
+/// (an iteration here is a handful of environment writes).
+const MAX_LOOP_ITERATIONS: usize = 10_000;
 
 /// Evaluate an IR node in `env`. The environment is cloned
 /// internally wherever a construct binds variables, so the
 /// caller's env is never mutated.
 pub fn eval(node: &IRNode, env: &Env) -> Result<Value, EvalError> {
     let mut working = env.clone();
-    Ok(eval_flow(node, &mut working)?.unwrap())
+    let mut budget = MAX_LOOP_ITERATIONS;
+    match eval_flow(node, &mut working, &mut budget)? {
+        Flow::Normal(v) | Flow::Returned(v) => Ok(v),
+        Flow::Broke(_) => Err(not_evaluable("Break outside a loop")),
+    }
 }
 
-fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
+fn eval_flow(
+    node: &IRNode,
+    env: &mut Env,
+    budget: &mut usize,
+) -> Result<Flow, EvalError> {
     match node {
         IRNode::Literal(lit) => Ok(Flow::Normal(literal_value(lit))),
 
@@ -103,20 +154,45 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
             .ok_or_else(|| not_evaluable(format!("unbound variable `{}`", name))),
 
         IRNode::BinOp(op, l, r) => {
-            let lv = eval_flow(l, env)?.unwrap();
-            let rv = eval_flow(r, env)?.unwrap();
+            // Statement-position Append on a bound variable
+            // rebinds it (Phase 95): the IR's Append renders
+            // in the compiled runner as a `.push(...)` on the
+            // binding, so the node is effectful wherever it
+            // stands — the template bodies accumulate their
+            // lexeme and token list exactly this way, as
+            // statements whose value is then read back from
+            // the variable. The verifier's statement layer
+            // makes the same distinction (Phase 93: the
+            // statement Append rebinds; the expression Append
+            // is the pure form). Any other Append shape —
+            // a non-variable target, an unbound variable —
+            // takes the pure `eval_binop` form below (an
+            // unbound variable then fails with the standard
+            // unbound-variable reason when read).
+            if *op == IRBinOp::Append {
+                if let IRNode::Var(name) = &**l {
+                    if let Some(current) = env.get(name).cloned() {
+                        let item = eval_flow(r, env, budget)?.into_value()?;
+                        let next = eval_binop(*op, current, item)?;
+                        env.insert(name.clone(), next.clone());
+                        return Ok(Flow::Normal(next));
+                    }
+                }
+            }
+            let lv = eval_flow(l, env, budget)?.into_value()?;
+            let rv = eval_flow(r, env, budget)?.into_value()?;
             Ok(Flow::Normal(eval_binop(*op, lv, rv)?))
         }
 
         IRNode::UnaryOp(op, inner) => {
-            let v = eval_flow(inner, env)?.unwrap();
+            let v = eval_flow(inner, env, budget)?.into_value()?;
             Ok(Flow::Normal(eval_unaryop(*op, v)?))
         }
 
         IRNode::If { condition, then_branch, else_branch } => {
-            match eval_flow(condition, env)?.unwrap() {
-                Value::Bool(true) => eval_flow(then_branch, env),
-                Value::Bool(false) => eval_flow(else_branch, env),
+            match eval_flow(condition, env, budget)?.into_value()? {
+                Value::Bool(true) => eval_flow(then_branch, env, budget),
+                Value::Bool(false) => eval_flow(else_branch, env, budget),
                 other => Err(not_evaluable(format!(
                     "if condition is not Bool (got {:?})",
                     other
@@ -125,20 +201,22 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
         }
 
         IRNode::Let { name, value, body } => {
-            let v = match eval_flow(value, env)? {
+            let v = match eval_flow(value, env, budget)? {
                 Flow::Returned(v) => return Ok(Flow::Returned(v)),
+                Flow::Broke(b) => return Ok(Flow::Broke(b)),
                 Flow::Normal(v) => v,
             };
             let mut inner = env.clone();
             inner.insert(name.clone(), v);
-            eval_flow(body, &mut inner)
+            eval_flow(body, &mut inner, budget)
         }
 
         IRNode::Block(stmts) => {
             let mut last = Value::Unit;
             for stmt in stmts {
-                match eval_flow(stmt, env)? {
+                match eval_flow(stmt, env, budget)? {
                     Flow::Returned(v) => return Ok(Flow::Returned(v)),
+                    Flow::Broke(b) => return Ok(Flow::Broke(b)),
                     Flow::Normal(v) => last = v,
                 }
             }
@@ -146,18 +224,18 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
         }
 
         IRNode::Return(inner) => {
-            let v = eval_flow(inner, env)?.unwrap();
+            let v = eval_flow(inner, env, budget)?.into_value()?;
             Ok(Flow::Returned(v))
         }
 
         IRNode::Match { scrutinee, cases } => {
-            let scrut = eval_flow(scrutinee, env)?.unwrap();
+            let scrut = eval_flow(scrutinee, env, budget)?.into_value()?;
             for (pattern, arm) in cases {
                 match bind_pattern(pattern, &scrut)? {
                     Some(bindings) => {
                         let mut inner = env.clone();
                         inner.extend(bindings);
-                        return eval_flow(arm, &mut inner);
+                        return eval_flow(arm, &mut inner, budget);
                     }
                     None => continue,
                 }
@@ -165,13 +243,16 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
             Err(not_evaluable("no match arm matched the scrutinee"))
         }
 
-        IRNode::Call { function, args } => eval_call(function, args, env).map(Flow::Normal),
+        IRNode::Call { function, args } => {
+            eval_call(function, args, env, budget).map(Flow::Normal)
+        }
 
         IRNode::Collection { elements, .. } => {
             let mut values = Vec::with_capacity(elements.len());
             for el in elements {
-                match eval_flow(el, env)? {
+                match eval_flow(el, env, budget)? {
                     Flow::Returned(v) => return Ok(Flow::Returned(v)),
+                    Flow::Broke(b) => return Ok(Flow::Broke(b)),
                     Flow::Normal(v) => values.push(v),
                 }
             }
@@ -179,26 +260,160 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
         }
 
         IRNode::Index(coll, idx) => {
-            let coll = eval_flow(coll, env)?.unwrap();
-            let idx = eval_flow(idx, env)?.unwrap();
+            let coll = eval_flow(coll, env, budget)?.into_value()?;
+            let idx = eval_flow(idx, env, budget)?.into_value()?;
             Ok(Flow::Normal(eval_index(coll, idx)?))
         }
 
-        IRNode::Typed { node, .. } => eval_flow(node, env),
+        IRNode::Typed { node, .. } => eval_flow(node, env, budget),
 
-        // Everything below is outside the expression subset:
-        // unfilled holes, loops and other effectful control flow,
-        // allocation/mutation, function values, higher-order
-        // combinators, and struct definitions. None of them can
-        // be given a value without guessing, so they are reported
-        // as not evaluable.
+        // ── The statement/loop subset (Phase 95, W9) ──────
+        // The semantics are the compiled runner's, the same
+        // ones the verifier's statement layer mirrors
+        // (Phase 93): Alloc binds (its value is the bound
+        // value), Assign rebinds an already-bound variable,
+        // loops repeat under the iteration budget, Break
+        // leaves the innermost loop, Return leaves the body
+        // (the `Returned` flow above), and TryPropagate
+        // threads a Result — the Ok payload continues, an
+        // Err unwinds the enclosing body with that Err as
+        // its result (the `?` semantics). One boundary
+        // rule, forced by composition: a BLOCK in a value
+        // position (an Alloc initializer, an Assign value,
+        // a TryPropagate operand) is a body — its Return
+        // is its result, absorbed as the block's value by
+        // `eval_body_value`. Every other node in those
+        // positions propagates its flows: in particular a
+        // TryPropagate's own Err-unwind (a Returned flow
+        // out of a non-Block initial) passes through the
+        // enclosing Alloc untouched, exactly as the
+        // compiled `let step = f()?;` unwinds. The
+        // compiled runner never inlines, so it never
+        // faces this; the in-process composition (the
+        // cross-validation harness's judging route)
+        // inlines callee bodies — which are Blocks —
+        // into exactly these positions. (An earlier draft
+        // of this phase propagated Returned out of Block
+        // initials too; the composed tokenize_one body
+        // then exited at its skip prefix and judged
+        // nothing — measured, and corrected.)
+        IRNode::Alloc { name, initial, .. } => {
+            match eval_body_value(initial, env, budget)? {
+                Flow::Normal(v) => {
+                    env.insert(name.clone(), v.clone());
+                    Ok(Flow::Normal(v))
+                }
+                flow => Ok(flow),
+            }
+        }
+
+        IRNode::Assign { target, value } => {
+            let IRNode::Var(name) = &**target else {
+                return Err(not_evaluable(
+                    "Assign target is not a variable (only a variable can be rebound)",
+                ));
+            };
+            match eval_body_value(value, env, budget)? {
+                Flow::Normal(v) => {
+                    if !env.contains_key(name) {
+                        return Err(not_evaluable(format!(
+                            "Assign to unbound variable `{}` (no Alloc binds it)",
+                            name
+                        )));
+                    }
+                    env.insert(name.clone(), v.clone());
+                    Ok(Flow::Normal(v))
+                }
+                flow => Ok(flow),
+            }
+        }
+
+        IRNode::While {
+            condition, body, ..
+        } => {
+            loop {
+                let cond = match eval_flow(condition, env, budget)? {
+                    Flow::Normal(Value::Bool(b)) => b,
+                    Flow::Normal(other) => {
+                        return Err(not_evaluable(format!(
+                            "while condition is not Bool (got {:?})",
+                            other
+                        )));
+                    }
+                    flow => return Ok(flow),
+                };
+                if !cond {
+                    break;
+                }
+                spend_iteration(budget)?;
+                match eval_flow(body, env, budget)? {
+                    Flow::Normal(_) => continue,
+                    Flow::Returned(v) => return Ok(Flow::Returned(v)),
+                    Flow::Broke(None) => break,
+                    // The valued Break form is genuinely
+                    // ambiguous here: the compiled language
+                    // gives `while` no break value (a Rust
+                    // `while` cannot break with one), so the
+                    // form is declined and named rather than
+                    // assigned a guessed meaning. (Inside a
+                    // `Loop` the same form is the loop's
+                    // value — see the Loop arm.)
+                    Flow::Broke(Some(_)) => {
+                        return Err(not_evaluable(
+                            "valued Break inside a While loop is outside the evaluable subset",
+                        ));
+                    }
+                }
+            }
+            Ok(Flow::Normal(Value::Unit))
+        }
+
+        IRNode::Loop { body, .. } => {
+            loop {
+                spend_iteration(budget)?;
+                match eval_flow(body, env, budget)? {
+                    Flow::Normal(_) => continue,
+                    Flow::Returned(v) => return Ok(Flow::Returned(v)),
+                    Flow::Broke(v) => {
+                        return Ok(Flow::Normal(v.unwrap_or(Value::Unit)));
+                    }
+                }
+            }
+        }
+
+        IRNode::Break { value } => {
+            let value = match value {
+                None => None,
+                Some(inner) => {
+                    Some(eval_flow(inner, env, budget)?.into_value()?)
+                }
+            };
+            Ok(Flow::Broke(value))
+        }
+
+        IRNode::TryPropagate(inner) => {
+            match eval_body_value(inner, env, budget)? {
+                Flow::Normal(Value::Ok(payload)) => {
+                    Ok(Flow::Normal((*payload).clone()))
+                }
+                Flow::Normal(err @ Value::Err(_)) => Ok(Flow::Returned(err)),
+                Flow::Normal(other) => Err(not_evaluable(format!(
+                    "TryPropagate (?) on a non-Result value ({:?})",
+                    other
+                ))),
+                flow => Ok(flow),
+            }
+        }
+
+        // Everything below stays outside the subset:
+        // unfilled holes, For (a bounded scan the subset
+        // does not need — the measured statement bodies use
+        // While/Loop), function values, higher-order
+        // combinators, and struct definitions. None of them
+        // can be given a value without guessing, so they are
+        // reported as not evaluable.
         IRNode::Hole { .. } => Err(not_evaluable("unfilled Hole")),
-        IRNode::While { .. } => Err(not_evaluable("While loop")),
         IRNode::For { .. } => Err(not_evaluable("For loop")),
-        IRNode::Loop { .. } => Err(not_evaluable("Loop")),
-        IRNode::Break { .. } => Err(not_evaluable("Break outside a loop")),
-        IRNode::Alloc { .. } => Err(not_evaluable("Alloc (mutable state)")),
-        IRNode::Assign { .. } => Err(not_evaluable("Assign (mutation)")),
         IRNode::Lambda { .. } => Err(not_evaluable("Lambda (function value)")),
         IRNode::Closure { .. } => Err(not_evaluable("Closure (function value)")),
         IRNode::Map { .. } => Err(not_evaluable("Map (higher-order)")),
@@ -206,16 +421,6 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
         IRNode::Fold { .. } => Err(not_evaluable("Fold (higher-order)")),
         IRNode::Sort { .. } => Err(not_evaluable("Sort (higher-order)")),
         IRNode::StructDef { .. } => Err(not_evaluable("StructDef (declaration)")),
-        // TryPropagate: Result VALUES exist since Phase 75,
-        // but `?` propagation semantics in the interpreter do
-        // not — unwinding an Err out of the enclosing body is
-        // a control-flow behavior this evaluator does not
-        // model, so the node stays outside the subset (the
-        // Phase 73-era reason, "no Result values", no longer
-        // states the cause and is not repeated).
-        IRNode::TryPropagate(_) => Err(not_evaluable(
-            "TryPropagate (? propagation is outside the evaluable subset)",
-        )),
         // M1 features (Phase 75): record construction and
         // field projection over Value::Record (D2a/D3a).
         // Fields evaluate in written order, like Collection
@@ -224,8 +429,9 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
         IRNode::RecordLit { type_name, fields } => {
             let mut values = Vec::with_capacity(fields.len());
             for (name, field_node) in fields {
-                match eval_flow(field_node, env)? {
+                match eval_flow(field_node, env, budget)? {
                     Flow::Returned(v) => return Ok(Flow::Returned(v)),
+                    Flow::Broke(b) => return Ok(Flow::Broke(b)),
                     Flow::Normal(v) => values.push((name.clone(), v)),
                 }
             }
@@ -235,7 +441,7 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
             }))
         }
         IRNode::FieldAccess { base, field } => {
-            let base_value = eval_flow(base, env)?.unwrap();
+            let base_value = eval_flow(base, env, budget)?.into_value()?;
             match base_value {
                 Value::Record { type_name, fields } => fields
                     .into_iter()
@@ -256,6 +462,47 @@ fn eval_flow(node: &IRNode, env: &mut Env) -> Result<Flow, EvalError> {
     }
 }
 
+/// Spend one loop iteration of an evaluation's budget
+/// (Phase 95): the termination discipline of the statement
+/// subset. Exhaustion is a judged `NotEvaluable` — the
+/// evaluation produced no answer — never a hang and never
+/// a fabricated exit value.
+fn spend_iteration(budget: &mut usize) -> Result<(), EvalError> {
+    if *budget == 0 {
+        return Err(not_evaluable(format!(
+            "loop iteration bound exceeded ({} iterations): the body does not terminate within the interpreter's bound",
+            MAX_LOOP_ITERATIONS
+        )));
+    }
+    *budget -= 1;
+    Ok(())
+}
+
+/// Evaluate a node sitting in a composition-boundary
+/// value position (an Alloc initializer, an Assign value,
+/// a TryPropagate operand — the positions the in-process
+/// composition inlines callee bodies into). A Block there
+/// is a body: its `Returned` flow is its result, absorbed
+/// as a plain value. Any other node propagates its flows
+/// untouched, so a control flow raised by the position's
+/// own operators (a TryPropagate unwind, a Break headed
+/// for its loop) is never mistaken for a value.
+fn eval_body_value(
+    node: &IRNode,
+    env: &mut Env,
+    budget: &mut usize,
+) -> Result<Flow, EvalError> {
+    let flow = eval_flow(node, env, budget)?;
+    if matches!(node, IRNode::Block(_)) {
+        match flow {
+            Flow::Returned(v) => Ok(Flow::Normal(v)),
+            other => Ok(other),
+        }
+    } else {
+        Ok(flow)
+    }
+}
+
 fn literal_value(lit: &IRLiteral) -> Value {
     match lit {
         IRLiteral::Int(n) => Value::Int(*n),
@@ -271,18 +518,24 @@ fn literal_value(lit: &IRLiteral) -> Value {
 /// - `Ok(Some(bindings))` — matched, with variables to bind
 /// - `Ok(None)` — definitely does not match; try the next arm
 /// - `Err(..)` — cannot decide (guard patterns carry an
-///   unparsed string condition), so the whole match is
-///   not evaluable rather than a guess.
+///   unparsed string condition; a constructor pattern whose
+///   arity contradicts the value family it names), so the
+///   whole match is not evaluable rather than a guess.
 ///
-/// Constructor patterns return `Ok(None)`: since Phase 75
-/// the value domain DOES include constructor values
-/// (`Value::Ok` / `Err` / `Some` / `None`), but constructor
-/// pattern matching in the interpreter does not — a body
-/// whose match discriminates on a constructor cannot be
-/// judged in-process (its constructor arms never match
-/// here, so it falls through to a later arm or to the
-/// no-match failure). That is a recorded residual of this
-/// evaluator's subset, not a claim about the values.
+/// Constructor patterns match in-process since Phase 95
+/// (the Phase 75 residual is closed): `Some`/`None` against
+/// the Option values, `Ok`/`Err` against the Result values,
+/// with the payload bound by the single sub-pattern
+/// (recursively — a nested constructor pattern matches a
+/// nested constructor value), and a constructor naming a
+/// record type against a `Value::Record` of that type, its
+/// sub-patterns binding the fields positionally in written
+/// order (the record value's own convention). A constructor
+/// pattern against a value of a different family simply
+/// does not match — the next arm is tried, exactly as the
+/// compiled runner falls through. Parity is with the
+/// compiled runner, which has matched these patterns since
+/// the bodies were first compiled.
 fn bind_pattern(pattern: &IRPattern, value: &Value) -> Result<Option<Env>, EvalError> {
     match pattern {
         IRPattern::Wildcard => Ok(Some(Env::new())),
@@ -298,17 +551,82 @@ fn bind_pattern(pattern: &IRPattern, value: &Value) -> Result<Option<Env>, EvalE
                 Ok(None)
             }
         }
-        IRPattern::Constructor(..) => Ok(None),
+        IRPattern::Constructor(name, subs) => {
+            // The payload-carrying constructors: the pattern
+            // matches its own family's value and binds the
+            // payload through the one sub-pattern.
+            let payload = match (name.as_str(), value) {
+                ("Some", Value::Some(v)) => Some(&**v),
+                ("Ok", Value::Ok(v)) => Some(&**v),
+                ("Err", Value::Err(v)) => Some(&**v),
+                _ => None,
+            };
+            if let Some(payload) = payload {
+                let [sub] = subs.as_slice() else {
+                    return Err(not_evaluable(format!(
+                        "constructor pattern `{}` carries {} sub-patterns for a one-payload value",
+                        name,
+                        subs.len()
+                    )));
+                };
+                return bind_pattern(sub, payload);
+            }
+            // The nullary constructor.
+            if name == "None" {
+                return match value {
+                    Value::None => {
+                        if subs.is_empty() {
+                            Ok(Some(Env::new()))
+                        } else {
+                            Err(not_evaluable(
+                                "constructor pattern `None` carries sub-patterns for a payload-free value",
+                            ))
+                        }
+                    }
+                    _ => Ok(None),
+                };
+            }
+            // A record constructor: the pattern names the
+            // record's type and binds its fields positionally.
+            if let Value::Record { type_name, fields } = value {
+                if type_name == name {
+                    if subs.len() != fields.len() {
+                        return Err(not_evaluable(format!(
+                            "record pattern `{}` carries {} sub-patterns for {} fields",
+                            name,
+                            subs.len(),
+                            fields.len()
+                        )));
+                    }
+                    let mut env = Env::new();
+                    for (sub, (_, field_value)) in subs.iter().zip(fields.iter()) {
+                        match bind_pattern(sub, field_value)? {
+                            Some(bindings) => env.extend(bindings),
+                            None => return Ok(None),
+                        }
+                    }
+                    return Ok(Some(env));
+                }
+            }
+            // Every remaining combination is a constructor of
+            // one family against a value of another: no match.
+            Ok(None)
+        }
         IRPattern::Guard(..) => Err(not_evaluable(
             "match guard patterns are outside the evaluable subset",
         )),
     }
 }
 
-fn eval_call(function: &str, args: &[IRNode], env: &mut Env) -> Result<Value, EvalError> {
+fn eval_call(
+    function: &str,
+    args: &[IRNode],
+    env: &mut Env,
+    budget: &mut usize,
+) -> Result<Value, EvalError> {
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
-        values.push(eval_flow(arg, env)?.unwrap());
+        values.push(eval_flow(arg, env, budget)?.into_value()?);
     }
     match function {
         // `List[...]` is the spec language's list literal; the
@@ -438,13 +756,26 @@ fn eval_index(coll: Value, idx: Value) -> Result<Value, EvalError> {
                 .ok_or_else(|| not_evaluable("list index out of bounds"))
         }
         (Value::Str(s), Value::Int(i)) => {
-            if i < 0 {
-                return Err(not_evaluable("negative string index"));
-            }
-            s.chars()
-                .nth(i as usize)
-                .map(Value::Char)
-                .ok_or_else(|| not_evaluable("string index out of bounds"))
+            // String indexing is TOTAL in the language:
+            // the compiled rendering is
+            // `chars().nth(i).unwrap_or('\0')` (Phase 85's
+            // index rendering, pinned in codegen), and the
+            // Z3 CharStr bridge totalizes the same way. An
+            // out-of-range or negative read is the NUL
+            // sentinel, not an error — the tokenizer's
+            // ident loop depends on it at end of input
+            // (the sentinel is not an ident-continue char,
+            // so the loop breaks exactly where peek's None
+            // breaks it). List indexing above stays an
+            // error: the compiled form is a Vec index,
+            // whose out-of-range behavior is a panic — a
+            // non-answer either way.
+            let c = if i < 0 {
+                '\0'
+            } else {
+                s.chars().nth(i as usize).unwrap_or('\0')
+            };
+            Ok(Value::Char(c))
         }
         _ => Err(not_evaluable("indexing a non-collection value")),
     }
@@ -524,6 +855,16 @@ fn eval_binop(op: IRBinOp, l: Value, r: Value) -> Result<Value, EvalError> {
             (Value::List(mut items), item) => {
                 items.push(item);
                 Ok(Value::List(items))
+            }
+            // The lexeme shape (Phase 95, the design doc's
+            // Phase 95 gate): a Char appended to a String —
+            // the compiled rendering is `push(char)`. The
+            // (Str, Str) form is not an Append shape (string
+            // concatenation is Concat's arm), exactly as in
+            // the encoder's W5 arm (Phase 91).
+            (Value::Str(mut s), Value::Char(c)) => {
+                s.push(c);
+                Ok(Value::Str(s))
             }
             _ => Err(not_evaluable("append on a non-List value")),
         },
@@ -607,7 +948,14 @@ fn eval_unaryop(op: IRUnaryOp, v: Value) -> Result<Value, EvalError> {
             Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
             _ => Err(not_evaluable("len of a non-collection value")),
         },
-        Head | Tail | Init | Last | Reverse | Clone => Err(not_evaluable(format!(
+        // Clone is the identity over immutable values
+        // (Phase 95): a copy of a value IS the value, the
+        // same reading the encoder's W3 arm took in
+        // Phase 91. The list operations beside it stay
+        // outside the subset — they have no measured
+        // consumer in the interpreter.
+        Clone => Ok(v),
+        Head | Tail | Init | Last | Reverse => Err(not_evaluable(format!(
             "unary operator {:?} is outside the evaluable subset",
             op
         ))),
@@ -1099,17 +1447,20 @@ mod tests {
     #[test]
     fn eval_not_evaluable_nodes() {
         let env = Env::new();
+        // Re-pinned at Phase 95: Alloc, Assign and While
+        // left this list — they are the statement subset
+        // now (their positive tests are the phase95_* tests
+        // below). The While case that remains here is the
+        // non-terminating one: it is NotEvaluable by the
+        // iteration bound, not by shape. The Assign case
+        // remains because its target is unbound in this
+        // env (no Alloc binds `x`).
         let cases: Vec<IRNode> = vec![
             IRNode::Hole { id: 0, expected_type: None },
             IRNode::While {
                 condition: Box::new(boolean(true)),
                 body: Box::new(int(1)),
                 invariant: None,
-            },
-            IRNode::Alloc {
-                name: "x".into(),
-                ty: crate::spec::ast::TypeRef::Int,
-                initial: Box::new(int(0)),
             },
             IRNode::Assign {
                 target: Box::new(var("x")),
@@ -1380,14 +1731,21 @@ mod tests {
         // Evaluable and wrong: still valued — it produced an
         // answer on every test.
         assert_eq!(valued_test_count(&boolean(false), &spec), 3);
-        // Unevaluable (unbound variable / hole / a loop body
-        // over the parameter): valued nowhere.
+        // Unevaluable (unbound variable / hole): valued nowhere.
         assert_eq!(valued_test_count(&var("result"), &spec), 0);
         assert_eq!(
             valued_test_count(&IRNode::Hole { id: 0, expected_type: None }, &spec),
             0
         );
-        let loop_body = IRNode::Block(vec![
+        // Re-pinned at Phase 95: the Alloc/Return body
+        // below used to be this test's unevaluable example;
+        // Alloc is in the evaluable subset now, so the body
+        // answers on every test (valued 3 — it returns the
+        // alloc'd 0, wrong on the merits, which is exactly
+        // the distinction this counter exists to draw). The
+        // still-unevaluable example is a For body: For stays
+        // outside the subset, so it values nowhere.
+        let alloc_body = IRNode::Block(vec![
             IRNode::Alloc {
                 name: "acc".into(),
                 ty: crate::spec::ast::TypeRef::Int,
@@ -1395,7 +1753,14 @@ mod tests {
             },
             IRNode::Return(Box::new(var("acc"))),
         ]);
-        assert_eq!(valued_test_count(&loop_body, &spec), 0);
+        assert_eq!(valued_test_count(&alloc_body, &spec), 3);
+        let for_body = IRNode::For {
+            var: "i".into(),
+            start: Box::new(int(0)),
+            end: Box::new(int(1)),
+            body: Box::new(var("kind")),
+        };
+        assert_eq!(valued_test_count(&for_body, &spec), 0);
     }
 
     #[test]
@@ -2109,22 +2474,719 @@ mod tests {
     }
 
     #[test]
-    fn try_propagate_remains_outside_the_evaluable_subset() {
-        // Residual, pinned deliberately: Result VALUES exist
-        // since this phase, but `?` propagation semantics in
-        // the interpreter do not — a body using TryPropagate
-        // is still not evaluable in-process, and the reason
-        // must not claim the old cause (no Result values).
+    fn try_propagate_evaluates_result_threading() {
+        // Phase 95 closes the Phase 75 residual this test
+        // used to pin (`try_propagate_remains_outside_the_
+        // evaluable_subset`): `?` propagation is in the
+        // subset now. An Ok payload continues as the value.
         let node = IRNode::TryPropagate(Box::new(call_ir("Ok", vec![int(1)])));
+        assert_eq!(eval(&node, &Env::new()), Ok(Value::Int(1)));
+        // An Err unwinds the enclosing body: the statement
+        // after it (a Hole, which would fail evaluation if
+        // reached) never runs, and the body's result is
+        // the Err itself.
+        let body = IRNode::Block(vec![
+            IRNode::TryPropagate(Box::new(call_ir(
+                "Err",
+                vec![string("boom")],
+            ))),
+            IRNode::Hole {
+                id: 0,
+                expected_type: None,
+            },
+        ]);
+        assert_eq!(
+            eval(&body, &Env::new()),
+            Ok(Value::Err(Box::new(Value::Str("boom".into()))))
+        );
+        // A non-Result operand is a named failure, not a
+        // guessed payload.
+        let node = IRNode::TryPropagate(Box::new(int(1)));
         match eval(&node, &Env::new()) {
             Err(EvalError::NotEvaluable(reason)) => {
                 assert!(
-                    !reason.contains("no Result values"),
-                    "the stale reason must not survive: {reason}"
+                    reason.contains("TryPropagate") && reason.contains("non-Result"),
+                    "the failure must name the cause, got: {reason}"
                 );
             }
             other => panic!("expected NotEvaluable, got {other:?}"),
         }
+    }
+
+    // ── Phase 95: the statement/loop subset ───────────
+    // (Encoder extension, W9: Alloc / Assign / While /
+    // Loop / Break / TryPropagate evaluation, constructor
+    // Match, Clone, statement Append — the shapes the
+    // denoted and template bodies are made of.)
+
+    fn alloc(name: &str, initial: IRNode) -> IRNode {
+        IRNode::Alloc {
+            name: name.into(),
+            ty: crate::spec::ast::TypeRef::Int,
+            initial: Box::new(initial),
+        }
+    }
+
+    fn assign(name: &str, value: IRNode) -> IRNode {
+        IRNode::Assign {
+            target: Box::new(var(name)),
+            value: Box::new(value),
+        }
+    }
+
+    #[test]
+    fn phase95_alloc_assign_and_block_statements() {
+        // Alloc binds; Assign rebinds the binding; the
+        // block's value is its last statement's.
+        let body = IRNode::Block(vec![
+            alloc("x", int(1)),
+            assign("x", binop(IRBinOp::Add, var("x"), int(2))),
+            var("x"),
+        ]);
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Int(3)));
+        // An Alloc's own value is the bound value (the
+        // statement layer's running-value discipline).
+        assert_eq!(eval(&alloc("x", int(5)), &Env::new()), Ok(Value::Int(5)));
+        // Assign to a variable nothing binds: a named
+        // failure, not a silent creation.
+        match eval(&assign("ghost", int(1)), &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("ghost") && reason.contains("unbound"),
+                    "the failure must name the variable, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // A non-variable Assign target: named, not guessed.
+        let bad = IRNode::Assign {
+            target: Box::new(IRNode::Index(Box::new(var("xs")), Box::new(int(0)))),
+            value: Box::new(int(1)),
+        };
+        match eval(&bad, &env_with(&[("xs", Value::List(vec![Value::Int(0)]))])) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("not a variable"),
+                    "the failure must name the cause, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phase95_while_and_loop_with_break() {
+        // While: mutation persists across iterations.
+        let counter = IRNode::Block(vec![
+            alloc("n", int(0)),
+            IRNode::While {
+                condition: Box::new(binop(IRBinOp::Lt, var("n"), int(5))),
+                body: Box::new(IRNode::Block(vec![assign(
+                    "n",
+                    binop(IRBinOp::Add, var("n"), int(1)),
+                )])),
+                invariant: None,
+            },
+            var("n"),
+        ]);
+        assert_eq!(eval(&counter, &Env::new()), Ok(Value::Int(5)));
+        // While exited by a bare Break in a branch.
+        let breaker = IRNode::Block(vec![
+            alloc("n", int(0)),
+            IRNode::While {
+                condition: Box::new(boolean(true)),
+                body: Box::new(IRNode::Block(vec![
+                    assign("n", binop(IRBinOp::Add, var("n"), int(1))),
+                    IRNode::If {
+                        condition: Box::new(binop(IRBinOp::Ge, var("n"), int(3))),
+                        then_branch: Box::new(IRNode::Break { value: None }),
+                        else_branch: Box::new(IRNode::Literal(IRLiteral::Unit)),
+                    },
+                ])),
+                invariant: None,
+            },
+            var("n"),
+        ]);
+        assert_eq!(eval(&breaker, &Env::new()), Ok(Value::Int(3)));
+        // Loop with a valued Break: the value is the
+        // loop's value (the compiled `loop { break v }`).
+        let valued = IRNode::Block(vec![
+            alloc("n", int(0)),
+            IRNode::Loop {
+                invariant: None,
+                body: Box::new(IRNode::Block(vec![
+                    assign("n", binop(IRBinOp::Add, var("n"), int(1))),
+                    IRNode::If {
+                        condition: Box::new(binop(IRBinOp::Eq, var("n"), int(4))),
+                        then_branch: Box::new(IRNode::Break {
+                            value: Some(Box::new(binop(
+                                IRBinOp::Mul,
+                                var("n"),
+                                int(10),
+                            ))),
+                        }),
+                        else_branch: Box::new(IRNode::Literal(IRLiteral::Unit)),
+                    },
+                ])),
+            },
+        ]);
+        assert_eq!(eval(&valued, &Env::new()), Ok(Value::Int(40)));
+        // A Break with no enclosing loop: named failure.
+        match eval(&IRNode::Break { value: None }, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("Break outside a loop"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // The valued Break form inside a While is the one
+        // declined form: named, not assigned a meaning.
+        let declined = IRNode::While {
+            condition: Box::new(boolean(true)),
+            body: Box::new(IRNode::Break {
+                value: Some(Box::new(int(1))),
+            }),
+            invariant: None,
+        };
+        match eval(&declined, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("valued Break inside a While"),
+                    "the declined form must be named, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phase95_iteration_bound_judges_nontermination() {
+        // A While that never exits: judged NotEvaluable by
+        // the bound — promptly (the test completing at all
+        // is the wall-time evidence) and with the bound
+        // named in the reason.
+        let forever = IRNode::While {
+            condition: Box::new(boolean(true)),
+            body: Box::new(IRNode::Literal(IRLiteral::Unit)),
+            invariant: None,
+        };
+        match eval(&forever, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("iteration bound"),
+                    "the reason must name the bound, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // A bare Loop with no Break: the same judgment.
+        let forever = IRNode::Loop {
+            body: Box::new(IRNode::Literal(IRLiteral::Unit)),
+            invariant: None,
+        };
+        assert!(matches!(
+            eval(&forever, &Env::new()),
+            Err(EvalError::NotEvaluable(_))
+        ));
+        // A loop that terminates within the bound is
+        // judged on its merits: counting to the bound
+        // minus one succeeds.
+        let counter = IRNode::Block(vec![
+            alloc("n", int(0)),
+            IRNode::While {
+                condition: Box::new(binop(
+                    IRBinOp::Lt,
+                    var("n"),
+                    int((MAX_LOOP_ITERATIONS - 1) as i64),
+                )),
+                body: Box::new(IRNode::Block(vec![assign(
+                    "n",
+                    binop(IRBinOp::Add, var("n"), int(1)),
+                )])),
+                invariant: None,
+            },
+            var("n"),
+        ]);
+        assert_eq!(
+            eval(&counter, &Env::new()),
+            Ok(Value::Int((MAX_LOOP_ITERATIONS - 1) as i64))
+        );
+    }
+
+    #[test]
+    fn phase95_constructor_match_binds_payloads() {
+        let match_on = |scrutinee: IRNode, cases: Vec<(IRPattern, IRNode)>| IRNode::Match {
+            scrutinee: Box::new(scrutinee),
+            cases,
+        };
+        let ctor = |name: &str, subs: Vec<IRPattern>| {
+            IRPattern::Constructor(name.into(), subs)
+        };
+        // Some(ch) binds the payload — peek's dispatch
+        // shape, the canonical loop condition.
+        let body = match_on(
+            call_ir("Some", vec![chr('h')]),
+            vec![
+                (ctor("None", vec![]), boolean(false)),
+                (
+                    ctor("Some", vec![IRPattern::Variable("ch".into())]),
+                    binop(IRBinOp::Eq, var("ch"), chr('h')),
+                ),
+            ],
+        );
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Bool(true)));
+        // None takes the nullary arm.
+        let body = match_on(
+            call_ir("None", vec![]),
+            vec![
+                (ctor("None", vec![]), boolean(true)),
+                (
+                    ctor("Some", vec![IRPattern::Variable("ch".into())]),
+                    boolean(false),
+                ),
+            ],
+        );
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Bool(true)));
+        // Ok/Err bind their payloads.
+        let body = match_on(
+            call_ir("Err", vec![string("boom")]),
+            vec![
+                (
+                    ctor("Ok", vec![IRPattern::Variable("v".into())]),
+                    int(0),
+                ),
+                (
+                    ctor("Err", vec![IRPattern::Variable("e".into())]),
+                    call_ir("len", vec![var("e")]),
+                ),
+            ],
+        );
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Int(4)));
+        // A constructor of another family does not match:
+        // the match falls through to the wildcard arm.
+        let body = match_on(
+            call_ir("Some", vec![int(1)]),
+            vec![
+                (
+                    ctor("Ok", vec![IRPattern::Variable("v".into())]),
+                    int(0),
+                ),
+                (IRPattern::Wildcard, int(9)),
+            ],
+        );
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Int(9)));
+        // Nested constructor patterns match nested values.
+        let body = match_on(
+            call_ir("Some", vec![call_ir("Ok", vec![int(3)])]),
+            vec![(
+                ctor(
+                    "Some",
+                    vec![ctor("Ok", vec![IRPattern::Variable("x".into())])],
+                ),
+                binop(IRBinOp::Add, var("x"), int(1)),
+            )],
+        );
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Int(4)));
+        // A record constructor binds fields positionally
+        // (written order — the record value's convention).
+        let env = env_with(&[("t", token_val(7, "x", 1, 1))]);
+        let body = match_on(
+            var("t"),
+            vec![(
+                ctor(
+                    "Token",
+                    vec![
+                        IRPattern::Variable("k".into()),
+                        IRPattern::Wildcard,
+                        IRPattern::Wildcard,
+                        IRPattern::Wildcard,
+                    ],
+                ),
+                var("k"),
+            )],
+        );
+        assert_eq!(eval(&body, &env), Ok(Value::Int(7)));
+        // Teeth: the same scrutinee under SWAPPED arms
+        // gives the opposite answer — the arms genuinely
+        // discriminate, they do not both fire or both miss.
+        let swapped = match_on(
+            call_ir("Some", vec![chr('h')]),
+            vec![
+                (ctor("None", vec![]), boolean(true)),
+                (
+                    ctor("Some", vec![IRPattern::Variable("ch".into())]),
+                    boolean(false),
+                ),
+            ],
+        );
+        assert_eq!(eval(&swapped, &Env::new()), Ok(Value::Bool(false)));
+        // An arity-contradicting constructor pattern is a
+        // named decline, not a silent miss.
+        let bad = match_on(
+            call_ir("Some", vec![int(1)]),
+            vec![(ctor("Some", vec![]), int(0))],
+        );
+        match eval(&bad, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("sub-patterns"),
+                    "the decline must be named, got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phase95_clone_is_the_identity() {
+        // Over a scalar, a list, and a record: a copy of an
+        // immutable value is the value (the encoder's W3
+        // reading, Phase 91).
+        assert_eq!(
+            eval(
+                &IRNode::UnaryOp(IRUnaryOp::Clone, Box::new(int(4))),
+                &Env::new()
+            ),
+            Ok(Value::Int(4))
+        );
+        let env = env_with(&[("t", token_val(0, "spec", 1, 1))]);
+        assert_eq!(
+            eval(
+                &IRNode::UnaryOp(IRUnaryOp::Clone, Box::new(var("t"))),
+                &env
+            ),
+            Ok(token_val(0, "spec", 1, 1))
+        );
+        // The list operations beside Clone stay outside.
+        let list = IRNode::Collection {
+            kind: CollectionKind::List,
+            elements: vec![int(1)],
+        };
+        assert!(eval(
+            &IRNode::UnaryOp(IRUnaryOp::Head, Box::new(list)),
+            &Env::new()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn phase95_append_str_char_and_statement_rebind() {
+        // The lexeme shape as an expression: Append of a
+        // Char onto a String.
+        assert_eq!(
+            eval(
+                &binop(IRBinOp::Append, string("ab"), chr('c')),
+                &Env::new()
+            ),
+            Ok(Value::Str("abc".into()))
+        );
+        // Statement position on a variable rebinds it —
+        // the push the compiled runner performs: a token
+        // list accumulated across statements reads back
+        // with the appended element.
+        let body = IRNode::Block(vec![
+            alloc(
+                "xs",
+                IRNode::Collection {
+                    kind: CollectionKind::List,
+                    elements: vec![int(1)],
+                },
+            ),
+            binop(IRBinOp::Append, var("xs"), int(2)),
+            var("xs"),
+        ]);
+        // (the Alloc's declared type is Int in the helper;
+        // the interpreter does not re-check it — the IR is
+        // the typechecker's output, not its input.)
+        assert_eq!(
+            eval(&body, &Env::new()),
+            Ok(Value::List(vec![Value::Int(1), Value::Int(2)]))
+        );
+        // The string form of the same rebind.
+        let body = IRNode::Block(vec![
+            alloc("s", string("")),
+            binop(IRBinOp::Append, var("s"), chr('a')),
+            binop(IRBinOp::Append, var("s"), chr('b')),
+            var("s"),
+        ]);
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Str("ab".into())));
+        // A non-variable Append target keeps the pure
+        // form: the value is computed, nothing is rebound.
+        assert_eq!(
+            eval(
+                &binop(
+                    IRBinOp::Append,
+                    IRNode::Collection {
+                        kind: CollectionKind::List,
+                        elements: vec![int(1)],
+                    },
+                    int(2)
+                ),
+                &Env::new()
+            ),
+            Ok(Value::List(vec![Value::Int(1), Value::Int(2)]))
+        );
+    }
+
+    #[test]
+    fn phase95_composition_boundary_block_values_and_try_unwind() {
+        // A Block in a value position is a body: its
+        // Return is its result. This is the rule the
+        // in-process composition (callee bodies inlined
+        // into Alloc initials / TryPropagate operands)
+        // judges by.
+        let body = IRNode::Block(vec![
+            alloc(
+                "x",
+                IRNode::Block(vec![IRNode::Return(Box::new(int(5)))]),
+            ),
+            var("x"),
+        ]);
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Int(5)));
+        // A TryPropagate over an inlined body returning
+        // Ok binds the payload through the Alloc.
+        let body = IRNode::Block(vec![
+            alloc(
+                "step",
+                IRNode::TryPropagate(Box::new(IRNode::Block(vec![
+                    IRNode::Return(Box::new(call_ir("Ok", vec![int(7)]))),
+                ]))),
+            ),
+            var("step"),
+        ]);
+        assert_eq!(eval(&body, &Env::new()), Ok(Value::Int(7)));
+        // And its Err unwind passes THROUGH the Alloc:
+        // the statement after it (a Hole, which would fail
+        // evaluation if reached) never runs, and the
+        // enclosing body's result is the Err — the
+        // compiled `let step = f()?;` behavior.
+        let body = IRNode::Block(vec![
+            alloc(
+                "step",
+                IRNode::TryPropagate(Box::new(IRNode::Block(vec![
+                    IRNode::Return(Box::new(call_ir(
+                        "Err",
+                        vec![string("boom")],
+                    ))),
+                ]))),
+            ),
+            IRNode::Hole {
+                id: 0,
+                expected_type: None,
+            },
+        ]);
+        assert_eq!(
+            eval(&body, &Env::new()),
+            Ok(Value::Err(Box::new(Value::Str("boom".into()))))
+        );
+    }
+
+    /// The mirror skip body in statement form over the
+    /// parameter `state`, with peek/next_char inlined over
+    /// the local `cur` — the Phase 92 denotation's shape,
+    /// hand-composed from this module's own `peek_body` /
+    /// `next_char_body` transcriptions (which are written
+    /// over `state`; the helpers below are their `cur`
+    /// renamings).
+    fn phase95_skip_body() -> IRNode {
+        fn fa(base: IRNode, field: &str) -> IRNode {
+            IRNode::FieldAccess {
+                base: Box::new(base),
+                field: field.into(),
+            }
+        }
+        let peek_cur = IRNode::If {
+            condition: Box::new(binop(
+                IRBinOp::Lt,
+                fa(var("cur"), "pos"),
+                call_ir("len", vec![fa(var("cur"), "source")]),
+            )),
+            then_branch: Box::new(call_ir(
+                "Some",
+                vec![IRNode::Index(
+                    Box::new(fa(var("cur"), "source")),
+                    Box::new(fa(var("cur"), "pos")),
+                )],
+            )),
+            else_branch: Box::new(call_ir("None", vec![])),
+        };
+        let is_newline = binop(
+            IRBinOp::And,
+            binop(
+                IRBinOp::Lt,
+                fa(var("cur"), "pos"),
+                call_ir("len", vec![fa(var("cur"), "source")]),
+            ),
+            binop(
+                IRBinOp::Eq,
+                IRNode::Index(
+                    Box::new(fa(var("cur"), "source")),
+                    Box::new(fa(var("cur"), "pos")),
+                ),
+                chr('\n'),
+            ),
+        );
+        let next_cur = IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), fa(var("cur"), "source")),
+                (
+                    "pos".into(),
+                    binop(IRBinOp::Add, fa(var("cur"), "pos"), int(1)),
+                ),
+                (
+                    "line".into(),
+                    IRNode::If {
+                        condition: Box::new(is_newline.clone()),
+                        then_branch: Box::new(binop(
+                            IRBinOp::Add,
+                            fa(var("cur"), "line"),
+                            int(1),
+                        )),
+                        else_branch: Box::new(fa(var("cur"), "line")),
+                    },
+                ),
+                (
+                    "col".into(),
+                    IRNode::If {
+                        condition: Box::new(is_newline),
+                        then_branch: Box::new(int(1)),
+                        else_branch: Box::new(binop(
+                            IRBinOp::Add,
+                            fa(var("cur"), "col"),
+                            int(1),
+                        )),
+                    },
+                ),
+                ("tokens".into(), fa(var("cur"), "tokens")),
+            ],
+        };
+        let ws = |ch: char| binop(IRBinOp::Eq, var("ch"), chr(ch));
+        let cond = IRNode::Match {
+            scrutinee: Box::new(peek_cur),
+            cases: vec![
+                (
+                    IRPattern::Constructor("None".into(), vec![]),
+                    boolean(false),
+                ),
+                (
+                    IRPattern::Constructor(
+                        "Some".into(),
+                        vec![IRPattern::Variable("ch".into())],
+                    ),
+                    [ws(' '), ws('\t'), ws('\n'), ws('\r')]
+                        .into_iter()
+                        .reduce(|a, b| binop(IRBinOp::Or, a, b))
+                        .unwrap(),
+                ),
+            ],
+        };
+        IRNode::Block(vec![
+            alloc("cur", var("state")),
+            IRNode::While {
+                condition: Box::new(cond),
+                body: Box::new(IRNode::Block(vec![IRNode::Assign {
+                    target: Box::new(var("cur")),
+                    value: Box::new(next_cur),
+                }])),
+                invariant: None,
+            },
+            IRNode::Return(Box::new(var("cur"))),
+        ])
+    }
+
+    #[test]
+    fn phase95_skip_body_passes_golden_tests_and_teeth_hold() {
+        let specs = load_specs_from(RESTORED_TOKENIZER_MODULE);
+        let skip = spec_named(&specs, "skip_whitespace");
+        // The statement-shaped mirror body is judged
+        // in-process now: both golden tests pass — the
+        // Phase 75 record for this spec (binds, but the
+        // loop body is unjudgeable) is superseded.
+        assert_eq!(
+            test_outcomes(&phase95_skip_body(), skip),
+            vec![TestOutcome::Passed, TestOutcome::Passed]
+        );
+        assert_eq!(
+            run_spec_tests(&phase95_skip_body(), skip),
+            TestRun {
+                evaluable: 2,
+                passed: 2
+            }
+        );
+        // Beyond the golden tests: a newline run advances
+        // line/col through the loop (the mirror's own
+        // arithmetic, executed in-process).
+        let env = env_with(&[("state", state_val("\n\nab", 0, 1, 1, vec![]))]);
+        assert_eq!(
+            eval(&phase95_skip_body(), &env),
+            Ok(state_val("\n\nab", 2, 3, 1, vec![]))
+        );
+        // Teeth: the identity body still fails the golden
+        // tests in-process — it passes "no-whitespace" and
+        // fails "skip-spaces", exactly as the compiled
+        // judging has always recorded (the α scandal is a
+        // spec-strength fact, not an interpreter gap).
+        assert_eq!(
+            run_spec_tests(&var("state"), skip),
+            TestRun {
+                evaluable: 2,
+                passed: 1
+            }
+        );
+        // Teeth: a partial skip (advance at most once,
+        // unconditionally) fails BOTH golden tests — it
+        // moves on "hi", where nothing may move, and it
+        // stops after one space on "  hi". A wrong body is
+        // judged wrong in-process, in both directions.
+        let partial = IRNode::Block(vec![
+            alloc("cur", var("state")),
+            IRNode::If {
+                condition: Box::new(binop(
+                    IRBinOp::Lt,
+                    field(var("cur"), "pos"),
+                    call_ir("len", vec![field(var("cur"), "source")]),
+                )),
+                then_branch: Box::new(IRNode::Block(vec![IRNode::Assign {
+                    target: Box::new(var("cur")),
+                    value: Box::new(IRNode::RecordLit {
+                        type_name: "TokenizerState".into(),
+                        fields: vec![
+                            ("source".into(), field(var("cur"), "source")),
+                            (
+                                "pos".into(),
+                                binop(
+                                    IRBinOp::Add,
+                                    field(var("cur"), "pos"),
+                                    int(1),
+                                ),
+                            ),
+                            ("line".into(), field(var("cur"), "line")),
+                            (
+                                "col".into(),
+                                binop(
+                                    IRBinOp::Add,
+                                    field(var("cur"), "col"),
+                                    int(1),
+                                ),
+                            ),
+                            ("tokens".into(), field(var("cur"), "tokens")),
+                        ],
+                    }),
+                }])),
+                else_branch: Box::new(IRNode::Literal(IRLiteral::Unit)),
+            },
+            IRNode::Return(Box::new(var("cur"))),
+        ]);
+        assert_eq!(
+            run_spec_tests(&partial, skip),
+            TestRun {
+                evaluable: 2,
+                passed: 0
+            }
+        );
     }
 
     // ── Headline evidence (Phase 75): the restored ──────
@@ -2390,10 +3452,16 @@ spec tokenize_all {
             }
         );
 
-        // skip_whitespace: the mirror body is a loop, which
-        // stays outside the evaluable subset — the tests
-        // bind and count as evaluable, and the outcome says
-        // exactly why no verdict was produced.
+        // skip_whitespace: the body used here is a
+        // non-terminating While (condition `true`), so the
+        // judgment is BodyNotEvaluable by the Phase 95
+        // iteration bound — the tests bind and count as
+        // evaluable, and the outcome says exactly why no
+        // verdict was produced. (Before Phase 95 the
+        // reason was the loop's shape; the terminating
+        // mirror body is judged in-process by
+        // `phase95_skip_body_passes_golden_tests_and_teeth_
+        // hold` above.)
         let skip = spec_named(&specs, "skip_whitespace");
         let loop_body = IRNode::While {
             condition: Box::new(boolean(true)),

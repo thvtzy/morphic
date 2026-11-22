@@ -89,11 +89,19 @@
 //     spec-silent otherwise (the mirror carries it over).
 //     Full-state agreement and pinned-field agreement are
 //     reported separately.
-//   - skip_whitespace: the spec states only two
-//     postconditions (output.pos >= state.pos;
-//     len(output.source) == len(state.source)). Those are
-//     the pinned content; the stopping behavior is the
-//     mirror's completion. Postcondition satisfaction and
+//   - skip_whitespace: through Phase 95 the spec
+//     stated only two postconditions
+//     (output.pos >= state.pos;
+//     len(output.source) == len(state.source)); R1
+//     (Phase 96) added the (a) boundary row and the
+//     (c) all-whitespace-between Forall — the spec now
+//     states FOUR postconditions, and the four jointly
+//     pin the mirror's stopping behavior. The harness's
+//     secondary count remains the two ORIGINAL rows'
+//     projection (a body can satisfy them without
+//     skipping); the strengthened rows are Z3-judged
+//     (see the composition candidates, Phase 97).
+//     Postcondition satisfaction and
 //     full mirror agreement are reported separately, and a
 //     shortfall against the mirror is a property of the
 //     spec as stated, not a machinery failure.
@@ -132,6 +140,35 @@
 //  with the winners' real Z3 statuses, and a shortfall is
 //  a synthesis result (no exact body found, a resolver
 //  gap), not an encodability wall.
+//
+//  COMPOSITION CANDIDATES (Phase 97): the faithful
+//  bodies for skip_whitespace / tokenize_one /
+//  tokenize_all exist as resolver denotations and
+//  compositions, not as pool candidates — pool judging
+//  is context-free, so the raw template seeds judge
+//  tpr 0.000 there (Phase 95). The harness therefore
+//  also measures, once per harness run (the bodies are
+//  deterministic), a COMPOSITION candidate per such
+//  spec: the spec's resolver denotation (tokenize_all:
+//  the pool's template LOOP body, composed over the
+//  STEP denotation), judged by the SAME two standards
+//  as any crown — (a) Z3 via verify_one against the
+//  spec's current rows, (b) executed agreement against
+//  the golden battery, measured on BOTH execution
+//  routes (the compiled runner over the generated
+//  denotation functions — next_char in its production
+//  inlined form, see measure_composition — and the
+//  Phase 95 in-process route over the textually
+//  resolved composition), cross-checked against
+//  each other. The composition
+//  is reported alongside the pool winner and takes the
+//  crown only where it meets both standards better:
+//  it must be Z3-Verified, its executed agreement must
+//  be at least the pool winner's in every run, and
+//  strictly better somewhere (or the pool winner
+//  unverified where they tie). The other five specs
+//  keep their standing pool crowns — no composition
+//  candidate is offered for them.
 //
 //  Run with:
 //
@@ -608,7 +645,10 @@ mod xval_tok {
                 ty: ty.clone(),
             },
             Index(c, i) => Index(Box::new(f(c)?), Box::new(f(i)?)),
-            Loop { body } => Loop { body: Box::new(f(body)?) },
+            Loop { body, invariant } => Loop {
+                body: Box::new(f(body)?),
+                invariant: invariant.clone(),
+            },
             Break { value } => Break {
                 value: match value {
                     Some(v) => Some(Box::new(f(v)?)),
@@ -1410,6 +1450,477 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         m
     }
 
+    // ─────────────────────────────────────────────────────────
+    //  Phase 97 — composition candidates: the crowning
+    //  route for the three specs whose faithful bodies
+    //  are resolver denotations / compositions rather
+    //  than pool candidates (skip_whitespace,
+    //  tokenize_one, tokenize_all). Each composition is
+    //  judged by the same two standards as any crown:
+    //  (a) Z3 — verify_one on the denotation/LOOP body
+    //  against the spec's current rows (the verifier
+    //  composes callees through the resolver itself);
+    //  (b) executed agreement against the golden
+    //  battery on BOTH routes — the compiled runner
+    //  (this harness's standing route for record specs:
+    //  the composition candidate map measured by
+    //  measure_record_spec, closure members carrying
+    //  their denotation bodies) and the in-process
+    //  interpreter over the textually resolved
+    //  composition (the Phase 95 route) — cross-checked
+    //  against each other where both reach.
+    // ─────────────────────────────────────────────────────────
+
+    fn p97_field<'a>(v: &'a Value, name: &str) -> &'a Value {
+        match v {
+            Value::Record { fields, .. } => fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, x)| x)
+                .unwrap_or_else(|| panic!("record has no field {name}")),
+            other => panic!("expected a record, got {other:?}"),
+        }
+    }
+    fn p97_as_int(v: &Value) -> i64 {
+        match v {
+            Value::Int(n) => *n,
+            other => panic!("expected Int, got {other:?}"),
+        }
+    }
+    fn p97_as_str(v: &Value) -> String {
+        match v {
+            Value::Str(s) => s.clone(),
+            other => panic!("expected Str, got {other:?}"),
+        }
+    }
+    fn p97_token_value(t: &Token) -> Value {
+        Value::Record {
+            type_name: "Token".into(),
+            fields: vec![
+                ("kind".into(), Value::Int(t.kind)),
+                ("lexeme".into(), Value::Str(t.lexeme.clone())),
+                ("line".into(), Value::Int(t.line)),
+                ("col".into(), Value::Int(t.col)),
+            ],
+        }
+    }
+    fn p97_state_value(s: &State) -> Value {
+        Value::Record {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), Value::Str(s.source.clone())),
+                ("pos".into(), Value::Int(s.pos)),
+                ("line".into(), Value::Int(s.line)),
+                ("col".into(), Value::Int(s.col)),
+                (
+                    "tokens".into(),
+                    Value::List(s.tokens.iter().map(p97_token_value).collect()),
+                ),
+            ],
+        }
+    }
+    fn p97_value_token(v: &Value) -> Token {
+        Token {
+            kind: p97_as_int(p97_field(v, "kind")),
+            lexeme: p97_as_str(p97_field(v, "lexeme")),
+            line: p97_as_int(p97_field(v, "line")),
+            col: p97_as_int(p97_field(v, "col")),
+        }
+    }
+    fn p97_value_state(v: &Value) -> State {
+        let tokens = match p97_field(v, "tokens") {
+            Value::List(items) => items.iter().map(p97_value_token).collect(),
+            other => panic!("expected a token list, got {other:?}"),
+        };
+        State {
+            source: p97_as_str(p97_field(v, "source")),
+            pos: p97_as_int(p97_field(v, "pos")),
+            line: p97_as_int(p97_field(v, "line")),
+            col: p97_as_int(p97_field(v, "col")),
+            tokens,
+        }
+    }
+    fn p97_value_result_state(v: &Value) -> Result<State, String> {
+        match v {
+            Value::Ok(inner) => Ok(p97_value_state(inner)),
+            Value::Err(e) => Err(p97_as_str(e)),
+            other => panic!("expected a Result value, got {other:?}"),
+        }
+    }
+    fn p97_value_result_tokens(v: &Value) -> Result<Vec<Token>, String> {
+        match v {
+            Value::Ok(inner) => match &**inner {
+                Value::List(items) => Ok(items.iter().map(p97_value_token).collect()),
+                other => panic!("expected a token list, got {other:?}"),
+            },
+            Value::Err(e) => Err(p97_as_str(e)),
+            other => panic!("expected a Result value, got {other:?}"),
+        }
+    }
+
+    /// The denotation index (the Phase 95 route): every
+    /// spec that denotes, by its resolver meaning.
+    /// tokenize_all denotes nothing — its LOOP body is
+    /// the candidate, composed over these.
+    fn composition_bodies(
+        functions: &[FunctionSpec],
+        module: &spec::ast::Spec,
+    ) -> BodyIndex {
+        let index = engine::SpecIndex::from_module(module);
+        let mut bodies: BodyIndex = HashMap::new();
+        for name in [
+            "is_whitespace",
+            "is_ident_start",
+            "is_ident_continue",
+            "peek",
+            "next_char",
+            "skip_whitespace",
+            "tokenize_one",
+        ] {
+            let body = index
+                .callee_body(name)
+                .unwrap_or_else(|| panic!("{name}: denotation must exist"));
+            let params = functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .params
+                .clone();
+            bodies.insert(name.to_string(), (body, params));
+        }
+        bodies
+    }
+
+    /// Candidate shells carrying the composition bodies
+    /// (Phase 85's shell pattern: one synthesis pass per
+    /// spec supplies the shells; bodies and provenance
+    /// are replaced outright). Every member's body is
+    /// its resolver denotation — except tokenize_all,
+    /// whose body is the pool's template LOOP body
+    /// itself (it denotes nothing; the composition is
+    /// what the closure and the resolver make of it).
+    fn composition_candidates(
+        functions: &[FunctionSpec],
+        module: &spec::ast::Spec,
+    ) -> HashMap<String, CandidateImplementation> {
+        let bodies = composition_bodies(functions, module);
+        let pool_seed = |f: &FunctionSpec, kinds: &[&str]| {
+            let candidates =
+                engine::synthesize_with_module_spec(f, 1, module).unwrap();
+            kinds.iter().find_map(|k| {
+                candidates.iter().find(|c| {
+                    matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == k)
+                }).cloned()
+            })
+        };
+        let mut map: HashMap<String, CandidateImplementation> = HashMap::new();
+        for f in functions {
+            let mut cand = match f.name.as_str() {
+                "skip_whitespace" => pool_seed(
+                    functions.iter().find(|g| g.name == "peek").unwrap(),
+                    &["complementary_guard"],
+                )
+                .unwrap(),
+                "tokenize_one" | "tokenize_all" => pool_seed(f, &["tokenize_template"])
+                    .unwrap_or_else(|| panic!("{}: template seed missing", f.name)),
+                "peek" => pool_seed(f, &["complementary_guard"])
+                    .unwrap_or_else(|| panic!("peek: seed missing")),
+                "next_char" => pool_seed(f, &["record_completion"])
+                    .unwrap_or_else(|| panic!("next_char: seed missing")),
+                _ => pool_seed(f, &["equation", "char_equation"])
+                    .unwrap_or_else(|| panic!("{}: constraint seed missing", f.name)),
+            };
+            cand.spec_name = f.name.clone();
+            cand.spec = f.clone();
+            if f.name != "tokenize_all" {
+                cand.body = bodies[&f.name].0.clone();
+            }
+            cand.provenance = Provenance::Template {
+                template_name: "phase97_composition".to_string(),
+            };
+            map.insert(f.name.clone(), cand);
+        }
+        map
+    }
+
+    struct CompositionMeasure {
+        z3_status: verify::VerificationStatus,
+        z3_held: usize,
+        z3_total: usize,
+        compiled: RecordMeasure,
+        inproc_agree: usize,
+        inproc_total: usize,
+        inproc_disagreements: Vec<String>,
+    }
+
+    /// Executed agreement of the composed body through
+    /// the in-process interpreter (the Phase 95 route):
+    /// callees resolved against the denotation index,
+    /// outputs compared in the compiled route's
+    /// canonical forms.
+    fn measure_composition_in_process(
+        name: &str,
+        bodies: &BodyIndex,
+        candidates: &HashMap<String, CandidateImplementation>,
+    ) -> (usize, usize, Vec<String>) {
+        let raw = if name == "tokenize_all" {
+            candidates[name].body.clone()
+        } else {
+            bodies[name].0.clone()
+        };
+        let composed = resolve_body(&raw, bodies).unwrap();
+        let run = |s: &State| -> Value {
+            let mut env = eval::Env::new();
+            env.insert("state".to_string(), p97_state_value(s));
+            eval::eval(&composed, &env).unwrap_or_else(|e| {
+                panic!("{name}: the composed body must evaluate in-process: {e:?}")
+            })
+        };
+        match name {
+            "skip_whitespace" => {
+                let inputs = skip_battery();
+                let mut agree = 0;
+                let mut dis = Vec::new();
+                for s in &inputs {
+                    let got = show_state(&p97_value_state(&run(s)));
+                    let want = show_state(&mirror_skip_whitespace(s.clone()));
+                    if got == want {
+                        agree += 1;
+                    } else if dis.len() < 5 {
+                        dis.push(disagreement(s, &got, &want));
+                    }
+                }
+                (agree, inputs.len(), dis)
+            }
+            "tokenize_one" => {
+                let inputs = tokenize_one_battery();
+                let mut agree = 0;
+                let mut dis = Vec::new();
+                for s in &inputs {
+                    let got = show_result_state(&p97_value_result_state(&run(s)));
+                    let want = show_result_state(&mirror_tokenize_one(s.clone()));
+                    if got == want {
+                        agree += 1;
+                    } else if dis.len() < 5 {
+                        dis.push(disagreement(s, &got, &want));
+                    }
+                }
+                (agree, inputs.len(), dis)
+            }
+            "tokenize_all" => {
+                let inputs = tokenize_all_battery();
+                let mut agree = 0;
+                let mut dis = Vec::new();
+                for s in &inputs {
+                    let got = show_result_tokens(&p97_value_result_tokens(&run(s)));
+                    let want = show_result_tokens(&mirror_tokenize_all(s.clone()));
+                    if got == want {
+                        agree += 1;
+                    } else if dis.len() < 5 {
+                        dis.push(disagreement(s, &got, &want));
+                    }
+                }
+                (agree, inputs.len(), dis)
+            }
+            other => panic!("not a composition spec: {other}"),
+        }
+    }
+
+    /// Both crown standards for one composition
+    /// candidate: Z3 via verify_one on the
+    /// denotation/LOOP body (the verifier composes
+    /// callees through the resolver itself); executed
+    /// agreement on two routes over the same composed
+    /// functions, cross-checked against each other —
+    /// the in-process interpreter over the textually
+    /// resolved composition (resolve_body), and the
+    /// compiled runner over one generated function
+    /// per spec, bodies = the denotations with their
+    /// named calls kept (this harness's standing
+    /// architecture). Two emitter facts shape the
+    /// compiled route, both measured in this phase:
+    /// (1) the fully resolved body cannot be emitted —
+    /// a denotation's Return is function-scoped in
+    /// the emitter (block-scoped in the interpreter),
+    /// so an inlined skip returns from tokenize_one
+    /// itself (E0308); (2) next_char's raw denotation
+    /// cannot be emitted either — its guard calls
+    /// peek(state) by value and the record literal
+    /// then reads state (E0382). The production seed
+    /// route's standing answer to (2) is the inlined
+    /// body (`record_completion_seed_body` admits
+    /// only the `inline_calls` form), so the compiled
+    /// map carries exactly that body for next_char
+    /// and the denotations for every other member.
+    fn measure_composition(
+        name: &str,
+        functions: &[FunctionSpec],
+        module: &spec::ast::Spec,
+        bodies: &BodyIndex,
+        candidates: &HashMap<String, CandidateImplementation>,
+        module_names: &[String],
+    ) -> CompositionMeasure {
+        let func = functions.iter().find(|f| f.name == name).unwrap();
+        let result = verify::verifier::Verifier::with_module(module)
+            .verify_one(&candidates[name], func);
+        let mut compiled_map = candidates.clone();
+        let index = engine::SpecIndex::from_module(module);
+        if let Some(nc) = compiled_map.get_mut("next_char") {
+            let raw = nc.body.clone();
+            if let Some(inlined) = index.inline_calls(&raw) {
+                nc.body = inlined;
+            }
+        }
+        let compiled = measure_record_spec(97, name, &compiled_map, module_names);
+        let (inproc_agree, inproc_total, inproc_disagreements) =
+            measure_composition_in_process(name, bodies, candidates);
+        CompositionMeasure {
+            z3_status: result.status,
+            z3_held: result
+                .constraint_results
+                .iter()
+                .filter(|r| r.holds)
+                .count(),
+            z3_total: result.constraint_results.len(),
+            compiled,
+            inproc_agree,
+            inproc_total,
+            inproc_disagreements,
+        }
+    }
+
+    /// The crown rule: the composition takes the crown
+    /// iff it is Z3-Verified, its executed agreement
+    /// (the compiled route) is at least the pool
+    /// winner's in every run, and it meets the two
+    /// standards strictly better somewhere — a run
+    /// where its agreement is higher, or a run where
+    /// they tie on agreement and the pool winner is
+    /// not Verified.
+    fn composition_takes_crown(
+        m: &CompositionMeasure,
+        pool: &[RecordMeasure],
+        pool_verified: &[bool],
+    ) -> bool {
+        if m.z3_status != verify::VerificationStatus::Verified {
+            return false;
+        }
+        let mut strictly = false;
+        for (i, pm) in pool.iter().enumerate() {
+            if m.compiled.agree < pm.agree {
+                return false;
+            }
+            if m.compiled.agree > pm.agree || !pool_verified[i] {
+                strictly = true;
+            }
+        }
+        strictly
+    }
+
+    /// Phase 97: the composition crowns, pinned outside
+    /// the (ignored) harness run so the suites carry
+    /// them. All three compositions Verify against the
+    /// current rows (W8 closed in this phase); executed
+    /// agreement is mirror-exact for skip and capped
+    /// only by the F2 Err-message text for the tokenize
+    /// pair — identically on both execution routes.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase97_composition_crowns() {
+        let (functions, module) = load_tokenizer_module();
+        let module_names: Vec<String> =
+            functions.iter().map(|f| f.name.clone()).collect();
+        let bodies = composition_bodies(&functions, &module);
+        let candidates = composition_candidates(&functions, &module);
+
+        // skip_whitespace: Verified against all four
+        // rows; mirror-exact 12/12 on both routes.
+        let m = measure_composition(
+            "skip_whitespace",
+            &functions,
+            &module,
+            &bodies,
+            &candidates,
+            &module_names,
+        );
+        println!(
+            "TOK97|skip_whitespace|z3={:?}|rows={}/{}|compiled={}/{}|inproc={}/{}",
+            m.z3_status, m.z3_held, m.z3_total, m.compiled.agree, m.compiled.total,
+            m.inproc_agree, m.inproc_total
+        );
+        assert_eq!(m.z3_status, verify::VerificationStatus::Verified);
+        assert_eq!((m.z3_held, m.z3_total), (4, 4), "all four rows hold (R1's four)");
+        assert_eq!(m.compiled.exec, "ok");
+        assert_eq!((m.compiled.agree, m.compiled.total), (12, 12));
+        assert_eq!(m.compiled.secondary, Some(12));
+        assert_eq!((m.inproc_agree, m.inproc_total), (12, 12));
+        assert!(m.compiled.disagreements.is_empty() && m.inproc_disagreements.is_empty());
+
+        // tokenize_one: Verified; 9/10 on both routes,
+        // the sole disagreement the F2 Err text at "5"
+        // (both sides carry the Err tag).
+        let m = measure_composition(
+            "tokenize_one",
+            &functions,
+            &module,
+            &bodies,
+            &candidates,
+            &module_names,
+        );
+        println!(
+            "TOK97|tokenize_one|z3={:?}|rows={}/{}|compiled={}/{}|inproc={}/{}|dis={:?}",
+            m.z3_status, m.z3_held, m.z3_total, m.compiled.agree, m.compiled.total,
+            m.inproc_agree, m.inproc_total, m.compiled.disagreements
+        );
+        assert_eq!(m.z3_status, verify::VerificationStatus::Verified);
+        assert_eq!((m.z3_held, m.z3_total), (2, 2));
+        assert_eq!(m.compiled.exec, "ok");
+        assert_eq!((m.compiled.agree, m.compiled.total), (9, 10));
+        assert_eq!((m.inproc_agree, m.inproc_total), (9, 10));
+        for dis in [&m.compiled.disagreements, &m.inproc_disagreements] {
+            assert_eq!(dis.len(), 1, "exactly one disagreement per route: {dis:?}");
+            assert!(
+                dis[0].contains("\"5\"")
+                    && dis[0].contains("winner ERR|")
+                    && dis[0].contains("mirror ERR|"),
+                "the sole deviation is the Err message text at \"5\" (F2 cap): {}",
+                dis[0]
+            );
+        }
+
+        // tokenize_all: Verified; 7/8 on both routes,
+        // the sole disagreement the same F2 text at
+        // "spec 5".
+        let m = measure_composition(
+            "tokenize_all",
+            &functions,
+            &module,
+            &bodies,
+            &candidates,
+            &module_names,
+        );
+        println!(
+            "TOK97|tokenize_all|z3={:?}|rows={}/{}|compiled={}/{}|inproc={}/{}|dis={:?}",
+            m.z3_status, m.z3_held, m.z3_total, m.compiled.agree, m.compiled.total,
+            m.inproc_agree, m.inproc_total, m.compiled.disagreements
+        );
+        assert_eq!(m.z3_status, verify::VerificationStatus::Verified);
+        assert_eq!((m.z3_held, m.z3_total), (1, 1));
+        assert_eq!(m.compiled.exec, "ok");
+        assert_eq!((m.compiled.agree, m.compiled.total), (7, 8));
+        assert_eq!((m.inproc_agree, m.inproc_total), (7, 8));
+        for dis in [&m.compiled.disagreements, &m.inproc_disagreements] {
+            assert_eq!(dis.len(), 1, "exactly one disagreement per route: {dis:?}");
+            assert!(
+                dis[0].contains("\"spec 5\"")
+                    && dis[0].contains("winner ERR|")
+                    && dis[0].contains("mirror ERR|"),
+                "the sole deviation is the Err message text at \"spec 5\" (F2 cap): {}",
+                dis[0]
+            );
+        }
+    }
+
     #[test]
     #[ignore = "cross-validation harness: 3 randomized synthesis runs x 8 specs, executes winners against the Phase 47 mirrors; run explicitly with --ignored --nocapture"]
     fn tokenizer_cross_validation() {
@@ -1425,7 +1936,7 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         let mut md = String::new();
         let _ = writeln!(md, "# Tokenizer cross-validation (Phase 48; classifiers re-measured in Phase 49 with the char_equation seed family; re-instrumented in Phase 79 for the completed module — post-D5a verdicts, D4a agreement, restored tokenize constraints): synthesized winners vs tests/tokenizer_proof.rs mirrors (S4 copies in src/tokenizer_cross_validation.rs)");
         let _ = writeln!(md);
-        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module_spec (opt 1; Phase 81: the engine's index now carries the type declarations too, so the record-era seed families can fire during synthesis) → Z3 verify_all (module-aware: specs + type declarations) → select_best. Classifiers execute on the IR interpreter over the 774-char Phase 45 battery, judged by executed mirror agreement (the standing D5a cross-check, re-measured every run); their winners' Z3 statuses are real since Phase 76 and appear in the table. Record specs execute through compiled runners (10 s limit, per-input panic isolation) over the Phase 47 batteries. Pinned vs spec-silent per the header: peek fully pinned; next_char pinned on pos+col always and line only on newlines; skip_whitespace pinned only on its two stated postconditions; tokenize_one/tokenize_all carry their restored constraints — the rows pin partial content (the Ok/Err split + growth/length rows), so executed agreement against the mirrors is their verdict content, paired with the winners' Z3 statuses.");
+        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module_spec (opt 1; Phase 81: the engine's index now carries the type declarations too, so the record-era seed families can fire during synthesis) → Z3 verify_all (module-aware: specs + type declarations) → select_best. Classifiers execute on the IR interpreter over the 774-char Phase 45 battery, judged by executed mirror agreement (the standing D5a cross-check, re-measured every run); their winners' Z3 statuses are real since Phase 76 and appear in the table. Record specs execute through compiled runners (10 s limit, per-input panic isolation) over the Phase 47 batteries. Pinned vs spec-silent per the header: peek fully pinned; next_char pinned on pos+col always and line only on newlines; skip_whitespace's secondary count is the projection of its two original postconditions (the spec states four since R1, Phase 96 — the strengthened rows are Z3-judged, see the composition section); tokenize_one/tokenize_all carry their restored constraints — the rows pin partial content (the Ok/Err split + growth/length rows), so executed agreement against the mirrors is their verdict content, paired with the winners' Z3 statuses. Composition candidates (Phase 97) for skip_whitespace / tokenize_one / tokenize_all are measured once after the runs and reported below the verdicts.");
         let _ = writeln!(md);
         let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 status | Winner prov | Seed in pool | Agreement | Exec |");
         let _ = writeln!(md, "|---|---|---|---|---|---|---|---|");
@@ -1438,6 +1949,7 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         let mut rec_runs: HashMap<String, Vec<RecordMeasure>> = HashMap::new();
         let mut winner_keys: HashMap<String, Vec<String>> = HashMap::new();
         let mut winner_facts: HashMap<String, Vec<String>> = HashMap::new();
+        let mut winner_verified: HashMap<String, Vec<bool>> = HashMap::new();
 
         for run in 1..=3usize {
             // ── The real pipeline, per spec ──
@@ -1505,6 +2017,10 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
                         w.verified,
                         count_holes(&w.body)
                     ));
+                    winner_verified
+                        .entry(func.name.clone())
+                        .or_default()
+                        .push(w.verified);
                 }
             }
 
@@ -1603,6 +2119,70 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
             }
         }
 
+        // ── Composition candidates (Phase 97): measured
+        // once, after the runs — the bodies are
+        // deterministic resolver denotations, not
+        // run-dependent pool draws. They compete for
+        // the crown under the rule in the header.
+        let comp_bodies = composition_bodies(&functions, &module);
+        let comp_candidates = composition_candidates(&functions, &module);
+        let mut comp_measures: HashMap<String, CompositionMeasure> = HashMap::new();
+        let _ = writeln!(details, "\n## Composition candidates (Phase 97)\n");
+        let _ = writeln!(
+            details,
+            "| Spec | Z3 | Rows held | Executed (compiled) | Executed (in-process) |"
+        );
+        let _ = writeln!(details, "|---|---|---|---|---|");
+        for name in ["skip_whitespace", "tokenize_one", "tokenize_all"] {
+            let m = measure_composition(
+                name,
+                &functions,
+                &module,
+                &comp_bodies,
+                &comp_candidates,
+                &module_names,
+            );
+            println!(
+                "TOKX-COMP|spec={}|z3={:?}|rows={}/{}|compiled={}/{}|inproc={}/{}|exec={}",
+                name,
+                m.z3_status,
+                m.z3_held,
+                m.z3_total,
+                m.compiled.agree,
+                m.compiled.total,
+                m.inproc_agree,
+                m.inproc_total,
+                m.compiled.exec
+            );
+            let _ = writeln!(
+                details,
+                "| {} | {:?} | {}/{} | {}/{} | {}/{} |",
+                name,
+                m.z3_status,
+                m.z3_held,
+                m.z3_total,
+                m.compiled.agree,
+                m.compiled.total,
+                m.inproc_agree,
+                m.inproc_total
+            );
+            for d in &m.compiled.disagreements {
+                let _ = writeln!(
+                    details,
+                    "- {} composition disagreement (compiled): {}",
+                    name, d
+                );
+            }
+            for d in &m.inproc_disagreements {
+                let _ = writeln!(
+                    details,
+                    "- {} composition disagreement (in-process): {}",
+                    name, d
+                );
+            }
+            comp_measures.insert(name.to_string(), m);
+        }
+
         // ── Verdicts ──
         let _ = writeln!(details, "\n## Verdicts (per the rules in the harness header)\n");
         let nb = battery.len();
@@ -1668,7 +2248,7 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
                         )
                     } else {
                         format!(
-                            "PARTIAL by design — stated postconditions [{}/{}], full mirror agreement [{}/{}]; the shortfall against the mirror is a property of the spec as stated (only two postconditions), not a machinery failure",
+                            "PARTIAL by design — stated postconditions [{}/{}], full mirror agreement [{}/{}]; the shortfall against the mirror is a property of the pool under the spec as stated (four postconditions since R1, Phase 96 — the Phase 97 composition candidate below is judged against all four), not a machinery failure",
                             posts.join(", "),
                             total,
                             agrees.join(", "),
@@ -1704,6 +2284,33 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
             );
             println!("TOKX-VERDICT|{}", line);
             let _ = writeln!(details, "{}", line);
+            // The Phase 97 crown competition, where a
+            // composition candidate exists for the spec.
+            if let Some(cm) = comp_measures.get(name) {
+                let crowned =
+                    composition_takes_crown(cm, runs, &winner_verified[name]);
+                let crown_line = format!(
+                    "- CROWN {}: {} — composition (Z3 {:?}, rows {}/{}, executed {}/{} compiled + {}/{} in-process) vs pool winners (executed [{}/{}] per run; {})",
+                    name,
+                    if crowned {
+                        "the composition takes the crown"
+                    } else {
+                        "the pool winner keeps the crown"
+                    },
+                    cm.z3_status,
+                    cm.z3_held,
+                    cm.z3_total,
+                    cm.compiled.agree,
+                    cm.compiled.total,
+                    cm.inproc_agree,
+                    cm.inproc_total,
+                    agrees.join(", "),
+                    total,
+                    winner_facts[name].join(" | ")
+                );
+                println!("TOKX-CROWN|{}", crown_line);
+                let _ = writeln!(details, "{}", crown_line);
+            }
         }
 
         md.push_str(&details);
@@ -2018,6 +2625,261 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
                 name, m.agree, m.total, m.exec, m.disagreements
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────
+    //  Phase 95 — the template bodies, judged IN-PROCESS.
+    //
+    //  The encoder-extension campaign's interpreter phase:
+    //  the statement/loop subset (Alloc / Assign / While /
+    //  Loop / Break / TryPropagate, constructor Match,
+    //  Clone, statement Append) lands in
+    //  `synthesis::eval`, so the tokenize template bodies
+    //  can finally be EXECUTED by the in-process path —
+    //  until now only the compiled runner could run them
+    //  (9/10 and 7/8, Phase 85/87 standings), while every
+    //  in-process judgment of a statement-shaped body was
+    //  NotEvaluable.
+    //
+    //  Composition: the interpreter has no module context
+    //  (a named call to a sibling function is outside its
+    //  subset — G4's neighbour, unchanged), so the bodies
+    //  are composed exactly as this harness has always
+    //  composed them: named calls resolved against the
+    //  production denotations (`SpecIndex::callee_body` —
+    //  the Phase 92/93 statement denotations for
+    //  skip_whitespace / tokenize_one, the dual-registered
+    //  record-completion body for next_char) via
+    //  `resolve_body`, then evaluated by `eval::eval`.
+    //  The LOOP body exists only as the pool's template
+    //  seed, drawn from a real synthesis pool as in
+    //  Phase 85.
+    //
+    //  Pool tpr, measured and reported as-is: the pool
+    //  judges the RAW template bodies, whose named calls
+    //  the context-free interpreter declines, so both
+    //  seeds still score 0.000 in pool judging — the
+    //  subset's effect is on composed bodies (this test's
+    //  batteries and in-spec runs), not on the raw pool
+    //  score. Selection standings are unchanged.
+    // ─────────────────────────────────────────────────────
+
+    #[test]
+    fn phase95_template_bodies_evaluate_in_process() {
+        let (functions, module) = load_tokenizer_module();
+        let spec_named = |name: &str| functions.iter().find(|f| f.name == name).unwrap();
+
+        // The production denotations.
+        let index = engine::SpecIndex::from_module(&module);
+        let mut bodies: BodyIndex = HashMap::new();
+        for name in [
+            "is_whitespace",
+            "is_ident_start",
+            "is_ident_continue",
+            "peek",
+            "next_char",
+            "skip_whitespace",
+            "tokenize_one",
+        ] {
+            let body = index
+                .callee_body(name)
+                .unwrap_or_else(|| panic!("{name}: denotation must exist"));
+            bodies.insert(name.to_string(), (body, spec_named(name).params.clone()));
+        }
+
+        // Pool presence + the raw-body tpr measurement.
+        let template_seed = |name: &str| {
+            let candidates =
+                engine::synthesize_with_module_spec(spec_named(name), 1, &module).unwrap();
+            candidates
+                .into_iter()
+                .find(|c| {
+                    matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == "tokenize_template")
+                })
+                .unwrap_or_else(|| panic!("{name}: template must enter the pool"))
+        };
+        let step_seed = template_seed("tokenize_one");
+        let loop_seed = template_seed("tokenize_all");
+        println!(
+            "TOK95|tokenize_one|pool_tpr={:.3}",
+            step_seed.scores.test_pass_ratio
+        );
+        println!(
+            "TOK95|tokenize_all|pool_tpr={:.3}",
+            loop_seed.scores.test_pass_ratio
+        );
+        assert_eq!(step_seed.scores.test_pass_ratio, 0.0);
+        assert_eq!(loop_seed.scores.test_pass_ratio, 0.0);
+
+        // Compose the two template bodies.
+        let step = resolve_body(
+            &index.callee_body("tokenize_one").unwrap(),
+            &bodies,
+        )
+        .unwrap();
+        let loop_body = resolve_body(&loop_seed.body, &bodies).unwrap();
+
+        // The specs' own tests, through the in-process path.
+        assert_eq!(
+            eval::run_spec_tests(&step, spec_named("tokenize_one")),
+            eval::TestRun {
+                evaluable: 2,
+                passed: 2
+            }
+        );
+        assert_eq!(
+            eval::run_spec_tests(&loop_body, spec_named("tokenize_all")),
+            eval::TestRun {
+                evaluable: 2,
+                passed: 2
+            }
+        );
+
+        // Value <-> mirror conversions.
+        fn field<'a>(v: &'a Value, name: &str) -> &'a Value {
+            match v {
+                Value::Record { fields, .. } => fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, x)| x)
+                    .unwrap_or_else(|| panic!("record has no field {name}")),
+                other => panic!("expected a record, got {other:?}"),
+            }
+        }
+        fn as_int(v: &Value) -> i64 {
+            match v {
+                Value::Int(n) => *n,
+                other => panic!("expected Int, got {other:?}"),
+            }
+        }
+        fn as_str(v: &Value) -> String {
+            match v {
+                Value::Str(s) => s.clone(),
+                other => panic!("expected Str, got {other:?}"),
+            }
+        }
+        fn token_value(t: &Token) -> Value {
+            Value::Record {
+                type_name: "Token".into(),
+                fields: vec![
+                    ("kind".into(), Value::Int(t.kind)),
+                    ("lexeme".into(), Value::Str(t.lexeme.clone())),
+                    ("line".into(), Value::Int(t.line)),
+                    ("col".into(), Value::Int(t.col)),
+                ],
+            }
+        }
+        fn state_value(s: &State) -> Value {
+            Value::Record {
+                type_name: "TokenizerState".into(),
+                fields: vec![
+                    ("source".into(), Value::Str(s.source.clone())),
+                    ("pos".into(), Value::Int(s.pos)),
+                    ("line".into(), Value::Int(s.line)),
+                    ("col".into(), Value::Int(s.col)),
+                    (
+                        "tokens".into(),
+                        Value::List(s.tokens.iter().map(token_value).collect()),
+                    ),
+                ],
+            }
+        }
+        fn value_token(v: &Value) -> Token {
+            Token {
+                kind: as_int(field(v, "kind")),
+                lexeme: as_str(field(v, "lexeme")),
+                line: as_int(field(v, "line")),
+                col: as_int(field(v, "col")),
+            }
+        }
+        fn value_state(v: &Value) -> State {
+            let tokens = match field(v, "tokens") {
+                Value::List(items) => items.iter().map(value_token).collect(),
+                other => panic!("expected a token list, got {other:?}"),
+            };
+            State {
+                source: as_str(field(v, "source")),
+                pos: as_int(field(v, "pos")),
+                line: as_int(field(v, "line")),
+                col: as_int(field(v, "col")),
+                tokens,
+            }
+        }
+        fn value_result_state(v: &Value) -> Result<State, String> {
+            match v {
+                Value::Ok(inner) => Ok(value_state(inner)),
+                Value::Err(e) => Err(as_str(e)),
+                other => panic!("expected a Result value, got {other:?}"),
+            }
+        }
+        fn value_result_tokens(v: &Value) -> Result<Vec<Token>, String> {
+            match v {
+                // tokenize_all's Ok payload is the token
+                // list itself (`return Ok(s.tokens)`).
+                Value::Ok(inner) => match &**inner {
+                    Value::List(items) => Ok(items.iter().map(value_token).collect()),
+                    other => panic!("expected a token list, got {other:?}"),
+                },
+                Value::Err(e) => Err(as_str(e)),
+                other => panic!("expected a Result value, got {other:?}"),
+            }
+        }
+
+        let run = |body: &IRNode, s: &State| -> Value {
+            let mut env = eval::Env::new();
+            env.insert("state".to_string(), state_value(s));
+            eval::eval(body, &env).unwrap_or_else(|e| {
+                panic!("the composed body must evaluate in-process: {e:?}")
+            })
+        };
+
+        // STEP battery: 9/10 in-process, sole deviation the
+        // Err message text at the "5" point (F2) — the
+        // compiled runner's standing, now reproduced by
+        // the interpreter.
+        let mut agree = 0;
+        let mut disagreements: Vec<(State, String, String)> = Vec::new();
+        for st in tokenize_one_battery() {
+            let got = show_result_state(&value_result_state(&run(&step, &st)));
+            let want = show_result_state(&mirror_tokenize_one(st.clone()));
+            if got == want {
+                agree += 1;
+            } else {
+                disagreements.push((st, got, want));
+            }
+        }
+        println!("TOK95|tokenize_one|in_process={agree}/10");
+        assert_eq!(agree, 9);
+        assert_eq!(disagreements.len(), 1);
+        let (st, got, want) = &disagreements[0];
+        assert_eq!(st.source, "5");
+        assert!(
+            got.starts_with("ERR|") && want.starts_with("ERR|"),
+            "the sole deviation is the Err tag's text: got {got}, want {want}"
+        );
+
+        // LOOP battery: 7/8 in-process, sole deviation the
+        // same Err text at the "spec 5" point.
+        let mut agree = 0;
+        let mut disagreements: Vec<(State, String, String)> = Vec::new();
+        for st in tokenize_all_battery() {
+            let got = show_result_tokens(&value_result_tokens(&run(&loop_body, &st)));
+            let want = show_result_tokens(&mirror_tokenize_all(st.clone()));
+            if got == want {
+                agree += 1;
+            } else {
+                disagreements.push((st, got, want));
+            }
+        }
+        println!("TOK95|tokenize_all|in_process={agree}/8");
+        assert_eq!(agree, 7);
+        assert_eq!(disagreements.len(), 1);
+        let (st, got, want) = &disagreements[0];
+        assert_eq!(st.source, "spec 5");
+        assert!(
+            got.starts_with("ERR|") && want.starts_with("ERR|"),
+            "the sole deviation is the Err tag's text: got {got}, want {want}"
+        );
     }
 
     #[test]

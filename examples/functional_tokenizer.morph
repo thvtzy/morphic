@@ -176,6 +176,62 @@
 //  at identifier, punctuation, and whitespace
 //  positions — stay refuted.
 
+// ── Phase 96 amendment record (2026-11-22) ─────────────
+//  Round-3 amendment, owner-ratified 2026-11-22
+//  (R1 + R2, from the encoder-extension campaign's
+//  ratification round; ENCODER_EXTENSION_DESIGN.md).
+//  Two changes, both spec-side, both measured before
+//  they were written (Phases 83/87/90/94):
+//   - skip_whitespace (R1) gains TWO strengthening
+//     rows, jointly the exact pin of the mirror's
+//     behavior that its two original rows never
+//     stated:
+//     (a) `output.pos >= len(output.source) ||
+//         is_whitespace(output.source[output.pos]) == false`
+//         — the output stops at end-of-input or on a
+//         non-whitespace character;
+//     (c) `forall i: Int in range(len(output.source)):
+//         i < state.pos || i >= output.pos ||
+//         is_whitespace(output.source[i])`
+//         — everything between the input position and
+//         the output position is whitespace.
+//     The two original rows stay. Under the old rows
+//     the identity body and partial-skip bodies were
+//     admitted (the golden's 4/12 partial standing);
+//     under (a)+(c) they refute — that flip is R1's
+//     whole point, and Phase 96's tests pin it. The
+//     faithful body now Verifies symbolically against
+//     the strengthened spec: Phase 96's loop-invariant
+//     machinery discharges its While (the invariant
+//     is row (c)'s shape carried in the body, not in
+//     this file).
+//   - tokenize_one row 2 (R2) gains the β-skip Err
+//     license: the R2-α license of round 2, re-read at
+//     the POST-skip position —
+//     `|| (skip_whitespace(state).pos < len(skip_whitespace(state).source)
+//       && is_ident_start(skip_whitespace(state).source[skip_whitespace(state).pos]) == false
+//       && is_whitespace(skip_whitespace(state).source[skip_whitespace(state).pos]) == false
+//       && skip_whitespace(state).source[skip_whitespace(state).pos] != ':' && … != '=')`
+//     (the same nine punctuation disequalities, at the
+//     skipped position). The license is guarded by
+//     `skip_whitespace(state).pos < len(…source)`:
+//     skip landing at end-of-input licenses NO Err —
+//     end-of-input is the Ok case, already row 2's
+//     second disjunct. This closes the whitespace-
+//     then-bad-char subclass (" 5") the Phase 84
+//     record named as the rows' one deviation: the
+//     mirror's Err there is now admitted, and
+//     fabricated Errs at post-skip identifier starts,
+//     post-skip punctuation, and post-skip end-of-input
+//     stay refuted (Phase 96's tests pin each). The
+//     license became judgeable in the same phase that
+//     ratified it: the verifier's constraint layer now
+//     resolves statement-bodied calls in a row through
+//     the statement encoder (the "skip form is
+//     unencodable" clause of the Phase 84 record is
+//     superseded by that machinery, not by a stronger
+//     spec).
+
 FunctionalTokenizer {
 
 // ── Types ──────────────────────────────────────────────────
@@ -288,13 +344,21 @@ spec skip_whitespace {
 
     // The original's two invariant lines, carried as
     // constraints with identical expressions (note 4).
-    // They are all the spec states: the full behavior
-    // (advance to the first non-whitespace char, tracking
-    // line/col through next_char) is the mirror's.
-    // Tests restored in-spec in the D3a named form
-    // (Phase 79); the mirror golden keeps its copies.
+    // Round 3 (Phase 96, owner-ratified R1): two
+    // strengthening rows join them — (a) the output
+    // stops at end-of-input or on a non-whitespace
+    // character, (c) everything between the input and
+    // output positions is whitespace. Jointly the four
+    // rows pin the mirror's behavior exactly (the two
+    // original rows alone admitted the identity and
+    // partial-skip bodies); see the Phase 96 amendment
+    // record in the module header. Tests restored
+    // in-spec in the D3a named form (Phase 79); the
+    // mirror golden keeps its copies.
     constraint: output.pos>=state.pos
     constraint: len(output.source)==len(state.source)
+    constraint: output.pos >= len(output.source) || is_whitespace(output.source[output.pos]) == false
+    constraint: forall i: Int in range(len(output.source)): i < state.pos || i >= output.pos || is_whitespace(output.source[i])
 
     test "no-whitespace" {
         input: TokenizerState { source: "hi", pos: 0, line: 1, col: 1, tokens: [] }
@@ -338,8 +402,18 @@ spec tokenize_one {
     // the module header. Tests restored in-spec in the
     // D3a named form; the mirror golden in
     // tests/tokenizer_proof.rs keeps its copies.
+    // Round 3 (Phase 96, owner-ratified R2): row 2
+    // gains the β-skip license — the R2-α license
+    // re-read at the POST-skip position, with a callee
+    // call to skip_whitespace in the row — because the
+    // whitespace-then-bad-char subclass (" 5") stayed
+    // refuted under the pre-skip reading. Post-skip
+    // end-of-input licenses no Err (the guard is
+    // `skip_whitespace(state).pos < len(…source)`).
+    // See the Phase 96 amendment record in the module
+    // header.
     constraint: output.is_err() || len(output.unwrap().tokens) == len(state.tokens) + 1 || output.unwrap().pos >= len(output.unwrap().source)
-    constraint: output.is_ok() || state.pos >= len(state.source) || (is_ident_start(state.source[state.pos]) == false && is_whitespace(state.source[state.pos]) == false && state.source[state.pos] != ':' && state.source[state.pos] != '{' && state.source[state.pos] != '}' && state.source[state.pos] != '(' && state.source[state.pos] != ')' && state.source[state.pos] != ',' && state.source[state.pos] != '<' && state.source[state.pos] != '>' && state.source[state.pos] != '=')
+    constraint: output.is_ok() || state.pos >= len(state.source) || (is_ident_start(state.source[state.pos]) == false && is_whitespace(state.source[state.pos]) == false && state.source[state.pos] != ':' && state.source[state.pos] != '{' && state.source[state.pos] != '}' && state.source[state.pos] != '(' && state.source[state.pos] != ')' && state.source[state.pos] != ',' && state.source[state.pos] != '<' && state.source[state.pos] != '>' && state.source[state.pos] != '=') || (skip_whitespace(state).pos < len(skip_whitespace(state).source) && is_ident_start(skip_whitespace(state).source[skip_whitespace(state).pos]) == false && is_whitespace(skip_whitespace(state).source[skip_whitespace(state).pos]) == false && skip_whitespace(state).source[skip_whitespace(state).pos] != ':' && skip_whitespace(state).source[skip_whitespace(state).pos] != '{' && skip_whitespace(state).source[skip_whitespace(state).pos] != '}' && skip_whitespace(state).source[skip_whitespace(state).pos] != '(' && skip_whitespace(state).source[skip_whitespace(state).pos] != ')' && skip_whitespace(state).source[skip_whitespace(state).pos] != ',' && skip_whitespace(state).source[skip_whitespace(state).pos] != '<' && skip_whitespace(state).source[skip_whitespace(state).pos] != '>' && skip_whitespace(state).source[skip_whitespace(state).pos] != '=')
 
     test "keyword-spec" {
         input: TokenizerState { source: "spec", pos: 0, line: 1, col: 1, tokens: [] }
