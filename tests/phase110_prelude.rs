@@ -145,6 +145,7 @@ fn crown(functions: &[FunctionSpec], spec: &FunctionSpec, seed: u64) -> Candidat
 
 // ── The bundled library itself ───────────────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn bundled_library_parses_and_checks_standalone() {
     for (name, source) in stdlib::LIBRARY_MODULES {
@@ -521,6 +522,7 @@ const TIER2_ENTRIES: &[&str] = &[
     "list_binary_search",
 ];
 
+#[cfg(not(feature = "wasm-playground"))]
 #[cfg(feature = "z3-support")]
 #[test]
 fn pipeline_crowns_the_shipped_body_for_the_entry() {

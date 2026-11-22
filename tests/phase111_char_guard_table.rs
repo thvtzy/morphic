@@ -35,7 +35,7 @@ fn kinds(source: &str, name: &str) -> Vec<String> {
 
 #[test]
 fn fires_on_the_shipped_char_to_digit() {
-    let source = stdlib::LIBRARY_MODULES[1].1;
+    let source = include_str!("../stdlib/char.morph");
     let ks = kinds(source, "char_to_digit");
     assert!(
         ks.iter().any(|k| k == "char_guard_table"),
@@ -89,7 +89,7 @@ fn declines_equation_shaped_char_spec() {
     // A Char classifier stated as an equation is the
     // equation family's territory; the row builder finds
     // no rows and stays out.
-    let source = stdlib::LIBRARY_MODULES[1].1;
+    let source = include_str!("../stdlib/char.morph");
     let ks = kinds(source, "char_is_digit");
     assert!(
         ks.iter().any(|k| k == "equation"),

@@ -248,9 +248,24 @@ fn main() -> anyhow::Result<()> {
             // exactly the asset bytes (no banner, nothing
             // else): `morphic stdlib-asset >
             // playground/stdlib-asset.bin` regenerates the
-            // checked-in file byte-for-byte.
-            use std::io::Write;
-            std::io::stdout().write_all(&morphic::stdlib::library_asset_bytes())?;
+            // checked-in file byte-for-byte. The generator
+            // reads the EMBEDDED library data, which exists
+            // only in native builds — under the
+            // `wasm-playground` feature (which a workspace
+            // --all-targets build unifies into this bin)
+            // the subcommand refuses by name instead.
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                use std::io::Write;
+                std::io::stdout().write_all(&morphic::stdlib::library_asset_bytes())?;
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                anyhow::bail!(
+                    "stdlib-asset is generated from a native build \
+                     (this build carries no embedded library data)"
+                );
+            }
         }
 
         Command::Init { name } => {

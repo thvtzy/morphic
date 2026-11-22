@@ -23,6 +23,16 @@
 //!   codec round-trips every shipped body);
 //! * installing it through the public seam succeeds,
 //!   and malformed bytes are refused.
+//!
+//! Configuration note: the first two pins compare against
+//! the EMBEDDED data, which exists only in native builds
+//! (`#[cfg(not(feature = "wasm-playground"))]` in
+//! src/stdlib.rs — the browser build installs this very
+//! asset at runtime instead). They are gated to match, so
+//! a workspace `--all-targets` build (which unifies the
+//! morphic-wasm member's `wasm-playground` feature into
+//! this package) still compiles; in the standing native
+//! configurations all three pins run.
 
 use morphic::stdlib::{self, LibraryAsset};
 
@@ -34,6 +44,7 @@ fn checked_in_asset() -> Vec<u8> {
     .expect("the checked-in stdlib asset exists")
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn checked_in_asset_is_byte_fresh() {
     assert_eq!(
@@ -43,6 +54,7 @@ fn checked_in_asset_is_byte_fresh() {
     );
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn asset_carries_the_whole_library() {
     let asset: LibraryAsset =
