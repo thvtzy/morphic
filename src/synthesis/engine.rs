@@ -10903,17 +10903,22 @@ spec exclaim {
             "the seed body must be the scan built from the mined predicate `x > threshold`"
         );
         // Judging reality, recorded: the interpreter binds
-        // the tests (Phase 53) but cannot evaluate a
-        // For/Alloc/Assign body, so the seed's interpreter
-        // run is evaluable-but-zero — a coverage fact the
-        // runner's Phase 60 trigger extension exists to
-        // bridge. Z3 is Inconclusive by construction (loop
-        // bodies are outside its encodable subset).
+        // the tests (Phase 53) and — since Phase 115 added
+        // the For arm (the List family's judging
+        // machinery) to the Phase 95 statement subset —
+        // evaluates the scan body in full: the seed passes
+        // 3/3 in-process. Before Phase 115 the run was
+        // evaluable-but-zero (For was outside the subset),
+        // the coverage gap the runner's Phase 60 trigger
+        // extension existed to bridge; for this body the
+        // bridge is simply no longer needed. Z3 is
+        // Inconclusive by construction (loop bodies are
+        // outside its encodable subset).
         let run = crate::synthesis::eval::run_spec_tests(&seed.body, &spec);
         assert_eq!(
             run,
-            crate::synthesis::eval::TestRun { evaluable: 3, passed: 0 },
-            "the interpreter must bind all 3 tests and evaluate none of the scan body"
+            crate::synthesis::eval::TestRun { evaluable: 3, passed: 3 },
+            "the interpreter must bind all 3 tests and evaluate the scan body on each"
         );
         let result = crate::verify::verifier::Verifier::new().verify_one(&seed, &spec);
         assert_eq!(

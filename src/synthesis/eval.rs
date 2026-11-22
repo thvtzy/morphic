@@ -11,12 +11,14 @@
 // │  loop subset the denoted and template bodies are made    │
 // │  of: Block sequencing (always present), Alloc, Assign,   │
 // │  While, Loop, Break, TryPropagate, constructor-pattern   │
-// │  Match, and Clone. Loops carry an explicit iteration     │
-// │  bound (see MAX_LOOP_ITERATIONS): exceeding it is a      │
-// │  judged `NotEvaluable`, never a hang and never a         │
-// │  fabricated value. Anything still outside the subset —   │
-// │  Holes, For, lambdas, higher-order combinators, calls    │
-// │  to functions that are not known pure builtins —         │
+// │  Match, and Clone — and, since Phase 115 (the List       │
+// │  family's judging machinery), the bounded For scan the   │
+// │  compiled runner's bodies are written in. Loops carry    │
+// │  an explicit iteration bound (see MAX_LOOP_ITERATIONS):  │
+// │  exceeding it is a judged `NotEvaluable`, never a hang   │
+// │  and never a fabricated value. Anything still outside    │
+// │  the subset — Holes, lambdas, higher-order combinators,  │
+// │  calls to functions that are not known pure builtins —   │
 // │  returns `EvalError::NotEvaluable` with a reason. The    │
 // │  evaluator never panics and never guesses a value.       │
 // └──────────────────────────────────────────────────────────┘
@@ -108,7 +110,7 @@ impl Flow {
 }
 
 /// The loop-iteration budget of one top-level `eval` call
-/// (Phase 95): the total number of While/Loop iterations —
+/// (Phase 95): the total number of loop iterations —
 /// nested loops share the one counter — an evaluation may
 /// perform before the evaluation is judged `NotEvaluable`
 /// ("loop iteration bound exceeded"). The bound exists so
@@ -381,6 +383,87 @@ fn eval_flow(
             }
         }
 
+        // For (Phase 115, the List family's judging
+        // machinery — STDLIB_SCOPE §2.6 priced this arm
+        // into the List phase): the compiled runner's
+        // native loop shape, `for var in start..end`. The
+        // semantics are the compiled ones: the bounds are
+        // evaluated ONCE, before the first iteration; the
+        // variable is bound per iteration and SCOPED to
+        // the loop (an outer binding of the same name is
+        // restored on every exit path, and no binding
+        // leaks out); the shared iteration budget is
+        // spent per iteration, so a vast range is a judged
+        // NotEvaluable, never a hang. A bare Break leaves
+        // the loop; a valued one is declined and named,
+        // exactly as in a While — the compiled language
+        // gives `for` no break value either.
+        IRNode::For {
+            var,
+            start,
+            end,
+            body,
+        } => {
+            let start = match eval_flow(start, env, budget)?.into_value()? {
+                Value::Int(n) => n,
+                other => {
+                    return Err(not_evaluable(format!(
+                        "For loop start is not Int (got {:?})",
+                        other
+                    )));
+                }
+            };
+            let end = match eval_flow(end, env, budget)?.into_value()? {
+                Value::Int(n) => n,
+                other => {
+                    return Err(not_evaluable(format!(
+                        "For loop end is not Int (got {:?})",
+                        other
+                    )));
+                }
+            };
+            let saved = env.remove(var);
+            let mut flow = Flow::Normal(Value::Unit);
+            let mut current = start;
+            let mut exit = Ok(());
+            while current < end {
+                if let Err(e) = spend_iteration(budget) {
+                    exit = Err(e);
+                    break;
+                }
+                env.insert(var.clone(), Value::Int(current));
+                match eval_flow(body, env, budget) {
+                    Ok(Flow::Normal(_)) => {}
+                    Ok(Flow::Broke(None)) => break,
+                    Ok(Flow::Broke(Some(_))) => {
+                        exit = Err(not_evaluable(
+                            "valued Break inside a For loop is outside the evaluable subset",
+                        ));
+                        break;
+                    }
+                    Ok(returned @ Flow::Returned(_)) => {
+                        flow = returned;
+                        break;
+                    }
+                    Err(e) => {
+                        exit = Err(e);
+                        break;
+                    }
+                }
+                current += 1;
+            }
+            match saved {
+                Some(previous) => {
+                    env.insert(var.clone(), previous);
+                }
+                None => {
+                    env.remove(var);
+                }
+            }
+            exit?;
+            Ok(flow)
+        }
+
         IRNode::Break { value } => {
             let value = match value {
                 None => None,
@@ -406,14 +489,13 @@ fn eval_flow(
         }
 
         // Everything below stays outside the subset:
-        // unfilled holes, For (a bounded scan the subset
-        // does not need — the measured statement bodies use
-        // While/Loop), function values, higher-order
+        // unfilled holes, function values, higher-order
         // combinators, and struct definitions. None of them
         // can be given a value without guessing, so they are
-        // reported as not evaluable.
+        // reported as not evaluable. (For graduated into the
+        // subset in Phase 115 — its arm sits with the other
+        // loop forms above.)
         IRNode::Hole { .. } => Err(not_evaluable("unfilled Hole")),
-        IRNode::For { .. } => Err(not_evaluable("For loop")),
         IRNode::Lambda { .. } => Err(not_evaluable("Lambda (function value)")),
         IRNode::Closure { .. } => Err(not_evaluable("Closure (function value)")),
         IRNode::Map { .. } => Err(not_evaluable("Map (higher-order)")),
@@ -1914,19 +1996,20 @@ mod tests {
             test_outcomes(&wrong, &spec),
             vec![TestOutcome::Passed, TestOutcome::Failed, TestOutcome::Failed]
         );
-        // Loop body: bound tests, but the interpreter cannot
-        // execute the body — BodyNotEvaluable, and the tests
-        // still count as evaluable in the fold.
-        let loopy = IRNode::For {
-            var: "i".into(),
-            start: Box::new(int(0)),
-            end: Box::new(int(1)),
-            body: Box::new(boolean(true)),
-        };
+        // A body the interpreter cannot execute: bound
+        // tests, but every outcome is BodyNotEvaluable,
+        // and the tests still count as evaluable in the
+        // fold. (The example is a Head body — the list
+        // primitives stay outside the subset. Until
+        // Phase 115 this example was a For body; For
+        // graduated into the subset with the List
+        // family's judging machinery, so the example
+        // moved to a form that still declines.)
+        let loopy = IRNode::UnaryOp(IRUnaryOp::Head, Box::new(var("kind")));
         let outcomes = test_outcomes(&loopy, &spec);
         assert!(
             outcomes.iter().all(|o| matches!(o, TestOutcome::BodyNotEvaluable(_))),
-            "loop body must be BodyNotEvaluable on every test: {outcomes:?}"
+            "unevaluable body must be BodyNotEvaluable on every test: {outcomes:?}"
         );
         assert_eq!(
             run_spec_tests(&loopy, &spec),
@@ -2027,8 +2110,11 @@ mod tests {
         // answers on every test (valued 3 — it returns the
         // alloc'd 0, wrong on the merits, which is exactly
         // the distinction this counter exists to draw). The
-        // still-unevaluable example is a For body: For stays
-        // outside the subset, so it values nowhere.
+        // still-unevaluable example is a Lambda body: the
+        // evaluator holds no function values (G4), so it
+        // values nowhere. (Until Phase 115 the example was
+        // a For body; For graduated into the subset with
+        // the List family's judging machinery.)
         let alloc_body = IRNode::Block(vec![
             IRNode::Alloc {
                 name: "acc".into(),
@@ -2038,13 +2124,11 @@ mod tests {
             IRNode::Return(Box::new(var("acc"))),
         ]);
         assert_eq!(valued_test_count(&alloc_body, &spec), 3);
-        let for_body = IRNode::For {
-            var: "i".into(),
-            start: Box::new(int(0)),
-            end: Box::new(int(1)),
+        let lambda_body = IRNode::Lambda {
+            params: vec![("x".into(), crate::spec::ast::TypeRef::Int)],
             body: Box::new(var("kind")),
         };
-        assert_eq!(valued_test_count(&for_body, &spec), 0);
+        assert_eq!(valued_test_count(&lambda_body, &spec), 0);
     }
 
     #[test]
@@ -3153,6 +3237,231 @@ mod tests {
             &Env::new()
         )
         .is_err());
+    }
+
+    // ── Phase 115: the For arm ────────────────────────
+    // (The List family's judging machinery, STDLIB_SCOPE
+    // §2.6: the compiled runner's native loop shape is
+    // `for i in start..end` — its loop variable is the
+    // one index the generated Rust can use — so the
+    // in-process judge learns the same form: bounds
+    // evaluated once, the variable bound per iteration
+    // and scoped to the loop, the shared iteration
+    // budget spent per iteration.)
+
+    fn for_(var_name: &str, start: IRNode, end: IRNode, body: IRNode) -> IRNode {
+        IRNode::For {
+            var: var_name.into(),
+            start: Box::new(start),
+            end: Box::new(end),
+            body: Box::new(body),
+        }
+    }
+
+    #[test]
+    fn phase115_for_scan_accumulates() {
+        // The count-shaped scan (the runner fixture's
+        // shape): count the elements above a limit, the
+        // loop variable as the Index — the form the
+        // compiled runner has always executed.
+        let body = IRNode::Block(vec![
+            alloc("count", int(0)),
+            for_(
+                "i",
+                int(0),
+                IRNode::UnaryOp(
+                    IRUnaryOp::Len,
+                    Box::new(var("values")),
+                ),
+                assign(
+                    "count",
+                    binop(
+                        IRBinOp::Add,
+                        var("count"),
+                        IRNode::If {
+                            condition: Box::new(binop(
+                                IRBinOp::Gt,
+                                IRNode::Index(
+                                    Box::new(var("values")),
+                                    Box::new(var("i")),
+                                ),
+                                var("limit"),
+                            )),
+                            then_branch: Box::new(int(1)),
+                            else_branch: Box::new(int(0)),
+                        },
+                    ),
+                ),
+            ),
+            var("count"),
+        ]);
+        let env = env_with(&[
+            (
+                "values",
+                Value::List(vec![Value::Int(10), Value::Int(1), Value::Int(20)]),
+            ),
+            ("limit", Value::Int(5)),
+        ]);
+        assert_eq!(eval(&body, &env), Ok(Value::Int(2)));
+        // A sum scan over the same shape.
+        let sum = IRNode::Block(vec![
+            alloc("acc", int(0)),
+            for_(
+                "i",
+                int(0),
+                IRNode::UnaryOp(IRUnaryOp::Len, Box::new(var("values"))),
+                assign(
+                    "acc",
+                    binop(
+                        IRBinOp::Add,
+                        var("acc"),
+                        IRNode::Index(Box::new(var("values")), Box::new(var("i"))),
+                    ),
+                ),
+            ),
+            var("acc"),
+        ]);
+        assert_eq!(eval(&sum, &env), Ok(Value::Int(31)));
+    }
+
+    #[test]
+    fn phase115_for_bounds_and_scoping() {
+        // Empty ranges run zero iterations, in either
+        // direction; the accumulator is untouched.
+        for (start, end) in [(3, 3), (5, 2), (0, 0)] {
+            let body = IRNode::Block(vec![
+                alloc("acc", int(7)),
+                for_("i", int(start), int(end), assign("acc", int(0))),
+                var("acc"),
+            ]);
+            assert_eq!(
+                eval(&body, &Env::new()),
+                Ok(Value::Int(7)),
+                "range {start}..{end} must not iterate"
+            );
+        }
+        // The loop variable is scoped to the loop (the
+        // compiled semantics): an outer binding of the
+        // same name survives the loop.
+        let scoped = IRNode::Block(vec![
+            alloc("i", int(99)),
+            for_("i", int(0), int(3), IRNode::Literal(IRLiteral::Unit)),
+            var("i"),
+        ]);
+        assert_eq!(eval(&scoped, &Env::new()), Ok(Value::Int(99)));
+        // With no outer binding, the variable does not
+        // leak out of the loop.
+        let leaked = IRNode::Block(vec![
+            for_("i", int(0), int(3), IRNode::Literal(IRLiteral::Unit)),
+            var("i"),
+        ]);
+        match eval(&leaked, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(reason.contains("unbound"), "got: {reason}");
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // Bounds are evaluated once: a bound that reads
+        // the accumulator does not move as it changes.
+        let once = IRNode::Block(vec![
+            alloc("acc", int(0)),
+            alloc("n", int(3)),
+            for_(
+                "i",
+                int(0),
+                var("n"),
+                IRNode::Block(vec![
+                    assign("acc", binop(IRBinOp::Add, var("acc"), int(1))),
+                    assign("n", binop(IRBinOp::Add, var("n"), int(10))),
+                ]),
+            ),
+            var("acc"),
+        ]);
+        assert_eq!(eval(&once, &Env::new()), Ok(Value::Int(3)));
+    }
+
+    #[test]
+    fn phase115_for_flows_and_declines() {
+        // A Return inside the body leaves the whole
+        // evaluation with its value.
+        let early = IRNode::Block(vec![
+            alloc("acc", int(0)),
+            for_(
+                "i",
+                int(0),
+                int(10),
+                IRNode::If {
+                    condition: Box::new(binop(IRBinOp::Eq, var("i"), int(3))),
+                    then_branch: Box::new(IRNode::Return(Box::new(var("i")))),
+                    else_branch: Box::new(IRNode::Literal(IRLiteral::Unit)),
+                },
+            ),
+            var("acc"),
+        ]);
+        assert_eq!(eval(&early, &Env::new()), Ok(Value::Int(3)));
+        // A bare Break exits the loop; the value after
+        // the loop is the accumulator's.
+        let breaker = IRNode::Block(vec![
+            alloc("acc", int(0)),
+            for_(
+                "i",
+                int(0),
+                int(10),
+                IRNode::Block(vec![
+                    assign("acc", binop(IRBinOp::Add, var("acc"), int(1))),
+                    IRNode::If {
+                        condition: Box::new(binop(IRBinOp::Ge, var("acc"), int(3))),
+                        then_branch: Box::new(IRNode::Break { value: None }),
+                        else_branch: Box::new(IRNode::Literal(IRLiteral::Unit)),
+                    },
+                ]),
+            ),
+            var("acc"),
+        ]);
+        assert_eq!(eval(&breaker, &Env::new()), Ok(Value::Int(3)));
+        // A valued Break inside a For: the compiled
+        // language gives `for` no break value — declined
+        // and named, exactly as in a While.
+        let valued = for_(
+            "i",
+            int(0),
+            int(3),
+            IRNode::Break {
+                value: Some(Box::new(int(1))),
+            },
+        );
+        match eval(&valued, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(
+                    reason.contains("valued Break") && reason.contains("For"),
+                    "got: {reason}"
+                );
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // A non-Int bound: declined and named.
+        let bad_bound = for_("i", boolean(true), int(3), IRNode::Literal(IRLiteral::Unit));
+        match eval(&bad_bound, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(reason.contains("For"), "got: {reason}");
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
+        // The shared iteration budget binds For loops
+        // too: a range past the bound is a judged
+        // NotEvaluable, never a hang.
+        let huge = for_(
+            "i",
+            int(0),
+            int(20_000),
+            IRNode::Literal(IRLiteral::Unit),
+        );
+        match eval(&huge, &Env::new()) {
+            Err(EvalError::NotEvaluable(reason)) => {
+                assert!(reason.contains("bound exceeded"), "got: {reason}");
+            }
+            other => panic!("expected NotEvaluable, got {other:?}"),
+        }
     }
 
     #[test]

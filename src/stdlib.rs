@@ -28,17 +28,23 @@
 //  and is pinned by tests/phase110_prelude.rs.
 //
 //  BODIES AS DATA: a library entry is a spec + its crowned
-//  body, shipped as data (STDLIB_AUDIT §4.3). Bodies are
-//  crowned at library-build time — the production pipeline,
-//  seeded profile, seed 42, measured in the phase that ships
-//  the entry — and transcribed here as IR constructions (the
-//  Phase 92 denotation precedent). The registry below is the
-//  ONLY source of shipped bodies; `SpecIndex::callee_body`
-//  consults it before any row-derived denotation, because the
-//  shipped body is what the entry's name denotes. The pin
-//  (tests/phase110_prelude.rs): each shipped body judges
-//  Z3-Verified ∧ golden-exact against its own spec, and equals
-//  the body the pipeline crowns for that entry.
+//  body, shipped as data (STDLIB_AUDIT §4.3). Tier-1 bodies
+//  are crowned at library-build time — the production
+//  pipeline, seeded profile, seed 42, measured in the phase
+//  that ships the entry — and transcribed here as IR
+//  constructions (the Phase 92 denotation precedent); the
+//  Tier-2 List bodies (Phase 115) are the recorded hand
+//  bodies at their tier's executed standard, the pipeline
+//  crowning no Verified body for them. The registry below
+//  is the ONLY source of shipped bodies; `SpecIndex::
+//  callee_body` consults it before any row-derived
+//  denotation, because the shipped body is what the entry's
+//  name denotes. The pins: each Tier-1 shipped body judges
+//  Z3-Verified ∧ golden-exact against its own spec and
+//  equals the body the pipeline crowns for that entry
+//  (tests/phase110_prelude.rs); each Tier-2 body is
+//  executed-exact on its full battery through both
+//  executed judges (tests/phase115_list.rs).
 //
 //  THE ASSET FORM (Phase 112): the WASM playground bundle
 //  stood 1,290 bytes from its frozen budget (771,072 B) with
@@ -71,8 +77,8 @@ use crate::synthesis::engine::{
 /// codebase's standing embedding mechanism. One module per
 /// family (STDLIB_SCOPE §2): the Int module (Phase 110's
 /// spine, completed in Phase 111), the Char module
-/// (Phase 111), and the String / Result / Option modules
-/// (Phase 112). Under the `wasm-playground` feature this
+/// (Phase 111), the String / Result / Option modules
+/// (Phase 112), and the List module (Phase 115). Under the `wasm-playground` feature this
 /// table does not exist — the same sources arrive in the
 /// runtime asset instead (the banner comment above).
 #[cfg(not(feature = "wasm-playground"))]
@@ -82,6 +88,7 @@ pub const LIBRARY_MODULES: &[(&str, &str)] = &[
     ("string", include_str!("../stdlib/string.morph")),
     ("result", include_str!("../stdlib/result.morph")),
     ("option", include_str!("../stdlib/option.morph")),
+    ("list", include_str!("../stdlib/list.morph")),
 ];
 
 // ── The asset form (Phase 112) ───────────────────────────
@@ -1397,9 +1404,12 @@ pub fn shipped_body(name: &str) -> Option<IRNode> {
 }
 
 /// The transcribed registry of crowned bodies (native
-/// builds). Each arm is the body the production pipeline
-/// crowned for the entry at library-build time, pinned by
-/// tests/phase110_prelude.rs.
+/// builds). Each Tier-1 arm is the body the production
+/// pipeline crowned for the entry at library-build
+/// time, pinned by tests/phase110_prelude.rs; the
+/// Tier-2 List arms (Phase 115) are the recorded hand
+/// bodies at their tier's executed standard, pinned by
+/// tests/phase115_list.rs.
 #[cfg(not(feature = "wasm-playground"))]
 fn shipped_body_native(name: &str) -> Option<IRNode> {
     // Transcription helpers for the Phase 111 arms (the
@@ -1423,6 +1433,82 @@ fn shipped_body_native(name: &str) -> Option<IRNode> {
             then_branch: Box::new(then),
             else_branch: Box::new(els),
         }
+    }
+    // Transcription helpers for the Phase 115 arms (the
+    // statement/scan vocabulary of the List bodies).
+    fn boolean(b: bool) -> IRNode {
+        IRNode::Literal(IRLiteral::Bool(b))
+    }
+    fn block(stmts: Vec<IRNode>) -> IRNode {
+        IRNode::Block(stmts)
+    }
+    fn alloc(name: &str, ty: TypeRef, initial: IRNode) -> IRNode {
+        IRNode::Alloc {
+            name: name.into(),
+            ty,
+            initial: Box::new(initial),
+        }
+    }
+    fn assign(name: &str, value: IRNode) -> IRNode {
+        IRNode::Assign {
+            target: Box::new(v(name)),
+            value: Box::new(value),
+        }
+    }
+    fn for_(var: &str, start: IRNode, end: IRNode, body: IRNode) -> IRNode {
+        IRNode::For {
+            var: var.into(),
+            start: Box::new(start),
+            end: Box::new(end),
+            body: Box::new(body),
+        }
+    }
+    /// The range-end form of `len`: the UnaryOp node,
+    /// which the Rust emitter renders WITHOUT the
+    /// `as i64` cast, so a For range over it binds the
+    /// loop variable as `usize` — the one index the
+    /// generated Rust can use (the G5 boundary).
+    fn len_u(x: IRNode) -> IRNode {
+        IRNode::UnaryOp(IRUnaryOp::Len, Box::new(x))
+    }
+    /// The value form of `len`: the Call, rendered
+    /// `(...).len() as i64` — an Int wherever an Int is
+    /// compared or stored.
+    fn len_c(x: IRNode) -> IRNode {
+        IRNode::Call {
+            function: "len".into(),
+            args: vec![x],
+        }
+    }
+    fn idx(coll: IRNode, index: IRNode) -> IRNode {
+        IRNode::Index(Box::new(coll), Box::new(index))
+    }
+    fn empty_list() -> IRNode {
+        IRNode::Collection {
+            kind: CollectionKind::List,
+            elements: vec![],
+        }
+    }
+    fn append_stmt(name: &str, item: IRNode) -> IRNode {
+        bop(IRBinOp::Append, v(name), item)
+    }
+    fn some(x: IRNode) -> IRNode {
+        IRNode::Call {
+            function: "Some".into(),
+            args: vec![x],
+        }
+    }
+    fn none() -> IRNode {
+        IRNode::Call {
+            function: "None".into(),
+            args: vec![],
+        }
+    }
+    fn ret(x: IRNode) -> IRNode {
+        IRNode::Return(Box::new(x))
+    }
+    fn list_ty() -> TypeRef {
+        TypeRef::List(Box::new(TypeRef::Int))
     }
     match name {
         // Crowned at library-build time in Phase 110 (seeded
@@ -1604,6 +1690,289 @@ fn shipped_body_native(name: &str) -> Option<IRNode> {
                 ),
             ],
         }),
+        // ── Phase 115: the List family ──────────────────
+        // list_is_empty is Tier-1: the equation seed's
+        // body — the row's own right-hand side, crowned
+        // by the pipeline exactly like its String sibling
+        // (Z3-Verified ∧ golden-exact; the crowning pin
+        // covers it with the other Tier-1 entries).
+        "list_is_empty" => Some(bop(
+            IRBinOp::Eq,
+            IRNode::Call {
+                function: "len".into(),
+                args: vec![v("xs")],
+            },
+            i(0),
+        )),
+        // The eleven Tier-2 entries: HAND bodies at the
+        // executed standard (STDLIB_SCOPE §2.6, D7a),
+        // shipped because the pipeline crowns no
+        // Verified body for any of them and its executed
+        // crowns are unstable samples (measured in
+        // Phase 115: `list_is_sorted`'s crown flips
+        // between the template scan at 9/9 and a
+        // constant-true body at 6/9 across runs), while
+        // the library ships pinned, deterministic data. Each body is written in the one
+        // vocabulary BOTH executed judges reach in full:
+        // For scans whose loop variable is the index
+        // (the compiled form's only usable index — the
+        // G5 boundary: generated Rust cannot index a Vec
+        // by an Int variable), Alloc/Assign accumulators,
+        // statement Append, and Int counters wherever an
+        // Int is compared or produced. The Phase 115 pin
+        // re-proves each body's executed-exactness on the
+        // full battery through both routes (the in-process
+        // interpreter — For arm, Phase 115 — and the
+        // compiled runner's rendering via production
+        // codegen + rustc). Verdicts are Inconclusive:
+        // element-level verification is the §3.9 wall,
+        // the post-1.0 encoder campaign's to close, with
+        // this family as its test corpus.
+        "list_reverse" => Some(block(vec![
+            alloc("out", list_ty(), empty_list()),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                append_stmt(
+                    "out",
+                    idx(
+                        v("xs"),
+                        bop(IRBinOp::Sub, bop(IRBinOp::Sub, len_u(v("xs")), i(1)), v("i")),
+                    ),
+                ),
+            ),
+            ret(v("out")),
+        ])),
+        "list_contains" => Some(block(vec![
+            alloc("found", TypeRef::Bool, boolean(false)),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                assign(
+                    "found",
+                    bop(
+                        IRBinOp::Or,
+                        v("found"),
+                        bop(IRBinOp::Eq, idx(v("xs"), v("i")), v("x")),
+                    ),
+                ),
+            ),
+            ret(v("found")),
+        ])),
+        "list_sum" => Some(block(vec![
+            alloc("acc", TypeRef::Int, i(0)),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                assign("acc", bop(IRBinOp::Add, v("acc"), idx(v("xs"), v("i")))),
+            ),
+            ret(v("acc")),
+        ])),
+        "list_product" => Some(block(vec![
+            alloc("acc", TypeRef::Int, i(1)),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                assign("acc", bop(IRBinOp::Mul, v("acc"), idx(v("xs"), v("i")))),
+            ),
+            ret(v("acc")),
+        ])),
+        "list_min" => Some(if_(
+            bop(IRBinOp::Eq, len_c(v("xs")), i(0)),
+            none(),
+            block(vec![
+                alloc("m", TypeRef::Int, idx(v("xs"), i(0))),
+                for_(
+                    "i",
+                    i(1),
+                    len_u(v("xs")),
+                    assign(
+                        "m",
+                        if_(
+                            bop(IRBinOp::Lt, idx(v("xs"), v("i")), v("m")),
+                            idx(v("xs"), v("i")),
+                            v("m"),
+                        ),
+                    ),
+                ),
+                ret(some(v("m"))),
+            ]),
+        )),
+        "list_max" => Some(if_(
+            bop(IRBinOp::Eq, len_c(v("xs")), i(0)),
+            none(),
+            block(vec![
+                alloc("m", TypeRef::Int, idx(v("xs"), i(0))),
+                for_(
+                    "i",
+                    i(1),
+                    len_u(v("xs")),
+                    assign(
+                        "m",
+                        if_(
+                            bop(IRBinOp::Gt, idx(v("xs"), v("i")), v("m")),
+                            idx(v("xs"), v("i")),
+                            v("m"),
+                        ),
+                    ),
+                ),
+                ret(some(v("m"))),
+            ]),
+        )),
+        "list_take" => Some(block(vec![
+            alloc("out", list_ty(), empty_list()),
+            alloc("k", TypeRef::Int, i(0)),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                block(vec![
+                    if_(
+                        bop(IRBinOp::Lt, v("k"), v("n")),
+                        append_stmt("out", idx(v("xs"), v("i"))),
+                        block(vec![]),
+                    ),
+                    assign("k", bop(IRBinOp::Add, v("k"), i(1))),
+                ]),
+            ),
+            ret(v("out")),
+        ])),
+        "list_drop" => Some(block(vec![
+            alloc("out", list_ty(), empty_list()),
+            alloc("k", TypeRef::Int, i(0)),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                block(vec![
+                    if_(
+                        bop(IRBinOp::Ge, v("k"), v("n")),
+                        append_stmt("out", idx(v("xs"), v("i"))),
+                        block(vec![]),
+                    ),
+                    assign("k", bop(IRBinOp::Add, v("k"), i(1))),
+                ]),
+            ),
+            ret(v("out")),
+        ])),
+        // The AdjacentScan shape (the standing template's
+        // construction, hand-written): accumulate the
+        // conjunction over adjacent pairs.
+        "list_is_sorted" => Some(block(vec![
+            alloc("ok", TypeRef::Bool, boolean(true)),
+            for_(
+                "i",
+                i(1),
+                len_u(v("xs")),
+                assign(
+                    "ok",
+                    bop(
+                        IRBinOp::And,
+                        v("ok"),
+                        bop(
+                            IRBinOp::Le,
+                            idx(v("xs"), bop(IRBinOp::Sub, v("i"), i(1))),
+                            idx(v("xs"), v("i")),
+                        ),
+                    ),
+                ),
+            ),
+            ret(v("ok")),
+        ])),
+        // Insertion sort: each element of xs is inserted
+        // into the accumulated sorted list at the first
+        // position whose element exceeds it (the position
+        // scan and the rebuild both count with Int
+        // counters alongside the For variables).
+        "list_sort" => Some(block(vec![
+            alloc("out", list_ty(), empty_list()),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                block(vec![
+                    alloc("x", TypeRef::Int, idx(v("xs"), v("i"))),
+                    alloc("pos", TypeRef::Int, len_c(v("out"))),
+                    alloc("k", TypeRef::Int, i(0)),
+                    for_(
+                        "j",
+                        i(0),
+                        len_u(v("out")),
+                        block(vec![
+                            if_(
+                                bop(
+                                    IRBinOp::And,
+                                    bop(IRBinOp::Eq, v("pos"), len_c(v("out"))),
+                                    bop(IRBinOp::Gt, idx(v("out"), v("j")), v("x")),
+                                ),
+                                assign("pos", v("k")),
+                                block(vec![]),
+                            ),
+                            assign("k", bop(IRBinOp::Add, v("k"), i(1))),
+                        ]),
+                    ),
+                    alloc("next", list_ty(), empty_list()),
+                    alloc("k2", TypeRef::Int, i(0)),
+                    for_(
+                        "j",
+                        i(0),
+                        len_u(v("out")),
+                        block(vec![
+                            if_(
+                                bop(IRBinOp::Eq, v("k2"), v("pos")),
+                                append_stmt("next", v("x")),
+                                block(vec![]),
+                            ),
+                            append_stmt("next", idx(v("out"), v("j"))),
+                            assign("k2", bop(IRBinOp::Add, v("k2"), i(1))),
+                        ]),
+                    ),
+                    if_(
+                        bop(IRBinOp::Eq, v("pos"), len_c(v("out"))),
+                        append_stmt("next", v("x")),
+                        block(vec![]),
+                    ),
+                    assign("out", v("next")),
+                ]),
+            ),
+            ret(v("out")),
+        ])),
+        // The G5 scope-around, as documented on the
+        // entry: a first-match scan (the While-form
+        // binary search cannot compile — generated Rust
+        // has no Int-variable index). The counter k is
+        // the Int the Some payload carries; the For
+        // variable is only ever the index.
+        "list_binary_search" => Some(block(vec![
+            alloc(
+                "res",
+                TypeRef::Option(Box::new(TypeRef::Int)),
+                none(),
+            ),
+            alloc("k", TypeRef::Int, i(0)),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                block(vec![
+                    if_(
+                        bop(
+                            IRBinOp::And,
+                            bop(IRBinOp::Eq, idx(v("xs"), v("i")), v("x")),
+                            bop(IRBinOp::Eq, v("res"), none()),
+                        ),
+                        assign("res", some(v("k"))),
+                        block(vec![]),
+                    ),
+                    assign("k", bop(IRBinOp::Add, v("k"), i(1))),
+                ]),
+            ),
+            ret(v("res")),
+        ])),
         _ => None,
     }
 }

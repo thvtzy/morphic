@@ -1,0 +1,70 @@
+// ─────────────────────────────────────────────────────────
+//  PLAYGROUND CORPUS — Phase 115 prelude case.
+//
+//  A user module that calls the Phase 115 standard-
+//  library List entries by plain name, with NO import,
+//  at their frozen signatures: list_is_empty and
+//  list_sum / list_min / list_is_sorted over List<Int>,
+//  list_binary_search under its sorted precondition.
+//  The prelude merge must accept it in CLI and WASM
+//  alike — in the WASM build the library arrives via
+//  the runtime asset (init_stdlib), so this case is
+//  also the asset path's end-to-end proof for the new
+//  entries. Pinned in cases.json (check).
+// ─────────────────────────────────────────────────────────
+
+Prelude115Proof {
+spec total_or_empty {
+    input: xs: List<Int>
+    output: Int
+
+    constraint: output == list_sum(xs)
+
+    test "typical" {
+        input: [1, 2, 3]
+        expect: 6
+    }
+
+    test "empty" {
+        input: []
+        expect: 0
+    }
+}
+
+spec smallest {
+    input: xs: List<Int>
+    output: Option<Int>
+
+    constraint: output == list_min(xs)
+    constraint: list_is_empty(xs) == (output == None())
+
+    test "typical" {
+        input: [3, 1, 4]
+        expect: Some(1)
+    }
+
+    test "empty" {
+        input: []
+        expect: None()
+    }
+}
+
+spec sorted_probe {
+    input: xs: List<Int>, x: Int
+    output: Option<Int>
+
+    require: list_is_sorted(xs)
+
+    constraint: output == list_binary_search(xs, x)
+
+    test "present" {
+        input: ([1, 3, 5], 3)
+        expect: Some(1)
+    }
+
+    test "absent" {
+        input: ([1, 3, 5], 4)
+        expect: None()
+    }
+}
+}

@@ -1,0 +1,332 @@
+// ─────────────────────────────────────────────────────────
+//  MORPHIC STANDARD LIBRARY — List module (Phase 115)
+//
+//  Prelude module like the Int/Char/String modules
+//  (decision D2a); bodies crowned at library-build time,
+//  shipped as data in src/stdlib.rs. The List family of
+//  the frozen scope (STDLIB_SCOPE.md §2.6) is TWO-TIER
+//  (decision D7a): `list_is_empty` is length-level and
+//  ships at the Tier-1 standard (Z3-Verified ∧ golden-
+//  exact, like its String sibling); the eleven element-
+//  level entries ship at the Tier-2 standard — executed-
+//  exact on the full battery, the tier printed in each
+//  entry's doc below — because the verifier binds a List
+//  parameter as its length only, so no element-level
+//  entry can Verify at any body quality until the §3.9
+//  list-element encoder lands post-1.0, with this
+//  library as its test corpus.
+//
+//  Every Tier-2 body is a hand body in the Phase 95
+//  statement vocabulary (While / Index / Append / Alloc
+//  / Assign), so both executed judges reach it in full:
+//  the in-process interpreter and the compiled runner.
+//  `list_sort`'s body is a hand insertion sort at the
+//  executed standard (the standing template body needs a
+//  comparator parameter this concrete entry does not
+//  have); `list_binary_search` ships a hand body per
+//  the G5 scope-around (§2.6). No entry's body calls
+//  another entry — each is self-contained, so a caller's
+//  inlining of it renders and executes standalone.
+// ─────────────────────────────────────────────────────────
+
+StdlibList {
+spec list_is_empty {
+    doc: "list_is_empty(xs) = true iff xs has no elements: len(xs) == 0 (STDLIB_SCOPE.md 2.6). Tier-1."
+
+    input: xs: List<Int>
+    output: Bool
+
+    constraint: output == (len(xs) == 0)
+
+    test "empty" { input: [] expect: true }
+
+    test "singleton" { input: [7] expect: false }
+
+    test "typical" { input: [1, 2, 3] expect: false }
+
+    test "zero is an element" { input: [0] expect: false }
+}
+
+spec list_reverse {
+    doc: "list_reverse(xs) = the elements of xs in reverse order; empty gives empty, a singleton gives itself (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>
+    output: List<Int>
+
+    constraint: len(output) == len(xs)
+    constraint: forall i: Int in range(len(xs)): output[i] == xs[(len(xs) - 1) - i]
+
+    test "empty" { input: [] expect: [] }
+
+    test "singleton" { input: [5] expect: [5] }
+
+    test "typical" { input: [1, 2, 3] expect: [3, 2, 1] }
+
+    test "duplicates" { input: [3, 1, 4, 1, 5] expect: [5, 1, 4, 1, 3] }
+
+    test "palindrome" { input: [1, 2, 1] expect: [1, 2, 1] }
+
+    test "negatives" { input: [0, (0 - 1), 2] expect: [2, (0 - 1), 0] }
+}
+
+spec list_contains {
+    doc: "list_contains(xs, x) = true iff some element of xs equals x; the empty list gives false (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>, x: Int
+    output: Bool
+
+    constraint: forall i: Int in range(len(xs)): xs[i] == x implies output == true
+    constraint: (forall i: Int in range(len(xs)): xs[i] != x) implies output == false
+
+    test "empty" { input: ([], 1) expect: false }
+
+    test "singleton hit" { input: ([5], 5) expect: true }
+
+    test "singleton miss" { input: ([5], 3) expect: false }
+
+    test "typical hit" { input: ([1, 2, 3], 2) expect: true }
+
+    test "typical miss" { input: ([1, 2, 3], 9) expect: false }
+
+    test "all duplicates" { input: ([2, 2, 2], 2) expect: true }
+
+    test "negative hit" { input: ([(0 - 3), 0, 7], (0 - 3)) expect: true }
+}
+
+spec list_sum {
+    doc: "list_sum(xs) = the sum of the elements of xs; the empty list gives 0. Arithmetic is the language's standing Int arithmetic (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>
+    output: Int
+
+    constraint: output == fold(xs, 0, |acc, v| acc + v)
+
+    test "empty" { input: [] expect: 0 }
+
+    test "singleton" { input: [5] expect: 5 }
+
+    test "typical" { input: [1, 2, 3] expect: 6 }
+
+    test "cancelling" { input: [(0 - 4), 4] expect: 0 }
+
+    test "mixed signs" { input: [10, (0 - 3), 7, (0 - 7)] expect: 7 }
+
+    test "int maximum alone" { input: [9223372036854775807] expect: 9223372036854775807 }
+
+    test "int minimum alone" { input: [(0 - 9223372036854775807 - 1)] expect: (0 - 9223372036854775807 - 1) }
+
+    test "extremes cancel" { input: [9223372036854775807, (0 - 9223372036854775807 - 1)] expect: (0 - 1) }
+}
+
+spec list_product {
+    doc: "list_product(xs) = the product of the elements of xs; the empty list gives 1, and any zero element gives 0 (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>
+    output: Int
+
+    constraint: output == fold(xs, 1, |acc, v| acc * v)
+
+    test "empty" { input: [] expect: 1 }
+
+    test "singleton" { input: [5] expect: 5 }
+
+    test "typical" { input: [2, 3, 4] expect: 24 }
+
+    test "zero element" { input: [0, 9223372036854775807] expect: 0 }
+
+    test "negative factor" { input: [(0 - 2), 3] expect: (0 - 6) }
+
+    test "two negatives" { input: [(0 - 1), (0 - 1)] expect: 1 }
+
+    test "ones" { input: [1, 1, 1] expect: 1 }
+
+    test "int minimum alone" { input: [(0 - 9223372036854775807 - 1)] expect: (0 - 9223372036854775807 - 1) }
+}
+
+spec list_min {
+    doc: "list_min(xs) = Some(m) with m the least element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>
+    output: Option<Int>
+
+    constraint: len(xs) == 0 implies output == None()
+    constraint: forall i: Int in range(len(xs)): output.is_none() || output.unwrap() <= xs[i]
+    constraint: output.is_some() implies exists i: Int in range(len(xs)): xs[i] == output.unwrap()
+
+    test "empty" { input: [] expect: None() }
+
+    test "singleton" { input: [5] expect: Some(5) }
+
+    test "typical" { input: [3, 1, 4] expect: Some(1) }
+
+    test "duplicates" { input: [2, 2] expect: Some(2) }
+
+    test "negatives" { input: [(0 - 5), 0, (0 - 9)] expect: Some((0 - 9)) }
+
+    test "extremes" { input: [9223372036854775807, (0 - 9223372036854775807 - 1)] expect: Some((0 - 9223372036854775807 - 1)) }
+}
+
+spec list_max {
+    doc: "list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>
+    output: Option<Int>
+
+    constraint: len(xs) == 0 implies output == None()
+    constraint: forall i: Int in range(len(xs)): output.is_none() || output.unwrap() >= xs[i]
+    constraint: output.is_some() implies exists i: Int in range(len(xs)): xs[i] == output.unwrap()
+
+    test "empty" { input: [] expect: None() }
+
+    test "singleton" { input: [5] expect: Some(5) }
+
+    test "typical" { input: [3, 1, 4] expect: Some(4) }
+
+    test "duplicates" { input: [2, 2] expect: Some(2) }
+
+    test "negatives" { input: [(0 - 5), (0 - 9)] expect: Some((0 - 5)) }
+
+    test "extremes" { input: [(0 - 9223372036854775807 - 1), 9223372036854775807] expect: Some(9223372036854775807) }
+}
+
+spec list_take {
+    doc: "list_take(xs, n) = the first n elements of xs, with n clamped into [0, len(xs)]: n <= 0 gives the empty list, n >= len(xs) gives xs unchanged (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>, n: Int
+    output: List<Int>
+
+    constraint: n <= 0 implies len(output) == 0
+    constraint: n >= len(xs) implies output == xs
+    constraint: (n > 0 && n < len(xs)) implies len(output) == n
+    constraint: forall i: Int in range(len(output)): output[i] == xs[i]
+
+    test "empty list" { input: ([], 3) expect: [] }
+
+    test "zero" { input: ([1, 2, 3], 0) expect: [] }
+
+    test "negative" { input: ([1, 2, 3], (0 - 2)) expect: [] }
+
+    test "typical" { input: ([1, 2, 3], 2) expect: [1, 2] }
+
+    test "exact length" { input: ([1, 2, 3], 3) expect: [1, 2, 3] }
+
+    test "beyond length" { input: ([1, 2, 3], 99) expect: [1, 2, 3] }
+
+    test "singleton" { input: ([5], 1) expect: [5] }
+}
+
+spec list_drop {
+    doc: "list_drop(xs, n) = xs without its first n elements, with n clamped into [0, len(xs)]: n <= 0 gives xs unchanged, n >= len(xs) gives the empty list (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>, n: Int
+    output: List<Int>
+
+    constraint: n <= 0 implies output == xs
+    constraint: n >= len(xs) implies len(output) == 0
+    constraint: (n > 0 && n < len(xs)) implies len(output) == len(xs) - n
+    constraint: forall i: Int in range(len(output)): n <= 0 implies output[i] == xs[i]
+    constraint: forall i: Int in range(len(output)): n > 0 implies output[i] == xs[i + n]
+
+    test "empty list" { input: ([], 3) expect: [] }
+
+    test "zero" { input: ([1, 2, 3], 0) expect: [1, 2, 3] }
+
+    test "negative" { input: ([1, 2, 3], (0 - 2)) expect: [1, 2, 3] }
+
+    test "typical" { input: ([1, 2, 3], 2) expect: [3] }
+
+    test "exact length" { input: ([1, 2, 3], 3) expect: [] }
+
+    test "beyond length" { input: ([1, 2, 3], 99) expect: [] }
+
+    test "singleton dropped" { input: ([5], 1) expect: [] }
+}
+
+spec list_is_sorted {
+    doc: "list_is_sorted(xs) = true iff xs is non-strictly ascending (every adjacent pair a <= b); the empty list and singletons give true. The library form of Appendix A's is_sorted (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>
+    output: Bool
+
+    constraint: len(xs) <= 1 implies output == true
+    constraint: forall i: Int in range(0, len(xs) - 1):
+        output == true implies xs[i] <= xs[i + 1]
+    constraint: forall i: Int in range(0, len(xs) - 1):
+        xs[i] > xs[i + 1] implies output == false
+
+    test "empty" { input: [] expect: true }
+
+    test "singleton" { input: [5] expect: true }
+
+    test "sorted" { input: [1, 2, 3] expect: true }
+
+    test "unsorted" { input: [3, 1, 2] expect: false }
+
+    test "all equal" { input: [5, 5, 5] expect: true }
+
+    test "plateau" { input: [1, 2, 2, 3] expect: true }
+
+    test "reverse sorted" { input: [3, 2, 1] expect: false }
+
+    test "negatives sorted" { input: [(0 - 2), (0 - 1), 0] expect: true }
+
+    test "late inversion" { input: [1, 3, 2] expect: false }
+}
+
+spec list_sort {
+    doc: "list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>
+    output: List<Int>
+
+    constraint: is_permutation(xs, output)
+    constraint: len(output) == len(xs)
+    constraint: forall i: Int, j: Int in range(len(output)): i < j implies output[i] <= output[j]
+
+    test "empty" { input: [] expect: [] }
+
+    test "singleton" { input: [5] expect: [5] }
+
+    test "typical" { input: [3, 1, 2] expect: [1, 2, 3] }
+
+    test "reverse sorted" { input: [5, 4, 3, 2, 1] expect: [1, 2, 3, 4, 5] }
+
+    test "duplicates" { input: [2, 2, 1, 1] expect: [1, 1, 2, 2] }
+
+    test "already sorted" { input: [1, 2, 3] expect: [1, 2, 3] }
+
+    test "negatives" { input: [(0 - 1), 5, (0 - 3), 0] expect: [(0 - 3), (0 - 1), 0, 5] }
+}
+
+spec list_binary_search {
+    doc: "list_binary_search(xs, x) = Some(i) with xs[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+
+    input: xs: List<Int>, x: Int
+    output: Option<Int>
+
+    require: list_is_sorted(xs)
+
+    constraint: output.is_none() || xs[output.unwrap()] == x
+    constraint: (forall i: Int in range(len(xs)): xs[i] != x) implies output == None()
+
+    test "empty" { input: ([], 5) expect: None() }
+
+    test "singleton hit" { input: ([5], 5) expect: Some(0) }
+
+    test "singleton miss" { input: ([5], 3) expect: None() }
+
+    test "at start" { input: ([1, 3, 5, 7, 9], 1) expect: Some(0) }
+
+    test "at end" { input: ([1, 3, 5, 7, 9], 9) expect: Some(4) }
+
+    test "in middle" { input: ([1, 3, 5, 7, 9], 7) expect: Some(3) }
+
+    test "between elements" { input: ([1, 3, 5, 7, 9], 4) expect: None() }
+
+    test "too small" { input: ([1, 3, 5, 7, 9], 0) expect: None() }
+
+    test "too large" { input: ([1, 3, 5, 7, 9], 10) expect: None() }
+
+    test "negatives" { input: ([(0 - 5), (0 - 1), 2, 8], (0 - 1)) expect: Some(1) }
+}
+}

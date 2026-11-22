@@ -17,7 +17,11 @@
 //!   does not ship, a named blocker recorded in the ROAD
 //!   Phase 111 note; Phase 112: `string_is_empty` and the
 //!   Result/Option entries `result_unwrap_or`,
-//!   `option_unwrap_or`, `option_ok_or`);
+//!   `option_unwrap_or`, `option_ok_or`; Phase 115:
+//!   `list_is_empty` at the same Tier-1 standard, plus
+//!   the eleven Tier-2 List entries, whose pin — the
+//!   two-tier standard of STDLIB_SCOPE §2.6 — lives in
+//!   tests/phase115_list.rs);
 //! * each entry's shipped body — crowned at library-build
 //!   time, shipped as data — judges Z3-Verified ∧
 //!   golden-exact against its own spec, and is the body the
@@ -152,7 +156,9 @@ fn bundled_library_parses_and_checks_standalone() {
     // The shipped entries, in module order (Phase 110:
     // int_abs alone; Phase 111: the Int family completed
     // minus the blocked int_gcd, plus the Char family;
-    // Phase 112: String basics and Result/Option).
+    // Phase 112: String basics and Result/Option;
+    // Phase 115: the List family — list_is_empty Tier-1
+    // plus the eleven Tier-2 entries).
     let specs = stdlib::prelude_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
@@ -175,6 +181,18 @@ fn bundled_library_parses_and_checks_standalone() {
             "result_unwrap_or",
             "option_unwrap_or",
             "option_ok_or",
+            "list_is_empty",
+            "list_reverse",
+            "list_contains",
+            "list_sum",
+            "list_product",
+            "list_min",
+            "list_max",
+            "list_take",
+            "list_drop",
+            "list_is_sorted",
+            "list_sort",
+            "list_binary_search",
         ]
     );
     let abs = &specs[0];
@@ -202,6 +220,19 @@ fn bundled_library_parses_and_checks_standalone() {
     let unwrap_or = &specs[14];
     assert_eq!(unwrap_or.params[0].ty.to_string(), "Result<Int, String>");
     assert_eq!(unwrap_or.return_type.to_string(), "Int");
+    // Spot-check the Phase 115 signatures against the
+    // frozen scope (§2.6).
+    let is_empty = &specs[17];
+    assert_eq!(is_empty.params[0].ty.to_string(), "List<Int>");
+    assert_eq!(is_empty.return_type.to_string(), "Bool");
+    let list_min = &specs[22];
+    assert_eq!(list_min.return_type.to_string(), "Option<Int>");
+    let bsearch = &specs[28];
+    assert_eq!(bsearch.params.len(), 2);
+    assert_eq!(bsearch.params[1].ty.to_string(), "Int");
+    assert_eq!(bsearch.return_type.to_string(), "Option<Int>");
+    // The frozen precondition: the list is sorted.
+    assert_eq!(bsearch.preconditions.len(), 1);
 }
 
 fn chr(c: char) -> IRNode {
@@ -363,6 +394,15 @@ fn expected_body(name: &str) -> IRNode {
                 ),
             ],
         },
+        // Phase 115: the equation seed's body — the row's
+        // own right-hand side, like its String sibling.
+        // (The eleven Tier-2 List bodies are pinned in
+        // tests/phase115_list.rs, at their own standard.)
+        "list_is_empty" => bin(
+            IRBinOp::Eq,
+            IRNode::Call { function: "len".into(), args: vec![var("xs")] },
+            int(0),
+        ),
         other => panic!("no expected body for {other}"),
     }
 }
@@ -390,12 +430,24 @@ const BATTERIES: &[(&str, usize, usize, usize)] = &[
     ("result_unwrap_or", 6, 6, 0),
     ("option_unwrap_or", 5, 5, 0),
     ("option_ok_or", 4, 4, 0),
+    ("list_is_empty", 4, 4, 0),
 ];
 
 #[test]
 fn shipped_body_judges_verified_and_golden_exact() {
     let specs = stdlib::prelude_specs();
-    assert_eq!(specs.len(), BATTERIES.len());
+    // BATTERIES names the Tier-1 entries (plus the
+    // spine's int_abs) — a subset of the prelude since
+    // Phase 115 added the Tier-2 List entries, whose
+    // standard is executed-exactness, not this pin's
+    // Verified ∧ golden-exact (their pin is
+    // tests/phase115_list.rs).
+    for (name, ..) in BATTERIES {
+        assert!(
+            specs.iter().any(|s| &s.name == name),
+            "{name}: a Tier-1 entry of the prelude"
+        );
+    }
     for (name, evaluable, total, silent) in BATTERIES {
         let spec = specs.iter().find(|s| &s.name == name).unwrap();
         let body = stdlib::shipped_body(name)
@@ -443,9 +495,32 @@ fn shipped_body_judges_verified_and_golden_exact() {
 /// `int_abs`; extended to the whole library in Phase
 /// 111): the production pipeline (seeded profile,
 /// seed 42) crowns EXACTLY the shipped body for every
-/// entry of every bundled module — if the engine's crown
-/// ever moves, the library is re-crowned and the data
-/// updated, in the open.
+/// Tier-1 entry of every bundled module — if the
+/// engine's crown ever moves, the library is re-crowned
+/// and the data updated, in the open. (The Tier-2 List
+/// entries are the recorded exception, TIER2_ENTRIES
+/// below: no pipeline crown is claimed for them.)
+/// The Tier-2 List entries (STDLIB_SCOPE §2.6): the
+/// pipeline crowns no executed-exact body for any of
+/// them (Phase 115's measurement), so this pin — which
+/// holds Tier-1 entries to "the pipeline crowns the
+/// shipped body, Verified" — does not extend over them;
+/// their shipped hand bodies are pinned at the Tier-2
+/// standard in tests/phase115_list.rs.
+const TIER2_ENTRIES: &[&str] = &[
+    "list_reverse",
+    "list_contains",
+    "list_sum",
+    "list_product",
+    "list_min",
+    "list_max",
+    "list_take",
+    "list_drop",
+    "list_is_sorted",
+    "list_sort",
+    "list_binary_search",
+];
+
 #[cfg(feature = "z3-support")]
 #[test]
 fn pipeline_crowns_the_shipped_body_for_the_entry() {
@@ -453,6 +528,9 @@ fn pipeline_crowns_the_shipped_body_for_the_entry() {
         let module = parser::parse(source).expect("library module parses");
         for spec in &module.functions {
             let name = &spec.name;
+            if TIER2_ENTRIES.contains(&name.as_str()) {
+                continue;
+            }
             let report = api::synthesize_seeded_spec(source, name, 42)
                 .unwrap_or_else(|e| panic!("{module_name}/{name}: pipeline run: {e:?}"));
             let shipped = stdlib::shipped_body(name)
