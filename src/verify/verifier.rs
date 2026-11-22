@@ -309,8 +309,9 @@ enum Tri {
 // free Z3 constants, mirroring the evaluable subset of the IR
 // interpreter (synthesis/eval.rs) construct by construct:
 //
-//   Literal, Var, BinOp, UnaryOp (Neg/Not/Abs/Len), If, Match
-//   (literal/variable/wildcard patterns), Let, Block, Return,
+//   Literal, Var, BinOp, UnaryOp (Neg/Not/Abs/Len/Clone), If, Match
+//   (literal/variable/wildcard patterns, and constructor
+//   patterns over Option/Result — Phase 91), Let, Block, Return,
 //   Call ("len", the "List" literal, the Ok/Err/Some/None
 //   constructors, and — when the verifier carries the module —
 //   calls to other specs, inlined), Collection, Index, Typed,
@@ -318,9 +319,9 @@ enum Tri {
 //
 // Anything else — holes, loops, mutation, lambdas and other
 // function values, higher-order combinators, calls that do
-// not resolve, guard/constructor patterns that cannot be
-// decided — makes the body unencodable (`None`), never a
-// guessed value.
+// not resolve, guard patterns, and constructor patterns
+// outside the tag+payload model — makes the body unencodable
+// (`None`), never a guessed value.
 //
 // Representable sorts are Int, Bool and String, plus literal
 // lists of representable values (needed for len/Index over
@@ -861,12 +862,23 @@ fn sym_literal(lit: &IRLiteral) -> Option<Sym> {
 }
 
 /// Symbolic match, folded into nested `ite`s from the last arm
-/// backwards. Mirrors the interpreter: arms are tried in order,
-/// constructor patterns never match a value in this domain,
-/// guard patterns are undecidable. The last reachable arm
-/// must be unconditional (wildcard/variable) — otherwise some
-/// scrutinee values match nothing and the body has no defined
-/// output, which is unencodable rather than a guess.
+/// backwards. Arms are tried in order, guard patterns are
+/// undecidable. The last reachable arm must be unconditional
+/// (wildcard/variable) — otherwise some scrutinee values match
+/// nothing and the body has no defined output, which is
+/// unencodable rather than a guess.
+///
+/// Constructor patterns (Phase 91, W2) encode against the
+/// Phase 76 tag+payload model: `Some`/`None` over an Option
+/// scrutinee, `Ok`/`Err` over a Result scrutinee — the arm's
+/// condition is the tag side it discriminates, and a
+/// Variable/Wildcard sub-pattern binds the payload. A
+/// constructor match with no unconditional arm is still
+/// encodable when live arms jointly cover both tag sides:
+/// the folded value's fallback is then unreachable by
+/// construction. Anything further declines — a constructor
+/// of the other tagged form, a nested sub-pattern, a
+/// payload pattern against a slot that carries none.
 #[cfg(feature = "z3-support")]
 fn sym_match(
     scrutinee: &IRNode,
@@ -877,6 +889,11 @@ fn sym_match(
     let scrut = sym_eval(scrutinee, env, ctx)?;
     // (condition, value) per arm; condition None = unconditional.
     let mut arms: Vec<(Option<z3::ast::Bool>, Sym)> = Vec::new();
+    // Tag-side coverage from constructor arms (Phase 91):
+    // a free-tag scrutinee is exhausted once live arms
+    // discriminate both of its sides.
+    let mut covers_pos = false;
+    let mut covers_neg = false;
     for (pattern, body) in cases {
         match pattern {
             IRPattern::Wildcard => {
@@ -900,12 +917,55 @@ fn sym_match(
                     PatternCond::Undecidable => return None,
                 }
             }
-            IRPattern::Constructor(..) => continue,
+            IRPattern::Constructor(name, pargs) => {
+                match sym_constructor_arm(&scrut, name) {
+                    // The scrutinee never carries this
+                    // constructor: the arm is dead, exactly
+                    // like a Never literal.
+                    CtorArm::Dead => continue,
+                    CtorArm::Unsupported => return None,
+                    CtorArm::Live {
+                        cond,
+                        payload,
+                        side,
+                    } => {
+                        let mut inner = env.clone();
+                        match (pargs.len(), &payload) {
+                            (0, _) => {}
+                            (1, Some(p)) => match &pargs[0] {
+                                IRPattern::Variable(n) => {
+                                    inner.insert(n.clone(), p.clone());
+                                }
+                                IRPattern::Wildcard => {}
+                                // A nested sub-pattern is
+                                // outside the tag+payload
+                                // model: decline.
+                                _ => return None,
+                            },
+                            // A payload pattern against a
+                            // slot that carries none (or an
+                            // arity the constructors do not
+                            // have): decline.
+                            _ => return None,
+                        }
+                        let value = sym_eval(body, &mut inner, ctx)?;
+                        match side {
+                            TagSide::Pos => covers_pos = true,
+                            TagSide::Neg => covers_neg = true,
+                        }
+                        let unconditional = cond.is_none();
+                        arms.push((cond, value));
+                        if unconditional {
+                            break; // later arms are unreachable
+                        }
+                    }
+                }
+            }
             IRPattern::Guard(..) => return None,
         }
     }
     let (last_cond, last_val) = arms.pop()?;
-    if last_cond.is_some() {
+    if last_cond.is_some() && !(covers_pos && covers_neg) {
         return None; // the match can fall through
     }
     let mut acc = last_val;
@@ -914,6 +974,88 @@ fn sym_match(
         acc = sym_ite(&cond, val, acc)?;
     }
     Some(acc)
+}
+
+/// Which side of a tagged scrutinee a constructor
+/// discriminates (Phase 91): the payload side (`Some`/`Ok`)
+/// or the empty side (`None`/`Err`).
+#[cfg(feature = "z3-support")]
+#[derive(Clone, Copy)]
+enum TagSide {
+    Pos,
+    Neg,
+}
+
+/// A constructor pattern read against a scrutinee value
+/// (Phase 91, W2).
+#[cfg(feature = "z3-support")]
+enum CtorArm {
+    /// The scrutinee's tag is literally the other
+    /// constructor: this arm can never match.
+    Dead,
+    /// The arm discriminates this side of the tag: `cond`
+    /// is the tag condition (None when the tag is
+    /// literally this constructor, making the arm
+    /// unconditional), `payload` is the value the
+    /// constructor carries (None for the nullary
+    /// constructor), and `side` is the tag side the arm
+    /// covers toward exhaustiveness.
+    Live {
+        cond: Option<z3::ast::Bool>,
+        payload: Option<Sym>,
+        side: TagSide,
+    },
+    /// A constructor/scrutinee pairing the Sym model does
+    /// not represent (the other tagged form's constructor,
+    /// an unknown constructor, a non-tagged scrutinee):
+    /// unencodable.
+    Unsupported,
+}
+
+#[cfg(feature = "z3-support")]
+fn sym_constructor_arm(scrut: &Sym, name: &str) -> CtorArm {
+    // (tag, payload slot, side) for the constructor over
+    // this scrutinee form. The payload slot follows the
+    // Sym invariants: it is present whenever the tag can
+    // be this constructor, absent only under the opposing
+    // literal tag — exactly the Dead case below.
+    let (tag, payload, side) = match (scrut, name) {
+        (Sym::Option { some, payload }, "Some") => {
+            (some, payload.as_deref().cloned(), TagSide::Pos)
+        }
+        (Sym::Option { some, .. }, "None") => (some, None, TagSide::Neg),
+        (Sym::Result { ok, ok_payload, .. }, "Ok") => {
+            (ok, ok_payload.as_deref().cloned(), TagSide::Pos)
+        }
+        (Sym::Result { ok, err_payload, .. }, "Err") => {
+            (ok, err_payload.as_deref().cloned(), TagSide::Neg)
+        }
+        _ => return CtorArm::Unsupported,
+    };
+    match (tag, side) {
+        // The tag is literally this constructor: the arm
+        // matches unconditionally.
+        (Tag::True, TagSide::Pos) | (Tag::False, TagSide::Neg) => CtorArm::Live {
+            cond: None,
+            payload,
+            side,
+        },
+        // The tag is literally the other constructor:
+        // dead arm.
+        (Tag::True, TagSide::Neg) | (Tag::False, TagSide::Pos) => CtorArm::Dead,
+        // A free tag: the arm matches under the tag term
+        // (negated on the empty side).
+        (Tag::Free(t), TagSide::Pos) => CtorArm::Live {
+            cond: Some(t.clone()),
+            payload,
+            side,
+        },
+        (Tag::Free(t), TagSide::Neg) => CtorArm::Live {
+            cond: Some(t.not()),
+            payload,
+            side,
+        },
+    }
 }
 
 #[cfg(feature = "z3-support")]
@@ -1123,6 +1265,22 @@ fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
         (Sym::Char(x), Sym::Char(y)) => Some(Sym::Char(cond.ite(&x, &y))),
         (Sym::CharStr(x), Sym::CharStr(y)) => Some(Sym::CharStr(cond.ite(&x, &y))),
         (Sym::ListLen(x), Sym::ListLen(y)) => Some(Sym::ListLen(cond.ite(&x, &y))),
+        (Sym::List(x), Sym::List(y)) => {
+            // Two concrete lists merge elementwise (Phase
+            // 91, W4; the Phase 90 probe's p90_ite arm,
+            // promoted). The merged list has a definite
+            // length only when both sides agree on it —
+            // unequal lengths decline rather than invent
+            // one.
+            if x.len() != y.len() {
+                return None;
+            }
+            let mut out = Vec::with_capacity(x.len());
+            for (u, v) in x.into_iter().zip(y) {
+                out.push(sym_ite(cond, u, v)?);
+            }
+            Some(Sym::List(out))
+        }
         (Sym::Opaque, Sym::Opaque) => Some(Sym::Opaque),
         (
             Sym::Record {
@@ -1257,6 +1415,23 @@ fn sym_binop(kind: BinKind, l: Sym, r: Sym) -> Option<Sym> {
         (Append, Sym::List(mut a), item) => {
             a.push(item);
             Some(Sym::List(a))
+        }
+        // Append over a length-only list (Phase 91, W5):
+        // the elements are unmodelled, but the length is
+        // exact — appending one element grows it by one,
+        // whatever the element is.
+        (Append, Sym::ListLen(n), _) => {
+            Some(Sym::ListLen(z3_add(&n, &z3::ast::Int::from_i64(1))))
+        }
+        // Append of an indexed char onto a string (Phase
+        // 91, W5): the lexeme shape. The CharStr form is
+        // already the character as a length-≤1 string, so
+        // concatenation is the append — including the
+        // bridge's out-of-bounds totalization (the empty
+        // string appends nothing, as an out-of-bounds
+        // index denotes no character).
+        (Append, Sym::Str(a), Sym::CharStr(b)) => {
+            Some(Sym::Str(z3::ast::String::concat(&[&a, &b])))
         }
         // Char comparisons (Phase 76, D5a): scalar order on
         // the Int sort. Arithmetic on Chars does not exist
@@ -1591,7 +1766,12 @@ fn sym_unary_ir(op: IRUnaryOp, v: Sym) -> Option<Sym> {
         IRUnaryOp::Not => sym_not(v),
         IRUnaryOp::Abs => sym_abs(v),
         IRUnaryOp::Len => sym_len(v),
-        // Head/Tail/Init/Last/Reverse/Clone are outside the
+        // Clone (Phase 91, W3): a value copy. Sym terms
+        // are immutable values, so the copy IS the value —
+        // the identity is the exact symbolic semantics
+        // (the Phase 90 probe's clone elision, promoted).
+        IRUnaryOp::Clone => Some(v),
+        // Head/Tail/Init/Last/Reverse are outside the
         // interpreter's evaluable subset too.
         _ => None,
     }
@@ -4939,6 +5119,459 @@ spec guarded {
             verifier.verify_one(&cand, &hand).status,
             VerificationStatus::Inconclusive,
             "unwrap of a literal Err is unencodable by construction"
+        );
+    }
+
+    // ────────────────────────────────────────────────────
+    // Phase 91 — ENCODER EXTENSION small arms.
+    //
+    // The four S-priced arms of ENCODER_EXTENSION_DESIGN.md
+    // §4, promoted from the Phase 90 probes that measured
+    // their boundaries in situ (p90_match's constructor
+    // arms, the probe's Clone elision, p90_ite's (List,
+    // List) arm, p90_append's ListLen and (Str, CharStr)
+    // forms):
+    //   W2  constructor-pattern arms in sym_match, against
+    //       the Phase 76 tag+payload Sym model;
+    //   W3  UnaryOp::Clone as the identity in sym_unary_ir;
+    //   W4  a (List, List) elementwise arm in sym_ite;
+    //   W5  Append over ListLen (n → n+1) and (Str,
+    //       CharStr) concat in sym_binop.
+    // Each test pins the flip (a body that was Inconclusive
+    // now judges), the teeth (a wrong body Refutes — never
+    // Proven), and the declines (shapes the Sym model
+    // cannot represent exactly stay Inconclusive).
+    // ────────────────────────────────────────────────────
+
+    #[cfg(feature = "z3-support")]
+    const PHASE91_MODULE: &str = r#"
+Phase91Arms {
+
+spec opt_flag {
+    input: o: Option<Int>
+    output: Int
+
+    constraint: o==None()||output==1
+    constraint: o!=None()||output==0
+}
+
+spec opt_id {
+    input: o: Option<Int>
+    output: Option<Int>
+
+    constraint: output==o
+}
+
+spec res_or_zero {
+    input: r: Result<Int, String>
+    output: Int
+
+    constraint: r.is_err()||output==r.unwrap()
+    constraint: r.is_ok()||output==0
+}
+
+spec clone_id {
+    input: x: Int
+    output: Int
+
+    constraint: output==x
+}
+
+spec pick_first {
+    input: b: Bool
+    output: Int
+
+    constraint: b==false||output==1
+    constraint: b==true||output==3
+}
+
+spec push_len {
+    input: xs: List<Int>
+    output: Int
+
+    constraint: output==len(xs)+1
+}
+
+spec grow_first {
+    input: s: String
+    output: String
+
+    constraint: len(s)==0||len(output)==len(s)+1
+}
+
+}
+"#;
+
+    #[cfg(feature = "z3-support")]
+    fn load_phase91_module() -> Spec {
+        let parsed = crate::spec::parser::parse(PHASE91_MODULE)
+            .expect("phase 91 module parses");
+        crate::spec::typeck::check(parsed)
+            .expect("phase 91 module typechecks")
+            .spec
+    }
+
+    #[cfg(feature = "z3-support")]
+    fn ctor(name: &str, pargs: Vec<IRPattern>, body: IRNode) -> (IRPattern, IRNode) {
+        (IRPattern::Constructor(name.into(), pargs), body)
+    }
+
+    #[cfg(feature = "z3-support")]
+    fn call(name: &str, args: Vec<IRNode>) -> IRNode {
+        IRNode::Call {
+            function: name.into(),
+            args,
+        }
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase91_constructor_match_option_arms_verify_and_refute() {
+        let module = load_phase91_module();
+        let flag = restored_spec(&module, "opt_flag");
+        // The canonical shape the Phase 90 probe priced
+        // (p90_match): discriminate on the tag. Production
+        // sym_match skipped Constructor arms wholesale, so
+        // this body was Inconclusive before the arm.
+        let good = match_on(
+            var("o"),
+            vec![
+                ctor("Some", vec![IRPattern::Wildcard], int(1)),
+                ctor("None", vec![], int(0)),
+            ],
+        );
+        assert_eq!(status_of(flag, good), VerificationStatus::Verified);
+        // Teeth: swapped arms are a different function —
+        // Refuted, not Proven and not merely unjudged.
+        let swapped = match_on(
+            var("o"),
+            vec![
+                ctor("Some", vec![IRPattern::Wildcard], int(0)),
+                ctor("None", vec![], int(1)),
+            ],
+        );
+        assert_eq!(
+            status_of(flag, swapped),
+            VerificationStatus::VerificationFailed
+        );
+
+        // The payload bind is load-bearing: the identity
+        // over Option through a constructor match verifies
+        // only if the bound name denotes the Some payload
+        // itself.
+        let id = restored_spec(&module, "opt_id");
+        let good_id = match_on(
+            var("o"),
+            vec![
+                ctor(
+                    "Some",
+                    vec![IRPattern::Variable("x".into())],
+                    call("Some", vec![var("x")]),
+                ),
+                ctor("None", vec![], call("None", vec![])),
+            ],
+        );
+        assert_eq!(status_of(id, good_id), VerificationStatus::Verified);
+        // Teeth: a fabricated payload refutes.
+        let fabricated = match_on(
+            var("o"),
+            vec![
+                ctor(
+                    "Some",
+                    vec![IRPattern::Variable("x".into())],
+                    call("Some", vec![int(0)]),
+                ),
+                ctor("None", vec![], call("None", vec![])),
+            ],
+        );
+        assert_eq!(
+            status_of(id, fabricated),
+            VerificationStatus::VerificationFailed
+        );
+        // Teeth: arms landing on the wrong tag side
+        // refute (each side builds the other constructor).
+        let wrong_side = match_on(
+            var("o"),
+            vec![
+                ctor(
+                    "Some",
+                    vec![IRPattern::Variable("x".into())],
+                    call("None", vec![]),
+                ),
+                ctor("None", vec![], call("Some", vec![int(0)])),
+            ],
+        );
+        assert_eq!(
+            status_of(id, wrong_side),
+            VerificationStatus::VerificationFailed
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase91_constructor_match_result_arms_verify_and_refute() {
+        let module = load_phase91_module();
+        let spec = restored_spec(&module, "res_or_zero");
+        let good = match_on(
+            var("r"),
+            vec![
+                ctor("Ok", vec![IRPattern::Variable("x".into())], var("x")),
+                ctor("Err", vec![IRPattern::Wildcard], int(0)),
+            ],
+        );
+        assert_eq!(status_of(spec, good), VerificationStatus::Verified);
+        // Teeth: dropping the Ok payload refutes — row 1
+        // reads it back through unwrap.
+        let dropped = match_on(
+            var("r"),
+            vec![
+                ctor("Ok", vec![IRPattern::Wildcard], int(0)),
+                ctor("Err", vec![IRPattern::Wildcard], int(0)),
+            ],
+        );
+        assert_eq!(
+            status_of(spec, dropped),
+            VerificationStatus::VerificationFailed
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase91_constructor_match_declines_stay_inconclusive() {
+        let module = load_phase91_module();
+        let flag = restored_spec(&module, "opt_flag");
+        // A match that can fall through (no None arm, no
+        // unconditional arm) has no defined output on the
+        // missing side: unencodable, as before.
+        let fallthrough = match_on(
+            var("o"),
+            vec![ctor("Some", vec![IRPattern::Wildcard], int(1))],
+        );
+        assert_eq!(
+            status_of(flag, fallthrough),
+            VerificationStatus::Inconclusive
+        );
+        // A nested sub-pattern (a literal inside Some) is
+        // outside the tag+payload model: decline, never an
+        // approximation.
+        let nested = match_on(
+            var("o"),
+            vec![
+                ctor(
+                    "Some",
+                    vec![IRPattern::Literal(IRLiteral::Int(5))],
+                    int(1),
+                ),
+                ctor("None", vec![], int(0)),
+            ],
+        );
+        assert_eq!(
+            status_of(flag, nested),
+            VerificationStatus::Inconclusive
+        );
+        // A constructor of the other tagged form over an
+        // Option scrutinee has no Sym representation:
+        // decline.
+        let wrong_form = match_on(
+            var("o"),
+            vec![
+                ctor("Ok", vec![IRPattern::Variable("x".into())], int(1)),
+                ctor("None", vec![], int(0)),
+            ],
+        );
+        assert_eq!(
+            status_of(flag, wrong_form),
+            VerificationStatus::Inconclusive
+        );
+    }
+
+    /// The headline shape: a Match over `peek(state)`
+    /// itself — the canonical loop-condition form of the
+    /// tokenizer bodies (design doc W2). The scrutinee is
+    /// an inlined callee value (a free-tag Option built by
+    /// ite), and the match rebuilds it arm by arm; peek's
+    /// rows pin the output exactly, so the identity over
+    /// peek must Verify outright.
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase91_match_over_peek_call_verifies() {
+        let module = load_restored_module();
+        let spec = restored_spec(&module, "peek");
+        let verifier = Verifier::with_module(&module);
+        let body = match_on(
+            call("peek", vec![var("state")]),
+            vec![
+                ctor(
+                    "Some",
+                    vec![IRPattern::Variable("ch".into())],
+                    call("Some", vec![var("ch")]),
+                ),
+                ctor("None", vec![], call("None", vec![])),
+            ],
+        );
+        let cand = candidate(spec, 91, body);
+        assert_eq!(
+            verifier.verify_one(&cand, spec).status,
+            VerificationStatus::Verified,
+            "match over peek(state) must verify once constructor arms encode"
+        );
+        // Teeth: the same match with the arms' values
+        // exchanged is a different function — Refuted.
+        let swapped = match_on(
+            call("peek", vec![var("state")]),
+            vec![
+                ctor(
+                    "Some",
+                    vec![IRPattern::Variable("ch".into())],
+                    call("None", vec![]),
+                ),
+                ctor(
+                    "None",
+                    vec![],
+                    call("Some", vec![IRNode::Literal(IRLiteral::Char('x'))]),
+                ),
+            ],
+        );
+        let cand = candidate(spec, 91, swapped);
+        assert_eq!(
+            verifier.verify_one(&cand, spec).status,
+            VerificationStatus::VerificationFailed
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase91_clone_is_the_identity() {
+        let module = load_phase91_module();
+        let spec = restored_spec(&module, "clone_id");
+        // The probe's Clone elision, promoted: a value
+        // copy is the value (Sym terms are immutable), so
+        // Clone(x) judges exactly as x does. Before the
+        // arm this body was Inconclusive.
+        let cloned = IRNode::UnaryOp(IRUnaryOp::Clone, Box::new(var("x")));
+        assert_eq!(status_of(spec, cloned), VerificationStatus::Verified);
+        // Teeth: a clone of a different value is that
+        // value, not x — Refuted.
+        let cloned_other = IRNode::UnaryOp(
+            IRUnaryOp::Clone,
+            Box::new(binop(IRBinOp::Add, var("x"), int(1))),
+        );
+        assert_eq!(
+            status_of(spec, cloned_other),
+            VerificationStatus::VerificationFailed
+        );
+        // Clone composes over a compound value: cloning
+        // peek's result whole still verifies against
+        // peek's rows (the hand bodies' `peek(Clone …)`
+        // shape family).
+        let module = load_restored_module();
+        let peek = restored_spec(&module, "peek");
+        let verifier = Verifier::with_module(&module);
+        let body = IRNode::UnaryOp(
+            IRUnaryOp::Clone,
+            Box::new(call("peek", vec![var("state")])),
+        );
+        let cand = candidate(peek, 91, body);
+        assert_eq!(
+            verifier.verify_one(&cand, peek).status,
+            VerificationStatus::Verified
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase91_ite_merges_concrete_lists_elementwise() {
+        let module = load_phase91_module();
+        let spec = restored_spec(&module, "pick_first");
+        let list = |items: Vec<i64>| call("List", items.into_iter().map(int).collect());
+        let pick = |then_items: Vec<i64>, else_items: Vec<i64>| {
+            IRNode::Index(
+                Box::new(IRNode::If {
+                    condition: Box::new(var("b")),
+                    then_branch: Box::new(list(then_items)),
+                    else_branch: Box::new(list(else_items)),
+                }),
+                Box::new(int(0)),
+            )
+        };
+        // Merging two concrete lists elementwise is what
+        // a state record's carried list field needs; with
+        // no (List, List) arm the If was unencodable.
+        assert_eq!(
+            status_of(spec, pick(vec![1, 2], vec![3, 4])),
+            VerificationStatus::Verified
+        );
+        // Teeth: branches exchanged — Refuted.
+        assert_eq!(
+            status_of(spec, pick(vec![3, 4], vec![1, 2])),
+            VerificationStatus::VerificationFailed
+        );
+        // Decline: lists of different lengths have no
+        // merged length — the arm must not invent one.
+        assert_eq!(
+            status_of(spec, pick(vec![1, 2], vec![3, 4, 5])),
+            VerificationStatus::Inconclusive
+        );
+    }
+
+    #[cfg(feature = "z3-support")]
+    #[test]
+    fn phase91_append_arms_length_and_charstr() {
+        let module = load_phase91_module();
+        // Length-only: a List parameter binds as ListLen;
+        // Append grows the length by exactly one, whatever
+        // the (unmodelled) elements are.
+        let spec = restored_spec(&module, "push_len");
+        let grown = call("len", vec![binop(IRBinOp::Append, var("xs"), int(7))]);
+        assert_eq!(status_of(spec, grown), VerificationStatus::Verified);
+        // Teeth: two appends grow by two — Refuted
+        // against the +1 row; zero appends likewise.
+        let twice = call(
+            "len",
+            vec![binop(
+                IRBinOp::Append,
+                binop(IRBinOp::Append, var("xs"), int(7)),
+                int(8),
+            )],
+        );
+        assert_eq!(
+            status_of(spec, twice),
+            VerificationStatus::VerificationFailed
+        );
+        assert_eq!(
+            status_of(spec, call("len", vec![var("xs")])),
+            VerificationStatus::VerificationFailed
+        );
+
+        // (Str, CharStr): the lexeme shape — a string
+        // grown by an indexed char grows by that char
+        // (the bridge's totalization: at an empty string
+        // the indexed char is empty and nothing grows —
+        // the row's len(s)==0 guard states exactly that).
+        let spec = restored_spec(&module, "grow_first");
+        let body = binop(
+            IRBinOp::Append,
+            var("s"),
+            IRNode::Index(Box::new(var("s")), Box::new(int(0))),
+        );
+        assert_eq!(status_of(spec, body), VerificationStatus::Verified);
+        // Teeth: the string alone does not grow — Refuted.
+        assert_eq!(
+            status_of(spec, var("s")),
+            VerificationStatus::VerificationFailed
+        );
+        // Decline: appending a Char SCALAR (not the
+        // bridge's CharStr form) is not one of this
+        // phase's arms — it stays unencodable rather
+        // than guessing a conversion.
+        let scalar = binop(
+            IRBinOp::Append,
+            var("s"),
+            IRNode::Literal(IRLiteral::Char('x')),
+        );
+        assert_eq!(
+            status_of(spec, scalar),
+            VerificationStatus::Inconclusive
         );
     }
 

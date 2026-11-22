@@ -453,6 +453,11 @@ fn abs_match(
     // also builds the Z3 condition, but encodability turns
     // only on its existence.
     let mut arms: Vec<(bool, Abs)> = Vec::new();
+    // Tag-side coverage from constructor arms (Phase 91),
+    // mirroring sym_match: a free-tag scrutinee is
+    // exhausted once live arms discriminate both sides.
+    let mut covers_pos = false;
+    let mut covers_neg = false;
     for (pattern, body) in cases {
         match pattern {
             IRPattern::Wildcard => {
@@ -474,12 +479,47 @@ fn abs_match(
                 PatternCond::Never => continue,
                 PatternCond::Undecidable => return None,
             },
-            IRPattern::Constructor(..) => continue,
+            IRPattern::Constructor(name, pargs) => {
+                match abs_constructor_arm(&scrut, name) {
+                    // The scrutinee never carries this
+                    // constructor: dead arm, as in the real
+                    // evaluator.
+                    AbsCtorArm::Dead => continue,
+                    AbsCtorArm::Unsupported => return None,
+                    AbsCtorArm::Live {
+                        conditional,
+                        payload,
+                        side,
+                    } => {
+                        let mut inner = env.clone();
+                        match (pargs.len(), &payload) {
+                            (0, _) => {}
+                            (1, Some(p)) => match &pargs[0] {
+                                IRPattern::Variable(n) => {
+                                    inner.insert(n.clone(), (**p).clone());
+                                }
+                                IRPattern::Wildcard => {}
+                                _ => return None,
+                            },
+                            _ => return None,
+                        }
+                        let value = abs_eval(body, &mut inner, ctx)?;
+                        match side {
+                            AbsTagSide::Pos => covers_pos = true,
+                            AbsTagSide::Neg => covers_neg = true,
+                        }
+                        arms.push((conditional, value));
+                        if !conditional {
+                            break; // later arms are unreachable
+                        }
+                    }
+                }
+            }
             IRPattern::Guard(..) => return None,
         }
     }
     let (last_conditional, last_val) = arms.pop()?;
-    if last_conditional {
+    if last_conditional && !(covers_pos && covers_neg) {
         return None; // the match can fall through
     }
     let mut acc = last_val;
@@ -487,6 +527,62 @@ fn abs_match(
         acc = abs_ite(val, acc)?;
     }
     Some(acc)
+}
+
+/// Which side of a tagged scrutinee a constructor
+/// discriminates (Phase 91), mirroring the real
+/// evaluator's TagSide.
+#[derive(Clone, Copy)]
+enum AbsTagSide {
+    Pos,
+    Neg,
+}
+
+/// A constructor pattern read against a scrutinee value
+/// (Phase 91), mirroring the real evaluator's CtorArm:
+/// only the tag's CLASS is tracked, since encodability
+/// turns on whether a condition exists, not its term.
+enum AbsCtorArm {
+    Dead,
+    Unsupported,
+    Live {
+        conditional: bool,
+        payload: Option<Box<Abs>>,
+        side: AbsTagSide,
+    },
+}
+
+fn abs_constructor_arm(scrut: &Abs, name: &str) -> AbsCtorArm {
+    let (tag, payload, side) = match (scrut, name) {
+        (Abs::Option { some, payload }, "Some") => {
+            (*some, payload.clone(), AbsTagSide::Pos)
+        }
+        (Abs::Option { some, .. }, "None") => (*some, None, AbsTagSide::Neg),
+        (Abs::Result { ok, ok_payload, .. }, "Ok") => {
+            (*ok, ok_payload.clone(), AbsTagSide::Pos)
+        }
+        (Abs::Result { ok, err_payload, .. }, "Err") => {
+            (*ok, err_payload.clone(), AbsTagSide::Neg)
+        }
+        _ => return AbsCtorArm::Unsupported,
+    };
+    match (tag, side) {
+        (AbsTag::True, AbsTagSide::Pos) | (AbsTag::False, AbsTagSide::Neg) => {
+            AbsCtorArm::Live {
+                conditional: false,
+                payload,
+                side,
+            }
+        }
+        (AbsTag::True, AbsTagSide::Neg) | (AbsTag::False, AbsTagSide::Pos) => {
+            AbsCtorArm::Dead
+        }
+        (AbsTag::Free, _) => AbsCtorArm::Live {
+            conditional: true,
+            payload,
+            side,
+        },
+    }
 }
 
 // ── Calls (mirrors sym_call / sym_invoke) ──────────────────
@@ -619,6 +715,18 @@ fn abs_ite(a: Abs, b: Abs) -> Option<Abs> {
         (Abs::Char(_), Abs::Char(_)) => Some(Abs::Char(IntVal::Unknown)),
         (Abs::CharStr, Abs::CharStr) => Some(Abs::CharStr),
         (Abs::ListLen, Abs::ListLen) => Some(Abs::ListLen),
+        // Two concrete lists merge elementwise (Phase 91),
+        // mirroring sym_ite: equal lengths only.
+        (Abs::List(x), Abs::List(y)) => {
+            if x.len() != y.len() {
+                return None;
+            }
+            let mut out = Vec::with_capacity(x.len());
+            for (u, v) in x.into_iter().zip(y) {
+                out.push(abs_ite(u, v)?);
+            }
+            Some(Abs::List(out))
+        }
         (Abs::Opaque, Abs::Opaque) => Some(Abs::Opaque),
         (
             Abs::Record {
@@ -747,6 +855,12 @@ fn abs_binop(kind: BinKind, l: Abs, r: Abs) -> Option<Abs> {
             a.push(item);
             Some(Abs::List(a))
         }
+        // Append over a length-only list (Phase 91): the
+        // length grows by exactly one, whatever the item.
+        (Append, Abs::ListLen, _) => Some(Abs::ListLen),
+        // Append of an indexed char onto a string (Phase
+        // 91): a concatenation term, never a known literal.
+        (Append, Abs::Str(_), Abs::CharStr) => Some(Abs::Str(StrVal::Unknown)),
         // Char comparisons (Phase 76): all six, on scalars.
         (Eq, Abs::Char(_), Abs::Char(_)) => Some(Abs::Bool),
         (Neq, Abs::Char(_), Abs::Char(_)) => Some(Abs::Bool),
@@ -983,6 +1097,9 @@ fn abs_unary_ir(op: IRUnaryOp, v: Abs) -> Option<Abs> {
             _ => None,
         },
         IRUnaryOp::Len => abs_len(v),
+        // Clone is the identity (Phase 91): the value —
+        // and every fact tracked about it — is unchanged.
+        IRUnaryOp::Clone => Some(v),
         _ => None,
     }
 }
@@ -1433,6 +1550,97 @@ mod tests {
                         boolean(true),
                     )],
                 },
+                idx.clone(),
+            ));
+
+            // Phase 91 corners: the small arms must agree
+            // on both sides — constructor matches
+            // (exhaustive, fall-through, and a nested
+            // sub-pattern), Clone, the (List, List) ite
+            // (equal and unequal lengths), and the Append
+            // forms (ListLen growth, (Str, CharStr), and
+            // the unarmed (Str, Char) decline).
+            let s91 = spec(vec![
+                ("o", TypeRef::Option(Box::new(TypeRef::Int))),
+                ("xs", TypeRef::List(Box::new(TypeRef::Int))),
+                ("b", TypeRef::Bool),
+                ("t", TypeRef::String),
+                ("x", TypeRef::Int),
+            ]);
+            let ctor =
+                |name: &str, pargs: Vec<IRPattern>| IRPattern::Constructor(name.into(), pargs);
+            let match_o = |cases: Vec<(IRPattern, IRNode)>| IRNode::Match {
+                scrutinee: Box::new(var("o")),
+                cases,
+            };
+            bodies.push((
+                s91.clone(),
+                match_o(vec![
+                    (
+                        ctor("Some", vec![IRPattern::Variable("y".into())]),
+                        var("y"),
+                    ),
+                    (ctor("None", vec![]), int(0)),
+                ]),
+                idx.clone(),
+            ));
+            bodies.push((
+                s91.clone(),
+                match_o(vec![(
+                    ctor("Some", vec![IRPattern::Variable("y".into())]),
+                    var("y"),
+                )]),
+                idx.clone(),
+            ));
+            bodies.push((
+                s91.clone(),
+                match_o(vec![
+                    (
+                        ctor("Some", vec![IRPattern::Literal(IRLiteral::Int(5))]),
+                        int(1),
+                    ),
+                    (ctor("None", vec![]), int(0)),
+                ]),
+                idx.clone(),
+            ));
+            bodies.push((
+                s91.clone(),
+                IRNode::UnaryOp(IRUnaryOp::Clone, Box::new(var("x"))),
+                idx.clone(),
+            ));
+            let if_lists = |a: Vec<IRNode>, b: Vec<IRNode>| {
+                IRNode::Index(
+                    Box::new(IRNode::If {
+                        condition: Box::new(var("b")),
+                        then_branch: Box::new(list(a)),
+                        else_branch: Box::new(list(b)),
+                    }),
+                    Box::new(int(0)),
+                )
+            };
+            bodies.push((
+                s91.clone(),
+                if_lists(vec![int(1), int(2)], vec![int(3), int(4)]),
+                idx.clone(),
+            ));
+            bodies.push((
+                s91.clone(),
+                if_lists(vec![int(1), int(2)], vec![int(3), int(4), int(5)]),
+                idx.clone(),
+            ));
+            bodies.push((
+                s91.clone(),
+                call("len", vec![binop(IRBinOp::Append, var("xs"), int(7))]),
+                idx.clone(),
+            ));
+            bodies.push((
+                s91.clone(),
+                binop(IRBinOp::Append, var("t"), index(var("t"), int(0))),
+                idx.clone(),
+            ));
+            bodies.push((
+                s91.clone(),
+                binop(IRBinOp::Append, var("t"), chr('x')),
                 idx.clone(),
             ));
         }
