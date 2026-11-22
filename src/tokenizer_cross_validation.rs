@@ -2020,6 +2020,261 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         }
     }
 
+    // ─────────────────────────────────────────────────────
+    //  Phase 95 — the template bodies, judged IN-PROCESS.
+    //
+    //  The encoder-extension campaign's interpreter phase:
+    //  the statement/loop subset (Alloc / Assign / While /
+    //  Loop / Break / TryPropagate, constructor Match,
+    //  Clone, statement Append) lands in
+    //  `synthesis::eval`, so the tokenize template bodies
+    //  can finally be EXECUTED by the in-process path —
+    //  until now only the compiled runner could run them
+    //  (9/10 and 7/8, Phase 85/87 standings), while every
+    //  in-process judgment of a statement-shaped body was
+    //  NotEvaluable.
+    //
+    //  Composition: the interpreter has no module context
+    //  (a named call to a sibling function is outside its
+    //  subset — G4's neighbour, unchanged), so the bodies
+    //  are composed exactly as this harness has always
+    //  composed them: named calls resolved against the
+    //  production denotations (`SpecIndex::callee_body` —
+    //  the Phase 92/93 statement denotations for
+    //  skip_whitespace / tokenize_one, the dual-registered
+    //  record-completion body for next_char) via
+    //  `resolve_body`, then evaluated by `eval::eval`.
+    //  The LOOP body exists only as the pool's template
+    //  seed, drawn from a real synthesis pool as in
+    //  Phase 85.
+    //
+    //  Pool tpr, measured and reported as-is: the pool
+    //  judges the RAW template bodies, whose named calls
+    //  the context-free interpreter declines, so both
+    //  seeds still score 0.000 in pool judging — the
+    //  subset's effect is on composed bodies (this test's
+    //  batteries and in-spec runs), not on the raw pool
+    //  score. Selection standings are unchanged.
+    // ─────────────────────────────────────────────────────
+
+    #[test]
+    fn phase95_template_bodies_evaluate_in_process() {
+        let (functions, module) = load_tokenizer_module();
+        let spec_named = |name: &str| functions.iter().find(|f| f.name == name).unwrap();
+
+        // The production denotations.
+        let index = engine::SpecIndex::from_module(&module);
+        let mut bodies: BodyIndex = HashMap::new();
+        for name in [
+            "is_whitespace",
+            "is_ident_start",
+            "is_ident_continue",
+            "peek",
+            "next_char",
+            "skip_whitespace",
+            "tokenize_one",
+        ] {
+            let body = index
+                .callee_body(name)
+                .unwrap_or_else(|| panic!("{name}: denotation must exist"));
+            bodies.insert(name.to_string(), (body, spec_named(name).params.clone()));
+        }
+
+        // Pool presence + the raw-body tpr measurement.
+        let template_seed = |name: &str| {
+            let candidates =
+                engine::synthesize_with_module_spec(spec_named(name), 1, &module).unwrap();
+            candidates
+                .into_iter()
+                .find(|c| {
+                    matches!(&c.provenance, Provenance::ConstraintInduced { kind } if kind == "tokenize_template")
+                })
+                .unwrap_or_else(|| panic!("{name}: template must enter the pool"))
+        };
+        let step_seed = template_seed("tokenize_one");
+        let loop_seed = template_seed("tokenize_all");
+        println!(
+            "TOK95|tokenize_one|pool_tpr={:.3}",
+            step_seed.scores.test_pass_ratio
+        );
+        println!(
+            "TOK95|tokenize_all|pool_tpr={:.3}",
+            loop_seed.scores.test_pass_ratio
+        );
+        assert_eq!(step_seed.scores.test_pass_ratio, 0.0);
+        assert_eq!(loop_seed.scores.test_pass_ratio, 0.0);
+
+        // Compose the two template bodies.
+        let step = resolve_body(
+            &index.callee_body("tokenize_one").unwrap(),
+            &bodies,
+        )
+        .unwrap();
+        let loop_body = resolve_body(&loop_seed.body, &bodies).unwrap();
+
+        // The specs' own tests, through the in-process path.
+        assert_eq!(
+            eval::run_spec_tests(&step, spec_named("tokenize_one")),
+            eval::TestRun {
+                evaluable: 2,
+                passed: 2
+            }
+        );
+        assert_eq!(
+            eval::run_spec_tests(&loop_body, spec_named("tokenize_all")),
+            eval::TestRun {
+                evaluable: 2,
+                passed: 2
+            }
+        );
+
+        // Value <-> mirror conversions.
+        fn field<'a>(v: &'a Value, name: &str) -> &'a Value {
+            match v {
+                Value::Record { fields, .. } => fields
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, x)| x)
+                    .unwrap_or_else(|| panic!("record has no field {name}")),
+                other => panic!("expected a record, got {other:?}"),
+            }
+        }
+        fn as_int(v: &Value) -> i64 {
+            match v {
+                Value::Int(n) => *n,
+                other => panic!("expected Int, got {other:?}"),
+            }
+        }
+        fn as_str(v: &Value) -> String {
+            match v {
+                Value::Str(s) => s.clone(),
+                other => panic!("expected Str, got {other:?}"),
+            }
+        }
+        fn token_value(t: &Token) -> Value {
+            Value::Record {
+                type_name: "Token".into(),
+                fields: vec![
+                    ("kind".into(), Value::Int(t.kind)),
+                    ("lexeme".into(), Value::Str(t.lexeme.clone())),
+                    ("line".into(), Value::Int(t.line)),
+                    ("col".into(), Value::Int(t.col)),
+                ],
+            }
+        }
+        fn state_value(s: &State) -> Value {
+            Value::Record {
+                type_name: "TokenizerState".into(),
+                fields: vec![
+                    ("source".into(), Value::Str(s.source.clone())),
+                    ("pos".into(), Value::Int(s.pos)),
+                    ("line".into(), Value::Int(s.line)),
+                    ("col".into(), Value::Int(s.col)),
+                    (
+                        "tokens".into(),
+                        Value::List(s.tokens.iter().map(token_value).collect()),
+                    ),
+                ],
+            }
+        }
+        fn value_token(v: &Value) -> Token {
+            Token {
+                kind: as_int(field(v, "kind")),
+                lexeme: as_str(field(v, "lexeme")),
+                line: as_int(field(v, "line")),
+                col: as_int(field(v, "col")),
+            }
+        }
+        fn value_state(v: &Value) -> State {
+            let tokens = match field(v, "tokens") {
+                Value::List(items) => items.iter().map(value_token).collect(),
+                other => panic!("expected a token list, got {other:?}"),
+            };
+            State {
+                source: as_str(field(v, "source")),
+                pos: as_int(field(v, "pos")),
+                line: as_int(field(v, "line")),
+                col: as_int(field(v, "col")),
+                tokens,
+            }
+        }
+        fn value_result_state(v: &Value) -> Result<State, String> {
+            match v {
+                Value::Ok(inner) => Ok(value_state(inner)),
+                Value::Err(e) => Err(as_str(e)),
+                other => panic!("expected a Result value, got {other:?}"),
+            }
+        }
+        fn value_result_tokens(v: &Value) -> Result<Vec<Token>, String> {
+            match v {
+                // tokenize_all's Ok payload is the token
+                // list itself (`return Ok(s.tokens)`).
+                Value::Ok(inner) => match &**inner {
+                    Value::List(items) => Ok(items.iter().map(value_token).collect()),
+                    other => panic!("expected a token list, got {other:?}"),
+                },
+                Value::Err(e) => Err(as_str(e)),
+                other => panic!("expected a Result value, got {other:?}"),
+            }
+        }
+
+        let run = |body: &IRNode, s: &State| -> Value {
+            let mut env = eval::Env::new();
+            env.insert("state".to_string(), state_value(s));
+            eval::eval(body, &env).unwrap_or_else(|e| {
+                panic!("the composed body must evaluate in-process: {e:?}")
+            })
+        };
+
+        // STEP battery: 9/10 in-process, sole deviation the
+        // Err message text at the "5" point (F2) — the
+        // compiled runner's standing, now reproduced by
+        // the interpreter.
+        let mut agree = 0;
+        let mut disagreements: Vec<(State, String, String)> = Vec::new();
+        for st in tokenize_one_battery() {
+            let got = show_result_state(&value_result_state(&run(&step, &st)));
+            let want = show_result_state(&mirror_tokenize_one(st.clone()));
+            if got == want {
+                agree += 1;
+            } else {
+                disagreements.push((st, got, want));
+            }
+        }
+        println!("TOK95|tokenize_one|in_process={agree}/10");
+        assert_eq!(agree, 9);
+        assert_eq!(disagreements.len(), 1);
+        let (st, got, want) = &disagreements[0];
+        assert_eq!(st.source, "5");
+        assert!(
+            got.starts_with("ERR|") && want.starts_with("ERR|"),
+            "the sole deviation is the Err tag's text: got {got}, want {want}"
+        );
+
+        // LOOP battery: 7/8 in-process, sole deviation the
+        // same Err text at the "spec 5" point.
+        let mut agree = 0;
+        let mut disagreements: Vec<(State, String, String)> = Vec::new();
+        for st in tokenize_all_battery() {
+            let got = show_result_tokens(&value_result_tokens(&run(&loop_body, &st)));
+            let want = show_result_tokens(&mirror_tokenize_all(st.clone()));
+            if got == want {
+                agree += 1;
+            } else {
+                disagreements.push((st, got, want));
+            }
+        }
+        println!("TOK95|tokenize_all|in_process={agree}/8");
+        assert_eq!(agree, 7);
+        assert_eq!(disagreements.len(), 1);
+        let (st, got, want) = &disagreements[0];
+        assert_eq!(st.source, "spec 5");
+        assert!(
+            got.starts_with("ERR|") && want.starts_with("ERR|"),
+            "the sole deviation is the Err tag's text: got {got}, want {want}"
+        );
+    }
+
     #[test]
     fn tok_runner_executes_and_detects() {
         let inputs = state_battery();
