@@ -130,6 +130,72 @@ impl Verifier {
         Ok(verified)
     }
 
+    /// Phase 109 (§3.1, decision D3a): the spec's
+    /// `require:` preconditions as solver assumptions.
+    /// Until this phase the rows were parsed and shown to
+    /// the LLM prompt but never asserted in either judge,
+    /// so postconditions were judged over ALL inputs and a
+    /// faithful body could be refuted at a point its own
+    /// spec excludes (the audit's clamp exhibit:
+    /// VerificationFailed at {x:1, lo:1, hi:0} under
+    /// `require: lo <= hi`). The discipline:
+    ///
+    /// - every row is encoded through the same route a
+    ///   postcondition takes (statement-bodied calls in a
+    ///   row resolve by the Phase 96 route, their facts
+    ///   folding into the assumption set);
+    /// - the encoded rows must be JOINTLY SATISFIABLE
+    ///   under the Char side conditions — an empty domain
+    ///   would make every postcondition vacuously true
+    ///   for any body, so an unsatisfiable (or
+    ///   undecidable) precondition set mints no verdicts;
+    /// - a row that cannot be encoded declines the whole
+    ///   verification: never silently assumed-true, and
+    ///   never dropped while judging proceeds unassumed
+    ///   (that would keep minting §3.1's false refutations
+    ///   for exactly the specs whose contracts are hardest
+    ///   to state).
+    #[cfg(feature = "z3-support")]
+    fn precondition_assumptions(
+        &self,
+        spec: &FunctionSpec,
+        param_env: &SymEnv,
+    ) -> PreconditionAssumptions {
+        if spec.preconditions.is_empty() {
+            return PreconditionAssumptions::None;
+        }
+        let mut terms: Vec<z3::ast::Bool> = Vec::new();
+        for row in &spec.preconditions {
+            let Some((resolved, env, facts)) =
+                self.resolve_stmt_calls(row, param_env)
+            else {
+                return PreconditionAssumptions::Declined;
+            };
+            let Some(term) =
+                encode_constraint(&resolved, &env, &EvalCtx::root(&self.index))
+            else {
+                return PreconditionAssumptions::Declined;
+            };
+            terms.push(term);
+            terms.extend(facts);
+        }
+        // The domain must be inhabited, and DECIDEDLY so:
+        // Sat proceeds; Unsat (empty domain) and Unknown
+        // (the solver cannot rule an empty domain out)
+        // both decline.
+        let mut assertions: Vec<z3::ast::Bool> = Vec::new();
+        for p in &spec.params {
+            if let Some(sym) = param_env.get(&p.name) {
+                collect_char_conditions(sym, &mut assertions);
+            }
+        }
+        assertions.extend(terms.iter().cloned());
+        match stmt_sat(&assertions, self.timeout_per_constraint_ms) {
+            Some(true) => PreconditionAssumptions::Assumed(terms),
+            _ => PreconditionAssumptions::Declined,
+        }
+    }
+
     #[cfg(feature = "z3-support")]
     pub fn verify_one(
         &self,
@@ -156,6 +222,23 @@ impl Verifier {
         // encodable subset; every constraint is then Unknown and
         // the candidate can only be Inconclusive, never Verified.
         let param_env = param_env(spec, &self.index);
+
+        // Phase 109 (§3.1): the spec's `require:` rows,
+        // encoded and assumed for everything below — the
+        // body evaluation's guided decisions, both row
+        // judges, and the invariant obligations inside the
+        // statement route all work on the spec's domain.
+        // `Declined` (an unencodable row, or a jointly
+        // unsatisfiable/undecidable domain) forces every
+        // row Unknown in the loop below: the verification
+        // declines whole rather than minting a verdict the
+        // contract cannot support.
+        let pre = self.precondition_assumptions(spec, &param_env);
+        let pre_terms: &[z3::ast::Bool] = match &pre {
+            PreconditionAssumptions::Assumed(terms) => terms,
+            _ => &[],
+        };
+
         let output = sym_eval(
             &candidate.body,
             &mut param_env.clone(),
@@ -177,11 +260,15 @@ impl Verifier {
         let stmt_outcome = if output.is_none()
             && body_mentions_statements(&candidate.body, &self.index)
         {
-            let ctx = StmtCtx::root(
+            let mut ctx = StmtCtx::root(
                 &self.index,
                 self.stmt_fuel,
                 self.timeout_per_constraint_ms,
             );
+            // The evaluation's guided decisions and
+            // invariant obligations are made under the
+            // spec's preconditions (§3.1).
+            ctx.assumptions = pre_terms.to_vec();
             sym_eval_stmt(&candidate.body, param_env.clone(), &ctx)
         } else {
             None
@@ -190,13 +277,23 @@ impl Verifier {
         let mut any_refuted = false;
         let mut any_unknown = false;
         for (i, c) in spec.postconditions.iter().enumerate() {
-            let (result, tri) = match (&output, &stmt_outcome) {
-                (None, Some(outcome)) => self.verify_constraint_stmt(
+            let (result, tri) = match (&pre, &output, &stmt_outcome) {
+                (PreconditionAssumptions::Declined, _, _) => (
+                    ConstraintResult {
+                        constraint: format!("post[{}]", i),
+                        holds: false,
+                        solver_time_ms: 0,
+                        model: None,
+                    },
+                    Tri::Unknown,
+                ),
+                (_, None, Some(outcome)) => self.verify_constraint_stmt(
                     c,
                     &format!("post[{}]", i),
                     spec,
                     &param_env,
                     outcome,
+                    pre_terms,
                 ),
                 _ => self.verify_constraint(
                     c,
@@ -204,6 +301,7 @@ impl Verifier {
                     spec,
                     &param_env,
                     &output,
+                    pre_terms,
                 ),
             };
             match tri {
@@ -639,6 +737,7 @@ impl Verifier {
         spec: &FunctionSpec,
         param_env: &SymEnv,
         output: &Option<Sym>,
+        pre: &[z3::ast::Bool],
     ) -> (ConstraintResult, Tri) {
         let start = crate::timeutil::now();
         let done = |holds: bool, model: Option<HashMap<String, SmtValue>>, tri: Tri| {
@@ -717,6 +816,13 @@ impl Verifier {
             for cond in &side {
                 z3.assert(cond);
             }
+            // Phase 109 (§3.1): the assumed preconditions
+            // hold in the fallback session too — a guard
+            // disjunct may decide the row only on the
+            // spec's domain.
+            for term in pre {
+                z3.assert(term);
+            }
             z3.assert(&union.not());
             return match z3.check() {
                 SmtResult::Unsat => done(true, None, Tri::Proven),
@@ -730,6 +836,13 @@ impl Verifier {
         }
         for cond in &side {
             z3.assert(cond);
+        }
+        // Phase 109 (§3.1): the spec's `require:` rows,
+        // assumed — the check below is now "no ON-DOMAIN
+        // countermodel exists", which is the contract's
+        // actual claim.
+        for term in pre {
+            z3.assert(term);
         }
         let negated = formula.not();
         z3.assert(&negated);
@@ -750,9 +863,14 @@ impl Verifier {
         // `check_and_eval_ints_uf_guarded`; the judged
         // terms are scanned by `int_to_str_apps`). With
         // no UF application in the encoding this is the
-        // standing check, verdict for verdict.
+        // standing check, verdict for verdict. Phase 109:
+        // the assumed precondition terms are asserted in
+        // this session, so they are scanned too — a
+        // countermodel must be a countermodel ON the
+        // domain, under the real conversion.
         let mut uf_terms: Vec<&z3::ast::Bool> = vec![&formula];
         uf_terms.extend(call_facts.iter());
+        uf_terms.extend(pre.iter());
         let uf = int_to_str_apps(&uf_terms);
         match z3.check_and_eval_ints_uf_guarded(&int_params, &uf.apps, uf.uninspectable) {
             SmtResult::Unsat => done(true, None, Tri::Proven),
@@ -805,6 +923,7 @@ impl Verifier {
         spec: &FunctionSpec,
         param_env: &SymEnv,
         outcome: &StmtOutcome,
+        pre: &[z3::ast::Bool],
     ) -> (ConstraintResult, Tri) {
         let start = crate::timeutil::now();
         let done = |holds: bool, model: Option<HashMap<String, SmtValue>>, tri: Tri| {
@@ -883,6 +1002,11 @@ impl Verifier {
                 for fact in &call_facts {
                     z3.assert(fact);
                 }
+                // Phase 109 (§3.1): the assumed
+                // preconditions hold on this path too.
+                for term in pre {
+                    z3.assert(term);
+                }
                 z3.assert(pc);
                 z3.assert(&not_exhausted);
                 z3.assert(&union.not());
@@ -899,6 +1023,12 @@ impl Verifier {
             for fact in &call_facts {
                 z3.assert(fact);
             }
+            // Phase 109 (§3.1): a path refutes only at an
+            // on-domain point — the assumed preconditions
+            // are asserted alongside the path condition.
+            for term in pre {
+                z3.assert(term);
+            }
             z3.assert(pc);
             z3.assert(&not_exhausted);
             z3.assert(&formula.not());
@@ -906,9 +1036,12 @@ impl Verifier {
             // degradation rule, as in `verify_constraint`
             // — the per-path countermodel check is
             // UF-guarded over the row, the path condition,
-            // and the call facts.
+            // and the call facts. Phase 109: the assumed
+            // precondition terms are asserted in this
+            // session and scanned on the same terms.
             let mut uf_terms: Vec<&z3::ast::Bool> = vec![&formula, pc];
             uf_terms.extend(call_facts.iter());
+            uf_terms.extend(pre.iter());
             let uf = int_to_str_apps(&uf_terms);
             match z3.check_and_eval_ints_uf_guarded(&int_params, &uf.apps, uf.uninspectable) {
                 SmtResult::Sat(model) => {
@@ -925,10 +1058,17 @@ impl Verifier {
         // The exhaustion gate: Proven requires that the
         // fuel bound cut off NO path — otherwise the
         // completed paths' silence proves nothing about
-        // the paths that wanted another iteration.
+        // the paths that wanted another iteration. Phase
+        // 109 (§3.1): the gate is read on the spec's
+        // domain — exhaustion reachable only at
+        // precondition-violating points does not block a
+        // proof about the points the contract governs.
         let z3 = Z3Session::new(self.timeout_per_constraint_ms);
         for cond in &side {
             z3.assert(cond);
+        }
+        for term in pre {
+            z3.assert(term);
         }
         z3.assert(&outcome.exhausted);
         match z3.check() {
@@ -936,6 +1076,37 @@ impl Verifier {
             _ => done(false, None, Tri::Unknown),
         }
     }
+}
+
+/// Phase 109 (§3.1): the disposition of a spec's
+/// `require:` preconditions for one `verify_one` call —
+/// computed once per call by
+/// `Verifier::precondition_assumptions` and threaded
+/// through the body evaluation and both row judges.
+/// Specs without `require:` rows are `None`, and for
+/// them every session below asserts exactly what it
+/// asserted before this phase.
+#[cfg(feature = "z3-support")]
+enum PreconditionAssumptions {
+    /// No `require:` rows: the machinery never engages.
+    None,
+    /// Every row encoded and the conjunction decidedly
+    /// satisfiable: these terms (the encoded rows plus
+    /// any Phase 96 resolution facts) are asserted as
+    /// hypotheses in every judging session — the row
+    /// judges' checks, the Phase 97 per-disjunct
+    /// fallbacks, the statement judge's exhaustion gate —
+    /// and seed the statement evaluation's standing
+    /// assumptions.
+    Assumed(Vec<z3::ast::Bool>),
+    /// A row could not be encoded, or the encoded rows
+    /// are jointly unsatisfiable (an empty domain: every
+    /// postcondition would be vacuously true for any
+    /// body, so a Verified would certify a broken spec,
+    /// not an implementation), or satisfiability could
+    /// not be decided: the verification declines whole —
+    /// every row Unknown, the candidate Inconclusive.
+    Declined,
 }
 
 /// Three-valued outcome of one constraint check against one
@@ -2626,6 +2797,17 @@ struct StmtCtx<'a> {
     eval: EvalCtx<'a>,
     fuel: usize,
     timeout_ms: u64,
+    /// Phase 109 (§3.1): the spec-under-judgment's
+    /// encoded `require:` preconditions, seeded into the
+    /// root state's standing assumptions so solver-guided
+    /// decisions and the Phase 96 invariant obligations
+    /// are checked on the spec's domain, not over all
+    /// inputs. Empty for every evaluation that is not a
+    /// spec's own body under `verify_one` (callee
+    /// denotations evaluated for a caller carry the
+    /// caller's context through their states, not through
+    /// this field).
+    assumptions: Vec<z3::ast::Bool>,
 }
 
 #[cfg(feature = "z3-support")]
@@ -2635,6 +2817,7 @@ impl<'a> StmtCtx<'a> {
             eval: EvalCtx::root(index),
             fuel,
             timeout_ms,
+            assumptions: Vec::new(),
         }
     }
 
@@ -2643,6 +2826,7 @@ impl<'a> StmtCtx<'a> {
             eval: self.eval.child(name),
             fuel: self.fuel,
             timeout_ms: self.timeout_ms,
+            assumptions: self.assumptions.clone(),
         }
     }
 }
@@ -4317,7 +4501,12 @@ fn sym_eval_stmt(body: &IRNode, env: SymEnv, ctx: &StmtCtx) -> Option<StmtOutcom
         exhausted: Vec::new(),
         last: None,
         writes: std::collections::HashSet::new(),
-        assumptions: Vec::new(),
+        // Phase 109 (§3.1): the spec-under-judgment's
+        // precondition assumptions ride the root state —
+        // every derived state clones them, so guided
+        // decisions and invariant obligations throughout
+        // the run are made on the spec's domain.
+        assumptions: ctx.assumptions.clone(),
         guided: true,
     };
     stmt_eval(body, &mut st, ctx)?;
@@ -4835,6 +5024,21 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 // `encode_disjunct_union`.
                 ("unwrap", Sym::Result { ok_payload, .. }) => {
                     ok_payload.map(|p| *p)
+                }
+                // The Option family (Phase 112, the
+                // STDLIB_SCOPE §2.5 extension): the same
+                // tag+payload forms, the same discipline.
+                // unwrap projects the Some payload; a
+                // literal None construction leaves the
+                // slot absent and declines, exactly as
+                // the literal Err case above — the row
+                // judges recover guarded uses per-disjunct.
+                ("is_some", Sym::Option { some, .. }) => Some(Sym::Bool(some.term())),
+                ("is_none", Sym::Option { some, .. }) => {
+                    Some(Sym::Bool(some.term().not()))
+                }
+                ("unwrap", Sym::Option { payload, .. }) => {
+                    payload.map(|p| *p)
                 }
                 ("len", v @ (Sym::List(_) | Sym::ListLen(_))) => sym_len(v),
                 _ => None,
@@ -6247,6 +6451,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(golden.clone()),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -6259,6 +6464,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(golden),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -6294,6 +6500,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(err),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -6376,6 +6583,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(ok_of(state_of("spec", 0))),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Refuted),
@@ -6388,6 +6596,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(ok_of(state_of("spec", 1))),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -6780,6 +6989,7 @@ spec tokenize_all {
                 spec,
                 &env,
                 &Some(output.clone()),
+                &[],
             );
             assert!(
                 matches!((&tri, &want1), (Tri::Proven, Tri::Proven)
@@ -6794,6 +7004,7 @@ spec tokenize_all {
                 spec,
                 &env,
                 &Some(output),
+                &[],
             );
             assert!(
                 matches!((&tri, &want2), (Tri::Proven, Tri::Proven)
@@ -6830,6 +7041,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(err),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -6879,6 +7091,7 @@ spec tokenize_all {
                     z3::ast::String::from_str("Unexpected character").unwrap(),
                 ))),
             }),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -6913,6 +7126,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(err5),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -6926,6 +7140,7 @@ spec tokenize_all {
                 spec,
                 &env,
                 &Some(ok_of(state_of(" 5", 2, 1))),
+                &[],
             );
             assert!(
                 matches!(tri, Tri::Proven),
@@ -6959,6 +7174,7 @@ spec tokenize_all {
                         z3::ast::String::from_str("x").unwrap(),
                     ))),
                 }),
+                &[],
             );
             assert!(
                 matches!(tri, Tri::Refuted),
@@ -6979,6 +7195,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(ok_of(state_of("spec", 4, 0))),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -7293,6 +7510,7 @@ spec tokenize_all {
             spec,
             &env,
             &Some(phase84_err("Unexpected character")),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Refuted),
@@ -7583,6 +7801,7 @@ spec tokenize_all {
                     &spec,
                     &env,
                     &Some(state_sym(src, p, l, c)),
+                    &[],
                 );
                 match (label, i) {
                     ("a", 0) | ("a", 1) => assert!(
@@ -7629,6 +7848,7 @@ spec tokenize_all {
                     &spec,
                     &env,
                     &Some(state_sym(src, out_pos, 1, 3)),
+                    &[],
                 );
                 assert!(
                     matches!(tri, Tri::Proven),
@@ -8861,6 +9081,7 @@ spec grow_first {
             for (j, row) in skip.postconditions.iter().enumerate() {
                 let (res, tri) = verifier.verify_constraint(
                     row, "p92@skip-current", &skip, &env, &Some(out.clone()),
+                    &[],
                 );
                 assert!(
                     matches!(tri, Tri::Proven),
@@ -8870,6 +9091,7 @@ spec grow_first {
             }
             let (res, tri) = verifier.verify_constraint(
                 &row_a, "p92@skip-a", &spec_a, &env, &Some(out.clone()),
+                &[],
             );
             assert!(
                 matches!(tri, Tri::Proven),
@@ -8946,6 +9168,7 @@ spec grow_first {
             for (j, row) in spec.postconditions.iter().enumerate() {
                 let (res, tri) = verifier.verify_constraint(
                     row, "p92@step", &spec, &env, &Some(out.clone()),
+                    &[],
                 );
                 if is_err && j == 0 {
                     assert!(
@@ -9020,6 +9243,7 @@ spec grow_first {
             }
             let (res, tri) = verifier.verify_constraint(
                 &all_spec.postconditions[0], "p92@loop", &all_spec, &env, &Some(out),
+                &[],
             );
             if matches!(&mirror, Err(_)) {
                 assert!(
@@ -9063,6 +9287,7 @@ spec grow_first {
         env.insert("state".into(), p90_state_sym(&diag));
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[1], "p92@diag-row2", &spec, &env, &Some(out.clone()),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -9094,7 +9319,7 @@ spec grow_first {
         env: &SymEnv,
         outcome: &StmtOutcome,
     ) -> (Tri, u64) {
-        let (res, tri) = verifier.verify_constraint_stmt(row, "p93", spec, env, outcome);
+        let (res, tri) = verifier.verify_constraint_stmt(row, "p93", spec, env, outcome, &[]);
         (tri, res.solver_time_ms)
     }
 
@@ -10353,7 +10578,7 @@ spec grow_first {
             .clone();
         let judge = |row: &Constraint, output: &Sym| -> (Tri, u64) {
             let (res, tri) =
-                verifier.verify_constraint(row, "p94", &skip, &env, &Some(output.clone()));
+                verifier.verify_constraint(row, "p94", &skip, &env, &Some(output.clone()), &[]);
             (tri, res.solver_time_ms)
         };
         let (tc, mc) = judge(&row_c, &state_sym);
@@ -12576,6 +12801,7 @@ spec grow_first {
                         for (j, row) in skip.postconditions.iter().enumerate() {
                             let (res, tri) = verifier.verify_constraint(
                                 row, "p90@skip-current", &skip, &env, &Some(out.clone()),
+                                &[],
                             );
                             assert!(
                                 matches!(tri, Tri::Proven),
@@ -12585,6 +12811,7 @@ spec grow_first {
                         }
                         let (res, tri) = verifier.verify_constraint(
                             &row_a, "p90@skip-a", &spec_a, &env, &Some(out.clone()),
+                            &[],
                         );
                         assert!(
                             matches!(tri, Tri::Proven),
@@ -12633,7 +12860,7 @@ spec grow_first {
         .expect("identity resolves at fuel 0");
         for (j, row) in skip.postconditions.iter().enumerate() {
             let (_, tri) =
-                verifier.verify_constraint(row, "p90@identity", &skip, &env, &Some(out.clone()));
+                verifier.verify_constraint(row, "p90@identity", &skip, &env, &Some(out.clone()), &[]);
             match j {
                 0 | 1 => assert!(
                     matches!(tri, Tri::Proven),
@@ -12652,7 +12879,7 @@ spec grow_first {
             }
         }
         let (_, tri) =
-            verifier.verify_constraint(&row_a, "p90@identity-a", &spec_a, &env, &Some(out));
+            verifier.verify_constraint(&row_a, "p90@identity-a", &spec_a, &env, &Some(out), &[]);
         assert!(
             matches!(tri, Tri::Refuted),
             "row (a) REFUTES the identity body at a whitespace start"
@@ -12663,7 +12890,7 @@ spec grow_first {
         )
         .expect("partial skip resolves at fuel 0");
         let (_, tri) =
-            verifier.verify_constraint(&row_a, "p90@partial-a", &spec_a, &env, &Some(out));
+            verifier.verify_constraint(&row_a, "p90@partial-a", &spec_a, &env, &Some(out), &[]);
         assert!(
             matches!(tri, Tri::Refuted),
             "row (a) REFUTES the partial skip on a run of 5"
@@ -12674,7 +12901,7 @@ spec grow_first {
         let out = p90_concretize(&run_at(&partial, &one, 0).expect("partial evaluates"))
             .expect("partial resolves");
         let (_, tri) =
-            verifier.verify_constraint(&row_a, "p90@partial-a-ok", &spec_a, &env1, &Some(out));
+            verifier.verify_constraint(&row_a, "p90@partial-a-ok", &spec_a, &env1, &Some(out), &[]);
         assert!(
             matches!(tri, Tri::Proven),
             "the partial skip is exactly right on a run of 1: (a) admits it there"
@@ -12784,6 +13011,7 @@ spec grow_first {
             for (j, row) in spec.postconditions.iter().enumerate() {
                 let (res, tri) = verifier.verify_constraint(
                     row, "p90@step", &spec, &env, &Some(out.clone()),
+                    &[],
                 );
                 ms += res.solver_time_ms;
                 if is_err && j == 0 {
@@ -12844,6 +13072,7 @@ spec grow_first {
         env.insert("state".into(), p90_state_sym(&diag));
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[0], "p90@diag-row1", &spec, &env, &Some(out.clone()),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -12854,6 +13083,7 @@ spec grow_first {
         );
         let (_, tri) = verifier.verify_constraint(
             &spec.postconditions[1], "p90@diag-row2", &spec, &env, &Some(out.clone()),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Proven),
@@ -13220,6 +13450,7 @@ spec grow_first {
             env.insert("state".into(), p90_state_sym(&input));
             let (res, tri) = verifier.verify_constraint(
                 &spec.postconditions[0], "p90@loop", &spec, &env, &Some(out),
+                &[],
             );
             if matches!(&mirror, Err(_)) {
                 // At a literal Err output the row's
@@ -13756,6 +13987,7 @@ spec grow_first {
                 &spec,
                 &env,
                 &Some(err()),
+                &[],
             );
             tri
         };
@@ -14068,6 +14300,7 @@ spec false_guard {
                 spec,
                 &env,
                 &Some(output.clone()),
+                &[],
             );
             tri
         };
@@ -14562,6 +14795,7 @@ spec unguarded {
                 &spec,
                 &env,
                 &Some(output.clone()),
+                &[],
             );
             assert!(
                 matches!(tri, Tri::Proven),
@@ -14582,6 +14816,7 @@ spec unguarded {
             &spec,
             &env2,
             &Some(output),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Refuted),
@@ -14789,6 +15024,7 @@ spec unguarded {
                 &spec,
                 &env,
                 &Some(output.clone()),
+                &[],
             );
             assert!(
                 matches!(tri, Tri::Proven),
@@ -14806,6 +15042,7 @@ spec unguarded {
             &spec,
             &env2,
             &Some(output),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Refuted),
@@ -14856,6 +15093,7 @@ spec unguarded {
             &spec42,
             &no_params,
             &Some(output.clone()),
+            &[],
         );
         assert!(
             matches!(tri, Tri::Unknown),
@@ -14869,6 +15107,7 @@ spec unguarded {
             &spec43,
             &no_params,
             &Some(output),
+            &[],
         );
         assert!(
             !matches!(tri, Tri::Proven),

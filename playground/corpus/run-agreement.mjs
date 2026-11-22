@@ -38,6 +38,16 @@ try {
   wasm = await import(join(pkgDir, 'morphic_wasm.js'));
   const bytes = readFileSync(join(pkgDir, 'morphic_wasm_bg.wasm'));
   await wasm.default({ module_or_path: bytes });
+  // Phase 112: install the standard-library asset exactly
+  // as the page does (the library is runtime data now,
+  // not bundle data). A corpus run against an
+  // uninstalled prelude would silently test a different
+  // compiler than the page ships.
+  const asset = readFileSync(join(pkgDir, 'stdlib-asset.bin'));
+  if (wasm.init_stdlib(asset) !== true) {
+    console.error('init_stdlib did not confirm installation');
+    process.exit(2);
+  }
 } catch (e) {
   console.error(`cannot load the playground WASM package at ${pkgDir} — run playground/build.sh first\n${e}`);
   process.exit(2);

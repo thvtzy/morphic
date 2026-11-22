@@ -47,7 +47,16 @@
 //    equation template) and widens rust_call_form's
 //    classification by family 4 — the module holds 130
 //    specs and the fixed set is 125 constraint seeds +
-//    the same 5 by-design pool winners.
+//    the same 5 by-design pool winners. Phase 113
+//    re-record (2026-11-23): the Option cascade adds NO
+//    spec — it widens rust_expr_method_form's
+//    classification by the Phase 112 Option pair
+//    (is_some, is_none: +2 guard rows, +2 in-spec tests)
+//    in lockstep with the native arm — the module still
+//    holds 130 specs and the fixed set is still 125
+//    constraint seeds + the same 5 by-design pool
+//    winners, with rust_expr_method_form's winner
+//    re-crowned over its widened test table.
 //
 //  * The synthesized-codegen ARTIFACT is the 130 winners
 //    rendered through the ORIGINAL `generate` into one Rust
@@ -2519,6 +2528,51 @@ pub(super) fn proof_corpus() -> Vec<Case> {
                 args: vec![],
             },
             "output.unwrap().len()",
+        ),
+        (
+            // ADDED in Phase 113: the Option pair the
+            // Phase 112 extension admitted to the
+            // language's table, classified verbatim by
+            // the widened rust_expr_method_form on both
+            // sides together.
+            "method-is-some",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::Var("o".to_string())),
+                name: "is_some".to_string(),
+                args: vec![],
+            },
+            "o.is_some()",
+        ),
+        (
+            "method-is-none",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::Var("o".to_string())),
+                name: "is_none".to_string(),
+                args: vec![],
+            },
+            "o.is_none()",
+        ),
+        (
+            // An Option receiver's unwrap: one name for
+            // both families, rendered as it always was.
+            "method-unwrap-option",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::Var("o".to_string())),
+                name: "unwrap".to_string(),
+                args: vec![],
+            },
+            "o.unwrap()",
+        ),
+        (
+            // The argc fold over a widened name: a table
+            // name carrying arguments still falls back.
+            "method-is-some-args",
+            SpecExpr::MethodCall {
+                receiver: Box::new(SpecExpr::Var("o".to_string())),
+                name: "is_some".to_string(),
+                args: vec![SpecExpr::IntLit(1)],
+            },
+            "??",
         ),
         (
             "method-fallback-name",

@@ -66,6 +66,18 @@ jobs:
           tar -xzf "/tmp/${TARBALL}" -C /tmp
           echo "WASM_BINDGEN=/tmp/wasm-bindgen-${VERSION}-x86_64-unknown-linux-musl/wasm-bindgen" >> "$GITHUB_ENV"
 
+      # Same pinned Binaryen (wasm-opt) as playground.yml
+      # (build.sh's Phase 114 size pass resolves it via
+      # $WASM_OPT first).
+      - name: Install pinned Binaryen (wasm-opt)
+        run: |
+          VERSION=version_133
+          TARBALL="binaryen-${VERSION}-x86_64-linux.tar.gz"
+          curl -sL --fail -o "/tmp/${TARBALL}" \
+            "https://github.com/WebAssembly/binaryen/releases/download/${VERSION}/${TARBALL}"
+          tar -xzf "/tmp/${TARBALL}" -C /tmp
+          echo "WASM_OPT=/tmp/binaryen-${VERSION}/bin/wasm-opt" >> "$GITHUB_ENV"
+
       - name: Build the playground package
         run: ./playground/build.sh
 

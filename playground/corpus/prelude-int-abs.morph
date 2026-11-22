@@ -1,0 +1,36 @@
+// ─────────────────────────────────────────────────────────
+//  PLAYGROUND CORPUS — Phase 110 prelude case.
+//
+//  A user module that calls the standard-library entry
+//  `int_abs` by plain name, with NO import: the bundled
+//  library is merged into every module as a prelude
+//  (decision D2a). Pinned in cases.json (check + synthesis).
+//  The Rust-side pins live in tests/phase110_prelude.rs,
+//  which includes THIS file as its proof module — one
+//  source, two pins.
+// ─────────────────────────────────────────────────────────
+
+PreludeProof {
+spec abs_of_negated {
+    input: x: Int
+    output: Int
+
+    constraint: output == int_abs(0 - x)
+    constraint: output >= 0
+
+    test "negative" {
+        input: (0 - 7)
+        expect: 7
+    }
+
+    test "positive" {
+        input: 4
+        expect: 4
+    }
+
+    test "zero" {
+        input: 0
+        expect: 0
+    }
+}
+}

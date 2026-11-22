@@ -17,10 +17,24 @@
 //  Requests are processed one at a time, in arrival order.
 //  Cancellation is not a message: the page terminates the
 //  worker and spawns a fresh instance (see main.js).
+//
+//  Phase 112: before `ready`, the worker fetches the
+//  standard-library asset (pkg/stdlib-asset.bin — the
+//  library ships as data loaded at runtime, not compiled
+//  into the bundle) and installs it via init_stdlib. A
+//  worker whose asset fails to load never posts ready:
+//  the page's spawn timeout replaces it and the fallback
+//  path reports the error.
 // ─────────────────────────────────────────────────────────
-import init, { check, synthesize_seeded_spec } from '../pkg/morphic_wasm.js';
+import init, { check, init_stdlib, synthesize_seeded_spec } from '../pkg/morphic_wasm.js';
 
 await init();
+
+const assetResponse = await fetch(new URL('../pkg/stdlib-asset.bin', import.meta.url));
+if (!assetResponse.ok) {
+  throw new Error(`stdlib asset fetch failed: ${assetResponse.status}`);
+}
+init_stdlib(new Uint8Array(await assetResponse.arrayBuffer()));
 
 self.onmessage = (event) => {
   const { id, kind, source, specName, seed } = event.data ?? {};

@@ -1,0 +1,51 @@
+// ─────────────────────────────────────────────────────────
+//  PLAYGROUND CORPUS — Phase 112 prelude case.
+//
+//  A user module that calls the Phase 112 standard-
+//  library entries by plain name, with NO import, at
+//  their frozen signatures: string_is_empty (String),
+//  result_unwrap_or (Result<Int, String>), and
+//  option_unwrap_or / option_ok_or (Option<Int>). The
+//  prelude merge must accept it in CLI and WASM alike —
+//  in the WASM build the library arrives via the
+//  runtime asset (init_stdlib), so this case is also
+//  the asset path's end-to-end proof for the new
+//  entries. Pinned in cases.json (check).
+// ─────────────────────────────────────────────────────────
+
+Prelude112Proof {
+spec chained_fallback {
+    input: o: Option<Int>, d: Int
+    output: Int
+
+    constraint: output == option_unwrap_or(o, result_unwrap_or(option_ok_or(o, "missing"), d))
+    constraint: output >= 0 || d < 0
+
+    test "some" {
+        input: (Some(4), 9)
+        expect: 4
+    }
+
+    test "none" {
+        input: (None(), 9)
+        expect: 9
+    }
+}
+
+spec emptiness {
+    input: s: String
+    output: Bool
+
+    constraint: output == string_is_empty(s)
+
+    test "empty" {
+        input: ""
+        expect: true
+    }
+
+    test "nonempty" {
+        input: "x"
+        expect: false
+    }
+}
+}

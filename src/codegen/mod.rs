@@ -11,14 +11,306 @@ use crate::synthesis::engine::{CandidateImplementation, IRNode, IRLiteral, IRBin
 /// Generate source code from a verified candidate implementation
 pub fn generate(candidate: &CandidateImplementation, target: &str) -> Result<String, CodegenError> {
     match target {
-        "rust" => generate_rust_route(candidate),
-        "c" => generate_c(candidate),
-        "wasm" => generate_wasm(candidate),
-        "python" => generate_python(candidate),
-        "javascript" | "js" => generate_javascript(candidate),
+        "rust" => generate_rust_with_library(candidate),
+        "c" => {
+            reject_library_calls(candidate, target, true)?;
+            generate_c(candidate)
+        }
+        "wasm" => {
+            reject_library_calls(candidate, target, true)?;
+            generate_wasm(candidate)
+        }
+        "python" => {
+            reject_library_calls(candidate, target, false)?;
+            generate_python(candidate)
+        }
+        "javascript" | "js" => {
+            reject_library_calls(candidate, target, false)?;
+            generate_javascript(candidate)
+        }
         "ir" => Ok(debug_ir_string(&candidate.body, 0)),
         other => Err(CodegenError::UnsupportedTarget(other.into())),
     }
+}
+
+// ── Phase 116: cross-target honesty for library calls ───
+//
+// STDLIB_SCOPE gate clause 5: the silent free-call
+// fallback dies for library entries. Measured before the
+// fix (Phase 116 probe): a body calling a shipped entry
+// rendered as a silent wrong answer on every target —
+// Rust emitted a free call to a function the generated
+// file does not define (failing only at the user's own
+// rustc), C/WAT reduced the call to a comment, Python to
+// `pass # unsupported` / `None`, JavaScript to
+// `undefined`; the builtin tier (`len` in both IR forms,
+// `int_to_str`) was correct only on Rust and silently
+// constant-folded in expression position elsewhere
+// (`list_min`'s own generated C/Python/JS carried
+// `(0 == 0)` / `(None == 0)` / `(undefined === 0)` where
+// its `len` calls belonged). The dispositions, per
+// target:
+//
+// * rust — correct by construction: the entries the body
+//   uses are emitted into the file as real functions
+//   (their prelude specs + shipped bodies, transitively
+//   closed), so the output compiles and runs — the
+//   clause's stated measurement. Builtins already render
+//   (ir_call_text / the UnaryOp::Len arm).
+// * c, wasm — no length or aggregate model exists in
+//   either target (C lists are bare pointers, WAT is a
+//   scalar i32 model), so NO library call renders there:
+//   entry calls and builtin calls alike refuse at
+//   generation time, naming the call and the target.
+// * python, javascript — entry calls refuse the same
+//   way (neither emitter has any call rendering); the
+//   builtin tier renders correctly in the expression
+//   positions their walkers serve (name-keyed arms in
+//   ir_to_python_expr / ir_to_js_expr).
+// * ir — the debug dump names every call as it stands.
+//
+// Combinations NOT involving the library keep their
+// standing behaviour exactly: a plain sibling call or a
+// Hole reaches the same fallbacks as before (pinned in
+// tests/phase116_honesty.rs).
+
+/// The library involvement of one IR body: the shipped
+/// entries it calls by name, and the builtin-tier calls
+/// it makes (`len` in either of its IR forms,
+/// `int_to_str`).
+#[derive(Default)]
+struct LibraryUse {
+    entries: std::collections::BTreeSet<String>,
+    builtins: std::collections::BTreeSet<String>,
+}
+
+/// The names of the shipped standard-library entries:
+/// the prelude specs that carry a shipped body (the 29
+/// of STDLIB_SCOPE §2 as it stands). `int_gcd` is not
+/// among them — it has neither a prelude spec nor a
+/// shipped body; it stands as the scope's named blocker
+/// (owner's amendment pending), not as a callable entry.
+fn library_entry_names() -> std::collections::BTreeSet<String> {
+    crate::stdlib::prelude_specs()
+        .iter()
+        .filter(|s| crate::stdlib::shipped_body(&s.name).is_some())
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+fn scan_library_use(node: &IRNode, entry_names: &std::collections::BTreeSet<String>, out: &mut LibraryUse) {
+    match node {
+        IRNode::Call { function, args } => {
+            if entry_names.contains(function) {
+                out.entries.insert(function.clone());
+            } else if function == "len" || function == "int_to_str" {
+                out.builtins.insert(function.clone());
+            }
+            for a in args {
+                scan_library_use(a, entry_names, out);
+            }
+        }
+        IRNode::UnaryOp(IRUnaryOp::Len, inner) => {
+            out.builtins.insert("len".into());
+            scan_library_use(inner, entry_names, out);
+        }
+        IRNode::Block(stmts) => {
+            for s in stmts {
+                scan_library_use(s, entry_names, out);
+            }
+        }
+        IRNode::Let { value, body, .. } => {
+            scan_library_use(value, entry_names, out);
+            scan_library_use(body, entry_names, out);
+        }
+        IRNode::If { condition, then_branch, else_branch } => {
+            scan_library_use(condition, entry_names, out);
+            scan_library_use(then_branch, entry_names, out);
+            scan_library_use(else_branch, entry_names, out);
+        }
+        IRNode::While { condition, body, .. } => {
+            scan_library_use(condition, entry_names, out);
+            scan_library_use(body, entry_names, out);
+        }
+        IRNode::For { start, end, body, .. } => {
+            scan_library_use(start, entry_names, out);
+            scan_library_use(end, entry_names, out);
+            scan_library_use(body, entry_names, out);
+        }
+        IRNode::Match { scrutinee, cases } => {
+            scan_library_use(scrutinee, entry_names, out);
+            for (_, body) in cases {
+                scan_library_use(body, entry_names, out);
+            }
+        }
+        IRNode::Return(inner)
+        | IRNode::UnaryOp(_, inner)
+        | IRNode::TryPropagate(inner)
+        | IRNode::Typed { node: inner, .. } => {
+            scan_library_use(inner, entry_names, out);
+        }
+        IRNode::BinOp(_, lhs, rhs) | IRNode::Index(lhs, rhs) => {
+            scan_library_use(lhs, entry_names, out);
+            scan_library_use(rhs, entry_names, out);
+        }
+        IRNode::Lambda { body, .. }
+        | IRNode::Closure { body, .. }
+        | IRNode::Loop { body, .. }
+        | IRNode::StructDef { body, .. } => {
+            scan_library_use(body, entry_names, out);
+        }
+        IRNode::Collection { elements, .. } => {
+            for e in elements {
+                scan_library_use(e, entry_names, out);
+            }
+        }
+        IRNode::Map { function, over } | IRNode::Filter { predicate: function, over } => {
+            scan_library_use(function, entry_names, out);
+            scan_library_use(over, entry_names, out);
+        }
+        IRNode::Fold { operation, initial, over } => {
+            scan_library_use(operation, entry_names, out);
+            scan_library_use(initial, entry_names, out);
+            scan_library_use(over, entry_names, out);
+        }
+        IRNode::Sort { comparator, collection } => {
+            scan_library_use(comparator, entry_names, out);
+            scan_library_use(collection, entry_names, out);
+        }
+        IRNode::Alloc { initial, .. } => {
+            scan_library_use(initial, entry_names, out);
+        }
+        IRNode::Assign { target, value } => {
+            scan_library_use(target, entry_names, out);
+            scan_library_use(value, entry_names, out);
+        }
+        IRNode::Break { value } => {
+            if let Some(inner) = value {
+                scan_library_use(inner, entry_names, out);
+            }
+        }
+        IRNode::FieldAccess { base, .. } => {
+            scan_library_use(base, entry_names, out);
+        }
+        IRNode::RecordLit { fields, .. } => {
+            for (_, value) in fields {
+                scan_library_use(value, entry_names, out);
+            }
+        }
+        IRNode::Hole { .. } | IRNode::Literal(_) | IRNode::Var(_) => {}
+    }
+}
+
+/// Refuse generation for `target` when the body makes a
+/// library call the target cannot render. With
+/// `builtins_too`, builtin-tier calls refuse as well
+/// (the C/WAT disposition); otherwise only entry calls
+/// refuse (Python/JavaScript, whose builtin arms render).
+/// The first offender in name order is the one named, so
+/// the refusal is deterministic.
+fn reject_library_calls(
+    candidate: &CandidateImplementation,
+    target: &str,
+    builtins_too: bool,
+) -> Result<(), CodegenError> {
+    let entry_names = library_entry_names();
+    let mut used = LibraryUse::default();
+    scan_library_use(&candidate.body, &entry_names, &mut used);
+    let offender = used.entries.iter().next().cloned().or_else(|| {
+        if builtins_too {
+            used.builtins.iter().next().cloned()
+        } else {
+            None
+        }
+    });
+    match offender {
+        Some(name) => Err(CodegenError::UnrenderableLibraryCall {
+            target: target.into(),
+            name,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The Rust route of `generate`, with clause 5's
+/// correct-by-construction half: after the candidate's
+/// own rendering (whichever emitter the route seats),
+/// every library entry the body uses is emitted as a
+/// real function — its prelude spec and shipped body
+/// through the native function renderer — transitively
+/// closed over the entries' own bodies, in name order.
+/// A candidate that IS an entry is its own function and
+/// gains no helper. Bodies using no entry render
+/// byte-identically to the pre-116 route.
+fn generate_rust_with_library(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
+    let mut out = generate_rust_route(candidate)?;
+    let entry_names = library_entry_names();
+    let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut direct = LibraryUse::default();
+    scan_library_use(&candidate.body, &entry_names, &mut direct);
+    let mut queue: Vec<String> = direct.entries.into_iter().collect();
+    while let Some(name) = queue.pop() {
+        if used.insert(name.clone()) {
+            if let Some(body) = crate::stdlib::shipped_body(&name) {
+                let mut inner = LibraryUse::default();
+                scan_library_use(&body, &entry_names, &mut inner);
+                queue.extend(inner.entries);
+            }
+        }
+    }
+    used.remove(&candidate.spec.name);
+    if !used.is_empty() {
+        let specs = crate::stdlib::prelude_specs();
+        out.push('\n');
+        for name in &used {
+            let spec = specs
+                .iter()
+                .find(|s| &s.name == name)
+                .expect("a used entry is a prelude spec");
+            let body = crate::stdlib::shipped_body(name)
+                .expect("a used entry carries a shipped body");
+            let helper = CandidateImplementation {
+                id: 0,
+                body,
+                spec_name: name.clone(),
+                spec: spec.clone(),
+                score: 0.0,
+                scores: crate::synthesis::engine::ScoreBreakdown {
+                    test_pass_ratio: 0.0,
+                    constraint_score: 0.0,
+                    complexity_score: 0.0,
+                    quality_score: 0.0,
+                    synthesis_time_us: 0,
+                },
+                generation: 0,
+                provenance: crate::synthesis::engine::Provenance::HumanGuided,
+                verified: true,
+                verification_status: None,
+            };
+            // The function renderer heads a standalone
+            // candidate with `//!` module-doc lines; a
+            // helper appended mid-file must carry them as
+            // `///` outer doc lines instead (inner doc
+            // comments are legal only at a file's head).
+            // Only the leading doc block converts — the
+            // first line that is not a `//!` line ends it.
+            let rendered = render_rust_function(&helper);
+            let mut converted = String::with_capacity(rendered.len());
+            let mut in_doc_head = true;
+            for line in rendered.lines() {
+                if in_doc_head && line.starts_with("//!") {
+                    converted.push_str("///");
+                    converted.push_str(&line[3..]);
+                } else {
+                    in_doc_head = false;
+                    converted.push_str(line);
+                }
+                converted.push('\n');
+            }
+            out.push_str(&converted);
+        }
+    }
+    Ok(out)
 }
 
 /// The "rust" route of `generate` — the M5-S2 switch
@@ -86,11 +378,15 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
-// Kept-but-unselected under `bootstrap-codegen` (the M5-S2
-// switch routes around it there — the ROAD's keep-both
-// rule); the allow fires only in that configuration.
-#[cfg_attr(feature = "bootstrap-codegen", allow(dead_code))]
-fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
+/// One Rust function, rendered whole: module-doc header,
+/// signature, precondition block, body — everything
+/// `generate_rust` emits for a candidate except its
+/// `#[cfg(test)]` module. Factored out of `generate_rust`
+/// in Phase 116 (verbatim — the byte stream is unchanged)
+/// so the clause-5 helper emission
+/// (`generate_rust_with_library`) renders each used
+/// library entry through the very same function shape.
+fn render_rust_function(candidate: &CandidateImplementation) -> String {
     let mut out = String::new();
 
     // Module header
@@ -163,6 +459,16 @@ fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenE
     out.push_str(&body_code);
 
     out.push_str("}\n");
+
+    out
+}
+
+// Kept-but-unselected under `bootstrap-codegen` (the M5-S2
+// switch routes around it there — the ROAD's keep-both
+// rule); the allow fires only in that configuration.
+#[cfg_attr(feature = "bootstrap-codegen", allow(dead_code))]
+fn generate_rust(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
+    let mut out = render_rust_function(candidate);
 
     // Tests
     if !candidate.spec.tests.is_empty() {
@@ -1736,6 +2042,16 @@ fn ir_to_python(node: &IRNode, indent: usize) -> String {
                 pad,
             )
         }
+        // Phase 116: a discarded builtin-tier call still
+        // evaluates — the Rust statement Call arm's stance
+        // (the expression, terminated), name-keyed to the
+        // builtin tier. Every other statement call keeps
+        // the standing fallback below.
+        IRNode::Call { function, .. }
+            if matches!(function.as_str(), "len" | "int_to_str") =>
+        {
+            format!("{}{}\n", pad, ir_to_python_expr(node))
+        }
         _ => format!("{}pass  # {}\n", pad, "unsupported"),
     }
 }
@@ -1776,6 +2092,23 @@ fn ir_to_python_expr(node: &IRNode) -> String {
                 .collect();
             format!("{{{}}}", fields_str.join(", "))
         }
+        // Phase 116 (clause 5): the builtin tier renders —
+        // Python's own len/str are the entries' exact
+        // semantics (code points for a string, elements
+        // for a list). Name-keyed, arity-checked: every
+        // other call — and a builtin name at a wrong
+        // arity, which a checked module never carries —
+        // keeps the standing catch-all below.
+        IRNode::Call { function, args } if args.len() == 1 => {
+            match function.as_str() {
+                "len" => format!("len({})", ir_to_python_expr(&args[0])),
+                "int_to_str" => format!("str({})", ir_to_python_expr(&args[0])),
+                _ => "None".into(),
+            }
+        }
+        IRNode::UnaryOp(IRUnaryOp::Len, inner) => {
+            format!("len({})", ir_to_python_expr(inner))
+        }
         _ => "None".into(),
     }
 }
@@ -1814,6 +2147,16 @@ fn ir_to_javascript(node: &IRNode, indent: usize) -> String {
                 ir_to_javascript(body, indent + 1),
                 pad,
             )
+        }
+        // Phase 116: a discarded builtin-tier call still
+        // evaluates — the Rust statement Call arm's stance
+        // (the expression, terminated), name-keyed to the
+        // builtin tier. Every other statement call keeps
+        // the standing fallback below.
+        IRNode::Call { function, .. }
+            if matches!(function.as_str(), "len" | "int_to_str") =>
+        {
+            format!("{}{};\n", pad, ir_to_js_expr(node))
         }
         _ => format!("{}// {}\n", pad, "unsupported"),
     }
@@ -1854,6 +2197,23 @@ fn ir_to_js_expr(node: &IRNode) -> String {
                 .map(|(n, v)| format!("{}: {}", n, ir_to_js_expr(v)))
                 .collect();
             format!("{{ {} }}", fields_str.join(", "))
+        }
+        // Phase 116 (clause 5): the builtin tier renders.
+        // The spread form counts code points for a string
+        // and elements for a list — the language's
+        // char-count semantics, where a plain `.length`
+        // would count UTF-16 units. Name-keyed,
+        // arity-checked: every other call keeps the
+        // standing catch-all below.
+        IRNode::Call { function, args } if args.len() == 1 => {
+            match function.as_str() {
+                "len" => format!("[...({})].length", ir_to_js_expr(&args[0])),
+                "int_to_str" => format!("String({})", ir_to_js_expr(&args[0])),
+                _ => "undefined".into(),
+            }
+        }
+        IRNode::UnaryOp(IRUnaryOp::Len, inner) => {
+            format!("[...({})].length", ir_to_js_expr(inner))
         }
         _ => "undefined".into(),
     }
@@ -2013,7 +2373,7 @@ fn expr_to_rust(expr: &Expr) -> String {
             format!("{}.{}", expr_to_rust(base), rust_ident(field))
         }
         // Method calls (Phase 77, decision D1a — scoped
-        // unfreeze, new arm only): the four closed-table
+        // unfreeze, new arm only): the closed-table
         // builtins render as the identical Rust method
         // syntax on the rendered receiver. Anything else
         // — a name outside the table, or a table name
@@ -2021,9 +2381,21 @@ fn expr_to_rust(expr: &Expr) -> String {
         // zero-argument; both shapes are Phase 74 type
         // errors, so a checked module never reaches this)
         // — renders the standing catch-all, never a guess.
+        // Phase 113 amendment (2026-11-23): the Phase 112
+        // Option pair (is_some, is_none) joins the table
+        // here, in lockstep with the Codegen spec's
+        // rust_expr_method_form amendment, so the original
+        // and the composition move as one — the cascade
+        // Phase 112 priced and did not absorb. The match
+        // stays on the name alone: unwrap is one name for
+        // both families, and which receiver family a name
+        // belongs to is the typechecker's classification,
+        // not this walker's.
         Expr::MethodCall { receiver, name, args } => {
             match name.as_str() {
-                "is_ok" | "is_err" | "unwrap" | "len" if args.is_empty() => {
+                "is_ok" | "is_err" | "unwrap" | "len" | "is_some" | "is_none"
+                    if args.is_empty() =>
+                {
                     format!("{}.{}()", expr_to_rust(receiver), name)
                 }
                 _ => "??".into(),
@@ -2090,6 +2462,14 @@ pub enum CodegenError {
     UnsupportedTarget(String),
     InvalidIR(String),
     InternalError(String),
+    /// Phase 116 (STDLIB_SCOPE clause 5): the target
+    /// cannot render a standard-library call the body
+    /// makes — a shipped entry, or, on targets with no
+    /// length model, a builtin-tier call. Generation
+    /// refuses, naming the call and the target, instead
+    /// of emitting the silent free call / constant the
+    /// fallback used to produce.
+    UnrenderableLibraryCall { target: String, name: String },
 }
 
 impl std::fmt::Display for CodegenError {
@@ -2098,6 +2478,12 @@ impl std::fmt::Display for CodegenError {
             CodegenError::UnsupportedTarget(t) => write!(f, "Unsupported target language: {}", t),
             CodegenError::InvalidIR(msg) => write!(f, "Invalid IR: {}", msg),
             CodegenError::InternalError(msg) => write!(f, "Codegen error: {}", msg),
+            CodegenError::UnrenderableLibraryCall { target, name } => write!(
+                f,
+                "target \"{}\" cannot render the standard-library call \"{}\" \
+                 (refusing the silent free-call fallback)",
+                target, name
+            ),
         }
     }
 }
@@ -4128,6 +4514,51 @@ mod tests {
         let field_recv = Expr::Field(Box::new(var("state")), "tokens".into());
         assert_eq!(expr_to_rust(&field_recv), "state.tokens");
         assert_eq!(expr_to_rust(&mc(field_recv, "len")), "state.tokens.len()");
+    }
+
+    #[test]
+    fn phase113_expr_to_rust_option_methods_render_verbatim() {
+        // Phase 113 (the Option cascade): the Phase 112
+        // Option pair joins the closed table in this arm,
+        // in lockstep with the Codegen spec's
+        // rust_expr_method_form amendment — the Phase 102
+        // discipline for the emitter surface Phase 112
+        // priced and did not absorb.
+        let var = |n: &str| Expr::Var(n.into());
+        let mc = |receiver: Expr, name: &str| Expr::MethodCall {
+            receiver: Box::new(receiver),
+            name: name.into(),
+            args: vec![],
+        };
+        // The Option pair renders as the identical Rust
+        // method syntax on the rendered receiver.
+        assert_eq!(expr_to_rust(&mc(var("o"), "is_some")), "o.is_some()");
+        assert_eq!(expr_to_rust(&mc(var("o"), "is_none")), "o.is_none()");
+        // unwrap is one name for both families: the
+        // Result-receiver rendering is byte-unchanged from
+        // the Phase 77 pin, and an Option receiver reaches
+        // the same rendering (the arm matches on the name
+        // alone — the receiver's family is the
+        // typechecker's business, not this walker's).
+        assert_eq!(expr_to_rust(&mc(var("output"), "unwrap")), "output.unwrap()");
+        assert_eq!(expr_to_rust(&mc(var("o"), "unwrap")), "o.unwrap()");
+        // Chaining composes, as with the D1a names.
+        assert_eq!(
+            expr_to_rust(&mc(mc(var("o"), "unwrap"), "len")),
+            "o.unwrap().len()"
+        );
+        // A table name carrying arguments still renders
+        // the catch-all (the builtins are zero-argument;
+        // the shape is a Phase 74 type error, so a checked
+        // module never reaches this), and a case near-miss
+        // stays off-table.
+        let with_arg = Expr::MethodCall {
+            receiver: Box::new(var("o")),
+            name: "is_some".into(),
+            args: vec![Expr::IntLit(1)],
+        };
+        assert_eq!(expr_to_rust(&with_arg), "??");
+        assert_eq!(expr_to_rust(&mc(var("o"), "is_somee")), "??");
     }
 
     #[test]

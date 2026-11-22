@@ -25,6 +25,29 @@
 # open at its two named deviations). Previous figure:
 # 673,792 B.
 #
+# Phase 112 (2026-11-22): the standard library's DATA
+# left the bundle — the number did NOT change. The
+# library (module sources + shipped bodies) had been
+# compiled into the WASM since Phase 110 and the bundle
+# stood at 769,782 B (1,290 B of headroom) with the
+# 12-entry List family still to ship. The library now
+# travels as a separate asset (playground/
+# stdlib-asset.bin, copied into pkg/ by build.sh) that
+# the page fetches and installs via init_stdlib before
+# any call; per-entry library growth costs ~0 bundle
+# bytes from here. Measured after the move (Phase 112,
+# 17 entries in the asset): see the ROAD Phase 112 note.
+#
+# Phase 116 (2026-11-23): the number did NOT change. On
+# the final 1.0 library tree (all 29 entries shipped)
+# with the clause-5 cross-target honesty machinery in
+# codegen (the library-call scan, generation-time
+# refusals, the Rust helper emission), the bundle
+# rebuilds at 680,280 B post-wasm-opt (844,289 B
+# pre-pass) — headroom 90,792 B. The stdlib asset stands
+# at 33,476 B. Corpus on the rebuilt bundle: 16/16 check
+# + 6/6 synthesis.
+#
 # Enforced by .github/workflows/playground.yml on every
 # push/PR that touches the playground path. Re-baselining
 # is a deliberate act: change this number only in a phase

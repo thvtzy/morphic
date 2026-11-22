@@ -1,0 +1,38 @@
+// ─────────────────────────────────────────────────────────
+//  MORPHIC STANDARD LIBRARY — Result module (Phase 112)
+//
+//  Prelude module like the Int/Char modules (decision
+//  D2a); bodies crowned at library-build time, shipped
+//  as data in src/stdlib.rs. The Result half of the
+//  frozen scope's Result/Option family (STDLIB_SCOPE.md
+//  §2.5). The contract is the guarded method form the
+//  Phase 106 audit's hand probe Verified — the two rows
+//  together are exactly unwrap_or — and the body is the
+//  constructor Match those rows state, crowned through
+//  the pipeline by the match_from_rows seed family
+//  (Phase 112).
+// ─────────────────────────────────────────────────────────
+
+StdlibResult {
+spec result_unwrap_or {
+    doc: "result_unwrap_or(r, d) = the Ok payload of r, or d when r is Err (STDLIB_SCOPE.md 2.5)."
+
+    input: r: Result<Int, String>, d: Int
+    output: Int
+
+    constraint: r.is_err() || output == r.unwrap()
+    constraint: r.is_ok() || output == d
+
+    test "ok payload" { input: (Ok(7), 3) expect: 7 }
+
+    test "err default" { input: (Err("bad"), 3) expect: 3 }
+
+    test "ok zero payload" { input: (Ok(0), 5) expect: 0 }
+
+    test "err empty message" { input: (Err(""), 0) expect: 0 }
+
+    test "ok negative payload" { input: (Ok((0 - 4)), 9) expect: (0 - 4) }
+
+    test "err negative default" { input: (Err("boom"), (0 - 2)) expect: (0 - 2) }
+}
+}

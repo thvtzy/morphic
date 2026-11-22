@@ -888,10 +888,18 @@ spec count_above {
 "#;
 
     /// The forall-fold scan body for COUNT_SHAPED — the
-    /// Phase 60 family's construction (Alloc + For + Index
-    /// + conditional increment). The interpreter binds the
-    /// spec's tests but cannot evaluate this body on any of
-    /// them (For/Alloc/Assign are outside its subset).
+    /// Phase 60 family's construction (a Fold over the
+    /// list, counting the elements above the limit). The
+    /// interpreter binds the spec's tests but cannot
+    /// evaluate this body on any of them: the higher-order
+    /// nodes stay outside its subset (G4). The fixture's
+    /// original construction was a For scan (Alloc + For +
+    /// Index + conditional increment); Alloc/Assign
+    /// graduated into the subset in Phase 95 and For in
+    /// Phase 115 (the List family's judging machinery), so
+    /// the scan's unevaluable ingredient is the Fold now —
+    /// the body's semantics (the count of elements above
+    /// the limit) are unchanged.
     fn scan_body() -> IRNode {
         let var = |n: &str| IRNode::Var(n.to_string());
         let int = |n: i64| {
@@ -901,33 +909,39 @@ spec count_above {
             IRNode::Alloc {
                 name: "count".into(),
                 ty: crate::spec::ast::TypeRef::Int,
-                initial: Box::new(int(0)),
-            },
-            IRNode::For {
-                var: "i".into(),
-                start: Box::new(int(0)),
-                end: Box::new(IRNode::UnaryOp(
-                    crate::synthesis::engine::IRUnaryOp::Len,
-                    Box::new(var("values")),
-                )),
-                body: Box::new(IRNode::Assign {
-                    target: Box::new(var("count")),
-                    value: Box::new(IRNode::BinOp(
-                        crate::synthesis::engine::IRBinOp::Add,
-                        Box::new(var("count")),
-                        Box::new(IRNode::If {
+                initial: Box::new(IRNode::Fold {
+                    operation: Box::new(IRNode::Lambda {
+                        params: vec![
+                            ("acc".into(), crate::spec::ast::TypeRef::Int),
+                            ("x".into(), crate::spec::ast::TypeRef::Int),
+                        ],
+                        body: Box::new(IRNode::If {
                             condition: Box::new(IRNode::BinOp(
                                 crate::synthesis::engine::IRBinOp::Gt,
-                                Box::new(IRNode::Index(
-                                    Box::new(var("values")),
-                                    Box::new(var("i")),
+                                // The element arrives by
+                                // reference in the compiled
+                                // fold; the Clone read is
+                                // the Phase 61 form that
+                                // compiles (a plain read of
+                                // the borrowed element is
+                                // E0308 against the Int
+                                // limit).
+                                Box::new(IRNode::UnaryOp(
+                                    crate::synthesis::engine::IRUnaryOp::Clone,
+                                    Box::new(var("x")),
                                 )),
                                 Box::new(var("limit")),
                             )),
-                            then_branch: Box::new(int(1)),
-                            else_branch: Box::new(int(0)),
+                            then_branch: Box::new(IRNode::BinOp(
+                                crate::synthesis::engine::IRBinOp::Add,
+                                Box::new(var("acc")),
+                                Box::new(int(1)),
+                            )),
+                            else_branch: Box::new(var("acc")),
                         }),
-                    )),
+                    }),
+                    initial: Box::new(int(0)),
+                    over: Box::new(var("values")),
                 }),
             },
             IRNode::Return(Box::new(var("count"))),
