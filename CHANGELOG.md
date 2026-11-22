@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **Roadmap: 1.1 — Embeddable Morphic added as a target after 1.0 (Phase 105; owner decision 2026-11-22)** — a new roadmap milestone, placed after 1.0 as its own milestone with its own gate: `morphic build` emitting ready-to-import packages of synthesized, verified functions (an npm package — WASM/JS with TypeScript types — and a Rust crate), typed host bindings for JS/Python/Rust hosts, and examples + "5-minute" embedding documentation. Recorded as a target only — no gate defined yet, no work started. See the Phase 105 note in [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
+- **North Star pinned (Phase 107; owner decision 2026-11-22)** — Morphic's long-term ambition is recorded as Python-level recognition and everyday relevance, pursued through distribution and the proven-correct-code wedge: 1.0 and 1.1 first, then distribution technologies, then the chaotic-good horizon. Vision only — no new gate or schedule. See the Phase 107 note in [ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md).
 
 ## [0.7.0] — 2026-11-22
 
