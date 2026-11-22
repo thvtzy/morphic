@@ -1425,7 +1425,7 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
         let mut md = String::new();
         let _ = writeln!(md, "# Tokenizer cross-validation (Phase 48; classifiers re-measured in Phase 49 with the char_equation seed family; re-instrumented in Phase 79 for the completed module — post-D5a verdicts, D4a agreement, restored tokenize constraints): synthesized winners vs tests/tokenizer_proof.rs mirrors (S4 copies in src/tokenizer_cross_validation.rs)");
         let _ = writeln!(md);
-        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module (opt 1) → Z3 verify_all (module-aware: specs + type declarations) → select_best. Classifiers execute on the IR interpreter over the 774-char Phase 45 battery, judged by executed mirror agreement (the standing D5a cross-check, re-measured every run); their winners' Z3 statuses are real since Phase 76 and appear in the table. Record specs execute through compiled runners (10 s limit, per-input panic isolation) over the Phase 47 batteries. Pinned vs spec-silent per the header: peek fully pinned; next_char pinned on pos+col always and line only on newlines; skip_whitespace pinned only on its two stated postconditions; tokenize_one/tokenize_all carry their restored constraints — the rows pin partial content (the Ok/Err split + growth/length rows), so executed agreement against the mirrors is their verdict content, paired with the winners' Z3 statuses.");
+        let _ = writeln!(md, "Pipeline per spec per run: parse → typecheck → synthesize_with_module_spec (opt 1; Phase 81: the engine's index now carries the type declarations too, so the record-era seed families can fire during synthesis) → Z3 verify_all (module-aware: specs + type declarations) → select_best. Classifiers execute on the IR interpreter over the 774-char Phase 45 battery, judged by executed mirror agreement (the standing D5a cross-check, re-measured every run); their winners' Z3 statuses are real since Phase 76 and appear in the table. Record specs execute through compiled runners (10 s limit, per-input panic isolation) over the Phase 47 batteries. Pinned vs spec-silent per the header: peek fully pinned; next_char pinned on pos+col always and line only on newlines; skip_whitespace pinned only on its two stated postconditions; tokenize_one/tokenize_all carry their restored constraints — the rows pin partial content (the Ok/Err split + growth/length rows), so executed agreement against the mirrors is their verdict content, paired with the winners' Z3 statuses.");
         let _ = writeln!(md);
         let _ = writeln!(md, "| Run | Spec | Winner tpr | Z3 status | Winner prov | Seed in pool | Agreement | Exec |");
         let _ = writeln!(md, "|---|---|---|---|---|---|---|---|");
@@ -1447,7 +1447,7 @@ fn show_state(s: &TokenizerState) -> String { format!("{}|{}|{}|{}|{:?}|{}", s.p
             for func in &functions {
                 let name = func.name.clone();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    engine::synthesize_with_module(func, 1, &functions)
+                    engine::synthesize_with_module_spec(func, 1, &module)
                 }));
                 let candidates = match outcome {
                     Ok(Ok(c)) if !c.is_empty() => c,

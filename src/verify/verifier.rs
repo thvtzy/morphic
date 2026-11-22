@@ -2823,36 +2823,116 @@ spec tokenize_all {
         );
     }
 
+    /// The mirror's next_char, FULL body (Phase 81): the
+    /// Phase 76 transcription above carries line/col
+    /// unchanged, which the spec's rows refute at
+    /// non-newline inputs — it was an encodability probe,
+    /// never a verifying body. The full mirror branches
+    /// line/col on `peek(state) == Some('\n')`, stated as an
+    /// IR Call to peek (the form a candidate body carries;
+    /// the verifier inlines it through the resolver).
+    #[cfg(feature = "z3-support")]
+    fn next_char_full_mirror_body() -> IRNode {
+        let field = |name: &str| IRNode::FieldAccess {
+            base: Box::new(IRNode::Var("state".into())),
+            field: name.into(),
+        };
+        let peek_is_newline = || {
+            IRNode::BinOp(
+                IRBinOp::Eq,
+                Box::new(IRNode::Call {
+                    function: "peek".into(),
+                    args: vec![IRNode::Var("state".into())],
+                }),
+                Box::new(IRNode::Call {
+                    function: "Some".into(),
+                    args: vec![IRNode::Literal(IRLiteral::Char('\n'))],
+                }),
+            )
+        };
+        IRNode::RecordLit {
+            type_name: "TokenizerState".into(),
+            fields: vec![
+                ("source".into(), field("source")),
+                (
+                    "pos".into(),
+                    IRNode::BinOp(
+                        IRBinOp::Add,
+                        Box::new(field("pos")),
+                        Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                    ),
+                ),
+                (
+                    "line".into(),
+                    IRNode::If {
+                        condition: Box::new(peek_is_newline()),
+                        then_branch: Box::new(IRNode::BinOp(
+                            IRBinOp::Add,
+                            Box::new(field("line")),
+                            Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                        )),
+                        else_branch: Box::new(field("line")),
+                    },
+                ),
+                (
+                    "col".into(),
+                    IRNode::If {
+                        condition: Box::new(peek_is_newline()),
+                        then_branch: Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                        else_branch: Box::new(IRNode::BinOp(
+                            IRBinOp::Add,
+                            Box::new(field("col")),
+                            Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                        )),
+                    },
+                ),
+                ("tokens".into(), field("tokens")),
+            ],
+        }
+    }
+
     #[cfg(feature = "z3-support")]
     #[test]
-    fn phase76_next_char_body_encodes_but_peek_call_blocks_the_verdict() {
+    fn phase81_next_char_verifies_once_peek_denotes() {
+        // RE-STATED from Phase 76's
+        // phase76_next_char_body_encodes_but_peek_call_blocks_the_verdict,
+        // whose pinned premise — the resolver denotes no
+        // body for peek — is exactly what Phase 81 removes
+        // (the complementary-guard builder, remainder (i)).
+        // The encodability half of the old test is unchanged;
+        // the blocker assertions are replaced by the closure
+        // they predicted.
         let module = load_restored_module();
         let index = SpecIndex::from_module(&module);
         let spec = restored_spec(&module, "next_char");
-        // The body itself is fully encodable now (RecordLit,
-        // FieldAccess, the bridge inside its line/col logic
-        // is constraint-side only).
         assert!(
             body_is_encodable_with(&spec, &next_char_mirror_body(), &index),
             "next_char's mirror body must be encodable after Phase 76"
         );
-        // But its postconditions call peek(state), and the
-        // resolver denotes NO body for peek (its
-        // postconditions are disjunctive guard rows over a
-        // computed Bool guard — neither an equation nor a
-        // key-indexed guard table), so the constraint side
-        // cannot inline the call: Inconclusive, for that
-        // named reason — a resolver gap, not an encoder gap.
-        assert!(
-            index.callee_body("peek").is_none(),
-            "the named blocker: no resolver body for peek"
-        );
+        // peek now denotes, through the complementary-guard
+        // builder appended at the END of the resolver chain.
+        let peek_body = index
+            .callee_body("peek")
+            .expect("peek must denote after Phase 81");
+        // Self-check (the Phase 80 pricing's added evidence
+        // for this builder): the denoted body verifies
+        // against peek's OWN postconditions.
+        let peek_spec = restored_spec(&module, "peek");
         let verifier = Verifier::with_module(&module);
-        let cand = candidate(&spec, 76, next_char_mirror_body());
+        let cand = candidate(&peek_spec, 81, peek_body);
+        assert_eq!(
+            verifier.verify_one(&cand, &peek_spec).status,
+            VerificationStatus::Verified,
+            "peek's denoted body must verify against peek's own postconditions"
+        );
+        // And next_char's full mirror body — whose line/col
+        // logic calls peek(state) — now verifies with peek
+        // inlined through the denotation.
+        let cand = candidate(&spec, 81, next_char_full_mirror_body());
         assert_eq!(
             verifier.verify_one(&cand, &spec).status,
-            VerificationStatus::Inconclusive,
-            "next_char stays Inconclusive until peek has a resolver body"
+            VerificationStatus::Verified,
+            "next_char's full mirror body must verify once peek denotes"
         );
     }
 

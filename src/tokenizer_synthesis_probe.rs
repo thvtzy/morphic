@@ -301,7 +301,7 @@ mod probe_tok {
                 let name = func.name.clone();
                 let started = Instant::now();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    engine::synthesize_with_module(func, 1, functions)
+                    engine::synthesize_with_module_spec(func, 1, &module)
                 }));
                 let synth_ms = started.elapsed().as_millis();
 

@@ -563,6 +563,20 @@ impl SynthesisEngine {
         engine
     }
 
+    /// An engine that knows the whole module INCLUDING its
+    /// type declarations (Phase 81): the record-era seed
+    /// families read declared record fields from the index
+    /// (the record-completion builder, remainder (i-b)),
+    /// exactly as the verifier's `with_module` index does
+    /// since Phase 76. Modules declaring no record types
+    /// behave identically under either constructor — the
+    /// declarations are inert for every other family.
+    pub fn with_module_spec(config: SynthesisConfig, module: &Spec) -> Self {
+        let mut engine = Self::new(config);
+        engine.spec_index = SpecIndex::from_module(module);
+        engine
+    }
+
     fn new_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst)
     }
@@ -871,6 +885,19 @@ impl SynthesisEngine {
         }
         if let Some(body) = mixed_pair_guard_table_seed_body(spec, &self.spec_index) {
             admit("mixed_pair_guard_table", body);
+        }
+        // Phase 81 (M1 remainders (i) + (i-b)): the two
+        // record-era families, appended after every
+        // standing family. Their territories are disjoint
+        // from all of the above by shape (a two-row
+        // complementary-guard spec over a computed guard;
+        // a record-returning spec stated as partial field
+        // equations), so no standing seed moves.
+        if let Some(body) = complementary_guard_seed_body(spec, &self.spec_index) {
+            admit("complementary_guard", body);
+        }
+        if let Some(body) = record_completion_seed_body(spec, &self.spec_index) {
+            admit("record_completion", body);
         }
         if let Some(body) = char_equation_seed_body(spec, &self.spec_index) {
             admit("char_equation", body);
@@ -1487,6 +1514,20 @@ pub fn synthesize_with_module(
 ) -> Result<Vec<CandidateImplementation>, SynthesisError> {
     let config = SynthesisConfig::from_opt_level(opt_level);
     let mut engine = SynthesisEngine::with_module(config, specs);
+    engine.run(spec)
+}
+
+/// `synthesize_with_module` over a whole parsed module, so
+/// the engine's index carries the module's type
+/// declarations as well as its specs (Phase 81; see
+/// `SynthesisEngine::with_module_spec`).
+pub fn synthesize_with_module_spec(
+    spec: &FunctionSpec,
+    opt_level: u8,
+    module: &Spec,
+) -> Result<Vec<CandidateImplementation>, SynthesisError> {
+    let config = SynthesisConfig::from_opt_level(opt_level);
+    let mut engine = SynthesisEngine::with_module_spec(config, module);
     engine.run(spec)
 }
 
@@ -4361,6 +4402,535 @@ fn mixed_pair_guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> O
     }
 }
 
+/// Are two guard expressions STRUCTURAL complements — one
+/// holds exactly where the other fails, by syntax alone?
+/// The admitted pairs: `Not(G)` against `G` (either side),
+/// and a complementary comparison — Lt/Ge, Le/Gt, Eq/Neq,
+/// in either order — over `expr_same` operands IN THE SAME
+/// ORDER. Anything else (swapped operands, different
+/// operands, a non-comparison shape) is not a complement
+/// this module will state: complement detection stays
+/// syntactic and exact (Phase 80 remainder (i), whose
+/// pricing names the mispaired-denotation risk: a wrong
+/// complement would change what a call MEANS in
+/// verification, so the pattern is deliberately narrower
+/// than most standing builders).
+fn guards_complementary(a: &Expr, b: &Expr) -> bool {
+    match (a, b) {
+        (Expr::UnaryOp(UnaryOp::Not, inner), other)
+        | (other, Expr::UnaryOp(UnaryOp::Not, inner)) => expr_same(inner.as_ref(), other),
+        (Expr::BinOp(o1, l1, r1), Expr::BinOp(o2, l2, r2)) => {
+            let complementary = matches!(
+                (o1, o2),
+                (BinOp::Lt, BinOp::Ge)
+                    | (BinOp::Ge, BinOp::Lt)
+                    | (BinOp::Le, BinOp::Gt)
+                    | (BinOp::Gt, BinOp::Le)
+                    | (BinOp::Eq, BinOp::Neq)
+                    | (BinOp::Neq, BinOp::Eq)
+            );
+            complementary && expr_same(l1, l2) && expr_same(r1, r2)
+        }
+        _ => false,
+    }
+}
+
+/// `len(x)` in a spec expression reaches the IR as a
+/// `Call` to the builtin — the form the verifier's `len`
+/// arm and the Phase 76 mirror body both use. The parser
+/// may state it as `Expr::Length`, which `expr_to_ir`
+/// lowers to a Hole; the Phase 81 builders therefore
+/// rewrite `Length` to the call form before lowering, so
+/// their denotations carry no hole for a stated length.
+/// Every other shape passes through untouched.
+fn len_as_call(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Length(inner) => Expr::Call("len".into(), vec![len_as_call(inner)]),
+        Expr::Field(inner, f) => Expr::Field(Box::new(len_as_call(inner)), f.clone()),
+        Expr::Index(c, i) => Expr::Index(Box::new(len_as_call(c)), Box::new(len_as_call(i))),
+        Expr::Call(n, args) => Expr::Call(
+            n.clone(),
+            args.iter().map(len_as_call).collect(),
+        ),
+        Expr::BinOp(op, l, r) => Expr::BinOp(
+            *op,
+            Box::new(len_as_call(l)),
+            Box::new(len_as_call(r)),
+        ),
+        Expr::UnaryOp(op, inner) => Expr::UnaryOp(*op, Box::new(len_as_call(inner))),
+        Expr::Lambda(params, body) => {
+            Expr::Lambda(params.clone(), Box::new(len_as_call(body)))
+        }
+        Expr::Comprehension {
+            binder,
+            collection,
+            body,
+        } => Expr::Comprehension {
+            binder: binder.clone(),
+            collection: Box::new(len_as_call(collection)),
+            body: Box::new(len_as_call(body)),
+        },
+        Expr::MethodCall {
+            receiver,
+            name,
+            args,
+        } => Expr::MethodCall {
+            receiver: Box::new(len_as_call(receiver)),
+            name: name.clone(),
+            args: args.iter().map(len_as_call).collect(),
+        },
+        Expr::RecordLit { type_name, fields } => Expr::RecordLit {
+            type_name: type_name.clone(),
+            fields: fields
+                .iter()
+                .map(|(n, v)| (n.clone(), len_as_call(v)))
+                .collect(),
+        },
+        leaf => leaf.clone(),
+    }
+}
+
+/// Lower a spec expression for a Phase 81 denotation: the
+/// `len` rewrite, then the standing `expr_to_ir`. None when
+/// the lowered tree carries a Hole — a holed denotation is
+/// not the spec's body (the `equation_rhs` rule).
+fn denotation_ir(expr: &Expr) -> Option<IRNode> {
+    let body = expr_to_ir(&len_as_call(expr));
+    if count_holes(&body) > 0 {
+        None
+    } else {
+        Some(body)
+    }
+}
+
+/// One complementary-guard row read as (guard, pin): a
+/// postcondition that is an Or of exactly two leaves, one
+/// an `output == E` pin (either orientation) and the other
+/// the guard. Neither side may mention `output` (the guard
+/// states an input condition; a pin mentioning `output`
+/// is not a value the body can denote). Any other shape —
+/// not an Or, not exactly two leaves, two pins, no pin, a
+/// `Constraint` that is not an `Expr` — is not a row of
+/// this family.
+fn complementary_row_parts(c: &Constraint) -> Option<(&Expr, &Expr)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let mut leaves = Vec::new();
+    flatten_or(expr, &mut leaves);
+    if leaves.len() != 2 {
+        return None;
+    }
+    let mut guard: Option<&Expr> = None;
+    let mut pin: Option<&Expr> = None;
+    for leaf in leaves {
+        if let Expr::BinOp(BinOp::Eq, l, r) = leaf {
+            let side = if matches!(l.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(r.as_ref())
+            } else if matches!(r.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) {
+                Some(l.as_ref())
+            } else {
+                None
+            };
+            if let Some(side) = side {
+                if pin.is_some() {
+                    return None; // two output pins: ambiguous
+                }
+                pin = Some(side);
+                continue;
+            }
+        }
+        if guard.is_some() {
+            return None; // two guard leaves: not this family's row
+        }
+        guard = Some(leaf);
+    }
+    let (guard, pin) = (guard?, pin?);
+    if expr_mentions_var(guard, OUTPUT_VAR) || expr_mentions_var(pin, OUTPUT_VAR) {
+        return None;
+    }
+    Some((guard, pin))
+}
+
+/// The complementary-guard body (Phase 81, remainder (i)
+/// of the Phase 80 gate re-run): a spec whose
+/// postconditions are EXACTLY two rows `G || output == E`
+/// with structurally complementary guards denotes the
+/// conditional `If(G1, E2, E1)` — where G1 holds, the
+/// first row is satisfied vacuously and the second row's
+/// pin must hold; where G1 fails, the first row's pin
+/// must. The measured shape is the tokenizer's `peek`:
+/// `state.pos<len(state.source)||output==None()` and
+/// `state.pos>=len(state.source)||output==Some(state.source[state.pos])`
+/// — two rows over a computed comparison guard, neither an
+/// equation nor a key-indexed guard table, which is why
+/// every earlier builder returned None for it and
+/// `next_char`'s postconditions (which call `peek(state)`)
+/// could not be inlined by the verifier.
+///
+/// Exactly two postconditions, both rows of this shape,
+/// or no denotation: a third postcondition of ANY shape
+/// is a statement this body would not honor, so the
+/// builder declines rather than skipping it (the
+/// deviation discipline of the guard families, tightened
+/// to the whole spec because the denotation claims to be
+/// the spec's whole meaning). Complement detection is
+/// `guards_complementary` — syntactic and exact.
+///
+/// Registered at the END of the `SpecIndex::callee_body`
+/// chain: it fires only where all eight predecessors
+/// return None, so no existing denotation moves.
+fn complementary_guard_body(spec: &FunctionSpec) -> Option<IRNode> {
+    if spec.postconditions.len() != 2 {
+        return None;
+    }
+    let (g1, e1) = complementary_row_parts(&spec.postconditions[0])?;
+    let (g2, e2) = complementary_row_parts(&spec.postconditions[1])?;
+    if !guards_complementary(g1, g2) {
+        return None;
+    }
+    Some(IRNode::If {
+        condition: Box::new(denotation_ir(g1)?),
+        then_branch: Box::new(denotation_ir(e2)?),
+        else_branch: Box::new(denotation_ir(e1)?),
+    })
+}
+
+/// The complementary-guard seed's body: the denotation,
+/// with any spec-to-spec calls resolved against the module
+/// (the composition-guard seed's admission precedent),
+/// admitted when the verifier can encode the resolved body
+/// in the module context. A body calling NO indexed spec
+/// needs no resolution; where `inline_calls` refuses it on
+/// shape grounds alone it is admitted raw — the
+/// encodability gate is the admission standard either way.
+fn complementary_guard_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = complementary_guard_body(spec)?;
+    let body = match index.inline_calls(&raw) {
+        Some(body) => body,
+        None => {
+            if body_calls_indexed(&raw, index) {
+                return None;
+            }
+            raw
+        }
+    };
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
+/// Does an IR body call any spec the index holds? (Builtin
+/// and constructor calls — `len`, `Some`, `Ok` — are not
+/// indexed specs and do not count.)
+fn body_calls_indexed(node: &IRNode, index: &SpecIndex) -> bool {
+    match node {
+        IRNode::Call { function, args } => {
+            index.get(function).is_some()
+                || args.iter().any(|a| body_calls_indexed(a, index))
+        }
+        IRNode::BinOp(_, l, r) => {
+            body_calls_indexed(l, index) || body_calls_indexed(r, index)
+        }
+        IRNode::UnaryOp(_, inner) => body_calls_indexed(inner, index),
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            body_calls_indexed(condition, index)
+                || body_calls_indexed(then_branch, index)
+                || body_calls_indexed(else_branch, index)
+        }
+        IRNode::Index(c, i) => {
+            body_calls_indexed(c, index) || body_calls_indexed(i, index)
+        }
+        IRNode::FieldAccess { base, .. } => body_calls_indexed(base, index),
+        IRNode::RecordLit { fields, .. } => {
+            fields.iter().any(|(_, v)| body_calls_indexed(v, index))
+        }
+        IRNode::Match { scrutinee, cases } => {
+            body_calls_indexed(scrutinee, index)
+                || cases.iter().any(|(_, b)| body_calls_indexed(b, index))
+        }
+        _ => false,
+    }
+}
+
+/// One record-completion row read as (guard leaf, field,
+/// pin): an Or of exactly two leaves — one guard leaf and
+/// one pin of the form `output.<field> == <rhs>` (either
+/// orientation), the rhs not mentioning `output`. Any
+/// other shape is not a row of this family.
+fn record_completion_row_parts(c: &Constraint) -> Option<(&Expr, &str, &Expr)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let mut leaves = Vec::new();
+    flatten_or(expr, &mut leaves);
+    if leaves.len() != 2 {
+        return None;
+    }
+    let mut guard: Option<&Expr> = None;
+    let mut pin: Option<(&str, &Expr)> = None;
+    for leaf in leaves {
+        if let Expr::BinOp(BinOp::Eq, l, r) = leaf {
+            let side = match (l.as_ref(), r.as_ref()) {
+                (Expr::Field(base, f), rhs)
+                    if matches!(base.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) =>
+                {
+                    Some((f.as_str(), rhs))
+                }
+                (rhs, Expr::Field(base, f))
+                    if matches!(base.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) =>
+                {
+                    Some((f.as_str(), rhs))
+                }
+                _ => None,
+            };
+            if let Some(side) = side {
+                if pin.is_some() {
+                    return None; // two field pins in one row
+                }
+                pin = Some(side);
+                continue;
+            }
+        }
+        if guard.is_some() {
+            return None; // two guard leaves: not this family's row
+        }
+        guard = Some(leaf);
+    }
+    let (guard, (field, rhs)) = (guard?, pin?);
+    if expr_mentions_var(guard, OUTPUT_VAR) || expr_mentions_var(rhs, OUTPUT_VAR) {
+        return None;
+    }
+    Some((guard, field, rhs))
+}
+
+/// An unconditional field equation read as (field, rhs):
+/// a postcondition that is exactly `output.<field> ==
+/// <rhs>` (either orientation), the rhs not mentioning
+/// `output`. (An Or postcondition is a row, not an
+/// equation, and is refused here by shape.)
+fn record_completion_equation(c: &Constraint) -> Option<(&str, &Expr)> {
+    let Constraint::Expr(expr) = c else {
+        return None;
+    };
+    let Expr::BinOp(BinOp::Eq, l, r) = expr else {
+        return None;
+    };
+    let (field, rhs) = match (l.as_ref(), r.as_ref()) {
+        (Expr::Field(base, f), rhs)
+            if matches!(base.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) =>
+        {
+            (f.as_str(), rhs)
+        }
+        (rhs, Expr::Field(base, f))
+            if matches!(base.as_ref(), Expr::Var(v) if v == OUTPUT_VAR) =>
+        {
+            (f.as_str(), rhs)
+        }
+        _ => return None,
+    };
+    if expr_mentions_var(rhs, OUTPUT_VAR) {
+        return None;
+    }
+    Some((field, rhs))
+}
+
+/// The record-completion body (Phase 81, remainder (i-b)
+/// of the Phase 80 gate re-run): a seed — NOT a
+/// `callee_body` denotation — that builds a record
+/// construction from a spec's partial field equations, so
+/// a spec like the tokenizer's `next_char` can be
+/// CROWNED, not only hand-verified.
+///
+/// The exact rule. The spec's return type must resolve
+/// (through the index's declarations) to a record type R,
+/// and exactly one parameter — the base — must have that
+/// same record type. Every postcondition must classify as
+/// one of:
+///   - an unconditional field equation `output.f == rhs`;
+///   - a guard row `G' || output.f == rhs` whose single
+///     guard leaf is either `expr_same` to the family's
+///     one guard G or its structural complement
+///     (`guards_complementary`). The first row's leaf
+///     defines G. A row's pin holds where its guard leaf
+///     FAILS: a leaf `expr_same` to G pins its field on
+///     the G-false side; a complementary leaf pins on the
+///     G-true side.
+/// At least one unconditional equation AND at least one
+/// guard row are required (a spec with only equations is
+/// an equation-family shape stated fieldwise; a spec with
+/// only rows states no unconditional field).
+///
+/// The constructed body is `R { … }` over the DECLARED
+/// fields, in declared order. Each field's value:
+///   - its unconditional rhs, if it has one;
+///   - `If(G, rhs_true, rhs_false)` when pinned on both
+///     sides;
+///   - `If(G, rhs, base.f)` / `If(G, base.f, rhs)` when
+///     pinned on one side only — the unpinned side CARRIES
+///     the base record's field, which is the rule the
+///     module's own spec comment states ("Fields no row
+///     pins … are carried over unchanged");
+///   - `base.f` (carried) when no equation names it.
+///
+/// Decline conditions (any one returns None): the return
+/// type is not a declared record, or the index carries no
+/// declarations; the base parameter is not unique; a
+/// postcondition classifies as neither shape; a pin names
+/// a field R does not declare; a field is pinned twice on
+/// the same side (or unconditionally) with non-`expr_same`
+/// right-hand sides; a field carries both an unconditional
+/// equation and guard pins; a guard leaf is neither
+/// `expr_same` to G nor its complement; a guard or rhs
+/// mentions `output`; any lowered piece carries a Hole.
+/// The measured shape is `next_char`: `output.pos ==
+/// state.pos + 1` unconditionally; `line` pinned on the
+/// newline side only (carried otherwise); `col` pinned on
+/// both sides (`1` at a newline, `state.col + 1` past
+/// one); `source`/`tokens` carried — the mirror body,
+/// derived from the spec alone.
+fn record_completion_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let TypeRef::Named(ret_name) = &spec.return_type else {
+        return None;
+    };
+    let (resolved, declared) = index.record_fields(ret_name)?;
+    let mut bases: Vec<&Param> = Vec::new();
+    for p in &spec.params {
+        if let TypeRef::Named(n) = &p.ty {
+            if let Some((r, _)) = index.record_fields(n) {
+                if r == resolved {
+                    bases.push(p);
+                }
+            }
+        }
+    }
+    if bases.len() != 1 {
+        return None;
+    }
+    let base = bases[0];
+    let declared_names: Vec<&str> = declared.iter().map(|(n, _)| n.as_str()).collect();
+
+    let mut uncond: HashMap<&str, &Expr> = HashMap::new();
+    let mut on_true: HashMap<&str, &Expr> = HashMap::new();
+    let mut on_false: HashMap<&str, &Expr> = HashMap::new();
+    let mut guard: Option<&Expr> = None;
+    let mut n_equations = 0usize;
+    let mut n_rows = 0usize;
+    for c in &spec.postconditions {
+        if let Some((field, rhs)) = record_completion_equation(c) {
+            if !declared_names.contains(&field) {
+                return None;
+            }
+            if on_true.contains_key(field) || on_false.contains_key(field) {
+                return None; // unconditional AND guarded: two statements of one field
+            }
+            match uncond.get(field) {
+                Some(existing) if !expr_same(existing, rhs) => return None,
+                Some(_) => {}
+                None => {
+                    uncond.insert(field, rhs);
+                }
+            }
+            n_equations += 1;
+            continue;
+        }
+        if let Some((leaf, field, rhs)) = record_completion_row_parts(c) {
+            if !declared_names.contains(&field) {
+                return None;
+            }
+            if uncond.contains_key(field) {
+                return None; // unconditional AND guarded
+            }
+            let g = match guard {
+                None => {
+                    guard = Some(leaf);
+                    leaf
+                }
+                Some(g) => g,
+            };
+            let slot = if expr_same(leaf, g) {
+                &mut on_false // the pin holds where the leaf fails
+            } else if guards_complementary(leaf, g) {
+                &mut on_true // the pin holds where G holds
+            } else {
+                return None; // a second, unrelated guard: not one guard's rows
+            };
+            match slot.get(field) {
+                Some(existing) if !expr_same(existing, rhs) => return None,
+                Some(_) => {}
+                None => {
+                    slot.insert(field, rhs);
+                }
+            }
+            n_rows += 1;
+            continue;
+        }
+        return None; // a postcondition of neither shape: this body would not honor it
+    }
+    if n_equations == 0 || n_rows == 0 {
+        return None;
+    }
+    let guard_ir = denotation_ir(guard?)?;
+    let carry = |field: &str| IRNode::FieldAccess {
+        base: Box::new(IRNode::Var(base.name.clone())),
+        field: field.into(),
+    };
+    let mut fields: Vec<(String, IRNode)> = Vec::with_capacity(declared.len());
+    for (name, _) in &declared {
+        let value = if let Some(rhs) = uncond.get(name.as_str()) {
+            denotation_ir(rhs)?
+        } else {
+            match (on_true.get(name.as_str()), on_false.get(name.as_str())) {
+                (Some(t), Some(f)) => IRNode::If {
+                    condition: Box::new(guard_ir.clone()),
+                    then_branch: Box::new(denotation_ir(t)?),
+                    else_branch: Box::new(denotation_ir(f)?),
+                },
+                (Some(t), None) => IRNode::If {
+                    condition: Box::new(guard_ir.clone()),
+                    then_branch: Box::new(denotation_ir(t)?),
+                    else_branch: Box::new(carry(name)),
+                },
+                (None, Some(f)) => IRNode::If {
+                    condition: Box::new(guard_ir.clone()),
+                    then_branch: Box::new(carry(name)),
+                    else_branch: Box::new(denotation_ir(f)?),
+                },
+                (None, None) => carry(name),
+            }
+        };
+        fields.push((name.clone(), value));
+    }
+    Some(IRNode::RecordLit {
+        type_name: resolved,
+        fields,
+    })
+}
+
+/// The record-completion seed's body: the construction,
+/// with spec-to-spec calls resolved against the module —
+/// resolution is REQUIRED here (the guard of the measured
+/// shape calls `peek(state)`, and a raw call body could
+/// not be executed by the interpreter or emitted
+/// standalone: the composition-guard seed's precedent) —
+/// admitted when the verifier can encode the resolved body
+/// in the module context.
+fn record_completion_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = record_completion_body(spec, index)?;
+    let body = index.inline_calls(&raw)?;
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
+}
+
 /// The Char-classifier tree validator: the number of
 /// comparison leaves in `node` when the tree is a pure
 /// classifier over the parameter `param` — `||` / `&&` /
@@ -5125,6 +5695,7 @@ impl SpecIndex {
             .or_else(|| expr_pin_guard_body(spec, self))
             .or_else(|| pair_guard_table_body(spec))
             .or_else(|| mixed_pair_guard_table_body(spec))
+            .or_else(|| complementary_guard_body(spec))
     }
 
     /// IR-level inlining: replace every call to an indexed
@@ -5205,6 +5776,44 @@ impl SpecIndex {
                 visiting.push(function.clone());
                 self.inline_rec(&substituted, &visiting, depth + 1)
             }
+            // Phase 81: the resolver's shape set is widened
+            // to the Phase 73–77 nodes (If was always an IR
+            // node but outside this set; FieldAccess, Index
+            // and RecordLit are the record-era shapes). The
+            // widening only turns shape-refusals into
+            // resolutions — a body whose calls could not
+            // resolve for any other reason (cycle, depth,
+            // arity, capture) still returns None — and the
+            // record-completion seed (remainder (i-b)) is
+            // its first consumer: its guard calls a callee
+            // whose denotation is an If over an Index.
+            IRNode::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => Some(IRNode::If {
+                condition: Box::new(self.inline_rec(condition, visiting, depth)?),
+                then_branch: Box::new(self.inline_rec(then_branch, visiting, depth)?),
+                else_branch: Box::new(self.inline_rec(else_branch, visiting, depth)?),
+            }),
+            IRNode::FieldAccess { base, field } => Some(IRNode::FieldAccess {
+                base: Box::new(self.inline_rec(base, visiting, depth)?),
+                field: field.clone(),
+            }),
+            IRNode::Index(coll, idx) => Some(IRNode::Index(
+                Box::new(self.inline_rec(coll, visiting, depth)?),
+                Box::new(self.inline_rec(idx, visiting, depth)?),
+            )),
+            IRNode::RecordLit { type_name, fields } => {
+                let mut out = Vec::with_capacity(fields.len());
+                for (name, value) in fields {
+                    out.push((name.clone(), self.inline_rec(value, visiting, depth)?));
+                }
+                Some(IRNode::RecordLit {
+                    type_name: type_name.clone(),
+                    fields: out,
+                })
+            }
             _ => None,
         }
     }
@@ -5260,6 +5869,28 @@ fn collect_pattern_binders<'a>(node: &'a IRNode, out: &mut Vec<&'a str>) {
                 collect_pattern_binders(a, out);
             }
         }
+        // Phase 81 shape widening (see inline_rec): these
+        // shapes bind nothing, but the walk must reach the
+        // whole tree.
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_pattern_binders(condition, out);
+            collect_pattern_binders(then_branch, out);
+            collect_pattern_binders(else_branch, out);
+        }
+        IRNode::FieldAccess { base, .. } => collect_pattern_binders(base, out),
+        IRNode::Index(c, i) => {
+            collect_pattern_binders(c, out);
+            collect_pattern_binders(i, out);
+        }
+        IRNode::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                collect_pattern_binders(v, out);
+            }
+        }
         _ => {}
     }
 }
@@ -5286,6 +5917,27 @@ fn collect_free_vars(node: &IRNode, out: &mut Vec<String>) -> Option<()> {
             collect_free_vars(scrutinee, out)?;
             for (_, body) in cases {
                 collect_free_vars(body, out)?;
+            }
+            Some(())
+        }
+        // Phase 81 shape widening (see inline_rec).
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_free_vars(condition, out)?;
+            collect_free_vars(then_branch, out)?;
+            collect_free_vars(else_branch, out)
+        }
+        IRNode::FieldAccess { base, .. } => collect_free_vars(base, out),
+        IRNode::Index(c, i) => {
+            collect_free_vars(c, out)?;
+            collect_free_vars(i, out)
+        }
+        IRNode::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                collect_free_vars(v, out)?;
             }
             Some(())
         }
@@ -5346,6 +5998,37 @@ fn substitute_rec(
             Some(IRNode::Match {
                 scrutinee,
                 cases: out,
+            })
+        }
+        // Phase 81 shape widening (see inline_rec).
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => Some(IRNode::If {
+            condition: Box::new(substitute_rec(condition, params, args, shadowed)?),
+            then_branch: Box::new(substitute_rec(then_branch, params, args, shadowed)?),
+            else_branch: Box::new(substitute_rec(else_branch, params, args, shadowed)?),
+        }),
+        IRNode::FieldAccess { base, field } => Some(IRNode::FieldAccess {
+            base: Box::new(substitute_rec(base, params, args, shadowed)?),
+            field: field.clone(),
+        }),
+        IRNode::Index(coll, idx) => Some(IRNode::Index(
+            Box::new(substitute_rec(coll, params, args, shadowed)?),
+            Box::new(substitute_rec(idx, params, args, shadowed)?),
+        )),
+        IRNode::RecordLit { type_name, fields } => {
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                out.push((
+                    name.clone(),
+                    substitute_rec(value, params, args, shadowed)?,
+                ));
+            }
+            Some(IRNode::RecordLit {
+                type_name: type_name.clone(),
+                fields: out,
             })
         }
         _ => None,
@@ -7690,6 +8373,158 @@ spec exclaim {
                 agree
             );
         }
+    }
+
+    fn load_tokenizer_spec() -> crate::spec::ast::Spec {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let path = format!("{}/examples/functional_tokenizer.morph", root);
+        let source = std::fs::read_to_string(&path).unwrap();
+        let parsed = crate::spec::parser::parse(&source).unwrap();
+        crate::spec::typeck::check(parsed).unwrap().spec
+    }
+
+    /// Phase 81 (M1 remainder (i)): the complementary-guard
+    /// builder denotes `peek` — the two-row spec over a
+    /// computed comparison guard that every earlier builder
+    /// returned None for — and the denotation enters peek's
+    /// synthesis pool as a seed.
+    #[test]
+    fn phase81_complementary_guard_denotes_peek_and_seeds() {
+        let module = load_tokenizer_spec();
+        let index = SpecIndex::from_module(&module);
+        let body = index
+            .callee_body("peek")
+            .expect("peek must denote after Phase 81");
+        assert!(
+            matches!(body, IRNode::If { .. }),
+            "peek's denotation must be the complementary-guard If, got {:?}",
+            body
+        );
+        let engine =
+            SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        let peek = tokenizer_spec(&module.functions, "peek");
+        let kinds = engine.constraint_seed_kinds(&peek);
+        assert!(
+            kinds.iter().any(|k| k == "complementary_guard"),
+            "peek's seed kinds must include complementary_guard, got {:?}",
+            kinds
+        );
+    }
+
+    /// Phase 81: complement detection stays syntactic and
+    /// exact — the decline side of the builder.
+    #[test]
+    fn phase81_complementary_guard_declines() {
+        let spec_of = |src: &str| {
+            crate::spec::parser::parse(src)
+                .unwrap()
+                .functions
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        // Non-complementary guards (both Lt): no denotation.
+        let spec = spec_of(
+            "T { spec f { input: x: Int output: Int \
+             constraint: x<0||output==1 constraint: x<5||output==2 } }",
+        );
+        assert!(complementary_guard_body(&spec).is_none());
+        // Swapped operands are NOT expr_same operands: the
+        // complement of `x<0` stated as `0>=x` is declined.
+        let spec = spec_of(
+            "T { spec f { input: x: Int output: Int \
+             constraint: x<0||output==1 constraint: 0>=x||output==2 } }",
+        );
+        assert!(complementary_guard_body(&spec).is_none());
+        // Three rows: not exactly two postconditions.
+        let spec = spec_of(
+            "T { spec f { input: x: Int output: Int \
+             constraint: x<0||output==1 constraint: x>=0||output==2 \
+             constraint: output==output } }",
+        );
+        assert!(complementary_guard_body(&spec).is_none());
+        // The Not pair is a complement at the AST level
+        // (the Phase 80 pricing admits it). It is not
+        // reachable from parsed text today — the parser
+        // hoists a leading `!` to a constraint-level Not
+        // and rejects `!(…)` in guard-leaf position — so it
+        // is pinned here on constructed expressions, and
+        // the reachable complement forms are the comparison
+        // pairs (peek's Lt/Ge, next_char's Eq/Neq).
+        let g = Expr::BinOp(
+            BinOp::Lt,
+            Box::new(Expr::Var("x".into())),
+            Box::new(Expr::IntLit(0)),
+        );
+        let not_g = Expr::UnaryOp(UnaryOp::Not, Box::new(g.clone()));
+        assert!(guards_complementary(&not_g, &g));
+        assert!(guards_complementary(&g, &not_g));
+        assert!(!guards_complementary(&g, &g));
+    }
+
+    /// Phase 81 (M1 remainder (i-b)): the record-completion
+    /// builder constructs next_char's body from its partial
+    /// field equations, and its seed — with the peek call in
+    /// the guard resolved — enters next_char's pool.
+    #[test]
+    fn phase81_record_completion_builds_next_char() {
+        let module = load_tokenizer_spec();
+        let index = SpecIndex::from_module(&module);
+        let spec = tokenizer_spec(&module.functions, "next_char");
+        let body = record_completion_body(&spec, &index)
+            .expect("next_char must complete after Phase 81");
+        let IRNode::RecordLit { type_name, fields } = &body else {
+            panic!("record completion must build a RecordLit, got {:?}", body);
+        };
+        assert_eq!(type_name, "TokenizerState");
+        let names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["source", "pos", "line", "col", "tokens"]);
+        // pos carries the unconditional equation (an Add);
+        // line and col are guard conditionals; source and
+        // tokens are carried field projections.
+        assert!(matches!(fields[1].1, IRNode::BinOp(..)));
+        assert!(matches!(fields[2].1, IRNode::If { .. }));
+        assert!(matches!(fields[3].1, IRNode::If { .. }));
+        assert!(matches!(fields[0].1, IRNode::FieldAccess { .. }));
+        assert!(matches!(fields[4].1, IRNode::FieldAccess { .. }));
+        // The seed resolves the guard's peek call and fires.
+        let engine =
+            SynthesisEngine::with_module_spec(SynthesisConfig::default(), &module);
+        let kinds = engine.constraint_seed_kinds(&spec);
+        assert!(
+            kinds.iter().any(|k| k == "record_completion"),
+            "next_char's seed kinds must include record_completion, got {:?}",
+            kinds
+        );
+        let seed = constraint_seed(&engine, &spec, "record_completion");
+        assert!(
+            !body_calls_indexed(&seed.body, &index),
+            "the record-completion seed must not carry a raw peek call"
+        );
+    }
+
+    /// Phase 81: the record-completion builder's decline
+    /// side — no declarations in the index, and a record
+    /// spec stated with ordering postconditions instead of
+    /// field equations.
+    #[test]
+    fn phase81_record_completion_declines() {
+        let module = load_tokenizer_spec();
+        let spec = tokenizer_spec(&module.functions, "next_char");
+        let bare = SpecIndex::from_specs(&module.functions);
+        assert!(
+            record_completion_body(&spec, &bare).is_none(),
+            "without type declarations the builder must decline"
+        );
+        let index = SpecIndex::from_module(&module);
+        let skip = tokenizer_spec(&module.functions, "skip_whitespace");
+        assert!(
+            record_completion_body(&skip, &index).is_none(),
+            "skip_whitespace states orderings, not field equations: decline"
+        );
+        // peek returns Option<Char>, not the record: decline.
+        let peek = tokenizer_spec(&module.functions, "peek");
+        assert!(record_completion_body(&peek, &index).is_none());
     }
 
     /// Admitted synthetic shapes: the range conjunction
