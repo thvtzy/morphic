@@ -1,19 +1,18 @@
 // ─────────────────────────────────────────────────────────
-//  MORPHIC STANDARD LIBRARY — Int module (Phase 110)
+//  MORPHIC STANDARD LIBRARY — Int module (Phase 110/111)
 //
 //  Bundled with the compiler and merged into every user
-//  module as a prelude (decision D2a, STDLIB_AUDIT §4.3):
-//  entries are called by plain name, with no import. Each
-//  entry's implementation is crowned at library-build time
-//  and ships as data alongside this spec (src/stdlib.rs) —
-//  a call to an entry resolves to that shipped body through
-//  the module index, exactly as a call to a sibling spec
-//  resolves to its denotation.
+//  module as a prelude (decision D2a): entries are called
+//  by plain name, with no import. Each entry's body is
+//  crowned at library-build time and ships as data
+//  alongside this spec (src/stdlib.rs).
 //
-//  This module carries ONE entry this phase: `int_abs`,
-//  the packaging spine's end-to-end proof. The remaining
-//  Int entries of the frozen scope (STDLIB_SCOPE.md §2.2)
-//  are built and crowned in Phase 111.
+//  The Int family of the frozen scope (STDLIB_SCOPE.md
+//  §2.2): seven of eight entries ship; `int_gcd` does NOT
+//  — a named blocker, measured in the ROAD Phase 111
+//  note (no Euclid seed; the statement judge leaves its
+//  quantified preservation obligations Inconclusive). It
+//  returns by scope amendment, not by a silent drop.
 // ─────────────────────────────────────────────────────────
 
 StdlibInt {
@@ -23,46 +22,187 @@ spec int_abs {
     input: x: Int
     output: Int
 
-    // The Int minimum, written out: 0 - 9223372036854775807 - 1.
-    // (The literal -9223372036854775808 has no positive form
-    // the expression parser accepts.)
+    // The Int minimum, written out (the literal
+    // -9223372036854775808 has no parseable form).
     require: x != (0 - 9223372036854775807 - 1)
 
-    // Guard rows, in the established module dialect
-    // (negated-guard || consequent reads as "guard implies
-    // consequent"): the two rows together state exactly
-    // |x| — and with it output >= 0.
+    // Guard rows (negated-guard || consequent reads as
+    // "guard implies consequent"): together, exactly |x|.
     constraint: x < 0 || output == x
     constraint: x >= 0 || output == (0 - x)
 
-    test "zero" {
-        input: 0
-        expect: 0
-    }
+    test "zero" { input: 0 expect: 0 }
 
-    test "positive" {
-        input: 4
-        expect: 4
-    }
+    test "positive" { input: 4 expect: 4 }
 
-    test "negative" {
-        input: (0 - 7)
-        expect: 7
-    }
+    test "negative" { input: (0 - 7) expect: 7 }
 
-    test "int maximum" {
-        input: 9223372036854775807
-        expect: 9223372036854775807
-    }
+    test "int maximum" { input: 9223372036854775807 expect: 9223372036854775807 }
 
-    // The precondition boundary: at the Int minimum the
-    // entry is out of domain, so this point is judged
-    // spec-silent (Phase 109), never as a failure. The
-    // expected value is a placeholder the judge must not
-    // reach.
-    test "int minimum excluded" {
-        input: (0 - 9223372036854775807 - 1)
-        expect: 0
-    }
+    // The precondition boundary: out of domain at the
+    // Int minimum — judged spec-silent (Phase 109); the
+    // expected value is a placeholder.
+    test "int minimum excluded" { input: (0 - 9223372036854775807 - 1) expect: 0 }
+}
+
+spec int_min {
+    doc: "int_min(a, b) = the smaller of a and b; equal arguments give that value (STDLIB_SCOPE.md 2.2)."
+
+    input: a: Int, b: Int
+    output: Int
+
+    constraint: a > b || output == a
+    constraint: a <= b || output == b
+
+    test "first smaller" { input: (3, 7) expect: 3 }
+
+    test "second smaller" { input: (7, 3) expect: 3 }
+
+    test "equal" { input: (4, 4) expect: 4 }
+
+    test "both negative" { input: ((0 - 2), (0 - 9)) expect: (0 - 9) }
+
+    test "int minimum first" { input: ((0 - 9223372036854775807 - 1), 0) expect: (0 - 9223372036854775807 - 1) }
+
+    test "int minimum second" { input: (0, (0 - 9223372036854775807 - 1)) expect: (0 - 9223372036854775807 - 1) }
+
+    test "near maximum" { input: (9223372036854775807, 9223372036854775806) expect: 9223372036854775806 }
+}
+
+spec int_max {
+    doc: "int_max(a, b) = the larger of a and b; equal arguments give that value (STDLIB_SCOPE.md 2.2)."
+
+    input: a: Int, b: Int
+    output: Int
+
+    constraint: a < b || output == a
+    constraint: a >= b || output == b
+
+    test "first larger" { input: (7, 3) expect: 7 }
+
+    test "second larger" { input: (3, 7) expect: 7 }
+
+    test "equal" { input: (4, 4) expect: 4 }
+
+    test "both negative" { input: ((0 - 2), (0 - 9)) expect: (0 - 2) }
+
+    test "int maximum first" { input: (9223372036854775807, 0) expect: 9223372036854775807 }
+
+    test "int maximum second" { input: (0, 9223372036854775807) expect: 9223372036854775807 }
+
+    test "near minimum" { input: ((0 - 9223372036854775807 - 1), (0 - 9223372036854775807)) expect: (0 - 9223372036854775807) }
+}
+
+spec int_clamp {
+    doc: "int_clamp(x, lo, hi) = x confined to [lo, hi]: lo when x is below, hi when x is above, x between (STDLIB_SCOPE.md 2.2). Requires lo <= hi; at lo = hi every x gives lo."
+
+    input: x: Int, lo: Int, hi: Int
+    output: Int
+
+    require: lo <= hi
+
+    constraint: x >= lo || output == lo
+    constraint: x <= hi || output == hi
+    constraint: x < lo || x > hi || output == x
+    // The composition identity: clamp is min/max
+    // composed — a true row, and the one the crowned
+    // body is built from (Phase 111 measurement).
+    constraint: output == int_min(int_max(x, lo), hi)
+
+    test "between" { input: (5, 0, 10) expect: 5 }
+
+    test "below" { input: ((0 - 3), 0, 10) expect: 0 }
+
+    test "above" { input: (99, 0, 10) expect: 10 }
+
+    test "at lower bound" { input: (0, 0, 10) expect: 0 }
+
+    test "at upper bound" { input: (10, 0, 10) expect: 10 }
+
+    test "degenerate range" { input: (5, 5, 5) expect: 5 }
+
+    test "negative range between" { input: ((0 - 7), (0 - 10), (0 - 5)) expect: (0 - 7) }
+
+    test "negative range below" { input: ((0 - 12), (0 - 10), (0 - 5)) expect: (0 - 10) }
+
+    // The precondition boundary: lo > hi is out of
+    // domain — judged spec-silent (Phase 109), never a
+    // failure; the expected value is a placeholder.
+    test "inverted range excluded" { input: (5, 10, 0) expect: 0 }
+}
+
+spec int_sign {
+    doc: "int_sign(x) = -1 when x is negative, 0 when x is zero, 1 when x is positive (STDLIB_SCOPE.md 2.2). The Int minimum maps to -1; no exclusion is needed."
+
+    input: x: Int
+    output: Int
+
+    constraint: x >= 0 || output == (0 - 1)
+    constraint: x != 0 || output == 0
+    constraint: x <= 0 || output == 1
+    // The composition identity: sign is clamp to
+    // [-1, 1] — a true row, and the one the crowned
+    // body is built from (Phase 111 measurement).
+    constraint: output == int_clamp(x, (0 - 1), 1)
+
+    test "negative" { input: (0 - 5) expect: (0 - 1) }
+
+    test "zero" { input: 0 expect: 0 }
+
+    test "positive" { input: 7 expect: 1 }
+
+    test "minus one" { input: (0 - 1) expect: (0 - 1) }
+
+    test "one" { input: 1 expect: 1 }
+
+    test "int minimum" { input: (0 - 9223372036854775807 - 1) expect: (0 - 1) }
+
+    test "int maximum" { input: 9223372036854775807 expect: 1 }
+}
+
+spec int_is_even {
+    doc: "int_is_even(x) = true iff 2 divides x, sign-independent: -4 is even, -3 is not (STDLIB_SCOPE.md 2.2)."
+
+    input: x: Int
+    output: Bool
+
+    constraint: output == (x % 2 == 0)
+
+    test "zero" { input: 0 expect: true }
+
+    test "two" { input: 2 expect: true }
+
+    test "three" { input: 3 expect: false }
+
+    test "negative even" { input: (0 - 4) expect: true }
+
+    test "negative odd" { input: (0 - 3) expect: false }
+
+    test "int maximum" { input: 9223372036854775807 expect: false }
+
+    test "int minimum" { input: (0 - 9223372036854775807 - 1) expect: true }
+}
+
+spec int_is_odd {
+    doc: "int_is_odd(x) = true iff 2 does not divide x; the exact complement of int_is_even, negatives included (STDLIB_SCOPE.md 2.2)."
+
+    input: x: Int
+    output: Bool
+
+    constraint: output == (x % 2 != 0)
+
+    test "zero" { input: 0 expect: false }
+
+    test "two" { input: 2 expect: false }
+
+    test "three" { input: 3 expect: true }
+
+    test "negative even" { input: (0 - 4) expect: false }
+
+    test "negative odd" { input: (0 - 3) expect: true }
+
+    test "int maximum" { input: 9223372036854775807 expect: true }
+
+    test "int minimum" { input: (0 - 9223372036854775807 - 1) expect: false }
 }
 }

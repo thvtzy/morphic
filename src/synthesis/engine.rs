@@ -926,6 +926,17 @@ impl SynthesisEngine {
         if let Some(body) = char_equation_seed_body(spec, &self.spec_index) {
             admit("char_equation", body);
         }
+        // Phase 111 (1.0 library, `char_to_digit`): the
+        // Char guard-table family, appended after
+        // char_equation. Its territory is disjoint from
+        // every standing family by signature and shape
+        // (one Char parameter stated as guard rows —
+        // the row families key on Int/Bool, the equation
+        // families state equations), so no standing seed
+        // moves.
+        if let Some(body) = char_guard_table_seed_body(spec, &self.spec_index) {
+            admit("char_guard_table", body);
+        }
         // Phase 60 (campaign slice G3): the forall-fold
         // family runs LAST and claims only a spec no
         // earlier family seeded — its territory rule,
@@ -6060,6 +6071,239 @@ fn char_equation_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRN
         }
     }
     None
+}
+
+/// A Char guard leaf normalized to (operator,
+/// constant_on_left, constant): a comparison between the
+/// parameter and a CharLit constant, in either operand
+/// order — `guard_leaf`'s Char counterpart.
+fn guard_leaf_char(leaf: &Expr, param: &str) -> Option<(BinOp, bool, char)> {
+    let Expr::BinOp(op, l, r) = leaf else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Neq
+    ) {
+        return None;
+    }
+    match (l.as_ref(), r.as_ref()) {
+        (Expr::Var(v), Expr::CharLit(c)) if v == param => Some((*op, false, *c)),
+        (Expr::CharLit(c), Expr::Var(v)) if v == param => Some((*op, true, *c)),
+        _ => None,
+    }
+}
+
+/// Does the normalized Char guard leaf hold at
+/// `param == x`? (Char's Ord is Unicode scalar order —
+/// the order the Phase 76 scalar encoding gives the
+/// verifier, so the table this builder recovers is the
+/// table the verifier judges.)
+fn guard_leaf_char_holds(guard: &(BinOp, bool, char), x: char) -> bool {
+    let (op, constant_on_left, constant) = guard;
+    let (a, b) = if *constant_on_left {
+        (*constant, x)
+    } else {
+        (x, *constant)
+    };
+    match op {
+        BinOp::Lt => a < b,
+        BinOp::Le => a <= b,
+        BinOp::Gt => a > b,
+        BinOp::Ge => a >= b,
+        BinOp::Eq => a == b,
+        BinOp::Neq => a != b,
+        _ => unreachable!("guard_leaf_char admits only comparisons"),
+    }
+}
+
+/// The Char guard-table body (Phase 111, built for the
+/// 1.0 library's `char_to_digit`): the guard-table shape
+/// lifted from an Int/Bool key to a Char key, with
+/// expression pins. The measured gap it closes: a spec
+/// stated as guard rows over one Char parameter pinning
+/// constructed values — `c != '0' || output == Some(0)`,
+/// …, `c >= '0' || output == None()`, `c <= '9' ||
+/// output == None()` — was claimed by NO family (the
+/// guard table's param filter admits Int/Bool keys only;
+/// char_equation and the equation family state equations,
+/// not rows; the key-indexed families key on Int), so its
+/// pool held only the test-induced match — exact on the
+/// tested points, a typed-default wildcard off them, and
+/// Inconclusive forever — while a hand-written match over
+/// the same rows judges Verified ∧ golden-exact. This
+/// builder recovers the rows' own match.
+///
+/// The recovery is `guard_table_body_int`'s, restated for
+/// a Char key: rows are recognized exactly as the guard
+/// family's rows are (see `guard_row_parts`); every guard
+/// leaf must parse against the parameter and a CharLit
+/// constant (`guard_leaf_char`), or the spec states a row
+/// this body would not honor — a deviation, so no seed
+/// (all rows or none, the guarded-identity rule); non-row
+/// postconditions are skipped, as in every guard builder.
+/// The pinned cells are recovered by joint
+/// falsify-every-leaf over the candidate span — the leaf
+/// constants' scalar range widened by two on each side,
+/// the span's endpoints doubling as the two unbounded
+/// tail classes (outside the outermost constants every
+/// leaf's truth is stable, exactly as over Int). A cell
+/// is pinned exactly where every row firing there agrees
+/// on the pin; conflicting pins are jointly inconsistent
+/// — not a table, no seed.
+///
+/// Two deliberate narrowings against the Int builder,
+/// both forced by the pin type. Pins here are arbitrary
+/// hole-free expressions (the family's reason to exist
+/// is constructor pins — `Some(0)`, `None()` — which the
+/// Int table's literal-pin test exists to refuse), so
+/// there is no typed-literal default to fall back to:
+/// the wildcard must be PINNED, by both tail classes
+/// agreeing on one value, or there is no seed. And a
+/// table whose every pinned cell rides that wildcard is
+/// a constant, not a table — no seed, as over Int.
+///
+/// Territory: exactly one parameter, of type Char. The
+/// row families refuse that signature on their param
+/// filters, the equation families on the row shape (an
+/// Or of guard leaves plus a pin is not an equation), so
+/// the families never produce two seeds for one spec.
+fn char_guard_table_body(spec: &FunctionSpec) -> Option<IRNode> {
+    if spec.params.len() != 1 {
+        return None;
+    }
+    let param = &spec.params[0];
+    if !matches!(param.ty, TypeRef::Char) {
+        return None;
+    }
+    // Pass one: parse every row-shaped postcondition into
+    // (guard leaves, pin), collecting the leaf constants
+    // the candidate span is built from.
+    let mut rows: Vec<(Vec<(BinOp, bool, char)>, IRNode)> = Vec::new();
+    let mut constants: Vec<u32> = Vec::new();
+    for c in &spec.postconditions {
+        let Some((pin_side, guard_leaves)) = guard_row_parts(c) else {
+            continue; // not a row: skipped, as in every guard builder
+        };
+        // Row-shaped: it must be a Char guard row of this
+        // table, or the spec states a row this body would
+        // not honor — a deviation, so no seed.
+        if expr_mentions_var(pin_side, OUTPUT_VAR) {
+            return None;
+        }
+        let pin = expr_to_ir(pin_side);
+        if count_holes(&pin) > 0 {
+            return None; // the pin must convert whole
+        }
+        let mut guards: Vec<(BinOp, bool, char)> = Vec::new();
+        for leaf in guard_leaves {
+            guards.push(guard_leaf_char(leaf, &param.name)?);
+        }
+        constants.extend(guards.iter().map(|g| g.2 as u32));
+        rows.push((guards, pin));
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    // The candidate span (see the doc comment): the leaf
+    // constants' scalar range widened by two on each side,
+    // clamped to the Char domain. The span always contains
+    // the constants themselves, so it is never empty.
+    let lo = constants.iter().min().copied()?.saturating_sub(2);
+    let hi = constants
+        .iter()
+        .max()
+        .copied()?
+        .saturating_add(2)
+        .min(0x10FFFF);
+    let span: Vec<char> = (lo..=hi).filter_map(char::from_u32).collect();
+    let first = *span.first()?;
+    let last = *span.last()?;
+    // Each row's falsifying region over the span, and the
+    // joint table: a cell is pinned exactly where every
+    // row firing there agrees on the pin.
+    let mut regions: Vec<Vec<char>> = Vec::new();
+    let mut pinned: HashMap<char, IRNode> = HashMap::new();
+    for (guards, pin) in &rows {
+        let region: Vec<char> = span
+            .iter()
+            .copied()
+            .filter(|x| guards.iter().all(|g| !guard_leaf_char_holds(g, *x)))
+            .collect();
+        for cell in &region {
+            match pinned.get(cell) {
+                None => {
+                    pinned.insert(*cell, pin.clone());
+                }
+                Some(p) if literal_pin_eq(p, pin) => {}
+                Some(_) => return None, // conflicting pins: not a table
+            }
+        }
+        regions.push(region);
+    }
+    if pinned.is_empty() {
+        return None;
+    }
+    // The wildcard's value: the pinned fall-through, and
+    // only when BOTH tail classes pin it (see the doc
+    // comment — expression pins have no typed default).
+    let tail_lo = pinned.get(&first)?;
+    let tail_hi = pinned.get(&last)?;
+    if !literal_pin_eq(tail_lo, tail_hi) {
+        return None; // the two tails disagree: no single wildcard states this table
+    }
+    let wildcard = tail_lo.clone();
+    // Arms in row order (the Int builder's discipline): a
+    // single-value row arms its cell unconditionally; a
+    // band row arms each interior cell the wildcard does
+    // not already yield.
+    let mut cases: Vec<(IRPattern, IRNode)> = Vec::new();
+    let mut armed: Vec<char> = Vec::new();
+    for ((_, pin), region) in rows.iter().zip(regions.iter()) {
+        for cell in region {
+            if armed.contains(cell) {
+                continue;
+            }
+            if region.len() > 1
+                && (*cell == first || *cell == last || literal_pin_eq(pin, &wildcard))
+            {
+                continue; // the wildcard already yields this cell's value
+            }
+            armed.push(*cell);
+            cases.push((IRPattern::Literal(IRLiteral::Char(*cell)), pin.clone()));
+        }
+    }
+    if cases.is_empty() {
+        return None; // every pinned cell rides the wildcard: a constant, not a table
+    }
+    cases.push((IRPattern::Wildcard, wildcard));
+    Some(IRNode::Match {
+        scrutinee: Box::new(IRNode::Var(param.name.clone())),
+        cases,
+    })
+}
+
+/// The Char guard-table seed's body: the recovered match,
+/// with any spec-to-spec calls in its pins resolved
+/// against the module (the complementary-guard seed's
+/// admission precedent), admitted when the verifier can
+/// encode the resolved body in the module context.
+fn char_guard_table_seed_body(spec: &FunctionSpec, index: &SpecIndex) -> Option<IRNode> {
+    let raw = char_guard_table_body(spec)?;
+    let body = match index.inline_calls(&raw) {
+        Some(body) => body,
+        None => {
+            if body_calls_indexed(&raw, index) {
+                return None;
+            }
+            raw
+        }
+    };
+    if crate::verify::verifier::body_is_encodable_with(spec, &body, index) {
+        Some(body)
+    } else {
+        None
+    }
 }
 
 /// A constraint read as a single comparison between two

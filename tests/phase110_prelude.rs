@@ -10,12 +10,18 @@
 //! playground. These tests pin:
 //!
 //! * the bundled library parses + checks standalone, and
-//!   its one entry this phase (`int_abs`, the spine's
-//!   end-to-end proof) carries the frozen contract;
-//! * the entry's shipped body — crowned at library-build
+//!   its entries carry the frozen contracts (Phase 110:
+//!   `int_abs`, the spine's end-to-end proof; Phase 111:
+//!   the Int family completed and the Char family added —
+//!   seven Int entries and six Char entries; `int_gcd`
+//!   does not ship, a named blocker recorded in the ROAD
+//!   Phase 111 note);
+//! * each entry's shipped body — crowned at library-build
 //!   time, shipped as data — judges Z3-Verified ∧
 //!   golden-exact against its own spec, and is the body the
-//!   production pipeline itself crowns for the entry;
+//!   production pipeline itself crowns for the entry (the
+//!   crowning pin runs over EVERY entry of EVERY bundled
+//!   module since Phase 111);
 //! * a user module calling the entry with no import line
 //!   checks, resolves through the index (registry → inline),
 //!   and crowns a Verified, fully-passing caller through
@@ -141,10 +147,29 @@ fn bundled_library_parses_and_checks_standalone() {
         typeck::check(module)
             .unwrap_or_else(|e| panic!("stdlib module '{name}' must check: {e}"));
     }
-    // This phase ships exactly one entry: the spine's proof.
+    // The shipped entries, in module order (Phase 110:
+    // int_abs alone; Phase 111: the Int family completed
+    // minus the blocked int_gcd, plus the Char family).
     let specs = stdlib::prelude_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, vec!["int_abs"]);
+    assert_eq!(
+        names,
+        vec![
+            "int_abs",
+            "int_min",
+            "int_max",
+            "int_clamp",
+            "int_sign",
+            "int_is_even",
+            "int_is_odd",
+            "char_is_digit",
+            "char_is_alpha",
+            "char_is_whitespace",
+            "char_is_uppercase",
+            "char_is_lowercase",
+            "char_to_digit",
+        ]
+    );
     let abs = &specs[0];
     assert_eq!(abs.params.len(), 1);
     assert_eq!(abs.params[0].ty.to_string(), "Int");
@@ -153,60 +178,227 @@ fn bundled_library_parses_and_checks_standalone() {
     // minimum is excluded by precondition.
     assert_eq!(abs.preconditions.len(), 1);
     assert_eq!(abs.tests.len(), 5);
+    // Spot-check the Phase 111 signatures against the
+    // frozen scope (§2.2 / §2.3).
+    let clamp = &specs[3];
+    assert_eq!(clamp.params.len(), 3);
+    assert_eq!(clamp.preconditions.len(), 1);
+    let to_digit = &specs[12];
+    assert_eq!(to_digit.params[0].ty.to_string(), "Char");
+    assert_eq!(to_digit.return_type.to_string(), "Option<Int>");
 }
 
-#[test]
-fn shipped_body_judges_verified_and_golden_exact() {
-    let abs = stdlib::prelude_specs().into_iter().next().unwrap();
-    let body = stdlib::shipped_body("int_abs").expect("int_abs ships a body");
-    // The body crowned at library-build time (Phase 110,
-    // seeded pipeline, seed 42), transcribed as data.
-    let expected = IRNode::If {
-        condition: Box::new(bin(IRBinOp::Lt, var("x"), int(0))),
-        then_branch: Box::new(bin(IRBinOp::Sub, int(0), var("x"))),
-        else_branch: Box::new(var("x")),
-    };
-    assert_eq!(dbg(&body), dbg(&expected));
+fn chr(c: char) -> IRNode {
+    IRNode::Literal(IRLiteral::Char(c))
+}
 
-    // Golden-exact on the entry's own tests: 4 evaluable
-    // points pass; the Int-minimum point is spec-silent
-    // under the precondition (Phase 109), never a failure.
-    let run = eval::run_spec_tests(&body, &abs);
-    assert_eq!((run.passed, run.evaluable), (4, 4));
-    let outcomes = eval::test_outcomes(&body, &abs);
-    assert_eq!(outcomes.len(), 5);
-    assert!(
-        matches!(outcomes[4], eval::TestOutcome::SpecSilent(_)),
-        "the Int-minimum point must be spec-silent, got {:?}",
-        outcomes[4]
-    );
-
-    // Verified against its own contract.
-    #[cfg(feature = "z3-support")]
-    {
-        let verdict = Verifier::new().verify_one(&candidate(&abs, body.clone()), &abs).status;
-        assert_eq!(verdict, VerificationStatus::Verified);
+fn if_(cond: IRNode, then: IRNode, els: IRNode) -> IRNode {
+    IRNode::If {
+        condition: Box::new(cond),
+        then_branch: Box::new(then),
+        else_branch: Box::new(els),
     }
 }
 
-/// The library-build discipline, pinned: the production
-/// pipeline (seeded profile, seed 42) crowns EXACTLY the
-/// shipped body for the entry — if the engine's crown ever
-/// moves, the library is re-crowned and the data updated,
-/// in the open.
+/// The expected shipped body of every library entry — the
+/// transcription the registry must match byte-for-byte
+/// (Debug identity), entry by entry. Crowned at
+/// library-build time: Phase 110 for `int_abs`, Phase 111
+/// for the rest.
+fn expected_body(name: &str) -> IRNode {
+    match name {
+        "int_abs" => if_(
+            bin(IRBinOp::Lt, var("x"), int(0)),
+            bin(IRBinOp::Sub, int(0), var("x")),
+            var("x"),
+        ),
+        "int_min" => if_(bin(IRBinOp::Gt, var("a"), var("b")), var("b"), var("a")),
+        "int_max" => if_(bin(IRBinOp::Lt, var("a"), var("b")), var("b"), var("a")),
+        "int_clamp" => {
+            let m = if_(bin(IRBinOp::Lt, var("x"), var("lo")), var("lo"), var("x"));
+            if_(bin(IRBinOp::Gt, m.clone(), var("hi")), var("hi"), m)
+        }
+        "int_sign" => {
+            let m = if_(
+                bin(IRBinOp::Lt, var("x"), bin(IRBinOp::Sub, int(0), int(1))),
+                bin(IRBinOp::Sub, int(0), int(1)),
+                var("x"),
+            );
+            if_(bin(IRBinOp::Gt, m.clone(), int(1)), int(1), m)
+        }
+        "int_is_even" => bin(IRBinOp::Eq, bin(IRBinOp::Mod, var("x"), int(2)), int(0)),
+        "int_is_odd" => bin(IRBinOp::Neq, bin(IRBinOp::Mod, var("x"), int(2)), int(0)),
+        "char_is_digit" => bin(
+            IRBinOp::And,
+            bin(IRBinOp::Ge, var("c"), chr('0')),
+            bin(IRBinOp::Le, var("c"), chr('9')),
+        ),
+        "char_is_alpha" => bin(
+            IRBinOp::Or,
+            bin(
+                IRBinOp::And,
+                bin(IRBinOp::Ge, var("c"), chr('A')),
+                bin(IRBinOp::Le, var("c"), chr('Z')),
+            ),
+            bin(
+                IRBinOp::And,
+                bin(IRBinOp::Ge, var("c"), chr('a')),
+                bin(IRBinOp::Le, var("c"), chr('z')),
+            ),
+        ),
+        "char_is_whitespace" => bin(
+            IRBinOp::Or,
+            bin(
+                IRBinOp::Or,
+                bin(
+                    IRBinOp::Or,
+                    bin(IRBinOp::Eq, var("c"), chr(' ')),
+                    bin(IRBinOp::Eq, var("c"), chr('\t')),
+                ),
+                bin(IRBinOp::Eq, var("c"), chr('\n')),
+            ),
+            bin(IRBinOp::Eq, var("c"), chr('\r')),
+        ),
+        "char_is_uppercase" => bin(
+            IRBinOp::And,
+            bin(IRBinOp::Ge, var("c"), chr('A')),
+            bin(IRBinOp::Le, var("c"), chr('Z')),
+        ),
+        "char_is_lowercase" => bin(
+            IRBinOp::And,
+            bin(IRBinOp::Ge, var("c"), chr('a')),
+            bin(IRBinOp::Le, var("c"), chr('z')),
+        ),
+        "char_to_digit" => {
+            let mut cases: Vec<(morphic::synthesis::engine::IRPattern, IRNode)> = ('0'..='9')
+                .map(|d| {
+                    (
+                        morphic::synthesis::engine::IRPattern::Literal(IRLiteral::Char(d)),
+                        IRNode::Call {
+                            function: "Some".into(),
+                            args: vec![int(d as i64 - '0' as i64)],
+                        },
+                    )
+                })
+                .collect();
+            cases.push((
+                morphic::synthesis::engine::IRPattern::Wildcard,
+                IRNode::Call { function: "None".into(), args: vec![] },
+            ));
+            IRNode::Match { scrutinee: Box::new(var("c")), cases }
+        }
+        other => panic!("no expected body for {other}"),
+    }
+}
+
+/// (name, evaluable, total, spec-silent) per shipped
+/// entry — the battery standings the judging pin holds.
+/// The two silent points are the frozen precondition
+/// boundaries (int_abs at the Int minimum, int_clamp on
+/// an inverted range), Phase 109's SpecSilent class.
+const BATTERIES: &[(&str, usize, usize, usize)] = &[
+    ("int_abs", 4, 5, 1),
+    ("int_min", 7, 7, 0),
+    ("int_max", 7, 7, 0),
+    ("int_clamp", 8, 9, 1),
+    ("int_sign", 7, 7, 0),
+    ("int_is_even", 7, 7, 0),
+    ("int_is_odd", 7, 7, 0),
+    ("char_is_digit", 7, 7, 0),
+    ("char_is_alpha", 9, 9, 0),
+    ("char_is_whitespace", 6, 6, 0),
+    ("char_is_uppercase", 6, 6, 0),
+    ("char_is_lowercase", 6, 6, 0),
+    ("char_to_digit", 8, 8, 0),
+];
+
+#[test]
+fn shipped_body_judges_verified_and_golden_exact() {
+    let specs = stdlib::prelude_specs();
+    assert_eq!(specs.len(), BATTERIES.len());
+    for (name, evaluable, total, silent) in BATTERIES {
+        let spec = specs.iter().find(|s| &s.name == name).unwrap();
+        let body = stdlib::shipped_body(name)
+            .unwrap_or_else(|| panic!("{name} ships a body"));
+        // The body crowned at library-build time,
+        // transcribed as data — byte-identical.
+        assert_eq!(
+            dbg(&body),
+            dbg(&expected_body(name)),
+            "{name}: the shipped body must be the crowned body"
+        );
+        // Golden-exact on the entry's own tests: every
+        // evaluable point passes; the precondition
+        // boundaries are spec-silent, never failures.
+        let run = eval::run_spec_tests(&body, spec);
+        assert_eq!(
+            (run.passed, run.evaluable),
+            (*evaluable, *evaluable),
+            "{name}: golden-exact on evaluable points"
+        );
+        let outcomes = eval::test_outcomes(&body, spec);
+        assert_eq!(outcomes.len(), *total, "{name}: battery size");
+        let silent_count = outcomes
+            .iter()
+            .filter(|o| matches!(o, eval::TestOutcome::SpecSilent(_)))
+            .count();
+        assert_eq!(silent_count, *silent, "{name}: spec-silent points");
+        // Verified against its own contract, in the
+        // library's module context (two entries' rows
+        // call sibling entries — int_clamp's composition
+        // row, int_sign's clamp row — and resolve only
+        // with the module in scope, exactly as the
+        // pipeline judged them at crowning time).
+        #[cfg(feature = "z3-support")]
+        {
+            let verdict = Verifier::with_specs(&specs)
+                .verify_one(&candidate(spec, body.clone()), spec)
+                .status;
+            assert_eq!(verdict, VerificationStatus::Verified, "{name}: Verified");
+        }
+    }
+}
+
+/// The library-build discipline, pinned (Phase 110 for
+/// `int_abs`; extended to the whole library in Phase
+/// 111): the production pipeline (seeded profile,
+/// seed 42) crowns EXACTLY the shipped body for every
+/// entry of every bundled module — if the engine's crown
+/// ever moves, the library is re-crowned and the data
+/// updated, in the open.
 #[cfg(feature = "z3-support")]
 #[test]
 fn pipeline_crowns_the_shipped_body_for_the_entry() {
-    let source = stdlib::LIBRARY_MODULES[0].1;
-    let report = api::synthesize_seeded_spec(source, "int_abs", 42)
-        .expect("pipeline run over the library module");
-    let shipped = stdlib::shipped_body("int_abs").unwrap();
-    assert_eq!(report.winner.body_debug, format!("{:?}", shipped));
-    assert_eq!(report.winner.verification_status, "Verified");
-    assert_eq!(
-        (report.winner.tests_passed, report.winner.tests_evaluable, report.winner.tests_total),
-        (4, 4, 5)
-    );
+    for (module_name, source) in stdlib::LIBRARY_MODULES {
+        let module = parser::parse(source).expect("library module parses");
+        for spec in &module.functions {
+            let name = &spec.name;
+            let report = api::synthesize_seeded_spec(source, name, 42)
+                .unwrap_or_else(|e| panic!("{module_name}/{name}: pipeline run: {e:?}"));
+            let shipped = stdlib::shipped_body(name)
+                .unwrap_or_else(|| panic!("{name} ships a body"));
+            assert_eq!(
+                report.winner.body_debug,
+                format!("{:?}", shipped),
+                "{name}: the pipeline must crown the shipped body"
+            );
+            assert_eq!(
+                report.winner.verification_status, "Verified",
+                "{name}: the crown must be Verified"
+            );
+            let (_, evaluable, total, _) =
+                BATTERIES.iter().find(|(n, ..)| n == name).unwrap();
+            assert_eq!(
+                (
+                    report.winner.tests_passed,
+                    report.winner.tests_evaluable,
+                    report.winner.tests_total
+                ),
+                (*evaluable, *evaluable, *total),
+                "{name}: crown battery standings"
+            );
+        }
+    }
 }
 
 // ── The merge: a caller with no import ───────────────────

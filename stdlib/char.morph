@@ -1,0 +1,163 @@
+// ─────────────────────────────────────────────────────────
+//  MORPHIC STANDARD LIBRARY — Char module (Phase 111)
+//
+//  Prelude module like the Int module (decision D2a);
+//  bodies crowned at library-build time, shipped as data
+//  in src/stdlib.rs. The Char family of the frozen scope
+//  (STDLIB_SCOPE.md §2.3): five classifiers as direct
+//  equations over the Char scalar encoding, and
+//  `char_to_digit` as a guard table over constructed
+//  Some/None values. Ranges are ASCII, frozen as
+//  written — Unicode classes are out of 1.0 scope.
+// ─────────────────────────────────────────────────────────
+
+StdlibChar {
+spec char_is_digit {
+    doc: "char_is_digit(c) = true iff c is in '0'..='9' (STDLIB_SCOPE.md 2.3)."
+
+    input: c: Char
+    output: Bool
+
+    constraint: output == (c >= '0' && c <= '9')
+
+    test "zero digit" { input: '0' expect: true }
+
+    test "nine" { input: '9' expect: true }
+
+    test "middle" { input: '5' expect: true }
+
+    test "below range" { input: '/' expect: false }
+
+    test "above range" { input: ':' expect: false }
+
+    test "letter" { input: 'a' expect: false }
+
+    test "space" { input: ' ' expect: false }
+}
+
+spec char_is_alpha {
+    doc: "char_is_alpha(c) = true iff c is in 'A'..='Z' or 'a'..='z' — ASCII letters only (STDLIB_SCOPE.md 2.3)."
+
+    input: c: Char
+    output: Bool
+
+    constraint: output == ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
+
+    test "upper first" { input: 'A' expect: true }
+
+    test "upper last" { input: 'Z' expect: true }
+
+    test "lower first" { input: 'a' expect: true }
+
+    test "lower last" { input: 'z' expect: true }
+
+    test "middle" { input: 'M' expect: true }
+
+    test "after upper range" { input: '[' expect: false }
+
+    test "before lower range" { input: '`' expect: false }
+
+    test "digit" { input: '0' expect: false }
+
+    test "space" { input: ' ' expect: false }
+}
+
+spec char_is_whitespace {
+    doc: "char_is_whitespace(c) = true iff c is one of space, tab, newline, carriage return — the standing tokenizer spec's is_whitespace contract, adopted unchanged (STDLIB_SCOPE.md 2.3)."
+
+    input: c: Char
+    output: Bool
+
+    constraint: output == (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+
+    test "space" { input: ' ' expect: true }
+
+    test "tab" { input: '\t' expect: true }
+
+    test "newline" { input: '\n' expect: true }
+
+    test "carriage return" { input: '\r' expect: true }
+
+    test "letter" { input: 'x' expect: false }
+
+    test "digit" { input: '0' expect: false }
+}
+
+spec char_is_uppercase {
+    doc: "char_is_uppercase(c) = true iff c is in 'A'..='Z'; non-letters give false (STDLIB_SCOPE.md 2.3)."
+
+    input: c: Char
+    output: Bool
+
+    constraint: output == (c >= 'A' && c <= 'Z')
+
+    test "first" { input: 'A' expect: true }
+
+    test "last" { input: 'Z' expect: true }
+
+    test "lower" { input: 'a' expect: false }
+
+    test "digit" { input: '5' expect: false }
+
+    test "after range" { input: '[' expect: false }
+
+    test "space" { input: ' ' expect: false }
+}
+
+spec char_is_lowercase {
+    doc: "char_is_lowercase(c) = true iff c is in 'a'..='z'; non-letters give false (STDLIB_SCOPE.md 2.3)."
+
+    input: c: Char
+    output: Bool
+
+    constraint: output == (c >= 'a' && c <= 'z')
+
+    test "first" { input: 'a' expect: true }
+
+    test "last" { input: 'z' expect: true }
+
+    test "upper" { input: 'A' expect: false }
+
+    test "digit" { input: '5' expect: false }
+
+    test "before range" { input: '`' expect: false }
+
+    test "space" { input: ' ' expect: false }
+}
+
+spec char_to_digit {
+    doc: "char_to_digit(c) = Some(d) when c is in '0'..='9' with d the digit's value, None for every other char (STDLIB_SCOPE.md 2.3)."
+
+    input: c: Char
+    output: Option<Int>
+
+    constraint: c != '0' || output == Some(0)
+    constraint: c != '1' || output == Some(1)
+    constraint: c != '2' || output == Some(2)
+    constraint: c != '3' || output == Some(3)
+    constraint: c != '4' || output == Some(4)
+    constraint: c != '5' || output == Some(5)
+    constraint: c != '6' || output == Some(6)
+    constraint: c != '7' || output == Some(7)
+    constraint: c != '8' || output == Some(8)
+    constraint: c != '9' || output == Some(9)
+    constraint: c >= '0' || output == None()
+    constraint: c <= '9' || output == None()
+
+    test "zero" { input: '0' expect: Some(0) }
+
+    test "nine" { input: '9' expect: Some(9) }
+
+    test "middle" { input: '4' expect: Some(4) }
+
+    test "seven" { input: '7' expect: Some(7) }
+
+    test "letter" { input: 'a' expect: None() }
+
+    test "space" { input: ' ' expect: None() }
+
+    test "below range" { input: '/' expect: None() }
+
+    test "above range" { input: ':' expect: None() }
+}
+}

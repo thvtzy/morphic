@@ -803,7 +803,15 @@ fn as_f64(v: &Value) -> Option<f64> {
 }
 
 /// Value equality with numeric promotion: Int(1) == Float(1.0).
+/// Int/Int compares exactly (Phase 111 finding): routing it
+/// through f64 made distinct ints within f64 spacing of each
+/// other — everything from 2^53 up, e.g. the Int minimum and
+/// its neighbours — compare equal, which silently corrupted
+/// both test outcomes and `require:` evaluation at extremes.
 fn values_equal(l: &Value, r: &Value) -> bool {
+    if let (Value::Int(a), Value::Int(b)) = (l, r) {
+        return a == b;
+    }
     if let (Some(a), Some(b)) = (as_f64(l), as_f64(r)) {
         if matches!(l, Value::Int(_) | Value::Float(_))
             && matches!(r, Value::Int(_) | Value::Float(_))
