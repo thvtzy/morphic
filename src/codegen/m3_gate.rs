@@ -34,9 +34,16 @@
 //    MethodCall dispatch: String-equality guards like
 //    call_form's, its complete exemplar test set stating
 //    the classification the pool's winning Match body
-//    verifies against).
+//    verifies against). Phase 85 re-record
+//    (2026-11-22): the call/index-form amendment adds
+//    six specs — the module holds 129 specs and the
+//    fixed set is 124 constraint seeds + 5 by-design
+//    pool winners (rust_call_form joins the seedless
+//    set: the IR Call dispatch, String-equality guards
+//    and a complete exemplar test set, like its
+//    spec-side twin).
 //
-//  * The synthesized-codegen ARTIFACT is the 123 winners
+//  * The synthesized-codegen ARTIFACT is the 129 winners
 //    rendered through the ORIGINAL `generate` into one Rust
 //    module (each winner file wrapped in its own `mod`, so
 //    the per-file `mod tests` cannot collide), compiled with
@@ -104,7 +111,7 @@
 //          output, and the harness asserts the ORIGINAL side
 //          reproduces it, so a transcription slip stops the
 //          gate loudly instead of manufacturing a mismatch;
-//          (ii)  every M3 winner body (123) and every M2 winner
+//          (ii)  every M3 winner body (129) and every M2 winner
 //          body (14), plus every unique subtree of those
 //          bodies, each rendered three ways (expression,
 //          statement, tail) by both emitters;
