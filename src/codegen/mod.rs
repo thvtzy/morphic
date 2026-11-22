@@ -2013,7 +2013,7 @@ fn expr_to_rust(expr: &Expr) -> String {
             format!("{}.{}", expr_to_rust(base), rust_ident(field))
         }
         // Method calls (Phase 77, decision D1a — scoped
-        // unfreeze, new arm only): the four closed-table
+        // unfreeze, new arm only): the closed-table
         // builtins render as the identical Rust method
         // syntax on the rendered receiver. Anything else
         // — a name outside the table, or a table name
@@ -2021,9 +2021,21 @@ fn expr_to_rust(expr: &Expr) -> String {
         // zero-argument; both shapes are Phase 74 type
         // errors, so a checked module never reaches this)
         // — renders the standing catch-all, never a guess.
+        // Phase 113 amendment (2026-11-23): the Phase 112
+        // Option pair (is_some, is_none) joins the table
+        // here, in lockstep with the Codegen spec's
+        // rust_expr_method_form amendment, so the original
+        // and the composition move as one — the cascade
+        // Phase 112 priced and did not absorb. The match
+        // stays on the name alone: unwrap is one name for
+        // both families, and which receiver family a name
+        // belongs to is the typechecker's classification,
+        // not this walker's.
         Expr::MethodCall { receiver, name, args } => {
             match name.as_str() {
-                "is_ok" | "is_err" | "unwrap" | "len" if args.is_empty() => {
+                "is_ok" | "is_err" | "unwrap" | "len" | "is_some" | "is_none"
+                    if args.is_empty() =>
+                {
                     format!("{}.{}()", expr_to_rust(receiver), name)
                 }
                 _ => "??".into(),
@@ -4128,6 +4140,51 @@ mod tests {
         let field_recv = Expr::Field(Box::new(var("state")), "tokens".into());
         assert_eq!(expr_to_rust(&field_recv), "state.tokens");
         assert_eq!(expr_to_rust(&mc(field_recv, "len")), "state.tokens.len()");
+    }
+
+    #[test]
+    fn phase113_expr_to_rust_option_methods_render_verbatim() {
+        // Phase 113 (the Option cascade): the Phase 112
+        // Option pair joins the closed table in this arm,
+        // in lockstep with the Codegen spec's
+        // rust_expr_method_form amendment — the Phase 102
+        // discipline for the emitter surface Phase 112
+        // priced and did not absorb.
+        let var = |n: &str| Expr::Var(n.into());
+        let mc = |receiver: Expr, name: &str| Expr::MethodCall {
+            receiver: Box::new(receiver),
+            name: name.into(),
+            args: vec![],
+        };
+        // The Option pair renders as the identical Rust
+        // method syntax on the rendered receiver.
+        assert_eq!(expr_to_rust(&mc(var("o"), "is_some")), "o.is_some()");
+        assert_eq!(expr_to_rust(&mc(var("o"), "is_none")), "o.is_none()");
+        // unwrap is one name for both families: the
+        // Result-receiver rendering is byte-unchanged from
+        // the Phase 77 pin, and an Option receiver reaches
+        // the same rendering (the arm matches on the name
+        // alone — the receiver's family is the
+        // typechecker's business, not this walker's).
+        assert_eq!(expr_to_rust(&mc(var("output"), "unwrap")), "output.unwrap()");
+        assert_eq!(expr_to_rust(&mc(var("o"), "unwrap")), "o.unwrap()");
+        // Chaining composes, as with the D1a names.
+        assert_eq!(
+            expr_to_rust(&mc(mc(var("o"), "unwrap"), "len")),
+            "o.unwrap().len()"
+        );
+        // A table name carrying arguments still renders
+        // the catch-all (the builtins are zero-argument;
+        // the shape is a Phase 74 type error, so a checked
+        // module never reaches this), and a case near-miss
+        // stays off-table.
+        let with_arg = Expr::MethodCall {
+            receiver: Box::new(var("o")),
+            name: "is_some".into(),
+            args: vec![Expr::IntLit(1)],
+        };
+        assert_eq!(expr_to_rust(&with_arg), "??");
+        assert_eq!(expr_to_rust(&mc(var("o"), "is_somee")), "??");
     }
 
     #[test]

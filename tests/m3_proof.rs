@@ -444,13 +444,14 @@ fn rust_expr_field_text(receiver: &str, field: &str) -> String {
 /// Mirror of `rust_expr_method_form` (Phase 78): which
 /// rendering a MethodCall takes, keyed by the EFFECTIVE
 /// method name — 0 = the verbatim template (the closed
-/// D1a table), 1 = the fallback. The walker folds the
-/// argument count into the key (a call carrying
+/// table: the D1a four plus, Phase 113, the Option pair
+/// is_some/is_none), 1 = the fallback. The walker folds
+/// the argument count into the key (a call carrying
 /// arguments passes the empty name), exactly as the
 /// spec's doc records. Total.
 fn rust_expr_method_form(key: &str) -> i64 {
     match key {
-        "is_ok" | "is_err" | "unwrap" | "len" => 0,
+        "is_ok" | "is_err" | "unwrap" | "len" | "is_some" | "is_none" => 0,
         _ => 1,
     }
 }
@@ -3565,6 +3566,24 @@ mod golden_tests {
             )),
             "output.is_err()"
         );
+        // The Phase 113 widening: the Option pair renders
+        // verbatim through the same dispatch.
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::MethodCall(
+                Box::new(SExpr::Var("o")),
+                "is_some",
+                vec![]
+            )),
+            "o.is_some()"
+        );
+        assert_eq!(
+            expr_to_rust_assembled(&SExpr::MethodCall(
+                Box::new(SExpr::Var("o")),
+                "is_none",
+                vec![]
+            )),
+            "o.is_none()"
+        );
         assert_eq!(
             expr_to_rust_assembled(&SExpr::MethodCall(
                 Box::new(SExpr::Var("output")),
@@ -4733,9 +4752,10 @@ mod golden_tests {
         // match). The empty key — where the walker folds
         // every call that carries arguments — falls back
         // too, which is what makes the fold exact.
-        for name in ["is_ok", "is_err", "unwrap", "len"] {
+        for name in ["is_ok", "is_err", "unwrap", "len", "is_some", "is_none"] {
             assert_eq!(rust_expr_method_form(name), 0, "{}", name);
         }
+        assert_eq!(rust_expr_method_text("o", "is_some"), "o.is_some()");
         assert_eq!(rust_expr_method_form("tokens"), 1);
         assert_eq!(rust_expr_method_form("Len"), 1);
         assert_eq!(rust_expr_method_form(""), 1);

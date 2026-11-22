@@ -32,7 +32,7 @@
 //
 //  2. THE COMPILED ADAPTER ≡ THE ORIGINAL EMITTER, over both
 //     corpora (m5_s1_adapter_equivalence):
-//       A. the M3 gate corpus (2,717 cases, built by the
+//       A. the M3 gate corpus (2,721 cases, built by the
 //          gate's own corpus builders): adapter vs original
 //          vs the interpreter composition (mode B) — three
 //          ways, byte-compared per case, tallied per class;
@@ -348,7 +348,7 @@ struct ClassTally {
 }
 
 #[test]
-#[ignore = "M5-S1 equivalence: M3 corpus (2,717 cases) + M4 corpus (156 whole files, 156 pipeline runs); run explicitly with --ignored --nocapture m5_s1_adapter_equivalence"]
+#[ignore = "M5-S1 equivalence: M3 corpus (2,721 cases) + M4 corpus (156 whole files, 156 pipeline runs); run explicitly with --ignored --nocapture m5_s1_adapter_equivalence"]
 fn m5_s1_adapter_equivalence() {
     let root = env!("CARGO_MANIFEST_DIR");
     let out_dir = format!("{}/target/m5-s1", root);
@@ -387,7 +387,7 @@ fn m5_s1_adapter_equivalence() {
         sets.push((file, set));
     }
     cases.extend(m3_gate::winner_corpus(&sets));
-    assert_eq!(cases.len(), 2717, "the M3 gate corpus size (Phase 102 re-derivation: Phase 85's 2,706 + 11 — 4 new proof cases for the int_to_str form (3 IR-expr, 1 stmt), the 1 new winner's whole file, and 2 new unique winner subtrees x the corpus's 3 case kinds)");
+    assert_eq!(cases.len(), 2721, "the M3 gate corpus size (Phase 113 re-derivation: Phase 102's 2,717 + 4 — the 4 new spec-expr proof cases for the Option method forms (method-is-some, method-is-none, method-unwrap-option, method-is-some-args); the winner set is unchanged at 130 and the widened rust_expr_method_form winner contributes no new unique subtree)");
 
     let composed_b = Composed {
         w: &winners,
@@ -724,4 +724,60 @@ fn m5_artifact_winners_callable() {
         syn::rust_unsupported_target_text::rust_unsupported_target_text("java".to_string()),
         "Unsupported target language: java"
     );
+}
+
+#[test]
+fn phase113_option_methods_render_in_both_emitters() {
+    use crate::spec::ast::{Constraint, Expr};
+    // Phase 113 (the Option cascade): a candidate whose
+    // precondition carries an Option method call renders
+    // the verbatim form through BOTH emitters — the
+    // native generate_rust and the compiled adapter
+    // behind bootstrap-codegen — and the two files agree
+    // byte-for-byte. Before the cascade, both sides fell
+    // back to '??' for is_some/is_none, for different
+    // reasons: the native arm's closed table lacked the
+    // names, and the artifact's rust_expr_method_form
+    // winner classified them to its fallback row.
+    let mc = |name: &str| Expr::MethodCall {
+        receiver: Box::new(Expr::Var("o".to_string())),
+        name: name.to_string(),
+        args: vec![],
+    };
+    let opt_int = TypeRef::Option(Box::new(TypeRef::Int));
+    for (name, rhs, rendered) in [
+        ("is_some", Expr::BoolLit(true), "o.is_some() == true"),
+        ("is_none", Expr::BoolLit(false), "o.is_none() == false"),
+        ("unwrap", Expr::IntLit(0), "o.unwrap() == 0"),
+    ] {
+        let cand = m3_gate::make_candidate(
+            "opt_probe",
+            None,
+            vec![],
+            vec![("o", opt_int.clone())],
+            TypeRef::Bool,
+            vec![Constraint::Eq(mc(name), rhs)],
+            m3_gate::lb(true),
+            vec![],
+        );
+        let native = super::generate_rust(&cand).unwrap();
+        let adapted =
+            super::bootstrap_adapter::generate_synthesized(&cand, "rust").unwrap();
+        assert!(
+            native.contains(&format!("debug_assert!({}", rendered)),
+            "native emitter must render {} verbatim:\n{}",
+            name,
+            native
+        );
+        assert!(
+            !native.contains("??"),
+            "no fallback text may survive in the native file:\n{}",
+            native
+        );
+        assert_eq!(
+            native, adapted,
+            "the two emitters must agree byte-for-byte on {}",
+            name
+        );
+    }
 }
