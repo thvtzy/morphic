@@ -1,0 +1,68 @@
+// ─────────────────────────────────────────────────────────
+//  MORPHIC STANDARD LIBRARY — Int module (Phase 110)
+//
+//  Bundled with the compiler and merged into every user
+//  module as a prelude (decision D2a, STDLIB_AUDIT §4.3):
+//  entries are called by plain name, with no import. Each
+//  entry's implementation is crowned at library-build time
+//  and ships as data alongside this spec (src/stdlib.rs) —
+//  a call to an entry resolves to that shipped body through
+//  the module index, exactly as a call to a sibling spec
+//  resolves to its denotation.
+//
+//  This module carries ONE entry this phase: `int_abs`,
+//  the packaging spine's end-to-end proof. The remaining
+//  Int entries of the frozen scope (STDLIB_SCOPE.md §2.2)
+//  are built and crowned in Phase 111.
+// ─────────────────────────────────────────────────────────
+
+StdlibInt {
+spec int_abs {
+    doc: "int_abs(x) = |x|. The Int minimum is excluded by precondition: its absolute value is not representable in Int (STDLIB_SCOPE.md 2.2, frozen domain note)."
+
+    input: x: Int
+    output: Int
+
+    // The Int minimum, written out: 0 - 9223372036854775807 - 1.
+    // (The literal -9223372036854775808 has no positive form
+    // the expression parser accepts.)
+    require: x != (0 - 9223372036854775807 - 1)
+
+    // Guard rows, in the established module dialect
+    // (negated-guard || consequent reads as "guard implies
+    // consequent"): the two rows together state exactly
+    // |x| — and with it output >= 0.
+    constraint: x < 0 || output == x
+    constraint: x >= 0 || output == (0 - x)
+
+    test "zero" {
+        input: 0
+        expect: 0
+    }
+
+    test "positive" {
+        input: 4
+        expect: 4
+    }
+
+    test "negative" {
+        input: (0 - 7)
+        expect: 7
+    }
+
+    test "int maximum" {
+        input: 9223372036854775807
+        expect: 9223372036854775807
+    }
+
+    // The precondition boundary: at the Int minimum the
+    // entry is out of domain, so this point is judged
+    // spec-silent (Phase 109), never as a failure. The
+    // expected value is a placeholder the judge must not
+    // reach.
+    test "int minimum excluded" {
+        input: (0 - 9223372036854775807 - 1)
+        expect: 0
+    }
+}
+}

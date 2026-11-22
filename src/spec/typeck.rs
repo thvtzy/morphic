@@ -30,6 +30,21 @@ pub fn check(spec: Spec) -> Result<TypeCheckResult, TypeError> {
         env.type_defs.insert(td.name.clone(), td.clone());
     }
 
+    // Phase 110 (decision D2a): the bundled standard
+    // library's signatures are registered BEFORE the
+    // module's own, so every module checks against the
+    // prelude — a call to a library entry needs no import.
+    // Registered first so a module's own definition of the
+    // same name (registered next, overwriting) wins: the
+    // standing module-over-stdlib precedence below, applied
+    // to the merge itself. The library's specs are not added
+    // to the module — they are never checked as user specs
+    // and never listed as the module's own; only their
+    // signatures are in scope.
+    for func in crate::stdlib::prelude_specs() {
+        env.function_sigs.insert(func.name.clone(), func);
+    }
+
     // Then register function signatures
     for func in &spec.functions {
         env.function_sigs.insert(func.name.clone(), func.clone());

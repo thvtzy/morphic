@@ -20,6 +20,7 @@
 pub mod api;
 pub mod codegen;
 pub mod spec;
+pub mod stdlib;
 pub mod synthesis;
 pub mod timeutil;
 pub mod verify;

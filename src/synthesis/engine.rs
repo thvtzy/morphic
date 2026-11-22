@@ -6583,9 +6583,30 @@ pub(crate) const MAX_INLINE_DEPTH: usize = 8;
 /// resolver only answers "what does this name denote"). A
 /// spec with none of these shapes denotes nothing here and
 /// calls to it stay unresolvable.
+///
+/// Phase 110 (decision D2a) adds two things. First, the
+/// PRELUDE: both constructors merge the bundled standard
+/// library's specs (crate::stdlib) into the index, so a call
+/// to a library entry resolves exactly as a call to a sibling
+/// spec does — in the CLI, the API and the playground alike,
+/// since all three build their indexes here. A name the
+/// module itself defines WINS: the prelude entry of that
+/// name is not merged at all (the collision rule, mirroring
+/// the typechecker's module-over-stdlib precedence).
+/// Second, the BODY REGISTRY (`bodies`): a library entry
+/// ships its crowned body as data, and `callee_body`
+/// consults the registry before any row-derived denotation —
+/// the shipped body is what the entry's name denotes. Only
+/// the prelude merge registers bodies; an index built any
+/// other way (including `empty`) has an empty registry and
+/// behaves exactly as before this phase.
 #[derive(Debug, Clone, Default)]
 pub struct SpecIndex {
     by_name: HashMap<String, FunctionSpec>,
+    /// Crowned bodies shipped as data, by spec name — the
+    /// library entries' implementations (crate::stdlib).
+    /// Consulted first by `callee_body`.
+    bodies: HashMap<String, IRNode>,
     /// The module's type declarations, by name — carried
     /// only when the index is built from a whole module
     /// (`from_module`); `from_specs` leaves it empty, and
@@ -6597,29 +6618,54 @@ pub struct SpecIndex {
 
 impl SpecIndex {
     pub fn from_specs(specs: &[FunctionSpec]) -> Self {
-        Self {
+        let mut index = Self {
             by_name: specs
                 .iter()
                 .map(|s| (s.name.clone(), s.clone()))
                 .collect(),
+            bodies: HashMap::new(),
             types: HashMap::new(),
-        }
+        };
+        index.merge_prelude();
+        index
     }
 
     /// An index over a whole parsed module: its specs AND
     /// its type declarations.
     pub fn from_module(module: &Spec) -> Self {
-        Self {
+        let mut index = Self {
             by_name: module
                 .functions
                 .iter()
                 .map(|s| (s.name.clone(), s.clone()))
                 .collect(),
+            bodies: HashMap::new(),
             types: module
                 .types
                 .iter()
                 .map(|t| (t.name.clone(), t.clone()))
                 .collect(),
+        };
+        index.merge_prelude();
+        index
+    }
+
+    /// The Phase 110 prelude merge: insert every bundled
+    /// library spec whose name the module does not itself
+    /// define, registering its shipped body alongside it.
+    /// A colliding name keeps the module's own spec and
+    /// derives its denotation from the module's own rows —
+    /// the prelude never silently overrides a user
+    /// definition (the collision rule; see crate::stdlib).
+    fn merge_prelude(&mut self) {
+        for spec in crate::stdlib::prelude_specs() {
+            if self.by_name.contains_key(&spec.name) {
+                continue;
+            }
+            if let Some(body) = crate::stdlib::shipped_body(&spec.name) {
+                self.bodies.insert(spec.name.clone(), body);
+            }
+            self.by_name.insert(spec.name.clone(), spec);
         }
     }
 
@@ -6662,7 +6708,10 @@ impl SpecIndex {
         }
     }
 
-    /// The body a call to `name` denotes: the callee's first
+    /// The body a call to `name` denotes: a body registered
+    /// for the name wins first (Phase 110 — a library entry's
+    /// shipped crowned body IS its denotation); otherwise
+    /// the callee's first
     /// equation body, its guard-table body when it has no
     /// equation, its guarded-identity body when it has
     /// neither, its composition-guard body when it has none
@@ -6682,6 +6731,9 @@ impl SpecIndex {
     /// resolving those is the consumer's step, under the
     /// consumer's cycle/depth guard.
     pub fn callee_body(&self, name: &str) -> Option<IRNode> {
+        if let Some(body) = self.bodies.get(name) {
+            return Some(body.clone());
+        }
         let spec = self.by_name.get(name)?;
         first_equation_body(spec)
             .or_else(|| guard_table_body(spec))
