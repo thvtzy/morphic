@@ -3212,6 +3212,17 @@ pub mod bindings;
 /// frozen unpacked-mass budget (clause 6).
 pub mod package;
 
+/// Phase 123 (1.1 Embeddable): the Rust facade crate
+/// assembly — the 29 frozen entries as real Rust
+/// functions under `morphic::stdlib`, generated from
+/// the shipped bodies through the native function
+/// renderer, assembled into the crate's repo home
+/// (its own workspace root at `packages/rust/`) under
+/// the same crowning re-verification; NF-116-2 taken
+/// at the crate's surface (genuine precondition
+/// asserts), its global residue named in the open.
+pub mod facade;
+
 /// module's 112 synthesized winners, checked in as a versioned
 /// file and compiled into the crate — the compiled codegen the
 /// bootstrap adapter calls. GENERATED FILE (its own header

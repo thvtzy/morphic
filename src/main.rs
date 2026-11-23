@@ -69,9 +69,19 @@ enum Command {
         #[arg(long)]
         package: bool,
 
+        /// Assemble the Rust facade crate (crates.io
+        /// `morphic`) from the standard library's shipped
+        /// bodies instead of compiling a spec file
+        /// (Phase 123: the assembly re-runs the crowning
+        /// checks and refuses on a moved crown; takes no
+        /// input file)
+        #[arg(long)]
+        facade: bool,
+
         /// Directory the assembled package is written to
-        /// (with --package; default: the package's repo
-        /// home, packages/npm)
+        /// (with --package or --facade; default: the
+        /// package's repo home, packages/npm resp.
+        /// packages/rust)
         #[arg(long)]
         out: Option<PathBuf>,
 
@@ -196,6 +206,57 @@ fn main() -> anyhow::Result<()> {
                 let _ = out;
                 anyhow::bail!(
                     "package assembly runs from a native build \
+                     (this build carries no embedded library data)"
+                );
+            }
+        }
+
+        Command::Build { facade: true, input, out, .. } => {
+            // Phase 123: `morphic build --facade` — assemble
+            // the Rust facade crate (crates.io `morphic`)
+            // from the standard library's shipped bodies.
+            // The assembly re-runs the crowning checks
+            // before generating (codegen::facade, sharing
+            // codegen::package's crowning surface); a moved
+            // crown fails here and nothing is written. The
+            // crate carries no size budget (EMBED_SCOPE R8).
+            if input.is_some() {
+                anyhow::bail!(
+                    "build --facade assembles the standard-library crate \
+                     and takes no input file"
+                );
+            }
+            // The assembly reads the EMBEDDED library data,
+            // which exists only in native builds — under the
+            // `wasm-playground` feature the command refuses
+            // by name instead, the --package precedent.
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let files = codegen::facade::assemble_rust_facade_checked()?;
+                let total: usize = files.iter().map(|f| f.contents.len()).sum();
+                let dir =
+                    out.unwrap_or_else(|| PathBuf::from(codegen::facade::RUST_PACKAGE_DIR));
+                for f in &files {
+                    let path = dir.join(&f.path);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&path, &f.contents)?;
+                }
+                println!(
+                    "{} Assembled {} (Rust facade crate) — {} files, {total} B \
+                     (no size budget, EMBED_SCOPE R8)",
+                    "✓".green().bold(),
+                    codegen::facade::CRATE_NAME,
+                    files.len()
+                );
+                println!("  {} {}", "•".dimmed(), dir.display());
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = out;
+                anyhow::bail!(
+                    "facade assembly runs from a native build \
                      (this build carries no embedded library data)"
                 );
             }
