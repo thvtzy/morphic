@@ -104,20 +104,26 @@ fn phase127_apply_spec_end_to_end() {
     assert!(matches!(spec.params[0].ty, TypeRef::Function(..)));
     println!("P127|apply|parse=Ok");
 
-    // Check: THE WALL IS HERE, one layer earlier than the
+    // Check: THE WALL WAS HERE, one layer earlier than the
     // stdlib audit recorded. A plain postcondition that APPLIES
-    // its function parameter is a type error — check_expr's
-    // Call arm resolves callees against module sigs and the
+    // its function parameter was a type error — check_expr's
+    // Call arm resolved callees against module sigs and the
     // stdlib fiction table, never against the parameter env,
-    // so the spec language cannot even STATE `output == f(x)`.
+    // so the spec language could not even STATE
+    // `output == f(x)`. Phase 129 (D3a) admitted it: the Call
+    // arm falls back to the variable environment, and the
+    // shape checks. The layers below this one are unchanged —
+    // they are Phases 130/133's standings, pinned below.
     let checked = try_checked(APPLY_TWICE);
     match &checked {
         Ok(_) => println!("P127|apply|check=Ok"),
         Err(e) => println!("P127|apply|check=Err({e})"),
     }
-    let err = checked.expect_err("applying a fn parameter in a postcondition is a type error today");
-    assert!(err.contains("Called undefined function: 'f'"), "{err}");
-    println!("P127|apply|check=Err(Called undefined function: 'f')");
+    assert!(
+        checked.is_ok(),
+        "applying a fn parameter in a postcondition checks since Phase 129"
+    );
+    println!("P127|apply|check=Ok");
 
     // The remaining layers are probed on the PARSED spec (the
     // binding and judging layers do not consult the checker):
@@ -153,8 +159,9 @@ fn phase127_apply_spec_end_to_end() {
 
 #[test]
 fn phase127_where_application_is_admitted() {
-    // The check wall is shape-specific. Measured per shape:
-    // (a) plain postcondition application — type error (above).
+    // The check wall was shape-specific. Measured per shape:
+    // (a) plain postcondition application — was a type error,
+    // admitted at Phase 129 (above).
     // (b) application inside a FORALL row — sort's row 2 shape.
     let forall_src = r#"Probe { spec apply_fa {
         input: f: fn(Int) -> Int, x: Int
@@ -167,6 +174,10 @@ fn phase127_where_application_is_admitted() {
         Ok(_) => println!("P127|admit|forall_row=Ok"),
         Err(e) => println!("P127|admit|forall_row=Err({e})"),
     }
+    assert!(
+        checked.is_ok(),
+        "application inside a forall row checks since Phase 129"
+    );
     // (c) application inside a REQUIRE row.
     let require_src = r#"Probe { spec apply_req {
         input: f: fn(Int) -> Int, x: Int
@@ -180,6 +191,10 @@ fn phase127_where_application_is_admitted() {
         Ok(_) => println!("P127|admit|require_row=Ok"),
         Err(e) => println!("P127|admit|require_row=Err({e})"),
     }
+    assert!(
+        checked.is_ok(),
+        "application inside a require row checks since Phase 129"
+    );
     // (d) the parameter passed as an ARGUMENT (Var position) —
     // sort's `is_sorted(list, cmp)` shape, via the fiction
     // table's own name:
