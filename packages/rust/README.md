@@ -16,6 +16,14 @@ no runtime verification claims, and builds offline.
 The compiler that produced it is a separate tool and
 is not published.
 
+## Embedding guide
+
+The [embedding guide](https://github.com/thvtzy/morphic/blob/master/EMBEDDING.md)
+takes a host from install to a typed call: the
+five-minute quickstart, the import shapes, the full
+type table with its named losses, and what the tiers
+mean at the boundary.
+
 ## Usage
 
 ```toml

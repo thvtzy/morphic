@@ -151,7 +151,7 @@ pub const CRATE_NAME: &str = "morphic";
 /// crate is, the export list with its tiers, the type
 /// table's Rust column in brief, the lockstep, and the
 /// NF-116-2 statement. (The timed quickstart is the
-/// embedding guide's, Phase 124; it does not live here.)
+/// embedding guide's, Phase 125; it does not live here.)
 /// `{version}` is stamped from the crate's version at
 /// assembly time (R6).
 const CRATE_README: &str = r#"# morphic
@@ -171,6 +171,14 @@ no synthesizer, no verifier and no dependencies, makes
 no runtime verification claims, and builds offline.
 The compiler that produced it is a separate tool and
 is not published.
+
+## Embedding guide
+
+The [embedding guide](https://github.com/thvtzy/morphic/blob/master/EMBEDDING.md)
+takes a host from install to a typed call: the
+five-minute quickstart, the import shapes, the full
+type table with its named losses, and what the tiers
+mean at the boundary.
 
 ## Usage
 

@@ -259,6 +259,7 @@ morphic/
 |---|---|
 | **[▶ Playground](https://thvtzy.github.io/morphic/)** | Morphic in the browser — write a spec, check it, and synthesize an implementation judged by executed tests, entirely client-side. Capability labels: parse/typecheck + interpreter-judged synthesis run in-browser; Z3 formal verification and compiled-runner scoring are native-only and are labelled unavailable in the UI, never simulated |
 | **[GUIDE.md](GUIDE.md)** | Beginner tutorial — from zero to first synthesized function |
+| **[EMBEDDING.md](EMBEDDING.md)** | Embedding guide — the 1.1 packages (`@thvtzy/morphic` on npm, `morphic` on crates.io): five-minute quickstart, import shapes, the type table with its named losses, what the tiers mean at the boundary |
 | **[LANGUAGE_REFERENCE.md](LANGUAGE_REFERENCE.md)** | Complete .morph language specification |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | Full compiler pipeline + design decisions |
 | **[ROAD_TO_SELF_HOSTING.md](ROAD_TO_SELF_HOSTING.md)** | v0.5 self-hosting roadmap (milestones M0–M5; M2, M3, M4 and M5 gates closed 2026-11-20/21) + the v0.6 WASM-playground road (W1–W5, gate closed 2026-11-21) |

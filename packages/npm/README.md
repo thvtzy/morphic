@@ -15,6 +15,14 @@ no synthesizer and makes no runtime verification claims.
 The functions are plain, environment-neutral ES modules
 (BigInt, ES2020, is the only versioned requirement).
 
+## Embedding guide
+
+The [embedding guide](https://github.com/thvtzy/morphic/blob/master/EMBEDDING.md)
+takes a host from install to a typed call: the
+five-minute quickstart, the import shapes, the full
+type table with its named losses, and what the tiers
+mean at the boundary.
+
 ## The functions
 
 Twenty-nine exports under their Morphic entry names.
