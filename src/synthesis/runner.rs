@@ -849,9 +849,12 @@ spec mini_sort<T> {
     /// A spec whose only test still cannot bind after
     /// Phase 130: the input tuple carries a NESTED tuple,
     /// and there is no tuple Value for the element to map
-    /// to — the remaining Unbindable class (with named
-    /// function references, until Phase 132). The Phase 58
-    /// trigger's standing fixture.
+    /// to — the remaining Unbindable class. (Named function
+    /// references, the other former class, bind since
+    /// Phase 132 wherever a judging route carries a module
+    /// index; this stage's context-free count still reads
+    /// them as unbindable, having no index in hand.) The
+    /// Phase 58 trigger's standing fixture.
     const UNBINDABLE_TESTS: &str = r#"
 Mini {
 spec nested_pair {

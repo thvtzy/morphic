@@ -23,9 +23,13 @@
 //! Standings since the audit, flipped in place at their
 //! sites: Phase 129 (checker admission) flipped the check
 //! pins; Phase 130 (interpreter function values) flipped the
-//! binding and in-process judging pins. The verifier and
-//! emitter pins are untouched — those layers are Phases
-//! 133's and the standing exclusions' respectively.
+//! binding and in-process judging pins; Phase 132
+//! (named-reference supply) flipped the named-reference
+//! probe below — the name binds and judges through a module
+//! index, and the context-free route's pins stand. The
+//! verifier and emitter pins are untouched — those layers
+//! are Phases 133's and the standing exclusions'
+//! respectively.
 
 use morphic::spec::ast::{Expr, FunctionSpec, TypeRef};
 use morphic::spec::{parser, typeck};
@@ -411,10 +415,18 @@ fn phase127_fn_equality_has_no_home() {
 }
 
 #[test]
-fn phase127_named_function_reference_binds_nothing() {
+fn phase127_named_function_reference_binds_through_the_index() {
     // The typechecker resolves a bare sibling name to a
-    // Function type (typeck's Var arm reads function_sigs) —
-    // but there is no VALUE for the name to bind to in a test.
+    // Function type (typeck's Var arm reads function_sigs).
+    // Until Phase 132 there was no VALUE for the name to
+    // bind to in a test on any route — this probe pinned
+    // bindable 0/1. Phase 132 (G4 §2.5, D4a's second
+    // supply form) lands the named reference: through a
+    // module index the name maps to a function value built
+    // from the named spec's denoted body, the row binds,
+    // and the spec's own body judges it in-process. The
+    // context-free route stands as it was — it carries no
+    // index, so the name still binds nothing there.
     let src = r#"Probe {
         spec double_it {
             input: x: Int
@@ -435,14 +447,45 @@ fn phase127_named_function_reference_binds_nothing() {
         Err(e) => println!("P127|named_ref|check=Err({e})"),
     }
     // The value mapping of a bare function name, directly:
+    // nothing without an index (the standing route), a
+    // function value with one (Phase 132).
     let value = eval::value_of_expr(&Expr::Var("double_it".into()));
     println!("P127|named_ref|value_of_var={value:?}");
-    assert!(value.is_none(), "a named function has no Value today");
+    assert!(value.is_none(), "a named function has no Value without an index");
     if let Ok(specs) = checked {
+        let module = parser::parse(src).expect("probe source parses");
+        let checked_module = typeck::check(module).expect("probe source typechecks");
+        let index = morphic::synthesis::engine::SpecIndex::from_module(&checked_module.spec);
+        let indexed = eval::value_of_expr_in(&Expr::Var("double_it".into()), &index);
+        println!("P127|named_ref|value_of_var_in={indexed:?}");
+        assert!(
+            matches!(indexed, Some(eval::Value::Function { .. })),
+            "a named function is a Value through the index since Phase 132"
+        );
         let apply_named = &specs[1];
         let bindable = eval::bindable_test_count(apply_named);
         println!("P127|named_ref|bindable={}/{}", bindable, apply_named.tests.len());
-        assert_eq!(bindable, 0);
+        assert_eq!(bindable, 0, "the context-free count stands");
+        let bindable_in = eval::bindable_test_count_in(apply_named, &index);
+        println!(
+            "P127|named_ref|bindable_in={}/{}",
+            bindable_in,
+            apply_named.tests.len()
+        );
+        assert_eq!(bindable_in, 1, "the row binds through the index");
+        let body = index
+            .callee_body("apply_named")
+            .expect("apply_named denotes its equation body");
+        let run = eval::run_spec_tests_in(&body, apply_named, &index);
+        println!("P127|named_ref|run_in={run:?}");
+        assert_eq!(
+            run,
+            eval::TestRun {
+                evaluable: 1,
+                passed: 1
+            },
+            "and judges in-process at its frozen §3 standing"
+        );
     }
 }
 

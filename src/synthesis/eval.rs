@@ -23,7 +23,12 @@
 // │  an indexed place, a Let body evaluated in the current   │
 // │  environment (its Assigns to pre-existing bindings take  │
 // │  effect, as compiled; its bindings stay scoped), and     │
-// │  the bare-constructor `Var("None")` idiom.               │
+// │  the bare-constructor `Var("None")` idiom — and, since   │
+// │  Phase 132 (G4), named-reference function supply: where  │
+// │  a judging route carries a module index, a bare name in  │
+// │  a function position in a test row resolves through it   │
+// │  to a function value built from the named spec's         │
+// │  denoted body (§2.5's second supply form).               │
 // │  Loops carry an explicit iteration bound (see            │
 // │  MAX_LOOP_ITERATIONS): exceeding it is a judged          │
 // │  `NotEvaluable`, never a hang and never a fabricated     │
@@ -36,8 +41,8 @@
 // │  evaluator never panics and never guesses a value.       │
 // └──────────────────────────────────────────────────────────┘
 
-use super::engine::{IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp};
-use crate::spec::ast::{Constraint, Expr, FunctionSpec, OrderOp, Param};
+use super::engine::{IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp, SpecIndex};
+use crate::spec::ast::{Constraint, Expr, FunctionSpec, OrderOp, Param, TypeRef};
 use std::collections::HashMap;
 
 /// A runtime value in the evaluable subset.
@@ -1758,6 +1763,262 @@ fn eval_unaryop(op: IRUnaryOp, v: Value) -> Result<Value, EvalError> {
 
 // ── Spec test execution ───────────────────────────────────
 
+// ── Named-reference function supply (Phase 132, G4 §2.5) ──
+//
+// The second supply form: a bare name standing in a
+// function position in a test row resolves through the
+// module index to a function value built from the named
+// spec's body — sibling specs and shipped entries alike
+// (the index is where the prelude merge lives, so an
+// entry resolves exactly as a sibling does, and a
+// module's own definition wins a collision, Phase 110).
+// The construction mirrors the two standing consumer
+// routes for denoted bodies:
+//
+// - an acyclic body is call-resolved by substitution
+//   (`SpecIndex::inline_calls`, the resolver route the
+//   compositions are judged through), and the closure
+//   captures nothing;
+// - a SELF-RECURSIVE body (recursion is a named-spec
+//   feature, §2.2 — the named reference is its vehicle)
+//   keeps its raw denoted form, and the closure's
+//   captured environment binds the spec's own name to
+//   the closure itself, built as a ladder of
+//   MAX_APPLICATION_DEPTH + 1 generations: each
+//   generation's environment holds the previous one
+//   under the name. The ladder's foot is unreachable —
+//   an application chain that deep has already declined
+//   by the application's own depth bound — so a
+//   recursion past the bound declines by the depth rule,
+//   by name, never by a missing binding and never by
+//   exhausting the host stack. Sibling calls in such a
+//   body bind as named values in the same environment.
+//   A call cycle back through a sibling (mutual
+//   recursion) is not a G4 form and declines the supply.
+//
+// Every failure is a named decline (the Err text), never
+// a silent non-binding: an unknown name, a name denoting
+// no executable body, a body that cannot be
+// call-resolved. The position discipline — a name binds
+// only in a function position, and only when its
+// signature fits — is the binding layer's (`bind_part`).
+
+/// The function value a named reference denotes, built
+/// from the named spec's body in the index (see the
+/// section head). `Err` is the decline reason, naming
+/// the name and the class.
+fn named_function_value(index: &SpecIndex, name: &str) -> Result<Value, String> {
+    named_function_value_in(index, name, &[])
+}
+
+fn named_function_value_in(
+    index: &SpecIndex,
+    name: &str,
+    visiting: &[String],
+) -> Result<Value, String> {
+    if visiting.iter().any(|v| v == name) {
+        return Err(format!(
+            "the named function reference `{name}` cannot be built: its body calls \
+             back into `{name}` — mutual recursion between named references is not \
+             a G4 form (G4_SCOPE §2.2)"
+        ));
+    }
+    let spec = index.get(name).ok_or_else(|| {
+        format!(
+            "unknown function reference `{name}`: the module index holds no spec of that name"
+        )
+    })?;
+    let raw = index.callee_body(name).ok_or_else(|| {
+        format!(
+            "the named function reference `{name}` denotes no executable body: \
+             no shipped body is registered for it and its constraints build no denotation"
+        )
+    })?;
+    let params: Vec<String> = spec.params.iter().map(|p| p.name.clone()).collect();
+    let mut called: Vec<String> = Vec::new();
+    collect_called_indexed(&raw, index, &mut called);
+    if !called.iter().any(|c| c == name) {
+        // Acyclic: the standing consumer construction —
+        // resolve the body's spec calls by substitution.
+        let body = index.inline_calls(&raw).ok_or_else(|| {
+            format!(
+                "the named function reference `{name}` denotes a body that cannot be \
+                 call-resolved against the module index (a call cycle, an arity \
+                 mismatch, or a shape the resolver cannot expand)"
+            )
+        })?;
+        return Ok(Value::Function {
+            params,
+            body: Box::new(body),
+            env: Env::new(),
+        });
+    }
+    // Self-recursive: the ladder construction (see the
+    // section head). Sibling calls bind as named values
+    // in every generation's environment.
+    let mut chain: Vec<String> = visiting.to_vec();
+    chain.push(name.to_string());
+    let mut base_env = Env::new();
+    for callee in called.iter().filter(|c| *c != name) {
+        let value = named_function_value_in(index, callee, &chain)
+            .map_err(|e| format!("the named function reference `{name}` cannot be built: {e}"))?;
+        base_env.insert(callee.clone(), value);
+    }
+    let mut current = Value::Function {
+        params: params.clone(),
+        body: Box::new(raw.clone()),
+        env: base_env.clone(),
+    };
+    for _ in 0..MAX_APPLICATION_DEPTH {
+        let mut env = base_env.clone();
+        env.insert(name.to_string(), current);
+        current = Value::Function {
+            params: params.clone(),
+            body: Box::new(raw.clone()),
+            env,
+        };
+    }
+    Ok(current)
+}
+
+/// The indexed specs an IR body calls, in first-mention
+/// order — the named reference's call set. Descends
+/// everywhere a call can sit, lambda and closure bodies
+/// included (a lambda created inside the body captures
+/// the environment its body is evaluated in, so its
+/// calls resolve against the same bindings).
+fn collect_called_indexed(node: &IRNode, index: &SpecIndex, out: &mut Vec<String>) {
+    match node {
+        IRNode::Call { function, args } => {
+            if index.get(function).is_some() && !out.iter().any(|n| n == function) {
+                out.push(function.clone());
+            }
+            for a in args {
+                collect_called_indexed(a, index, out);
+            }
+        }
+        IRNode::Block(items) => {
+            for item in items {
+                collect_called_indexed(item, index, out);
+            }
+        }
+        IRNode::Let { value, body, .. } => {
+            collect_called_indexed(value, index, out);
+            collect_called_indexed(body, index, out);
+        }
+        IRNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_called_indexed(condition, index, out);
+            collect_called_indexed(then_branch, index, out);
+            collect_called_indexed(else_branch, index, out);
+        }
+        IRNode::While {
+            condition, body, ..
+        } => {
+            collect_called_indexed(condition, index, out);
+            collect_called_indexed(body, index, out);
+        }
+        IRNode::For {
+            start, end, body, ..
+        } => {
+            collect_called_indexed(start, index, out);
+            collect_called_indexed(end, index, out);
+            collect_called_indexed(body, index, out);
+        }
+        IRNode::Match { scrutinee, cases } => {
+            collect_called_indexed(scrutinee, index, out);
+            for (_, body) in cases {
+                collect_called_indexed(body, index, out);
+            }
+        }
+        IRNode::Return(inner) | IRNode::TryPropagate(inner) => {
+            collect_called_indexed(inner, index, out);
+        }
+        IRNode::UnaryOp(_, inner) => collect_called_indexed(inner, index, out),
+        IRNode::BinOp(_, l, r) | IRNode::Index(l, r) => {
+            collect_called_indexed(l, index, out);
+            collect_called_indexed(r, index, out);
+        }
+        IRNode::Lambda { body, .. } | IRNode::Closure { body, .. } => {
+            collect_called_indexed(body, index, out);
+        }
+        IRNode::Collection { elements, .. } => {
+            for e in elements {
+                collect_called_indexed(e, index, out);
+            }
+        }
+        IRNode::Map { function, over } | IRNode::Filter { predicate: function, over } => {
+            collect_called_indexed(function, index, out);
+            collect_called_indexed(over, index, out);
+        }
+        IRNode::Fold {
+            operation,
+            initial,
+            over,
+        } => {
+            collect_called_indexed(operation, index, out);
+            collect_called_indexed(initial, index, out);
+            collect_called_indexed(over, index, out);
+        }
+        IRNode::Sort {
+            comparator,
+            collection,
+        } => {
+            collect_called_indexed(comparator, index, out);
+            collect_called_indexed(collection, index, out);
+        }
+        IRNode::Alloc { initial, .. } => collect_called_indexed(initial, index, out),
+        IRNode::Assign { target, value } => {
+            collect_called_indexed(target, index, out);
+            collect_called_indexed(value, index, out);
+        }
+        IRNode::Typed { node, .. } => collect_called_indexed(node, index, out),
+        IRNode::Loop { body, .. } => collect_called_indexed(body, index, out),
+        IRNode::Break { value } => {
+            if let Some(v) = value {
+                collect_called_indexed(v, index, out);
+            }
+        }
+        IRNode::StructDef { body, .. } => collect_called_indexed(body, index, out),
+        IRNode::FieldAccess { base, .. } => collect_called_indexed(base, index, out),
+        IRNode::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                collect_called_indexed(v, index, out);
+            }
+        }
+        IRNode::Hole { .. } | IRNode::Literal(_) | IRNode::Var(_) => {}
+    }
+}
+
+/// Whether the named spec's signature fits the function
+/// type of the position it is supplied for, at the
+/// checker's coarse discipline: arity is exact; a type
+/// component must be equal, except that a generic
+/// component on either side fits anything (instantiation
+/// is the caller's business, as it is for the checker's
+/// own fn-typed parameters).
+fn signature_fits(named: &FunctionSpec, expected: &TypeRef) -> bool {
+    let TypeRef::Function(param_tys, return_ty) = expected else {
+        return false;
+    };
+    named.params.len() == param_tys.len()
+        && named
+            .params
+            .iter()
+            .zip(param_tys.iter())
+            .all(|(p, t)| type_fits(&p.ty, t))
+        && type_fits(&named.return_type, return_ty)
+}
+
+fn type_fits(actual: &TypeRef, expected: &TypeRef) -> bool {
+    actual == expected
+        || matches!(actual, TypeRef::Generic(_))
+        || matches!(expected, TypeRef::Generic(_))
+}
+
 /// Map a spec test's input/output `Expr` to an evaluator
 /// `Value`. Literals map directly; composite literal
 /// expressions (e.g. `1 + 2`, `List[1, 2]`) are lowered through
@@ -1797,7 +2058,32 @@ fn eval_unaryop(op: IRUnaryOp, v: Value) -> Result<Value, EvalError> {
 /// past its parameters for a free name declines as an
 /// unbound variable at application, never a guessed
 /// capture.
+///
+/// A third carve-out (Phase 132, G4 §2.5): with a module
+/// index in hand (`value_of_expr_in`), a bare name
+/// (`Expr::Var`) naming an indexed spec maps HERE to the
+/// function value the name denotes — the named-reference
+/// supply form (see the named-supply section above). This
+/// mapping is the primitive, position-blind; the
+/// function-position discipline (a name binds only where
+/// a function is being supplied, and only when its
+/// signature fits the position) lives in the binding
+/// layer (`bind_part`). Without an index this function is
+/// the standing one, and a bare name takes the generic
+/// route below, which cannot map it — exactly as before.
 pub fn value_of_expr(expr: &Expr) -> Option<Value> {
+    value_of_expr_indexed(expr, None)
+}
+
+/// `value_of_expr` with a module index in hand: a bare
+/// name naming an indexed spec additionally maps to the
+/// function value it denotes (Phase 132, §2.5). Every
+/// other form maps exactly as `value_of_expr` maps it.
+pub fn value_of_expr_in(expr: &Expr, index: &SpecIndex) -> Option<Value> {
+    value_of_expr_indexed(expr, Some(index))
+}
+
+fn value_of_expr_indexed(expr: &Expr, index: Option<&SpecIndex>) -> Option<Value> {
     match expr {
         Expr::IntLit(n) => Some(Value::Int(*n)),
         Expr::FloatLit(f) => Some(Value::Float(*f)),
@@ -1809,15 +2095,32 @@ pub fn value_of_expr(expr: &Expr) -> Option<Value> {
             body: Box::new(super::engine::expr_to_ir(body)),
             env: Env::new(),
         }),
+        Expr::Var(name) => {
+            // The named-reference carve-out (Phase 132):
+            // with an index, a name denoting a spec maps
+            // to its function value. Any other name — and
+            // every name without an index — takes the
+            // generic route, which is the standing
+            // behavior (a bare `None` reads as the None
+            // value through it, Phase 131; an unbound name
+            // does not map).
+            if let Some(index) = index {
+                if let Ok(value) = named_function_value(index, name) {
+                    return Some(value);
+                }
+            }
+            let ir = super::engine::expr_to_ir(expr);
+            eval(&ir, &Env::new()).ok()
+        }
         Expr::MethodCall {
             receiver,
             name,
             args,
         } => {
-            let receiver = value_of_expr(receiver)?;
+            let receiver = value_of_expr_indexed(receiver, index)?;
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
-                values.push(value_of_expr(arg)?);
+                values.push(value_of_expr_indexed(arg, index)?);
             }
             eval_method_call(&receiver, name, &values).ok()
         }
@@ -1828,6 +2131,19 @@ pub fn value_of_expr(expr: &Expr) -> Option<Value> {
     }
 }
 
+/// Why a test input did not bind: either a SPECIFIC
+/// named decline (the payload is the outcome's reason —
+/// a named function reference that cannot resolve, does
+/// not fit, or stands in a non-function position), or
+/// the GENERIC failure, whose reason is the standing
+/// class selection in `test_outcomes_indexed` (unmappable
+/// value vs shape/arity), unchanged from before
+/// Phase 132.
+enum BindDecline {
+    Specific(String),
+    Generic,
+}
+
 /// Build the environment for one test: the test input value is
 /// bound to the spec's parameter(s). A single parameter takes
 /// the value directly; multiple parameters bind elementwise
@@ -1835,22 +2151,29 @@ pub fn value_of_expr(expr: &Expr) -> Option<Value> {
 ///
 /// - a TUPLE input `(v1, v2, ...)` — the parser lowers it to
 ///   `Call("__tuple__", [v1, v2, ...])` (parser.rs), and each
-///   element is mapped through `value_of_expr` on its own
-///   (Phase 53: before this, the tuple was mapped as ONE
-///   value, which always failed — "__tuple__" is not an
-///   evaluable function — so tuple tests never bound);
+///   element is mapped on its own (Phase 53: before this, the
+///   tuple was mapped as ONE value, which always failed —
+///   "__tuple__" is not an evaluable function — so tuple tests
+///   never bound);
 /// - a whole input that maps to a List of exactly the
 ///   parameter count.
 ///
 /// A tuple whose arity differs from the parameter count, or
 /// with an element that cannot be mapped (a nested tuple —
-/// there is no tuple Value; a bare sibling name in a
-/// function position — the named-reference supply form is
-/// Phase 132's, and `value_of_expr` has no module index to
-/// resolve it against), does not bind: the test is
+/// there is no tuple Value), does not bind: the test is
 /// excluded, exactly as before. A lambda element DOES map
 /// since Phase 130 — to a closure (see `value_of_expr`).
-fn bind_test_env(params: &[Param], input: &Expr) -> Option<Env> {
+/// An element that is a bare sibling name in a function
+/// position is the named-reference supply form (Phase 132,
+/// §2.5): it maps where the binding carries a module index
+/// (through `bind_part`), to the function value the name
+/// denotes; on a route carrying no index it does not bind,
+/// and its decline names the missing index.
+fn bind_test_env_indexed(
+    params: &[Param],
+    input: &Expr,
+    index: Option<&SpecIndex>,
+) -> Result<Env, BindDecline> {
     // Tuple form: bind elementwise. Checked before the
     // whole-value mapping, which cannot represent a tuple.
     if params.len() >= 2 {
@@ -1858,30 +2181,108 @@ fn bind_test_env(params: &[Param], input: &Expr) -> Option<Env> {
             if name == "__tuple__" && parts.len() == params.len() {
                 let mut env = Env::new();
                 for (param, part) in params.iter().zip(parts.iter()) {
-                    env.insert(param.name.clone(), value_of_expr(part)?);
+                    env.insert(param.name.clone(), bind_part(part, param, index)?);
                 }
-                return Some(env);
+                return Ok(env);
             }
         }
     }
-    let value = value_of_expr(input)?;
+    // A single parameter supplied by a bare name goes
+    // through the same per-part discipline as a tuple
+    // element (the named-reference position rules).
+    if params.len() == 1 {
+        if let Expr::Var(_) = input {
+            let value = bind_part(input, &params[0], index)?;
+            let mut env = Env::new();
+            env.insert(params[0].name.clone(), value);
+            return Ok(env);
+        }
+    }
+    let value = value_of_expr_indexed(input, index).ok_or(BindDecline::Generic)?;
     let mut env = Env::new();
     match params.len() {
-        0 => Some(env),
+        0 => Ok(env),
         1 => {
             env.insert(params[0].name.clone(), value);
-            Some(env)
+            Ok(env)
         }
         _ => match value {
             Value::List(items) if items.len() == params.len() => {
                 for (param, item) in params.iter().zip(items) {
                     env.insert(param.name.clone(), item);
                 }
-                Some(env)
+                Ok(env)
             }
-            _ => None,
+            _ => Err(BindDecline::Generic),
         },
     }
+}
+
+/// Bind one supply position — a tuple element, or a lone
+/// input — against its parameter. A bare name is the
+/// named-reference supply form (Phase 132, §2.5) and is
+/// position-disciplined: it binds only in a FUNCTION
+/// position (the parameter's type is a function type),
+/// only where the route carries a module index, and only
+/// when the named spec's signature fits the position
+/// (`signature_fits`). Each failure is a SPECIFIC decline
+/// naming the name and the class — a named reference
+/// never silently binds and never silently vanishes into
+/// the generic class. A bare name in a non-function
+/// position that resolves to nothing is not a reference
+/// at all and keeps the generic failure, as before.
+/// Every other form maps through `value_of_expr_indexed`.
+fn bind_part(
+    part: &Expr,
+    param: &Param,
+    index: Option<&SpecIndex>,
+) -> Result<Value, BindDecline> {
+    if let Expr::Var(name) = part {
+        let fn_position = matches!(param.ty, TypeRef::Function(..));
+        match index {
+            Some(index) => {
+                if fn_position {
+                    let value =
+                        named_function_value(index, name).map_err(BindDecline::Specific)?;
+                    let named = index
+                        .get(name)
+                        .expect("a resolved reference names an indexed spec");
+                    if !signature_fits(named, &param.ty) {
+                        let actual = TypeRef::Function(
+                            named.params.iter().map(|p| p.ty.clone()).collect(),
+                            Box::new(named.return_type.clone()),
+                        );
+                        return Err(BindDecline::Specific(format!(
+                            "the named function reference `{name}` does not match the \
+                             function type of the parameter it is supplied for: \
+                             `{name}` is {actual}, the position requires {}",
+                            param.ty
+                        )));
+                    }
+                    return Ok(value);
+                }
+                if index.get(name).is_some() {
+                    return Err(BindDecline::Specific(format!(
+                        "the named reference `{name}` stands in a non-function position: \
+                         a bare name in a test input is a function supply form \
+                         (G4 §2.5), and the parameter it would bind is {}, \
+                         not a function type",
+                        param.ty
+                    )));
+                }
+            }
+            None => {
+                if fn_position {
+                    return Err(BindDecline::Specific(format!(
+                        "the named function reference `{name}` cannot be resolved here: \
+                         named supply resolves through a module index, and this \
+                         judging route carries none"
+                    )));
+                }
+            }
+        }
+    }
+    value_of_expr_indexed(part, index).ok_or(BindDecline::Generic)
 }
 
 /// Outcome of running a candidate body against a spec's tests.
@@ -1908,13 +2309,26 @@ pub struct TestRun {
 /// the spec's test encodings alone: it equals `evaluable` for
 /// every candidate. A spec whose count falls short of its
 /// test count has tests the interpreter cannot judge (the
-/// tuple-carrying residue: nested tuples, named function
-/// references — lambda-carrying tests bind since Phase 130)
-/// — the trigger signal for the compiled-runner final
+/// tuple-carrying residue: nested tuples — there is no tuple
+/// Value. Named function references bind since Phase 132
+/// wherever the count is taken with a module index —
+/// `bindable_test_count_in`; this context-free count still
+/// reads them as residue, having no index to resolve them
+/// against) — the trigger signal for the compiled-runner final
 /// scoring in synthesis::runner (Phase 58), which exists
 /// for exactly that residue.
 pub fn bindable_test_count(spec: &FunctionSpec) -> usize {
     test_bindability(spec).iter().filter(|b| **b).count()
+}
+
+/// `bindable_test_count` with a module index in hand:
+/// tests supplying a function by named reference
+/// (Phase 132, §2.5) bind on this route.
+pub fn bindable_test_count_in(spec: &FunctionSpec, index: &SpecIndex) -> usize {
+    test_bindability_in(spec, index)
+        .iter()
+        .filter(|b| **b)
+        .count()
 }
 
 /// Per-test bindability, in `spec.tests` order: test `i`
@@ -1926,11 +2340,21 @@ pub fn bindable_test_count(spec: &FunctionSpec) -> usize {
 /// playground's test panel reports exactly this (Phase 66,
 /// v0.6 W1/W2 surface).
 pub fn test_bindability(spec: &FunctionSpec) -> Vec<bool> {
+    test_bindability_indexed(spec, None)
+}
+
+/// `test_bindability` with a module index in hand
+/// (Phase 132: named-reference tests bind).
+pub fn test_bindability_in(spec: &FunctionSpec, index: &SpecIndex) -> Vec<bool> {
+    test_bindability_indexed(spec, Some(index))
+}
+
+fn test_bindability_indexed(spec: &FunctionSpec, index: Option<&SpecIndex>) -> Vec<bool> {
     spec.tests
         .iter()
         .map(|t| {
-            bind_test_env(&spec.params, &t.input).is_some()
-                && value_of_expr(&t.expected_output).is_some()
+            bind_test_env_indexed(&spec.params, &t.input, index).is_ok()
+                && value_of_expr_indexed(&t.expected_output, index).is_some()
         })
         .collect()
 }
@@ -2071,12 +2495,16 @@ pub enum TestOutcome {
     /// The test itself cannot be mapped to interpreter
     /// values, so no candidate could ever be judged against
     /// it. The payload is the reason CLASS: the expected
-    /// output is unmappable, the input is unmappable (it
+    /// output is unmappable; the input is unmappable (it
     /// carries a value with no interpreter representation,
-    /// e.g. a tuple — there is no tuple value — or a named
-    /// function reference, whose supply form is Phase
-    /// 132's), or the input's shape does not match the
-    /// parameter list.
+    /// e.g. a tuple — there is no tuple value; that is the
+    /// remaining unrepresentable class since Phase 132);
+    /// a named function reference declines (an unknown
+    /// name, a name denoting no executable body, a
+    /// signature that does not fit its position, a name in
+    /// a non-function position, or no module index on the
+    /// judging route — each named in the payload); or the
+    /// input's shape does not match the parameter list.
     Unbindable(String),
     /// The test binds, but its input VIOLATES the spec's
     /// own `require:` precondition (Phase 109, §3.1): the
@@ -2095,23 +2523,55 @@ pub enum TestOutcome {
 /// Execute `body` against every test in `spec.tests`,
 /// reporting the per-test outcome (in `spec.tests` order).
 pub fn test_outcomes(body: &IRNode, spec: &FunctionSpec) -> Vec<TestOutcome> {
+    test_outcomes_indexed(body, spec, None)
+}
+
+/// `test_outcomes` with a module index in hand: tests
+/// supplying a function by named reference (Phase 132,
+/// §2.5) bind and judge on this route.
+pub fn test_outcomes_in(
+    body: &IRNode,
+    spec: &FunctionSpec,
+    index: &SpecIndex,
+) -> Vec<TestOutcome> {
+    test_outcomes_indexed(body, spec, Some(index))
+}
+
+fn test_outcomes_indexed(
+    body: &IRNode,
+    spec: &FunctionSpec,
+    index: Option<&SpecIndex>,
+) -> Vec<TestOutcome> {
     spec.tests
         .iter()
         .map(|test| {
-            let Some(expected) = value_of_expr(&test.expected_output) else {
+            let Some(expected) = value_of_expr_indexed(&test.expected_output, index) else {
                 return TestOutcome::Unbindable(
                     "expected output cannot be mapped to an interpreter value".into(),
                 );
             };
-            let Some(env) = bind_test_env(&spec.params, &test.input) else {
-                return TestOutcome::Unbindable(if value_of_expr(&test.input).is_none() {
-                    "input cannot be mapped to an interpreter value \
-                     (it carries a value the interpreter cannot represent, \
-                     e.g. a tuple or a named function reference)"
-                        .into()
-                } else {
-                    "input does not match the spec's parameter list (shape/arity)".into()
-                });
+            let env = match bind_test_env_indexed(&spec.params, &test.input, index) {
+                Ok(env) => env,
+                // A named reference's decline is specific:
+                // its reason IS the outcome's payload (the
+                // name and the class), never the generic
+                // class below.
+                Err(BindDecline::Specific(reason)) => {
+                    return TestOutcome::Unbindable(reason);
+                }
+                Err(BindDecline::Generic) => {
+                    return TestOutcome::Unbindable(
+                        if value_of_expr_indexed(&test.input, index).is_none() {
+                            "input cannot be mapped to an interpreter value \
+                             (it carries a value the interpreter cannot represent, \
+                             e.g. a tuple)"
+                                .into()
+                        } else {
+                            "input does not match the spec's parameter list (shape/arity)"
+                                .into()
+                        },
+                    );
+                }
             };
             // Phase 109 (§3.1): a point the spec's own
             // `require:` excludes is spec-silent — the
@@ -2169,6 +2629,24 @@ pub fn run_spec_tests(body: &IRNode, spec: &FunctionSpec) -> TestRun {
     }
 }
 
+/// `run_spec_tests` with a module index in hand
+/// (Phase 132: named-reference tests bind and judge).
+pub fn run_spec_tests_in(body: &IRNode, spec: &FunctionSpec, index: &SpecIndex) -> TestRun {
+    let outcomes = test_outcomes_in(body, spec, index);
+    TestRun {
+        evaluable: outcomes
+            .iter()
+            .filter(|o| {
+                !matches!(o, TestOutcome::Unbindable(_) | TestOutcome::SpecSilent(_))
+            })
+            .count(),
+        passed: outcomes
+            .iter()
+            .filter(|o| matches!(o, TestOutcome::Passed))
+            .count(),
+    }
+}
+
 /// How many of the spec's bindable tests produce a VALUE
 /// under `body` — `eval` returns Ok — regardless of whether
 /// the value matches the expected output. `run_spec_tests`
@@ -2183,11 +2661,25 @@ pub fn run_spec_tests(body: &IRNode, spec: &FunctionSpec) -> TestRun {
 /// interpreter's subset, e.g. a For/Alloc/Assign scan body,
 /// and the compiled vehicle is the honest judge).
 pub fn valued_test_count(body: &IRNode, spec: &FunctionSpec) -> usize {
+    valued_test_count_indexed(body, spec, None)
+}
+
+/// `valued_test_count` with a module index in hand
+/// (Phase 132: named-reference tests bind).
+pub fn valued_test_count_in(body: &IRNode, spec: &FunctionSpec, index: &SpecIndex) -> usize {
+    valued_test_count_indexed(body, spec, Some(index))
+}
+
+fn valued_test_count_indexed(
+    body: &IRNode,
+    spec: &FunctionSpec,
+    index: Option<&SpecIndex>,
+) -> usize {
     let mut valued = 0;
     for test in &spec.tests {
-        let (Some(env), Some(_)) = (
-            bind_test_env(&spec.params, &test.input),
-            value_of_expr(&test.expected_output),
+        let (Ok(env), Some(_)) = (
+            bind_test_env_indexed(&spec.params, &test.input, index),
+            value_of_expr_indexed(&test.expected_output, index),
         ) else {
             continue;
         };
@@ -2999,7 +3491,8 @@ mod tests {
             test(tuple(vec![list_lit(&[1, 10, 2, 20]), Expr::IntLit(5)]), Expr::IntLit(2)),
         ];
         // The bindings are exactly the element values.
-        let env = bind_test_env(&spec.params, &spec.tests[0].input)
+        let env = bind_test_env_indexed(&spec.params, &spec.tests[0].input, None)
+            .ok()
             .expect("tuple input with a list element must bind");
         assert_eq!(
             env.get("list"),
@@ -3067,7 +3560,8 @@ mod tests {
             tuple(vec![list_lit(&[3, 1, 2]), lambda]),
             list_lit(&[1, 2, 3]),
         )];
-        let env = bind_test_env(&spec.params, &spec.tests[0].input)
+        let env = bind_test_env_indexed(&spec.params, &spec.tests[0].input, None)
+            .ok()
             .expect("tuple input with a lambda element must bind");
         assert!(
             matches!(env.get("cmp"), Some(Value::Function { .. })),
