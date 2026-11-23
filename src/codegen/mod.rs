@@ -3197,6 +3197,13 @@ impl std::error::Error for CodegenError {}
 // ── Tests ─────────────────────────────────────────────────
 
 /// The M5-S1 bootstrap artifact (Phase 51): the M3 Codegen
+/// Phase 121 (1.1 Embeddable): the typed-binding
+/// generator — assembled ESM module + `.d.ts` +
+/// `morphic.manifest.json` from (spec, body, verdict)
+/// inputs, for the frozen stdlib surface and, ungated,
+/// for user modules (D1a).
+pub mod bindings;
+
 /// module's 112 synthesized winners, checked in as a versioned
 /// file and compiled into the crate — the compiled codegen the
 /// bootstrap adapter calls. GENERATED FILE (its own header
