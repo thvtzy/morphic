@@ -434,3 +434,436 @@ entry, is not re-tiered, and does not ship.
 **Amended 1.0 totals:** **29 library entries + 2 builtins =
 31 named items** (**Tier-1 18 / Tier-2 11 / builtin 2**). The
 gate in §3 is run against this amended scope.
+
+---
+
+## Amendment 2 — the higher-order entries + `range` (the 1.2 amendment, frozen 2026-11-23)
+
+**Freeze (Phase 134).** The six entries named in outline by
+[`G4_SCOPE.md`](G4_SCOPE.md) §5 — the five higher-order names
+the G4 language build unblocked, plus `range` — are frozen
+here, as **Amendment 2** to this scope, in the Amendment 1
+manner: appended in the open, the frozen 1.0 text above
+untouched. The milestone is 1.2 (G4_SCOPE D8a: the G4
+language build + this amendment, two freezes, one gate); the
+language build this amendment rests on is complete (Phases
+129–133: checker admission, closure values, in-process
+higher-order judging, named-reference supply, the UF arm).
+Sources: G4_SCOPE §5 (the outline) and §7 (the gate this
+amendment is measured by), [`G4_AUDIT.md`](G4_AUDIT.md) §2.1
+(the payoff table), and the package freeze it extends,
+[`EMBED_SCOPE.md`](EMBED_SCOPE.md). Later phases tick this
+amendment by measurement only; a dropped, re-tiered, or
+re-signed entry is a further recorded amendment, never a
+silent edit.
+
+### A2.1 The six entries — signatures, edge semantics, docs
+
+Signatures are stated in this document's §2 form (the form
+the packages' manifest `signature` field carries). Entries
+freeze at the concrete instantiations named — §2.0's
+discipline carries: polymorphic forms (a `list_map` over
+`List<Char>`, a `list_fold` whose accumulator is not Int)
+are not frozen and do not ship in 1.2. Parameter names are
+as the docs name them; they are part of the frozen surface
+(the generated bindings take their parameter names from the
+specs).
+
+| Entry | Signature | Edge semantics |
+|---|---|---|
+| `list_map` | `(List<Int>, fn(Int) -> Int) → List<Int>` | `output[i] == f(xs[i])` for every i, order and length preserved; empty → empty. |
+| `list_filter` | `(List<Int>, fn(Int) -> Bool) → List<Int>` | The elements of xs for which p answers true, in their original relative order; empty → empty; none pass → empty; all pass → xs unchanged. |
+| `list_fold` | `(List<Int>, Int, fn(Int, Int) -> Int) → Int` | The **left** fold in element order: acc starts at `init`, each step replaces acc with `f(acc, x)`; empty → `init`. The accumulator is Int (the concrete instantiation, above). Argument order `(xs, init, f)` mirrors the constraint language's standing `fold(xs, init, f)` form (the `list_sum` / `list_product` constraints). |
+| `list_all` | `(List<Int>, fn(Int) -> Bool) → Bool` | True iff p holds of every element; **empty → true** (vacuous truth — the `forall` meaning). |
+| `list_any` | `(List<Int>, fn(Int) -> Bool) → Bool` | True iff p holds of at least one element; **empty → false** (the `exists` meaning). |
+| `range` | `(Int, Int) → List<Int>` | The ascending list `[lo, lo+1, …, hi−1]`, step 1, length `max(0, hi − lo)`; **`lo == hi` → empty; `lo > hi` → empty** (a reversed range is empty — there is no descending form and no precondition). Bounds whose difference overflows Int are out-of-domain by the standing checked-arithmetic discipline (no value exists to agree on); battery points keep lengths small. |
+
+Two recorded resolutions behind the table:
+
+- **`range`'s form is the two-bound form.** The audit's
+  probe measured a one-bound specimen (`range_upto`,
+  `[0..n)`, judging 2/2 in-process) — a feasibility probe,
+  not a signature. The frozen form is `range(lo, hi)` =
+  `[lo, hi)`, whose `(0, n)` case is exactly the probed
+  form (the probe's two points open the battery, A2.3, in
+  that spelling), because the constraint language's own
+  quantifier domain already spells both `range(n)` and
+  `range(lo, hi)` — `list_is_sorted` ships
+  `range(0, len(xs) - 1)` — so the two-bound entry is the
+  general form of a spelling users already read, and the
+  probed hand body (Alloc + For + Assign/Concat) generalizes
+  by its For bounds alone. The entry's name is the
+  outline's (`range`, G4_SCOPE §5); the quantifier-domain
+  `range(…)` is a parser position, not a call — Phase 135's
+  prelude-merge check (A2.7) is the instrument that proves
+  the two live together, and a collision there is a finding
+  that stops the build, not a rename done silently.
+- **Application discipline rides along.** A supplied
+  function's applications spend the standing evaluation
+  budget and nest under the standing depth bound (G4_SCOPE
+  §2.3): a battery or host point whose applications exhaust
+  them declines the judgement — never a wrong value, never
+  a hang. The batteries below use total, shallow functions
+  throughout, as every standing battery uses in-domain
+  points throughout.
+
+**The docs, frozen verbatim.** No `doc:` texts existed for
+these entries before this amendment; the six texts below
+are authored here, in the standing `doc:` style of
+`stdlib/list.morph` (the Phase 115 docs), and are frozen
+verbatim — Phase 135 writes them into the specs' `doc:`
+fields exactly as written, and the packages' manifest
+`doc` fields and JSDoc/rustdoc carriage carry them verbatim
+from there (the EMBED_SCOPE §2.4 discipline). Any later
+edit to a text below is a further recorded amendment.
+
+> `list_map`: "list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+
+> `list_filter`: "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+
+> `list_fold`: "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+
+> `list_all`: "list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+
+> `list_any`: "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+
+> `range`: "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9)."
+
+### A2.2 Tiers
+
+All six entries ship at **Tier-2** — executed-exact on the
+full battery (A2.3), the tier printed in each entry's
+documentation (A2.1) and in the packages' surfaces
+(EMBED_SCOPE §2.4) — per the G4 decisions and the audit's
+payoff table. **The Tier-1 upgrade path is named, as future
+work and not a 1.2 obligation:** the five higher-order
+entries Verify only when the §3.9 list-element encoder
+lands **together with** the UF arm composed over element
+applications (a body's `f(xs[i])` needs both an element
+model and a function symbol — either alone is vacuous for
+these contracts); `range` needs §3.9 alone (no function
+argument, no UF content — its Inconclusive standing is the
+element cap every Tier-2 List entry lives under). When
+that campaign lands, the upgrades re-issue as label changes
+at a lockstep release, without byte changes to the
+functions (the EMBED_SCOPE R11 mechanism), with this
+library — now including these six — as its test corpus
+(the D7a design).
+
+### A2.3 The golden batteries (frozen counts)
+
+Each entry carries a cross-validation battery in the
+Phase 115 form (pinned points against hand-written mirrors,
+executed in-process; the same points are the packages' host
+batteries under A2.7). **Function arguments are supplied
+both ways across every higher-order entry's battery** —
+lambda rows **and** named references (Phase 132's supply
+form) — with the named points naming shipped entries where
+a natural one exists, as the table records. Named points
+respect the named entry's own frozen domain (no point feeds
+the Int minimum to `int_abs` — its §2.2 precondition
+excludes it — exactly as the standing `int_abs` battery
+treats that point as the boundary it is).
+
+**Spec-silent points: 0 for all six entries.** Every point
+of the six contracts is fully determined by A2.1's
+semantics — there is no index-choice class (the
+`list_binary_search` case) and no underdetermined point in
+any of the six; the counts below are therefore pinned
+counts entire.
+
+| Entry | Pinned | Of which lambda-supplied | Of which named-supplied | Named entries used |
+|---|---|---|---|---|
+| `list_map` | **20** | 12 | 8 | `int_abs` (5), `int_sign` (3) |
+| `list_filter` | **20** | 12 | 8 | `int_is_even` (5), `int_is_odd` (3) |
+| `list_fold` | **18** | 12 | 6 | `int_min` (3), `int_max` (3) |
+| `list_all` | **16** | 10 | 6 | `int_is_even` (3), `int_is_odd` (3) |
+| `list_any` | **16** | 10 | 6 | `int_is_even` (3), `int_is_odd` (3) |
+| `range` | **15** | — (no function argument) | — | — |
+| **Total** | **105** | | | |
+
+The counts sit inside the standing Tier-2 band (the 1.0
+List batteries run 13–28 pinned). The point classes each
+battery covers, frozen with the counts:
+
+- **`list_map` (20):** lambda — empty under two functions,
+  singleton, typical, negation over mixed signs, constant
+  function, identity (incl. at the Int extremes, one point
+  each), duplicates, a longer list, a zero element; named —
+  `int_abs` over mixed signs / negatives / empty /
+  singleton / an Int-maximum element, `int_sign` over
+  typical / negatives-and-zero / empty.
+- **`list_filter` (20):** lambda — empty, all-pass,
+  none-pass, typical mixed, negatives, a zero boundary,
+  singleton pass and fail, duplicates, an extremes point,
+  evenness spelled as a lambda; named — `int_is_even` over
+  typical / empty / none-pass / negatives / singleton,
+  `int_is_odd` over typical / all-pass / empty.
+- **`list_fold` (18):** lambda — empty → init under two
+  operations, singleton, typical sum and product shapes, a
+  non-commutative operation (subtraction — the left-fold
+  order is pinned by the point, not assumed), init
+  dominating, negatives, init 0 vs init ≠ 0 over one list,
+  non-overflowing extremes, a longer list; named —
+  `int_min` with init above the minimum / init below every
+  element (init wins) / empty, `int_max` likewise with a
+  negatives point.
+- **`list_all` (16):** lambda — empty → true, all-pass,
+  first-element fail, last-element fail, singleton pass and
+  fail, negatives, a zero boundary, duplicates, a longer
+  all-pass; named — `int_is_even` all-even / one-odd /
+  empty, `int_is_odd` all-odd / one-even / negatives.
+- **`list_any` (16):** lambda — empty → false, none-pass,
+  first-element pass, last-element pass, singleton pass and
+  fail, negatives, a zero boundary, all-pass, duplicates;
+  named — `int_is_even` one-even / all-odd / empty,
+  `int_is_odd` one-odd / all-even / negatives.
+- **`range` (15):** the audit probe's two points first, in
+  the frozen spelling — `(0, 3) → [0, 1, 2]`, `(0, 0) →
+  []` — then `lo == hi` → [], two reversed points
+  (`lo > hi`, one ending at 0) → [], singletons at both
+  signs, typical spans, a negative-to-positive span, an
+  all-negative span, a length-10 span.
+
+**In-spec tests** follow the standing classes (§3 clause
+3's: empty/degenerate, singleton, typical, adversarial),
+and for the five higher-order entries each spec carries at
+least one lambda-supplied and one named-supplied test row —
+the named rows judged through the prelude-merged index
+(Phase 132's route), like every stdlib spec test.
+
+### A2.4 Package obligations (frozen here, executed at Phase 135)
+
+1. **Both packages gain exactly the six exports** — 35 in
+   total. npm: the root module gains the six functions,
+   six subpath shim pairs are added, and
+   `morphic.manifest.json` gains six rows (name, the A2.1
+   signature, `tier: "tier-2"`,
+   `verdictBasis: "executed-exact"`, `battery` per A2.3,
+   `doc` verbatim per A2.1). The facade gains the six
+   functions under `morphic::stdlib` and the same six
+   manifest rows in its copy. Nothing else is exported;
+   no standing export moves.
+2. **The JavaScript emitter's higher-order arms** — the
+   measured scope, against what Phase 120 left standing.
+   Today every form below reaches a catch-all:
+   `ir_to_js_expr` renders Lambda / Closure / Map / Filter
+   / Fold as the literal `undefined`, a Call whose callee
+   is a bound variable falls through `js_call_form` to the
+   same `undefined`, and a statement-position Map / Filter
+   / Fold renders `// unsupported` in `ir_to_javascript`.
+   Phase 135 adds exactly:
+   - a **Lambda arm** in `ir_to_js_expr` — the
+     arrow-function form (parameters + expression body);
+   - a **Closure arm** in `ir_to_js_expr` — the same form;
+     the capture list has no JavaScript runtime form
+     (JavaScript closures capture the enclosing scope
+     lexically). The one seam is named, not hidden: the
+     interpreter's capture is a by-value snapshot
+     (G4_SCOPE §2.2), so the amendment's bodies form
+     closures only over parameters and over locals not
+     rebound after the closure's creation — the discipline
+     the natural bodies already keep (the Map / Filter /
+     Fold operands are the parameter itself or closed
+     lambdas) — and battery agreement is the pin: a body
+     whose meaning turned on rebinding a captured name
+     after creation would be a Phase 135 finding, not a
+     rendering;
+   - an **application arm** — a `Call` whose callee names
+     a **bound function variable** (the entry's
+     function-typed parameters; a local bound to a function
+     value) renders as a direct JavaScript call. Callees
+     that are neither builtins, constructors, shipped
+     entries, nor bound function variables keep the
+     standing refusal — no silent form is invented for
+     them;
+   - **Map / Filter / Fold arms** in `ir_to_js_expr` — the
+     collection operand composed with the function operand
+     rendered through the Lambda / Closure / Var forms
+     above (the `.map` / `.filter` / `.reduce` shapes are
+     Phase 135's rendering text; this freeze fixes the
+     nodes and the operand forms that must compose), and
+     `ir_to_javascript`'s bare-expression-statement group
+     extends to the same three nodes in the same change,
+     so renderability does not depend on a node's position.
+   - **The Sort arm is not in scope** — no amendment body
+     is a Sort body (G4_SCOPE §5 names lambda + application
+     + Map/Filter/Fold only); its JavaScript standing stays
+     the catch-all, recorded here so the absence is a
+     decision.
+   - **The TypeScript boundary, recorded as this
+     amendment's interpretation of G4_SCOPE §5 with §6:**
+     the six exports ship and answer at runtime; the
+     `.d.ts` type of a function-typed parameter keeps the
+     EMBED_SCOPE §3 stance (`never` — no callable
+     TypeScript function type is frozen in 1.2), and a
+     typed higher-order TypeScript surface is the later
+     embed amendment's question (G4_SCOPE §6, priced S–M
+     atop G4). The manifest's `signature` field carries
+     the true Morphic signature (A2.1), so the boundary is
+     stated in the package's own surface, not hidden by
+     it. The facade has no such boundary: `ty_to_rust`'s
+     Function arm is already complete (fn-pointer types),
+     so facade parity is fully typed.
+3. **The crown-check judging-site wiring** (Phase 132's
+   recorded hand-off). The pipeline's judging sites —
+   including the package crown check inside
+   `morphic build --package` / `--facade` — kept the
+   context-free route at Phase 132, which cannot bind a
+   named reference. Phase 135 wires the package crown
+   check to judge through the **index-carrying route**
+   (the `test_outcomes_in` family) with the prelude-merged
+   `SpecIndex` in hand, so the new entries' named-supply
+   points bind during crown re-verification. **Non-mover
+   obligation:** the 29 standing entries' crown
+   re-verification outcomes must be identical on the index
+   route — their points carry no named supply, so the two
+   routes must agree exactly — measured and reported at
+   Phase 135, per Phase 132's record.
+4. **Version lockstep 1.2.0 at the gate** (EMBED_SCOPE R6
+   carries): both packages re-assemble at 1.2.0 when
+   Phase 136 stamps the project version — not before, and
+   no registry publish precedes the gate (R5 carries).
+5. **Documentation surfaces:** `LANGUAGE_REFERENCE.md`
+   Appendix A gains the six entries' rows (signature,
+   tier, semantics, one example — the §3 clause-7 form in
+   which the 1.0 tiers are printed), and `EMBEDDING.md`
+   names the six exports for package users, with the
+   A2.4.2 TypeScript boundary stated where a package user
+   reads it.
+
+### A2.5 Budgets
+
+- **Playground bundle: 771,072 B stands** (G4_SCOPE §7
+  clause 4). The library ships as the separately-loaded
+  asset (the Phase 112 route), so the six entries' data
+  does not spend the bundle; the gate measures it standing.
+- **The npm package budget at 35 exports: 76,800 B**
+  (unpacked mass, the EMBED_SCOPE §4 measure), derived by
+  the W4 discipline from Phase 122's actuals plus the
+  measured per-entry increment:
+
+| Component | Basis | Bytes |
+|---|---|---|
+| Base: the 29-export package | Phase 122's measured actual (unpacked) | 58,815 |
+| — root-module body + doc block (`index.js`) | List-family average over the standing package (band 178–1,309) | 584 |
+| — export-list line (`index.js`) | 412 B of export tail ÷ 29 | 14 |
+| — typings block (`index.d.ts`) | List-family average | 460 |
+| — manifest row | List-family average, raw bytes | 536 |
+| — subpath shim pair (`.js` + `.d.ts`) | Average over the 29 pairs | 86 |
+| — `package.json` exports entry | The standing entry's raw form | 90 |
+| **Per-entry increment** | | **1,770** |
+| Six entries | 6 × 1,770 | 10,620 |
+| **Composite measurement** | 58,815 + 10,620 | **69,435** |
+| + 10% margin, rounded up to a whole KiB | 69,435 × 1.10 = 76,378.5 → 75 KiB | **76,800 B** |
+
+  The increment is measured on the List family because the
+  six are List-family entries whose docs sit in that
+  family's length band (A2.1's texts run with the standing
+  Tier-2 docs). Two notes, recorded so the derivation is
+  not a surprise at Phase 135: the tree's current assembly
+  stands at 59,092 B (Phase 125's guide-linked README
+  regeneration added 277 B of package furniture over the
+  Phase 122 base) — inside the margin, not a second base;
+  and the frozen figure lands **below** the 1.1 budget
+  (79,872 B) deliberately — a budget re-derived from
+  measured actuals replaces the bracket-derived figure it
+  succeeds, because a budget that only grows by inheritance
+  has stopped measuring anything.
+- **The Rust crate carries no size budget** (EMBED_SCOPE
+  R8 carries).
+
+### A2.6 Owner prerequisites at the gate (named, not tasks)
+
+Recorded here so Phase 136 has no surprises; none of these
+is a task for Phase 134 or 135, and none needs a decision:
+
+- **The registry publishes remain the owner's act**
+  (EMBED_SCOPE R5/R12 carry): after a PASS at Phase 136,
+  from the tagged v1.2.0 tree on the owner's PC —
+  `npm publish --access public` from `packages/npm` and
+  `cargo publish` from `packages/rust` — with the owner's
+  own credentials, as at 1.1.
+- **npm needs a fresh login or token.** The 1.1 publish's
+  granular token (the Bypass-2FA `morphic-publish` token)
+  was revoked after use — owner-confirmed on 2026-11-23 —
+  so no standing npm credential exists for 1.2: the owner
+  signs in (`npm login`) or mints a fresh granular token on
+  his PC at publish time.
+- **crates.io stands as the owner left it at 1.1:** the
+  `cargo login` token on his PC persists if he kept it
+  (his choice at 1.1); if not, a fresh token is created by
+  him the same way, at publish time.
+
+### A2.7 The gate's amendment instruments
+
+G4_SCOPE §7 is the 1.2 gate; this section states the
+instruments its clauses 2 and 4 run for the new entries,
+so Phase 136 executes them rather than inventing them.
+
+**Clause 2 (the amendment stands at its tiers) — in-process,
+on the final tree:**
+
+- every entry's spec **checks** as part of the prelude
+  merge — the shipped library modules under `morphic
+  check`, the §3 clause-2 form (this is also the
+  instrument that proves `range` the entry and `range(…)`
+  the quantifier domain live together, A2.1);
+- **in-spec tests judged in-process through the
+  index-carrying route** (`run_spec_tests_in` over the
+  prelude-merged index): 100% Passed on the evaluable —
+  a named-supply row that does not bind fails this
+  instrument; it does not skip silently;
+- **the frozen batteries (A2.3): 105 pinned points**
+  executed in-process at 100% against the hand-written
+  mirrors, spec-silent points reported per entry (0,
+  frozen);
+- **tier printing verified by inspection:** this
+  amendment, the six `doc:` texts as shipped (verbatim
+  against A2.1), and Appendix A's six rows (A2.4.5).
+
+**Clause 4 (the surfaces answer) — on the final tree:**
+
+- **npm clean-host rehearsal:** a fresh project installs
+  the packed 1.2.0 tarball; all six exports are called on
+  their A2.3 battery points under node — function
+  arguments passed as JavaScript lambdas and as the
+  package's own exports (the named cases of A2.3) — at
+  100%. Non-mover: the 29 standing exports' clean-host set
+  (217 points, the Phase 121/122 instrument) re-runs at
+  100%;
+- **facade host rehearsal:** a fresh cargo project on the
+  facade calls all six at their battery points with
+  fn-pointer / closure arguments at 100%. Non-mover: the
+  29 entries' host battery (1,112 points, the Phase 124
+  instrument) re-runs at 100%;
+- **budgets measured:** playground bundle ≤ 771,072 B;
+  npm unpacked mass ≤ **76,800 B** (A2.5); the cascade
+  instrument reported — Codegen spec count against the
+  standing 130 and the synthesized-artifact bytes —
+  movement named as a finding, per clause 4;
+- **crown re-verification:** both assemblies re-run their
+  crown checks on the gate tree through the index-carrying
+  route (A2.4.3) and reproduce the checked-in packages
+  byte-for-byte (the Phase 126 clause-4 discipline).
+
+### A2.8 Exclusions, recorded in this freeze
+
+- **`zip` and `is_permutation`** — excluded from 1.2, with
+  G4_SCOPE §6's measured reasons (`zip`: the missing tuple
+  value, a decision of its own; `is_permutation`: the
+  §3.10 Predicate form plus the §3.9 element model). The
+  Phase 128 plan required this freeze to record them; it
+  does.
+- **Polymorphic forms of the six** — not frozen (A2.1).
+- **A callable TypeScript function type at the package
+  boundary** — not frozen in 1.2 (A2.4.2's recorded
+  interpretation); the later embed amendment's question.
+
+**Amended totals.** The library stands at **35 library
+entries + 2 builtins = 37 named items** (**Tier-1 18 /
+Tier-2 17 / builtin 2**); the package surface at 1.2 is
+**35 exports** (18 Tier-1 / 17 Tier-2). The 1.0 gate in §3
+was run against Amendment 1's scope; the 1.2 gate
+(G4_SCOPE §7) runs against the scope as amended by
+Amendments 1 and 2 together.
