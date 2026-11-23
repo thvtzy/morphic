@@ -32,13 +32,34 @@
 //    the control below asserts the new reality (and the
 //    Phase 60 instrument carries the full measurement).
 //
+//  Phase 131 (G4) re-basing, executed: Phase 130's
+//  function values retired the G1 stage's premise for
+//  sort and binary_search (their tests bind; the stage
+//  does not fire), so their template verdicts are now
+//  measured through this file's compiled vehicle — the
+//  route is_sorted always took — with the in-process
+//  verdict recorded beside: sort's template (6, 6) on
+//  both judges; binary_search's template still does not
+//  compile (G5), and its standing judge is the
+//  interpreter at (7, 7). The count_matching control is
+//  re-based to the reality Phase 115 created: the
+//  production forall-fold seed is a For scan, evaluable
+//  since the For arm, so the stage does not fire for its
+//  pool and the crown is the seed at an
+//  interpreter-measured tpr — the control pins the
+//  seed's in-process (3, 3), the stage's non-invocation,
+//  and the crown's identity. Part A and is_sorted's
+//  vehicle verdict stand unmoved.
+//
 //  Asserted (deterministic): the Part A firing set; the
 //  template seed's presence in every verified pool; the
-//  template bodies' own compiled verdicts (sort 0/6 — the
-//  E0631 comparator-contract wall; binary_search 0/7 —
-//  element extraction + index typing; is_sorted 5/5 — the
-//  body is correct, its crown is blocked by interpreter
-//  judging, recorded per draw); the count_matching control
+//  template bodies' own verdicts (sort (6, 6) in-process
+//  and compiled — the E0631/E0599 walls of the early
+//  record were removed at Phase 62; binary_search (7, 7)
+//  in-process with its compiled form still walled by G5;
+//  is_sorted 5/5 under the compiled vehicle — the body is
+//  correct, its crown is blocked by interpreter judging,
+//  recorded per draw); the count_matching control
 //  invariants.
 //  Recorded, not asserted (draw-dependent): crown
 //  identities and pass counts.
@@ -54,6 +75,7 @@ mod measurement {
     use crate::spec::ast::FunctionSpec;
     use crate::spec::{parser, typeck};
     use crate::synthesis::engine::{self, CandidateImplementation, Provenance};
+    use crate::synthesis::eval;
     use crate::synthesis::runner::{rescore_finalists_report, RunnerOutcome};
     use crate::synthesis::selector;
     use crate::synthesis::templates::{generate_templates, TemplateKind};
@@ -304,18 +326,16 @@ fn main() {
     }
 
     /// The template body's own verdict under the G1 runner
-    /// (singleton pool: the candidate is the would-be winner,
-    /// hence a guaranteed finalist).
-    fn runner_verdict_of(candidate: &CandidateImplementation, spec: &FunctionSpec) -> (usize, usize) {
-        let (_, outcome) = rescore_finalists_report(vec![candidate.clone()], spec);
-        match outcome {
-            RunnerOutcome::Scored { finalists, .. } => {
-                assert_eq!(finalists.len(), 1, "singleton pool must score exactly one finalist");
-                (finalists[0].passed, finalists[0].total)
-            }
-            other => panic!("runner must trigger for {}: got {:?}", spec.name, other),
-        }
-    }
+    /// was measured through this helper until Phase 131:
+    /// it drove the stage on a singleton pool and expected
+    /// Scored. Phase 130 retired that premise for sort and
+    /// binary_search (their tests bind; the stage does not
+    /// fire), and Phase 131's re-basing measures their
+    /// compiled verdicts through judge_compiled instead —
+    /// so the helper is removed rather than left as a
+    /// panic with a stale premise. The stage's own
+    /// end-to-end coverage lives in runner.rs's
+    /// instruments.
 
     #[test]
     #[ignore = "Phase 59 measurement: keying inventory over the whole corpus + 5 draws each of sort/binary_search/is_sorted through the full pipeline (template presence, template compiled verdicts, crowns) + 2 count_matching control draws; run explicitly with --ignored --nocapture phase59_measurement"]
@@ -418,18 +438,25 @@ fn main() {
                     .clone();
                 template_in_pool += 1;
 
-                // The template body's own compiled verdict.
-                let template_verdict = if name == "is_sorted" {
-                    let (_, tests) = judge_compiled(
-                        &template,
-                        main_src,
-                        &dir,
-                        &format!("{}_tmpl_{}", name, draw),
-                    );
-                    tests.unwrap_or((0, total))
-                } else {
-                    runner_verdict_of(&template, &func)
-                };
+                // The template body's own verdicts.
+                // Re-based at Phase 131 (G4): the G1 stage
+                // no longer fires for sort/binary_search —
+                // their tests bind and judge in-process
+                // since Phase 130 — so their compiled
+                // verdicts are measured through this file's
+                // compiled vehicle, the route is_sorted
+                // always took, with the in-process verdict
+                // recorded beside them. is_sorted keeps the
+                // vehicle alone: its template's judging wall
+                // is §3.4's, not G4's, and stands.
+                let in_process = eval::run_spec_tests(&template.body, &func);
+                let (compiles, tests) = judge_compiled(
+                    &template,
+                    main_src,
+                    &dir,
+                    &format!("{}_tmpl_{}", name, draw),
+                );
+                let template_verdict = tests.unwrap_or((0, total));
                 if name == "is_sorted" {
                     assert_eq!(
                         template_verdict,
@@ -437,31 +464,45 @@ fn main() {
                         "the adjacent-scan body must pass 5/5 under the compiled vehicle"
                     );
                 } else if name == "sort" {
-                    // Phase 62 re-record (2026-11-21): the
-                    // wall this assertion recorded — the scan
-                    // template judged 0/6 because its body
-                    // did not compile under the bound-free
-                    // signature (E0599) — was removed by the
-                    // owner's Clone-bound decision (option
-                    // (i)). The runner now measures the
-                    // template CORRECT: verdict (6, 6). The
-                    // Phase 59 record stands in the ROAD
-                    // note; this expectation is the new
-                    // reality, not a rewritten past.
+                    // Phase 62 re-record (2026-11-21) stands
+                    // behind the compiled expectation: the
+                    // owner's Clone-bound decision removed
+                    // the E0599 wall and the runner measured
+                    // the template (6, 6). At Phase 131 the
+                    // measurement route changed, not the
+                    // verdict: the interpreter judges the
+                    // template 6/6 itself (the frozen G4
+                    // standing), and the compiled vehicle
+                    // agrees 6/6.
+                    assert_eq!(
+                        (in_process.evaluable, in_process.passed),
+                        (6, 6),
+                        "sort: the template judges 6/6 in-process since Phase 131"
+                    );
                     assert_eq!(
                         template_verdict,
                         (6, total),
-                        "sort: since Phase 62 the template body must be judged {}/{} by the runner (the Clone bound removed the E0599 wall)",
+                        "sort: the compiled vehicle must agree at {}/{}",
                         total,
                         total
                     );
                 } else {
+                    // binary_search: the compiled side's
+                    // wall stands — G5: the generated
+                    // function indexes a Vec by i64 and does
+                    // not compile, so the vehicle returns
+                    // no verdict (template_verdict reads
+                    // (0, 7), the recorded no-verdict shape).
+                    // The standing judge is the interpreter,
+                    // at the frozen 7/7 since Phase 131.
+                    assert!(
+                        !compiles,
+                        "binary_search: the template's generated function must still fail compilation (G5)"
+                    );
                     assert_eq!(
-                        template_verdict,
-                        (0, total),
-                        "{}: the template body must be judged 0/{} by the runner (the recorded wall)",
-                        name,
-                        total
+                        (in_process.evaluable, in_process.passed),
+                        (7, 7),
+                        "binary_search: the template judges 7/7 in-process since Phase 131"
                     );
                 }
 
@@ -482,9 +523,11 @@ fn main() {
                 let passed = tests.map(|(p, _)| p).unwrap_or(0);
                 crown_pass_sum += passed;
                 report.push_str(&format!(
-                    "- draw {}: template verdict {:?}; crown {} [{}] recorded tpr {:.3}, compiles {}, compiled verdict {:?}\n",
+                    "- draw {}: template verdict {:?} (in-process {}/{}); crown {} [{}] recorded tpr {:.3}, compiles {}, compiled verdict {:?}\n",
                     draw,
                     template_verdict,
+                    in_process.passed,
+                    in_process.evaluable,
                     short_hash(&body_key(&crown)),
                     provenance_name(&crown),
                     crown.scores.test_pass_ratio,
@@ -505,11 +548,21 @@ fn main() {
         // ── Control: count_matching ──
         // G2's invariant stands (no template seed — the
         // shape is the forall-fold family's). The runner
-        // line is Phase 60's re-record: the stage now
-        // triggers via the unevaluable constraint seed and
-        // the crown is that seed at a measured tpr 1.000.
+        // line was Phase 60's re-record (the stage scores
+        // via the unevaluable constraint seed and crowns
+        // it). Phase 131 re-bases that line again: the
+        // production forall-fold seed is a For scan, and
+        // the interpreter's For arm (Phase 115) made it
+        // evaluable — it judges (3, 3) in-process — so the
+        // stage's ConstructedSeeds trigger no longer fires
+        // for this pool, and the crown is the seed at an
+        // interpreter-measured tpr 1.000. (The runner
+        // fixture's own scan body keeps a genuinely
+        // unevaluable ingredient — Head/Tail since Phase
+        // 131 — so the trigger itself stays exercised in
+        // runner.rs's instruments.)
         let cm_functions = load_functions("examples/self_host/count_matching.morph");
-        report.push_str("\n## Control — count_matching (no template in G2; forall-fold crown since Phase 60)\n");
+        report.push_str("\n## Control — count_matching (no template in G2; forall-fold crown, interpreter-judged since Phase 115)\n");
         for draw in 0..2 {
             let (func, pool) = verified_pool(&cm_functions, "count_matching");
             assert!(
@@ -525,25 +578,36 @@ fn main() {
                 "count_matching draw {}: the forall-fold seed must be in the pool (Phase 60)",
                 draw
             );
-            let seed_key = pool
+            let seed = pool
                 .iter()
                 .find(|c| matches!(
                     &c.provenance,
                     Provenance::ConstraintInduced { kind } if kind == "forall_fold"
                 ))
-                .map(|c| body_key(c))
-                .unwrap();
+                .unwrap()
+                .clone();
+            let seed_key = body_key(&seed);
+            // The seed judges in-process (Phase 115's For
+            // arm) — the fact that retired the stage's
+            // trigger for this pool.
+            let seed_run = eval::run_spec_tests(&seed.body, &func);
+            assert_eq!(
+                (seed_run.evaluable, seed_run.passed),
+                (3, 3),
+                "count_matching draw {}: the forall-fold seed judges 3/3 in-process",
+                draw
+            );
             let (rescored, outcome) = rescore_finalists_report(pool, &func);
             assert!(
-                matches!(outcome, RunnerOutcome::Scored { .. }),
-                "count_matching draw {}: the runner stage must score via the Phase 60 trigger extension, got {:?}",
+                matches!(outcome, RunnerOutcome::NotTriggered),
+                "count_matching draw {}: the runner stage must not fire — the seed judges in-process since Phase 115 (Phase 60's Scored expectation recorded the pre-For-arm world), got {:?}",
                 draw,
                 outcome
             );
             let crown = selector::select_best(rescored, &func).expect("select_best");
             assert!(
                 body_key(&crown) == seed_key,
-                "count_matching draw {}: the crown must be the forall-fold seed's body (Phase 60), got {} [{}]",
+                "count_matching draw {}: the crown must be the forall-fold seed's body (Phase 60's crown, interpreter-judged since Phase 115), got {} [{}]",
                 draw,
                 short_hash(&body_key(&crown)),
                 provenance_name(&crown)

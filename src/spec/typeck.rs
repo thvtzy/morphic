@@ -352,6 +352,21 @@ fn check_expr(expr: &Expr, env: &TypeEnv) -> Result<TypeRef, TypeError> {
             if let Some(ty) = stdlib_return_type(name) {
                 return Ok(ty);
             }
+            // G4 (Phase 129, decision D3a; G4_SCOPE §2.4): a
+            // callee that names a function-typed VARIABLE — a
+            // parameter, a binder, `output` — is an application
+            // of that function value, admitted with this
+            // checker's standing coarse argument discipline
+            // (the module-signature arm above inspects no
+            // arguments either; the strict validation of
+            // `int_to_str` was for a builtin, not a class).
+            // The application's type is the function type's own
+            // return, so nested application (`f(f(x))`) falls
+            // out of this same arm. A variable of any other
+            // type is not a callee and keeps the standing error.
+            if let Some(TypeRef::Function(_, ret)) = env.variables.get(name) {
+                return Ok((**ret).clone());
+            }
             Err(TypeError {
                 message: format!("Called undefined function: '{}'", name),
                 function: None,

@@ -5,8 +5,8 @@ ready-to-import packages:
 
 | Package | Host | Contents |
 |---|---|---|
-| `@thvtzy/morphic` (npm) | JavaScript / TypeScript | 29 functions as ES modules, with generated TypeScript typings |
-| `morphic` (crates.io) | Rust | The same 29 functions as real Rust code under `morphic::stdlib` |
+| `@thvtzy/morphic` (npm) | JavaScript / TypeScript | 35 functions as ES modules, with generated TypeScript typings |
+| `morphic` (crates.io) | Rust | The same 35 functions as real Rust code under `morphic::stdlib` |
 
 Every function was generated from a Morphic specification
 by the compiler's native pipeline — the pipeline that
@@ -126,7 +126,7 @@ published).
 
 ## Import shapes
 
-**npm.** The root module exports all 29 functions:
+**npm.** The root module exports all 35 functions:
 
 ```ts
 import { int_clamp, list_sort, char_to_digit } from "@thvtzy/morphic";
@@ -144,7 +144,7 @@ The package is ESM-only (`"type": "module"`); no
 CommonJS form is shipped in 1.1. The manifest is
 importable as data at `@thvtzy/morphic/morphic.manifest.json`.
 
-**Rust.** All 29 functions live in one module:
+**Rust.** All 35 functions live in one module:
 
 ```rust
 use morphic::stdlib::*;
@@ -156,6 +156,51 @@ addressable in code as `morphic::MANIFEST_JSON`.
 
 Export names are the Morphic entry names, unchanged, in
 both packages.
+
+## The 1.2 higher-order exports
+
+Six exports are new in 1.2 (STDLIB_SCOPE.md
+Amendment 2), all Tier-2:
+
+| Export | Morphic signature | What it does |
+|---|---|---|
+| `list_map` | `(List<Int>, fn(Int) -> Int) → List<Int>` | `f` applied to each element, in order |
+| `list_filter` | `(List<Int>, fn(Int) -> Bool) → List<Int>` | The elements for which `p` holds, in original order |
+| `list_fold` | `(List<Int>, Int, fn(Int, Int) -> Int) → Int` | The **left** fold over the list, starting from the accumulator |
+| `list_all` | `(List<Int>, fn(Int) -> Bool) → Bool` | True iff `p` holds of every element (empty → true) |
+| `list_any` | `(List<Int>, fn(Int) -> Bool) → Bool` | True iff `p` holds of at least one element (empty → false) |
+| `range` | `(Int, Int) → List<Int>` | The ascending list `[lo, lo + 1, …, hi − 1]`; `lo >= hi` → empty |
+
+The five higher-order exports take a function argument,
+and they answer at runtime in both packages:
+
+```ts
+import { list_map, int_abs } from "@thvtzy/morphic";
+
+list_map([3n, -4n], (x) => x + 1n); // [4n, -3n] — a host lambda
+list_map([3n, -4n], int_abs);       // [3n, 4n] — the package's own export
+```
+
+```rust
+use morphic::stdlib::{int_abs, list_map};
+
+assert_eq!(list_map(vec![3, -4], |x| x + 1), vec![4, -3]); // a closure
+assert_eq!(list_map(vec![3, -4], int_abs), vec![3, 4]);     // a function pointer
+```
+
+**The TypeScript boundary, stated where it binds:** in
+the npm package's TypeScript declarations, a
+function-typed parameter is typed `never` — no callable
+TypeScript function type is frozen in 1.2
+(Amendment 2 §A2.4.2's recorded interpretation), so a
+typed TypeScript host cannot name a callback type for
+these parameters even though the runtime answers any
+JavaScript function of the right shape. The manifest's
+`signature` field carries the true Morphic signature
+(the table above), so the boundary is stated in the
+package's own surface, not hidden by it. The Rust
+facade has no such boundary: its function parameters
+are fully typed `fn` pointers, as the snippet shows.
 
 ## Reading Option and Result results
 
@@ -192,9 +237,9 @@ transfer to the Component Model step unchanged.)
 | `List<T>` | `T[]` | `Vec<T>` | Structurally exact; element losses inherit recursively from T's row (a `List<Int>` is a `bigint[]`). |
 | `Option<T>` | `T \| null` | `Option<T>` | TS: `None` is `null`, distinct from every payload and from `undefined`. **Named composition boundary:** `Option<Option<T>>` flattens under `T \| null` — `Some(None)` and `None` are indistinguishable. No export in this package carries a nested-Option signature, so the shipped surface is exact; the boundary binds user specs with nested Options. Rust: exact, nesting included. |
 | `Result<T, E>` | `{ tag: "Ok", value: T } \| { tag: "Err", error: E }` | `Result<T, E>` | Exact as a discriminated union; nests without collision — the tags distinguish every level. Rust: exact. |
-| Record (named) | object type with the field types | generated struct | Field types inherit the rows above; field order is not semantic. No record-typed export is in the 29; this row binds generated user modules. |
+| Record (named) | object type with the field types | generated struct | Field types inherit the rows above; field order is not semantic. No record-typed export is in the 35; this row binds generated user modules. |
 | `Unit` | `undefined` | `()` | The standing rendering. User-module specs only. |
-| Function types | — | — | **No mapping exists.** No export is higher-order, and a Morphic function cannot take a host callback in 1.1 (that waits on the language's function-values work, G4). |
+| Function types | `never` in the declaration; any JS function at runtime | `fn(A) -> R` | **The 1.2 boundary (Amendment 2 §A2.4.2):** six exports are higher-order since 1.2 and answer at runtime (see "The 1.2 higher-order exports" above). The TypeScript declaration types a function-typed parameter `never` — no callable TypeScript function type is frozen in 1.2 — while the manifest's `signature` field carries the true Morphic signature. Rust is exact: the parameter is a fully typed `fn` pointer. |
 
 **The length rule.** There is no `len` export (below),
 so when a host needs a length: for a List value, the
@@ -213,15 +258,15 @@ the native pipeline before the package existed:
 
 - **Tier-1 — `z3-verified`.** The function's body was
   proven against its specification by Z3, and is
-  golden-exact on its frozen battery. 18 of the 29
+  golden-exact on its frozen battery. 18 of the 35
   exports are Tier-1.
 - **Tier-2 — `executed-exact`.** The function's body is
   held to 100% agreement with its frozen battery at
   every point, executed — but element-level symbolic
   verification of List bodies awaits the post-1.0 List
-  encoder, so no Verified claim is made. 11 of the 29
+  encoder, so no Verified claim is made. 17 of the 35
   exports are Tier-2 (all List functions except
-  `list_is_empty`). The tier is a property of the proof
+  `list_is_empty`, plus `range`). The tier is a property of the proof
   standard, not of the behaviour: a Tier-2 function is
   not "less correct" on any measured point, it is less
   *proven*. When the List encoder lands, Tier-2 labels

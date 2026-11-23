@@ -1,4 +1,4 @@
-//! The 29 frozen standard-library entries as real
+//! The 35 frozen standard-library entries as real
 //! Rust functions, generated from their shipped
 //! bodies by the Morphic pipeline's Rust renderer —
 //! do not edit (regenerate with
@@ -17,8 +17,10 @@
 // exhaustive match arms, accumulator bindings)
 // trips these stylistic lints by construction —
 // measured at Phase 123 as 51 warnings over the 29
-// functions (unused_parens ×40,
-// unreachable_patterns ×10, unused_mut ×1). The
+// functions, re-measured at Phase 135 as 43 warnings
+// over the 35 functions (unused_parens ×42,
+// unused_mut ×1; Phase 124's Char-pattern cascade
+// retired the unreachable_patterns class). The
 // allowances are scoped to this generated module so
 // the functions stay byte-identical to the
 // pipeline's rendering while the crate builds
@@ -473,5 +475,86 @@ pub fn list_binary_search(xs: Vec<i64>, x: i64) -> Option<i64> {
         k = (k + 1);
     }
     return res;
+}
+
+/// list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+///
+/// Tier: tier-2
+/// Verdict basis: executed-exact
+/// Battery: 20 pinned, 0 spec-silent
+pub fn list_map(xs: Vec<i64>, f: fn(i64) -> i64) -> Vec<i64> {
+    let mut out: Vec<i64> = vec![];
+    for i in 0..xs.len() {
+        out.push(f((xs)[i]));
+    }
+    return out;
+}
+
+/// list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+///
+/// Tier: tier-2
+/// Verdict basis: executed-exact
+/// Battery: 20 pinned, 0 spec-silent
+pub fn list_filter(xs: Vec<i64>, p: fn(i64) -> bool) -> Vec<i64> {
+    let mut out: Vec<i64> = vec![];
+    for i in 0..xs.len() {
+        if p((xs)[i]) {
+            out.push((xs)[i])
+} else {
+}
+    }
+    return out;
+}
+
+/// list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+///
+/// Tier: tier-2
+/// Verdict basis: executed-exact
+/// Battery: 18 pinned, 0 spec-silent
+pub fn list_fold(xs: Vec<i64>, init: i64, f: fn(i64, i64) -> i64) -> i64 {
+    let mut acc: i64 = init;
+    for i in 0..xs.len() {
+        acc = f(acc, (xs)[i]);
+    }
+    return acc;
+}
+
+/// list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+///
+/// Tier: tier-2
+/// Verdict basis: executed-exact
+/// Battery: 16 pinned, 0 spec-silent
+pub fn list_all(xs: Vec<i64>, p: fn(i64) -> bool) -> bool {
+    let mut ok: bool = true;
+    for i in 0..xs.len() {
+        ok = (ok && p((xs)[i]));
+    }
+    return ok;
+}
+
+/// list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+///
+/// Tier: tier-2
+/// Verdict basis: executed-exact
+/// Battery: 16 pinned, 0 spec-silent
+pub fn list_any(xs: Vec<i64>, p: fn(i64) -> bool) -> bool {
+    let mut ok: bool = false;
+    for i in 0..xs.len() {
+        ok = (ok || p((xs)[i]));
+    }
+    return ok;
+}
+
+/// range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9).
+///
+/// Tier: tier-2
+/// Verdict basis: executed-exact
+/// Battery: 15 pinned, 0 spec-silent
+pub fn range(lo: i64, hi: i64) -> Vec<i64> {
+    let mut out: Vec<i64> = vec![];
+    for i in lo..hi {
+        out.push(i);
+    }
+    return out;
 }
 

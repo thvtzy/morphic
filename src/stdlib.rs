@@ -1492,6 +1492,17 @@ fn shipped_body_native(name: &str) -> Option<IRNode> {
     fn append_stmt(name: &str, item: IRNode) -> IRNode {
         bop(IRBinOp::Append, v(name), item)
     }
+    // Phase 135 helper: an application of a function
+    // parameter — the Call form both executed judges
+    // reach (the interpreter applies a bound function
+    // value, Phase 130; the compiled runner renders the
+    // plain call against the fn-pointer parameter).
+    fn call(f: &str, args: Vec<IRNode>) -> IRNode {
+        IRNode::Call {
+            function: f.into(),
+            args,
+        }
+    }
     fn some(x: IRNode) -> IRNode {
         IRNode::Call {
             function: "Some".into(),
@@ -1972,6 +1983,101 @@ fn shipped_body_native(name: &str) -> Option<IRNode> {
                 ]),
             ),
             ret(v("res")),
+        ])),
+        // ── Phase 135: the Amendment 2 entries ──────
+        // Hand bodies in the standing Phase 115
+        // vocabulary (For scans, Alloc/Assign
+        // accumulators, statement Append), applying the
+        // function parameter through a Call — the
+        // Map/Filter/Fold IR forms do not compile in
+        // Rust under the standing rendering (E0631: a
+        // fn pointer is not `FnMut(&i64) -> i64`,
+        // measured at Phase 135), so the For-loop form
+        // is the one vocabulary both executed judges
+        // reach in full. Crowned Tier-2 at Phase 135:
+        // executed-exact on the Amendment 2 batteries
+        // (105 pinned points) through the index-carrying
+        // route; pinned in tests/phase135_amendment_
+        // build.rs.
+        "list_map" => Some(block(vec![
+            alloc("out", list_ty(), empty_list()),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                append_stmt("out", call("f", vec![idx(v("xs"), v("i"))])),
+            ),
+            ret(v("out")),
+        ])),
+        "list_filter" => Some(block(vec![
+            alloc("out", list_ty(), empty_list()),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                if_(
+                    call("p", vec![idx(v("xs"), v("i"))]),
+                    append_stmt("out", idx(v("xs"), v("i"))),
+                    block(vec![]),
+                ),
+            ),
+            ret(v("out")),
+        ])),
+        "list_fold" => Some(block(vec![
+            alloc("acc", TypeRef::Int, v("init")),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                assign("acc", call("f", vec![v("acc"), idx(v("xs"), v("i"))])),
+            ),
+            ret(v("acc")),
+        ])),
+        "list_all" => Some(block(vec![
+            alloc("ok", TypeRef::Bool, boolean(true)),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                assign(
+                    "ok",
+                    bop(
+                        IRBinOp::And,
+                        v("ok"),
+                        call("p", vec![idx(v("xs"), v("i"))]),
+                    ),
+                ),
+            ),
+            ret(v("ok")),
+        ])),
+        "list_any" => Some(block(vec![
+            alloc("ok", TypeRef::Bool, boolean(false)),
+            for_(
+                "i",
+                i(0),
+                len_u(v("xs")),
+                assign(
+                    "ok",
+                    bop(
+                        IRBinOp::Or,
+                        v("ok"),
+                        call("p", vec![idx(v("xs"), v("i"))]),
+                    ),
+                ),
+            ),
+            ret(v("ok")),
+        ])),
+        // The probed body (Phase 127's range_upto,
+        // judged 2/2 in-process) generalized by its For
+        // bounds alone (Amendment 2's recorded
+        // resolution): the loop variable runs lo..hi
+        // and is itself the appended value; lo >= hi
+        // runs zero iterations — the empty list, no
+        // descending form.
+        "range" => Some(block(vec![
+            alloc("out", list_ty(), empty_list()),
+            for_("i", v("lo"), v("hi"), append_stmt("out", v("i"))),
+            ret(v("out")),
         ])),
         _ => None,
     }

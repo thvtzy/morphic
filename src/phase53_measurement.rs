@@ -11,21 +11,34 @@
 //    fix, so candidate test_pass_ratio is measured by real
 //    execution, not scored by evaluate_candidate's FALLBACK.
 //  - examples/sort.morph — tuple carrying a lambda for the
-//    fn-typed cmp parameter: its tests still cannot bind
-//    (the evaluator has no function values), so sort's crowns
-//    are judged by the compiled-runner vehicle — the Phase 52
-//    pattern (winner function + a hand-written runner main,
-//    rustc, execute) — NOT by the generated test module
-//    (blocker 2: it renders the tuple input as __tuple__(...)
-//    and the cmp argument as ??, which does not parse) and
-//    NOT by the interpreter (evaluable == 0 by design here).
+//    fn-typed cmp parameter: at Phase 53 its tests still
+//    could not bind (the evaluator had no function
+//    values), so sort's crowns were judged by the compiled
+//    vehicle below — the Phase 52 pattern (winner function
+//    + a hand-written runner main, rustc, execute) — NOT
+//    by the generated test module (blocker 2: it renders
+//    the tuple input as __tuple__(...) and the cmp
+//    argument as ??, which does not parse).
 //
 //  Asserted (invariants of the fix itself): every
 //  count_matching winner's interpreter run reports
-//  evaluable == 3; every sort winner's reports evaluable ==
-//  0 (the FALLBACK's remaining legitimate domain).
+//  evaluable == 3; at Phase 53, every sort winner's
+//  reported evaluable == 0 (the FALLBACK's then-legitimate
+//  domain).
 //  Recorded, not asserted (draw-dependent): crown pass
 //  counts, pool tpr distributions, pool scans.
+//
+//  RE-BASED at Phase 131 (G4): Phase 130 gave the
+//  evaluator function values, so sort's tests bind (the
+//  invariant below is bindable == 6 now, not evaluable
+//  == 0) and its winners are judged in-process; Phase
+//  131's higher-order judging completed the template's
+//  standing. The compiled vehicle is kept as the
+//  cross-check it now is — the two judges agreeing on a
+//  crown is the project's cross-validation standard, and
+//  this instrument is where the agreement is sampled.
+//  The count_matching invariant (evaluable == 3) stands
+//  unmoved.
 //
 //  Run with:
 //    cargo test -- --ignored --nocapture phase53_measurement
@@ -368,22 +381,32 @@ fn main() {
         print!("{}", line);
         report.push_str(&line);
 
-        // ── sort: the spec whose tests stay unbindable ────
+        // ── sort: the spec whose tests bound at Phase 130 ──
         let sort_functions = load_functions("examples/sort.morph");
         let sort_spec = sort_functions
             .iter()
             .find(|f| f.name == "sort")
             .unwrap()
             .clone();
-        report.push_str("## sort (tuple carrying a lambda — tests stay unbindable; compiled vehicle judges)\n\n");
+        report.push_str("## sort (tuple carrying a lambda — tests bind since Phase 130; the interpreter judges, the compiled vehicle cross-checks)\n\n");
         let mut sort_crowns_passing = 0usize;
         let mut sort_crowns_compiling = 0usize;
         for draw in 0..12 {
             let (pool, winner) = run_pipeline(&sort_functions, "sort");
             let run = eval::run_spec_tests(&winner.body, &sort_spec);
+            // Re-based at Phase 131: the pre-130 invariant
+            // (every winner's run reports evaluable == 0)
+            // died with the function-value wall. The
+            // invariant of the current world is the binding
+            // itself — all six tests bind (the tuple-fix's
+            // post-130 form) — and each winner's in-process
+            // run is recorded in the draw line below, the
+            // compiled vehicle kept as the cross-check it
+            // now is rather than the only judge.
             assert_eq!(
-                run.evaluable, 0,
-                "sort's lambda-carrying tuple tests must stay unbindable (draw {})",
+                eval::bindable_test_count(&sort_spec),
+                6,
+                "sort's lambda-carrying tuple tests bind since Phase 130 (draw {})",
                 draw
             );
             let verdict = judge_compiled(&winner, SORT_RUNNER_MAIN, &dir, &format!("sort_{}", draw));
@@ -394,13 +417,14 @@ fn main() {
                 sort_crowns_passing += 1;
             }
             let line = format!(
-                "- draw {} — pool {} candidates; winner {:?} [body {}] tpr {:.3} (fallback domain: interpreter evaluable {}); compiled: function_compiles={} tests={:?}\n",
+                "- draw {} — pool {} candidates; winner {:?} [body {}] tpr {:.3} (interpreter run: evaluable {} passed {}); compiled: function_compiles={} tests={:?}\n",
                 draw,
                 pool.len(),
                 winner.provenance,
                 short_hash(&body_key(&winner)),
                 winner.scores.test_pass_ratio,
                 run.evaluable,
+                run.passed,
                 verdict.function_compiles,
                 verdict.tests,
             );

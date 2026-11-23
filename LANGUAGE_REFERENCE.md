@@ -770,6 +770,31 @@ campaign (Option's arm added Phase 112).
 | `list_is_sorted` | `List<Int> → Bool` | Tier-2 | True iff the list is non-strictly ascending (every adjacent pair a ≤ b); empty and singleton → true | `list_is_sorted(List(1, 2, 2, 3)) == true` |
 | `list_sort` | `List<Int> → List<Int>` | Tier-2 | The elements in non-strict ascending order; the output is a permutation of the input (judged on the executed battery) | `list_sort(List(3, 1, 2)) == List(1, 2, 3)` |
 | `list_binary_search` | `(List<Int>, Int) → Option<Int>` | Tier-2 | `require:` the list is sorted. Present → `Some(i)` with xs[i] equal to the target (with duplicate targets any valid index satisfies the contract — the specific index is spec-silent); absent → `None`. The shipped body is a first-match scan (the G5 scope-around: generated Rust cannot index a Vec by an Int variable) | `list_binary_search(List(1, 2, 3), 2) == Some(1)` |
+| `list_map` | `(List<Int>, fn(Int) -> Int) → List<Int>` | Tier-2 | `f` applied to each element, in order; empty → empty | `list_map(List(1, 2, 3), \|x\| x + 1) == List(2, 3, 4)` |
+| `list_filter` | `(List<Int>, fn(Int) -> Bool) → List<Int>` | Tier-2 | The elements for which `p` holds, in their original order; empty → empty; none pass → empty | `list_filter(List(1, 2, 3, 4), int_is_even) == List(2, 4)` |
+| `list_fold` | `(List<Int>, Int, fn(Int, Int) -> Int) → Int` | Tier-2 | The **left** fold in element order, starting from the accumulator `init`; empty → `init` | `list_fold(List(1, 2, 3), 100, \|a, x\| a - x) == 94` |
+| `list_all` | `(List<Int>, fn(Int) -> Bool) → Bool` | Tier-2 | True iff `p` holds of every element; empty → true (vacuous truth) | `list_all(List(2, 4, 6), int_is_even) == true` |
+| `list_any` | `(List<Int>, fn(Int) -> Bool) → Bool` | Tier-2 | True iff `p` holds of at least one element; empty → false | `list_any(List(1, 3, 4), int_is_even) == true` |
+| `range` | `(Int, Int) → List<Int>` | Tier-2 | The ascending list [lo, lo + 1, …, hi − 1]; `lo == hi` → empty; `lo > hi` → empty (no descending form, no precondition) | `range(0, 3) == List(0, 1, 2)` |
+
+The six rows from `list_map` to `range` are the 1.2
+amendment's entries (`STDLIB_SCOPE.md` Amendment 2,
+frozen at Phase 134, built at Phase 135): the five
+higher-order entries the G4 language build unblocked,
+plus `range` — whose name the quantifier domains
+already spelled (`range(0, len(xs) - 1)` is a parser
+position, not a call; the two coexist through the
+prelude merge, pinned by Phase 135's merge check).
+All six ship at Tier-2 — executed-exact on their
+frozen batteries (105 pinned points, judged
+in-process through the index-carrying route). A
+supplied function may be a lambda or the name of a
+shipped entry (named-reference supply, Phase 132).
+Their Tier-1 path is named, as future work: the
+§3.9 list-element encoder, together with the
+uninterpreted-function arm composed over element
+applications for the five higher-order entries
+(§3.9 alone for `range`).
 
 ### The old Appendix A names, accounted
 
@@ -794,6 +819,13 @@ above). Of the remaining 18 (the accounting frozen in
   post-1.0 build), `zip` (tuple elements are unmodelled at
   every layer), `range` (no analysis in the Phase 106
   audit — excluded conservatively).
+
+  Six of the eight returned in 1.2 (STDLIB_SCOPE.md
+  Amendment 2): `map`, `filter`, `fold`, `all`, `any`
+  as the `list_*` higher-order entries in the table
+  above, and `range` as the two-bound entry. `zip` and
+  `is_permutation` remain excluded, with their reasons
+  standing (Amendment 2 §A2.8).
 
 ---
 

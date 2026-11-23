@@ -266,3 +266,57 @@ export declare function list_sort(xs: bigint[]): bigint[];
  */
 export declare function list_binary_search(xs: bigint[], x: bigint): bigint | null;
 
+/**
+ * list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+ *
+ * Tier: tier-2
+ * Verdict basis: executed-exact
+ * Battery: 20 pinned, 0 spec-silent
+ */
+export declare function list_map(xs: bigint[], f: never): bigint[];
+
+/**
+ * list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+ *
+ * Tier: tier-2
+ * Verdict basis: executed-exact
+ * Battery: 20 pinned, 0 spec-silent
+ */
+export declare function list_filter(xs: bigint[], p: never): bigint[];
+
+/**
+ * list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+ *
+ * Tier: tier-2
+ * Verdict basis: executed-exact
+ * Battery: 18 pinned, 0 spec-silent
+ */
+export declare function list_fold(xs: bigint[], init: bigint, f: never): bigint;
+
+/**
+ * list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+ *
+ * Tier: tier-2
+ * Verdict basis: executed-exact
+ * Battery: 16 pinned, 0 spec-silent
+ */
+export declare function list_all(xs: bigint[], p: never): boolean;
+
+/**
+ * list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+ *
+ * Tier: tier-2
+ * Verdict basis: executed-exact
+ * Battery: 16 pinned, 0 spec-silent
+ */
+export declare function list_any(xs: bigint[], p: never): boolean;
+
+/**
+ * range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9).
+ *
+ * Tier: tier-2
+ * Verdict basis: executed-exact
+ * Battery: 15 pinned, 0 spec-silent
+ */
+export declare function range(lo: bigint, hi: bigint): bigint[];
+

@@ -28,7 +28,7 @@ mean at the boundary.
 
 ```toml
 [dependencies]
-morphic = "1.1.0"
+morphic = "1.2.0"
 ```
 
 ```rust
@@ -39,7 +39,7 @@ assert_eq!(int_clamp(15, 0, 10), 10);
 
 ## The functions
 
-Twenty-nine functions under `morphic::stdlib`, under
+Thirty-five functions under `morphic::stdlib`, under
 their Morphic entry names.
 
 Tier 1 — Z3-verified against the function's
@@ -64,7 +64,15 @@ every battery point):
 - List: `list_reverse`, `list_contains`, `list_sum`,
   `list_product`, `list_min`, `list_max`, `list_take`,
   `list_drop`, `list_is_sorted`, `list_sort`,
-  `list_binary_search`
+  `list_binary_search`, `list_map`, `list_filter`,
+  `list_fold`, `list_all`, `list_any`, `range`
+
+The last six are the 1.2 amendment's entries
+(STDLIB_SCOPE.md Amendment 2). Five of them are
+higher-order: their function parameters are ordinary
+Rust `fn` pointers, so a function pointer or a
+non-capturing closure answers — the facade is fully
+typed, with no boundary loss.
 
 `list_binary_search` is a first-match scan: its
 contract is search semantics — an index naming the

@@ -1,6 +1,7 @@
 //! Morphic's standard library as ready-to-call Rust
-//! functions: the 29 entries of the frozen 1.0 library
-//! (EMBED_SCOPE §2.1), pre-generated from their
+//! functions: the 35 entries of the frozen library
+//! (EMBED_SCOPE §2.1, as amended by STDLIB_SCOPE.md
+//! Amendment 2), pre-generated from their
 //! specifications by the Morphic compiler's native
 //! pipeline — the pipeline that judged them — and
 //! shipped with the standing that pipeline produced.

@@ -93,7 +93,105 @@ enum Abs {
         ok_payload: Option<Box<Abs>>,
         err_payload: Option<Box<Abs>>,
     },
+    /// A function-typed parameter in the UF arm's slice
+    /// (Phase 133) — mirrors `Sym::Func`: the value's only
+    /// symbolic life is application, whose abstract result
+    /// is the range's plain unknown value (see `abs_apply`).
+    Func {
+        domain: Vec<AbsUfSort>,
+        range: AbsUfSort,
+    },
     Opaque,
+}
+
+/// A sort in the UF arm's slice (Phase 133) — mirrors
+/// verifier.rs's `UfSort` decision for decision: Int
+/// family / Bool / String are in; Char, List, Option,
+/// Result, Record and function types are out, and a
+/// signature mentioning them binds Opaque on both sides.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AbsUfSort {
+    Int,
+    Bool,
+    Str,
+}
+
+impl AbsUfSort {
+    /// The abstract value of an application result: the
+    /// range sort's plain symbolic value — an Int term
+    /// that is no numeral, a Bool, a non-literal String.
+    fn result(self) -> Abs {
+        match self {
+            AbsUfSort::Int => Abs::Int(IntVal::Unknown),
+            AbsUfSort::Bool => Abs::Bool,
+            AbsUfSort::Str => Abs::Str(StrVal::Unknown),
+        }
+    }
+
+    /// Whether an abstract argument value carries this
+    /// sort — the mirror of `sym_apply`'s argument
+    /// discipline (an Int term at an Int point, and so
+    /// on; every other class declines on both sides).
+    fn accepts(self, v: &Abs) -> bool {
+        matches!(
+            (self, v),
+            (AbsUfSort::Int, Abs::Int(_))
+                | (AbsUfSort::Bool, Abs::Bool)
+                | (AbsUfSort::Str, Abs::Str(_))
+        )
+    }
+}
+
+/// The UF sort of a single type, if it lies in the slice
+/// (mirrors `uf_sort_of`).
+fn abs_uf_sort(ty: &TypeRef) -> Option<AbsUfSort> {
+    match ty {
+        TypeRef::Int
+        | TypeRef::I8
+        | TypeRef::I16
+        | TypeRef::I32
+        | TypeRef::I64
+        | TypeRef::U8
+        | TypeRef::U16
+        | TypeRef::U32
+        | TypeRef::U64 => Some(AbsUfSort::Int),
+        TypeRef::Bool => Some(AbsUfSort::Bool),
+        TypeRef::String => Some(AbsUfSort::Str),
+        _ => None,
+    }
+}
+
+/// The UF signature of a function type, if every domain
+/// sort and the range sort lie in the slice (mirrors
+/// `uf_signature`).
+fn abs_uf_signature(ty: &TypeRef) -> Option<(Vec<AbsUfSort>, AbsUfSort)> {
+    let TypeRef::Function(params, ret) = ty else {
+        return None;
+    };
+    let mut domain = Vec::with_capacity(params.len());
+    for p in params {
+        domain.push(abs_uf_sort(p)?);
+    }
+    Some((domain, abs_uf_sort(ret)?))
+}
+
+/// Apply a function-typed parameter's UF, abstractly
+/// (Phase 133) — mirrors `sym_apply`: arity and argument
+/// sorts must match the declared signature exactly; the
+/// result is the range's abstract value.
+fn abs_apply(func: &Abs, args: Vec<Abs>) -> Option<Abs> {
+    let Abs::Func { domain, range } = func else {
+        return None;
+    };
+    if args.len() != domain.len() {
+        return None;
+    }
+    for (arg, want) in args.iter().zip(domain.iter()) {
+        if !want.accepts(arg) {
+            return None;
+        }
+    }
+    Some(range.result())
 }
 
 /// The class of a constructor tag (mirrors the real
@@ -232,6 +330,13 @@ fn fresh_abs(ty: &TypeRef, index: &SpecIndex, depth: usize) -> Abs {
                     })
                     .collect(),
             },
+            None => Abs::Opaque,
+        },
+        // A function-typed parameter (Phase 133): the UF
+        // binding when the signature lies in the arm's
+        // slice, Opaque outside it — as the real binding.
+        TypeRef::Function(..) => match abs_uf_signature(ty) {
+            Some((domain, range)) => Abs::Func { domain, range },
             None => Abs::Opaque,
         },
         _ => Abs::Opaque,
@@ -435,6 +540,9 @@ fn abs_pattern_cond(scrut: &Abs, lit: &IRLiteral) -> PatternCond {
         (Abs::Char(_), IRLiteral::Char(_)) => PatternCond::Eq,
         (Abs::CharStr, IRLiteral::Char(_)) => PatternCond::Eq,
         (Abs::List(_), _) | (Abs::Opaque, _) => PatternCond::Undecidable,
+        // A function scrutinee (Phase 133): declines, as
+        // the real side — Undecidable, not Never.
+        (Abs::Func { .. }, _) => PatternCond::Undecidable,
         // Records, tagged values and list-lengths never
         // equal a literal pattern; a Char never equals a
         // literal of another sort.
@@ -649,6 +757,20 @@ fn abs_call(
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
                 values.push(abs_eval(arg, env, ctx)?);
+            }
+            // Phase 133 (G4 D6a): a call naming a
+            // function-typed parameter encodes as UF
+            // application, under the mirror of the real
+            // arm's condition (`sym_call`): no spec of
+            // this name in the index, and the environment
+            // binds the name to a UF. When it engages, its
+            // outcome is final.
+            if ctx.index.get(function).is_none() {
+                if let Some(func) = env.get(function) {
+                    if matches!(func, Abs::Func { .. }) {
+                        return abs_apply(func, values);
+                    }
+                }
             }
             abs_invoke(ctx, function, values)
         }

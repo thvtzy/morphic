@@ -1,6 +1,6 @@
 {
   "name": "@thvtzy/morphic",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Morphic's verified standard library as ready-to-import functions: pre-generated from the specifications the Morphic pipeline verified (Tier-1) or proved executed-exact (Tier-2). Per-function tiers and batteries: morphic.manifest.json.",
   "type": "module",
   "main": "./index.js",
@@ -125,6 +125,30 @@
     "./list_binary_search": {
       "types": "./list_binary_search.d.ts",
       "import": "./list_binary_search.js"
+    },
+    "./list_map": {
+      "types": "./list_map.d.ts",
+      "import": "./list_map.js"
+    },
+    "./list_filter": {
+      "types": "./list_filter.d.ts",
+      "import": "./list_filter.js"
+    },
+    "./list_fold": {
+      "types": "./list_fold.d.ts",
+      "import": "./list_fold.js"
+    },
+    "./list_all": {
+      "types": "./list_all.d.ts",
+      "import": "./list_all.js"
+    },
+    "./list_any": {
+      "types": "./list_any.d.ts",
+      "import": "./list_any.js"
+    },
+    "./range": {
+      "types": "./range.d.ts",
+      "import": "./range.js"
     },
     "./morphic.manifest.json": "./morphic.manifest.json",
     "./package.json": "./package.json"

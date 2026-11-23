@@ -25,7 +25,7 @@
 //!   the npm package's manifest (§2.4): identical rows,
 //!   only the `package` field differing (`morphic`,
 //!   not `@thvtzy/morphic`);
-//! * the generated module carries exactly the 29 frozen
+//! * the generated module carries exactly the 35 frozen
 //!   functions in §2.1's order, each with its tier +
 //!   verdict basis + battery in its rustdoc, under the
 //!   generated module's scoped lint allowances;
@@ -210,7 +210,7 @@ fn manifest_rows_match_the_npm_manifest() {
     );
     assert_eq!(
         facade_manifest["exports"].as_array().expect("rows").len(),
-        29,
+        35,
         "the frozen surface"
     );
 }
@@ -235,7 +235,7 @@ fn license_files_are_the_repo_texts() {
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn stdlib_module_carries_the_29_with_rustdoc_tiers() {
+fn stdlib_module_carries_the_35_with_rustdoc_tiers() {
     let files = assembled();
     let module = &files["src/stdlib.rs"];
     assert!(
@@ -243,8 +243,9 @@ fn stdlib_module_carries_the_29_with_rustdoc_tiers() {
         "the generated module's scoped lint allowances stand"
     );
     let inputs = bindings::stdlib_inputs();
-    assert_eq!(inputs.len(), 29);
-    // Exactly the 29 definitions, in §2.1's order.
+    assert_eq!(inputs.len(), 35);
+    // Exactly the 35 definitions, in §2.1's order
+    // (Amendment 2's six last, in the amendment's order).
     let mut cursor = 0usize;
     for input in &inputs {
         let needle = format!("pub fn {}(", input.spec.name);
@@ -279,8 +280,8 @@ fn stdlib_module_carries_the_29_with_rustdoc_tiers() {
     }
     assert_eq!(
         module.matches("pub fn ").count(),
-        29,
-        "exactly the 29 frozen functions, no helper, no extra name"
+        35,
+        "exactly the 35 frozen functions, no helper, no extra name"
     );
 }
 

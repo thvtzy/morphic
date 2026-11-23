@@ -24,9 +24,10 @@
 //  both derive from the input specs (signatures via
 //  morphic_signature, types via ts_type), so the two
 //  cannot drift apart; the Phase 121 pin holds the stdlib
-//  outputs against EMBED_SCOPE §2.1's frozen table.
+//  outputs against EMBED_SCOPE §2.1's frozen table (as
+//  amended — Phase 135 added Amendment 2's six rows).
 //
-//  WRAPPERS — MEASURED NONE for the frozen 29: the Phase
+//  WRAPPERS — MEASURED NONE for the frozen surface: the Phase
 //  120 emitter's generated functions already speak the
 //  §3 boundary shapes natively (Int is BigInt, `Some(x)`
 //  is the payload, `None` is `null`, `Ok`/`Err` are the
@@ -35,7 +36,7 @@
 //  export is declared over its raw generated function
 //  directly and no conversion wrapper exists. The pin
 //  holds this: the assembled module defines exactly the
-//  29 exports and nothing else, and the clean-host
+//  frozen exports and nothing else, and the clean-host
 //  battery runs typed §3-shaped values against the raw
 //  functions. The generator has no wrapper machinery —
 //  if a future body shape ever needed one, it would be
@@ -340,12 +341,15 @@ pub fn generate_bindings(
 
 // ── The frozen stdlib surface ────────────────────────────
 //
-// The 29 entries in EMBED_SCOPE §2.1's order, with the
-// tier + verdict basis STDLIB_SCOPE froze for each and
+// The 35 entries: EMBED_SCOPE §2.1's 29 in its order,
+// then STDLIB_SCOPE.md Amendment 2's six in the
+// amendment's order (Phase 135), with the tier +
+// verdict basis STDLIB_SCOPE froze for each and
 // the battery counts of the standing cross-validation
 // batteries (Phase 111 Int/Char, Phase 112
-// String/Result/Option, Phase 115 List — measured, their
-// P11xXV lines). `pinned` counts exactly-pinned points;
+// String/Result/Option, Phase 115 List, Phase 135
+// Amendment 2 — measured, their P11xXV / P135XV
+// lines). `pinned` counts exactly-pinned points;
 // `specSilent` the recorded spec-silent points
 // (`int_abs` at the Int minimum, `int_clamp` on inverted
 // ranges, `list_binary_search`'s duplicate-target
@@ -390,6 +394,14 @@ const FROZEN: &[FrozenRow] = &[
     FrozenRow { name: "list_is_sorted", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
     FrozenRow { name: "list_sort", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
     FrozenRow { name: "list_binary_search", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 64, battery_silent: 3 },
+    // Amendment 2 (Phase 135): the higher-order entries
+    // + range, Tier-2 on the A2.3 batteries.
+    FrozenRow { name: "list_map", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 20, battery_silent: 0 },
+    FrozenRow { name: "list_filter", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 20, battery_silent: 0 },
+    FrozenRow { name: "list_fold", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 18, battery_silent: 0 },
+    FrozenRow { name: "list_all", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 16, battery_silent: 0 },
+    FrozenRow { name: "list_any", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 16, battery_silent: 0 },
+    FrozenRow { name: "range", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
 ];
 
 /// The binding inputs for the frozen stdlib surface:

@@ -572,11 +572,24 @@ mod tests {
         // count_matching's crown passes 3/3 — the Phase
         // 68 pins (4/5, 1/3) recorded the pre-For-arm
         // wall, where those bodies never reached a judge.
+        // Phase 130 re-measurement: function values made
+        // sort's lambda-carrying tests bind, so its crown
+        // is measured for real in this profile — 3 passed
+        // of 6 evaluable — where the Phase 68 pin (0, 0, 6)
+        // recorded the function-value wall, at which no
+        // test could bind at all.
+        // Phase 131 re-measurement: higher-order judging
+        // (Assign-to-Index, the Let mutation delta, the
+        // bare-`None` idiom) put sort's template at 6/6
+        // in-process, and this profile crowns the template
+        // itself — the case is renamed sort-full, its
+        // "partial" name retired with the standing it
+        // described.
         let cases: [(&str, &str, &str, u64, usize, usize, usize); 4] = [
             ("validator-fully-evaluable", VALID, "is_known_type_tag", PLAYGROUND_DEFAULT_SEED, 5, 5, 5),
             ("is-sorted-full", IS_SORTED, "is_sorted", PLAYGROUND_DEFAULT_SEED, 5, 5, 5),
             ("count-matching-full", COUNT_MATCHING, "count_matching", PLAYGROUND_DEFAULT_SEED, 3, 3, 3),
-            ("sort-unbindable", SORT, "sort", PLAYGROUND_DEFAULT_SEED, 0, 0, 6),
+            ("sort-full", SORT, "sort", PLAYGROUND_DEFAULT_SEED, 6, 6, 6),
         ];
 
         for (label, source, spec_name, seed, pin_passed, pin_evaluable, pin_total) in cases {

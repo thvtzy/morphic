@@ -1,7 +1,7 @@
 {
   "package": "@thvtzy/morphic",
-  "packageVersion": "1.1.0",
-  "morphicVersion": "1.1.0",
+  "packageVersion": "1.2.0",
+  "morphicVersion": "1.2.0",
   "scope": "EMBED_SCOPE.md",
   "exports": [
     {
@@ -322,6 +322,72 @@
         "specSilent": 3
       },
       "doc": "list_binary_search(xs, x) = Some(i) with xs[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_map",
+      "signature": "(List<Int>, fn(Int) -> Int) → List<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 20,
+        "specSilent": 0
+      },
+      "doc": "list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+    },
+    {
+      "name": "list_filter",
+      "signature": "(List<Int>, fn(Int) -> Bool) → List<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 20,
+        "specSilent": 0
+      },
+      "doc": "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+    },
+    {
+      "name": "list_fold",
+      "signature": "(List<Int>, Int, fn(Int, Int) -> Int) → Int",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 18,
+        "specSilent": 0
+      },
+      "doc": "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+    },
+    {
+      "name": "list_all",
+      "signature": "(List<Int>, fn(Int) -> Bool) → Bool",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 16,
+        "specSilent": 0
+      },
+      "doc": "list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+    },
+    {
+      "name": "list_any",
+      "signature": "(List<Int>, fn(Int) -> Bool) → Bool",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 16,
+        "specSilent": 0
+      },
+      "doc": "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+    },
+    {
+      "name": "range",
+      "signature": "(Int, Int) → List<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9)."
     }
   ]
 }
