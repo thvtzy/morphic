@@ -9,8 +9,8 @@
 //! in its rustdoc; the same facts are in the crate's
 //! `morphic.manifest.json`. Functions whose
 //! specifications freeze a `require:` row carry it
-//! as a genuine `debug_assert!` (NF-116-2, taken at
-//! this crate's surface — see the crate docs).
+//! as a genuine `debug_assert!` (NF-116-2, closed
+//! globally in Phase 124 — see the crate docs).
 
 // Generated code: the emitter's uniform rendering
 // style (full parenthesization of expressions,
@@ -176,38 +176,36 @@ pub fn char_is_lowercase(c: char) -> bool {
 /// Tier: tier-1
 /// Verdict basis: z3-verified
 /// Battery: 101 pinned, 0 spec-silent
-///
-/// Known defect — the Char-pattern widening (Phase 123, named in the open): this entry's shipped body is a Match over Char literal patterns, which the Rust emitter renders as `_` patterns (the pattern renderer's Literal catch-all, in lockstep with the synthesized emitter since the M4 gate). As generated, the first arm matches every input: this function returns Some(0) for every Char and does NOT stand at its frozen battery in this crate (1 of its 101 battery points — the digit 0 itself — agrees, by accident of arm order). The npm package's form of this function is exact (the JavaScript renderer carries Char patterns). The entry is carried named — not silently wrong, and not silently dropped from the frozen surface of 29. Closing the widening is a lockstep cascade of the Phase 113 shape, recorded as the assembling phase's named blocker.
 pub fn char_to_digit(c: char) -> Option<i64> {
     match c {
-        _ => {
+        '0' => {
             Some(0)
         },
-        _ => {
+        '1' => {
             Some(1)
         },
-        _ => {
+        '2' => {
             Some(2)
         },
-        _ => {
+        '3' => {
             Some(3)
         },
-        _ => {
+        '4' => {
             Some(4)
         },
-        _ => {
+        '5' => {
             Some(5)
         },
-        _ => {
+        '6' => {
             Some(6)
         },
-        _ => {
+        '7' => {
             Some(7)
         },
-        _ => {
+        '8' => {
             Some(8)
         },
-        _ => {
+        '9' => {
             Some(9)
         },
         _ => {

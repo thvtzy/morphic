@@ -327,25 +327,29 @@ fn rust_pattern_fixed_text(kind: i64) -> Option<&'static str> {
 }
 
 /// Mirror of the family classification of the Literal arm of
-/// `ir_pattern_to_rust` (src/codegen/mod.rs:817): 0 = value
-/// text (Int, Bool), 1 = wildcard fallback (Float, Char,
-/// Unit), 2 = quoted-raw template (String). Total over the
-/// six IRLiteral kinds.
+/// `ir_pattern_to_rust`: 0 = value text (Int, Bool),
+/// 1 = wildcard fallback (Float, Unit), 2 = quoted
+/// template (String), 3 = quoted template (Char). Total
+/// over the six IRLiteral kinds. Char stood in family 1
+/// through Phase 123 (the F4 widening); the Phase 124
+/// amendment moves it to family 3.
 fn rust_pattern_literal_form(kind: i64) -> Option<i64> {
     match kind {
         0 | 2 => Some(0), // Int, Bool — value text
-        1 | 4 | 5 => Some(1), // Float, Char, Unit — wildcard
+        1 | 5 => Some(1), // Float, Unit — wildcard
         3 => Some(2),     // String — quoted template
+        4 => Some(3),     // Char — quoted template (Phase 124)
         _ => None,
     }
 }
 
 /// Mirror of the fallback rows of the Literal arm of
-/// `ir_pattern_to_rust` (src/codegen/mod.rs:821): Float, Char
-/// and Unit literal patterns render "_".
+/// `ir_pattern_to_rust`: Float and Unit literal patterns
+/// render "_". Char left this table in the Phase 124
+/// amendment (family 3 renders it genuinely).
 fn rust_pattern_literal_text(kind: i64) -> Option<&'static str> {
     match kind {
-        1 | 4 | 5 => Some("_"),
+        1 | 5 => Some("_"),
         _ => None,
     }
 }
@@ -471,52 +475,69 @@ fn rust_expr_record_text(name: &str, fields: &str) -> String {
 }
 
 /// Mirror of the rendering-family classification of
-/// `constraint_to_rust` (src/codegen/mod.rs:1162): 0 = fixed
-/// text "true" (True + the catch-all kinds), 1 = negation
-/// template, 2 = equality template, 3 = order, 4 = conjunction
-/// template. Total over the eleven Constraint kinds.
+/// `constraint_to_rust`: 0 = fixed text "true" (True +
+/// the quantified pair Forall/Exists, the named
+/// fallback), 1 = negation template, 2 = equality
+/// template, 3 = order, 4 = conjunction template,
+/// 5 = expression template, 6 = disjunction template,
+/// 7 = implication template, 8 = call template. Total
+/// over the eleven Constraint kinds. Through Phase 123
+/// kinds 1, 4, 6 and 10 stood in family 0 (the NF-116-2
+/// placeholder); the Phase 124 amendment gives them
+/// their genuine families.
 fn rust_constraint_form(kind: i64) -> Option<i64> {
     match kind {
-        0 | 1 | 2 | 3 | 4 | 6 | 10 => Some(0), // True, Expr, Forall, Exists, Implies, Or, Predicate
-        5 => Some(4),                          // And
-        7 => Some(1),                          // Not
-        8 => Some(2),                          // Eq
-        9 => Some(3),                          // Order
+        0 | 2 | 3 => Some(0), // True, Forall, Exists — fixed "true"
+        1 => Some(5),         // Expr — expression template
+        4 => Some(7),         // Implies — implication template
+        5 => Some(4),         // And — conjunction template
+        6 => Some(6),         // Or — disjunction template
+        7 => Some(1),         // Not — negation template
+        8 => Some(2),         // Eq — equality template
+        9 => Some(3),         // Order
+        10 => Some(8),        // Predicate — call template
         _ => None,
     }
 }
 
-/// Mirror of the True arm and catch-all of
-/// `constraint_to_rust` (src/codegen/mod.rs:1163,1173): all
-/// render "true".
+/// Mirror of the True arm and named fallback of
+/// `constraint_to_rust`: True and the quantified pair
+/// render "true" — True genuinely, Forall/Exists
+/// because a quantified proposition has no value-level
+/// assert rendering.
 fn rust_constraint_fixed_text(kind: i64) -> Option<&'static str> {
     match kind {
-        0 | 1 | 2 | 3 | 4 | 6 | 10 => Some("true"),
+        0 | 2 | 3 => Some("true"),
         _ => None,
     }
 }
 
 /// Mirror of the operator classification of the Order arm of
-/// `constraint_to_rust` (src/codegen/mod.rs:1166-1167):
-/// 0 = " < " template, 1 = " <= " template, 2 = "true"
-/// fallback (GreaterThan, GreaterThanOrEqual have no arm).
-/// Total over the four OrderOp codes.
+/// `constraint_to_rust`: every operator is a comparison
+/// template — 0 = " < ", 1 = " <= ", 2 = " > ",
+/// 3 = " >= ". Total over the four OrderOp codes.
+/// GreaterThan/GreaterThanOrEqual stood in a "true"
+/// fallback family through Phase 123; the Phase 124
+/// amendment gives both their templates.
 fn rust_order_form(op: i64) -> Option<i64> {
     match op {
         0 => Some(0), // LessThan
         1 => Some(1), // LessThanOrEqual
-        2 | 3 => Some(2), // GreaterThan, GreaterThanOrEqual
+        2 => Some(2), // GreaterThan
+        3 => Some(3), // GreaterThanOrEqual
         _ => None,
     }
 }
 
 /// Mirror of the separators of the Order arm of
-/// `constraint_to_rust` (src/codegen/mod.rs:1166-1167),
-/// spaces included.
+/// `constraint_to_rust`, spaces included. Total over
+/// the four OrderOp codes since Phase 124.
 fn rust_order_separator(op: i64) -> Option<&'static str> {
     match op {
         0 => Some(" < "),
         1 => Some(" <= "),
+        2 => Some(" > "),
+        3 => Some(" >= "),
         _ => None,
     }
 }
@@ -929,15 +950,19 @@ enum Pat {
     Guard(Box<Pat>, &'static str),
 }
 
-/// The Literal arm of `ir_pattern_to_rust`
-/// (src/codegen/mod.rs:817-822): Int/Bool/String render their
-/// value (String quoted raw); Float/Char/Unit fall back to
-/// the wildcard text pinned by rust_pattern_literal_text.
+/// The Literal arm of `ir_pattern_to_rust`: Int/Bool/String
+/// render their value (String quoted raw); Char renders
+/// the quoted character (Phase 124 — the F4 widening
+/// retired; the escape rule is the expression arm's,
+/// mirror-pinned on the identity subdomain here);
+/// Float/Unit fall back to the wildcard text pinned by
+/// rust_pattern_literal_text.
 fn ir_pattern_literal_rendered(lit: &Lit) -> String {
     match lit {
         Lit::Int(n) => n.to_string(),
         Lit::Bool(b) => b.to_string(),
         Lit::Str(s) => format!("\"{}\"", s),
+        Lit::Char(c) => format!("'{}'", c),
         _ => "_".to_string(),
     }
 }
@@ -1059,43 +1084,106 @@ fn expr_to_rust_assembled(expr: &SExpr) -> String {
 }
 
 /// Tree form of `Constraint` for the assembled
-/// `constraint_to_rust` mirror. The catch-all variants carry
-/// no payload: all render "true".
+/// `constraint_to_rust` mirror. The quantified variants
+/// carry no payload: both render "true" (the named
+/// fallback). Expr/Implies/Or/Predicate carry their
+/// payloads since the Phase 124 amendment gave those
+/// kinds genuine templates.
 #[allow(dead_code)]
 enum Cons {
     True,
-    Expr,
+    Expr(SExpr),
     Forall,
     Exists,
-    Implies,
+    Implies(Box<Cons>, Box<Cons>),
     And(Vec<Cons>),
-    Or,
+    Or(Vec<Cons>),
     Not(Box<Cons>),
     Eq(SExpr, SExpr),
     Order(i64, SExpr, SExpr),
-    Predicate,
+    Predicate(&'static str, Vec<SExpr>),
 }
 
-/// Faithful assembly of `constraint_to_rust`
-/// (src/codegen/mod.rs:1162-1174): Not wraps in "!(..)",
-/// Eq/Order render their operands via expr_to_rust (Order
-/// only for LessThan/LessThanOrEqual — the others fall into
-/// the catch-all), And joins with " && " inside parens, and
-/// everything else is "true".
+/// Faithful assembly of the assert-position walker
+/// (assert_expr_to_rust / assert_call_to_rust, Phase
+/// 124): calls and binary operations recurse through
+/// the assert walker — a plain-variable call argument
+/// renders cloned (the clone rule: the proposition
+/// must not consume the function's argument); the
+/// pseudo-calls keep their forms over assert-rendered
+/// operands; every other form takes
+/// expr_to_rust_assembled's rendering.
+fn expr_to_rust_assert_assembled(expr: &SExpr) -> String {
+    match expr {
+        SExpr::Call(name, args) => match rust_expr_call_form(name) {
+            1 => rust_expr_list_text(
+                &args
+                    .iter()
+                    .map(expr_to_rust_assert_assembled)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            2 => rust_expr_tuple_text(
+                &args
+                    .iter()
+                    .map(expr_to_rust_assert_assembled)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            3 => "None".to_string(),
+            _ => call_assert_assembled(name, args),
+        },
+        SExpr::BinOp(op, lhs, rhs) => format!(
+            "({} {} {})",
+            expr_to_rust_assert_assembled(lhs),
+            spec_binop_symbol(*op).unwrap(),
+            expr_to_rust_assert_assembled(rhs)
+        ),
+        _ => expr_to_rust_assembled(expr),
+    }
+}
+
+/// A call at assert position over pre-rendered
+/// discipline: plain-variable arguments clone, the
+/// rest recurse through the assert walker.
+fn call_assert_assembled(name: &str, args: &[SExpr]) -> String {
+    let rendered: Vec<String> = args
+        .iter()
+        .map(|a| match a {
+            SExpr::Var(v) => format!("{v}.clone()"),
+            _ => expr_to_rust_assert_assembled(a),
+        })
+        .collect();
+    format!("{}({})", name, rendered.join(", "))
+}
+
+/// Faithful assembly of `constraint_to_rust`: Expr and
+/// Predicate render genuinely through the
+/// assert-position walker (Phase 124 — NF-116-2 taken
+/// globally); Not wraps in "!(..)"; Eq/Order render
+/// their operands through the assert walker (Order for
+/// all four operators since Phase 124 — the others
+/// fell into the catch-all before); And/Or join inside
+/// parens; Implies renders as its proposition; True
+/// and the quantified pair render "true" (the pair is
+/// the named fallback: no value-level rendering of a
+/// quantified proposition exists).
 fn constraint_to_rust_assembled(cons: &Cons) -> String {
     match cons {
+        Cons::Expr(e) => expr_to_rust_assert_assembled(e),
+        Cons::Predicate(name, args) => call_assert_assembled(name, args),
         Cons::Not(inner) => format!("!({})", constraint_to_rust_assembled(inner)),
         Cons::Eq(a, b) => format!(
             "{} == {}",
-            expr_to_rust_assembled(a),
-            expr_to_rust_assembled(b)
+            expr_to_rust_assert_assembled(a),
+            expr_to_rust_assert_assembled(b)
         ),
         Cons::Order(op, a, b) => match rust_order_separator(*op) {
             Some(sep) => format!(
                 "{}{}{}",
-                expr_to_rust_assembled(a),
+                expr_to_rust_assert_assembled(a),
                 sep,
-                expr_to_rust_assembled(b)
+                expr_to_rust_assert_assembled(b)
             ),
             None => "true".to_string(),
         },
@@ -1103,6 +1191,15 @@ fn constraint_to_rust_assembled(cons: &Cons) -> String {
             let rendered: Vec<String> = parts.iter().map(constraint_to_rust_assembled).collect();
             format!("({})", rendered.join(" && "))
         }
+        Cons::Or(parts) => {
+            let rendered: Vec<String> = parts.iter().map(constraint_to_rust_assembled).collect();
+            format!("({})", rendered.join(" || "))
+        }
+        Cons::Implies(a, b) => format!(
+            "(!({}) || ({}))",
+            constraint_to_rust_assembled(a),
+            constraint_to_rust_assembled(b)
+        ),
         _ => "true".to_string(),
     }
 }
@@ -3307,15 +3404,16 @@ mod golden_tests {
         assert_eq!(rust_pattern_literal_form(3), Some(2));
         assert_eq!(rust_pattern_literal_form(5), Some(1));
         assert_eq!(rust_pattern_literal_form(2), Some(0));
-        assert_eq!(rust_pattern_literal_form(4), Some(1));
+        // Phase 124: Char takes the quoted-template family;
+        // its fixed-text row is gone (unpinned there now).
+        assert_eq!(rust_pattern_literal_form(4), Some(3));
         assert_eq!(rust_pattern_literal_text(1), Some("_"));
-        assert_eq!(rust_pattern_literal_text(4), Some("_"));
         assert_eq!(rust_pattern_literal_text(5), Some("_"));
         // Unpinned space
         for kind in 1..=4 {
             assert_eq!(rust_pattern_fixed_text(kind), None, "kind {}", kind);
         }
-        for kind in [0, 2, 3] {
+        for kind in [0, 2, 3, 4] {
             assert_eq!(rust_pattern_literal_text(kind), None, "kind {}", kind);
         }
         // Off-range
@@ -3335,7 +3433,8 @@ mod golden_tests {
         assert_eq!(ir_pattern_assembled(&Pat::Literal(Lit::Bool(false))), "false");
         assert_eq!(ir_pattern_assembled(&Pat::Literal(Lit::Str("hi"))), "\"hi\"");
         assert_eq!(ir_pattern_assembled(&Pat::Literal(Lit::Float(1.5))), "_");
-        assert_eq!(ir_pattern_assembled(&Pat::Literal(Lit::Char('a'))), "_");
+        // Phase 124: Char literal patterns render literally.
+        assert_eq!(ir_pattern_assembled(&Pat::Literal(Lit::Char('a'))), "'a'");
         assert_eq!(ir_pattern_assembled(&Pat::Literal(Lit::Unit)), "_");
         // Constructor: bare name without sub-patterns (the
         // branch rust_pattern_ctor_name pins), template with
@@ -3619,23 +3718,36 @@ mod golden_tests {
 
     #[test]
     fn constraint_tables_full() {
-        // .morph tests: true/and/or/not/order forms, true/or/
-        // predicate texts, all four order rows, both separators
+        // .morph tests: the eleven forms, the three fixed
+        // texts, all four order rows, all four separators
+        // (Phase 124: Expr/Implies/Or/Predicate take their
+        // genuine families; the fixed-text table narrows
+        // to True + the quantified pair)
         assert_eq!(rust_constraint_form(0), Some(0));
+        assert_eq!(rust_constraint_form(1), Some(5));
+        assert_eq!(rust_constraint_form(2), Some(0));
+        assert_eq!(rust_constraint_form(3), Some(0));
+        assert_eq!(rust_constraint_form(4), Some(7));
         assert_eq!(rust_constraint_form(5), Some(4));
-        assert_eq!(rust_constraint_form(6), Some(0));
+        assert_eq!(rust_constraint_form(6), Some(6));
         assert_eq!(rust_constraint_form(7), Some(1));
         assert_eq!(rust_constraint_form(9), Some(3));
         assert_eq!(rust_constraint_form(8), Some(2));
+        assert_eq!(rust_constraint_form(10), Some(8));
         assert_eq!(rust_constraint_fixed_text(0), Some("true"));
-        assert_eq!(rust_constraint_fixed_text(6), Some("true"));
-        assert_eq!(rust_constraint_fixed_text(10), Some("true"));
+        assert_eq!(rust_constraint_fixed_text(2), Some("true"));
+        assert_eq!(rust_constraint_fixed_text(3), Some("true"));
+        assert_eq!(rust_constraint_fixed_text(1), None);
+        assert_eq!(rust_constraint_fixed_text(6), None);
+        assert_eq!(rust_constraint_fixed_text(10), None);
         assert_eq!(rust_order_form(0), Some(0));
         assert_eq!(rust_order_form(1), Some(1));
         assert_eq!(rust_order_form(2), Some(2));
-        assert_eq!(rust_order_form(3), Some(2));
+        assert_eq!(rust_order_form(3), Some(3));
         assert_eq!(rust_order_separator(0), Some(" < "));
         assert_eq!(rust_order_separator(1), Some(" <= "));
+        assert_eq!(rust_order_separator(2), Some(" > "));
+        assert_eq!(rust_order_separator(3), Some(" >= "));
         // Family 0 and the fixed-text table coincide
         for kind in 0..=10 {
             assert_eq!(
@@ -3645,15 +3757,12 @@ mod golden_tests {
                 kind
             );
         }
-        // Order: the fallback family is exactly where no
-        // separator exists
+        // Order: every operator has its own template
+        // family and a separator (Phase 124 — no fallback
+        // row remains)
         for op in 0..=3 {
-            assert_eq!(
-                rust_order_form(op) == Some(2),
-                rust_order_separator(op).is_none(),
-                "op {}",
-                op
-            );
+            assert_eq!(rust_order_form(op), Some(op), "op {}", op);
+            assert!(rust_order_separator(op).is_some(), "op {}", op);
         }
         // Off-range
         assert_eq!(rust_constraint_form(11), None);
@@ -3663,11 +3772,67 @@ mod golden_tests {
 
     #[test]
     fn constraint_assembly() {
-        // True and every catch-all kind render "true"
+        // True and the quantified pair render "true" (the
+        // pair is the named fallback, Phase 124)
         assert_eq!(constraint_to_rust_assembled(&Cons::True), "true");
-        assert_eq!(constraint_to_rust_assembled(&Cons::Or), "true");
-        assert_eq!(constraint_to_rust_assembled(&Cons::Predicate), "true");
         assert_eq!(constraint_to_rust_assembled(&Cons::Forall), "true");
+        assert_eq!(constraint_to_rust_assembled(&Cons::Exists), "true");
+        // Phase 124: Or renders genuinely — the
+        // disjunction template over its parts
+        assert_eq!(
+            constraint_to_rust_assembled(&Cons::Or(vec![Cons::True])),
+            "(true)"
+        );
+        assert_eq!(
+            constraint_to_rust_assembled(&Cons::Or(vec![
+                Cons::Eq(SExpr::Var("x"), SExpr::IntLit(3)),
+                Cons::Order(0, SExpr::Var("x"), SExpr::IntLit(4)),
+            ])),
+            "(x == 3 || x < 4)"
+        );
+        // Phase 124: Predicate renders as its call, the
+        // clone rule on plain-variable arguments
+        assert_eq!(
+            constraint_to_rust_assembled(&Cons::Predicate("p", vec![])),
+            "p()"
+        );
+        assert_eq!(
+            constraint_to_rust_assembled(&Cons::Predicate(
+                "list_is_sorted",
+                vec![SExpr::Var("xs")]
+            )),
+            "list_is_sorted(xs.clone())"
+        );
+        // Phase 124: Expr renders through the assert
+        // walker — a binary proposition as itself, a
+        // nested call under the clone rule
+        assert_eq!(
+            constraint_to_rust_assembled(&Cons::Expr(SExpr::BinOp(
+                11,
+                Box::new(SExpr::Var("x")),
+                Box::new(SExpr::IntLit(0))
+            ))),
+            "(x > 0)"
+        );
+        assert_eq!(
+            constraint_to_rust_assembled(&Cons::Expr(SExpr::Call(
+                "len",
+                vec![SExpr::Var("xs")]
+            ))),
+            "len(xs.clone())"
+        );
+        // Phase 124: Implies renders as its proposition
+        assert_eq!(
+            constraint_to_rust_assembled(&Cons::Implies(
+                Box::new(Cons::Expr(SExpr::BinOp(
+                    8,
+                    Box::new(SExpr::Var("x")),
+                    Box::new(SExpr::IntLit(0))
+                ))),
+                Box::new(Cons::Eq(SExpr::Var("x"), SExpr::IntLit(3)))
+            )),
+            "(!((x != 0)) || (x == 3))"
+        );
         // Negation template, nested
         assert_eq!(constraint_to_rust_assembled(&Cons::Not(Box::new(Cons::True))), "!(true)");
         assert_eq!(
@@ -3677,12 +3842,13 @@ mod golden_tests {
             )))))),
             "!(!(x == 3))"
         );
-        // Equality over expr_to_rust operands
+        // Equality over assert-walker operands
         assert_eq!(
             constraint_to_rust_assembled(&Cons::Eq(SExpr::Var("x"), SExpr::IntLit(3))),
             "x == 3"
         );
-        // Order: LT/LTE render, GT/GTE assert nothing
+        // Order: all four operators render (Phase 124 —
+        // GT/GTE asserted nothing before)
         assert_eq!(
             constraint_to_rust_assembled(&Cons::Order(0, SExpr::Var("x"), SExpr::IntLit(3))),
             "x < 3"
@@ -3693,11 +3859,11 @@ mod golden_tests {
         );
         assert_eq!(
             constraint_to_rust_assembled(&Cons::Order(2, SExpr::Var("x"), SExpr::IntLit(3))),
-            "true"
+            "x > 3"
         );
         assert_eq!(
             constraint_to_rust_assembled(&Cons::Order(3, SExpr::Var("x"), SExpr::IntLit(3))),
-            "true"
+            "x >= 3"
         );
         // Conjunction: joined in parens; one part still
         // parenthesized; zero parts render "()"

@@ -684,7 +684,7 @@ pub fn rust_pattern_fixed_text(kind: i64) -> String {
 }
 
 pub(crate) mod rust_pattern_literal_form {
-//! Rendering family of a literal inside a pattern (the Literal arm of ir_pattern_to_rust, src/codegen/mod.rs:817-822): 0 = value text (Int renders its decimal text; Bool renders via rust_literal_bool), 1 = wildcard fallback (Float, Char and Unit patterns render '_' regardless of value -- pinned by rust_pattern_literal_text; such a pattern therefore matches EVERYTHING, silently widening the match arm), 2 = quoted template (String: a quote, the escaped contents, a quote -- as in expression position; the escape rule is per-character and mirror-pinned, Phase 29). Total over all six IRLiteral kinds.
+//! Rendering family of a literal inside a pattern (the Literal arm of ir_pattern_to_rust): 0 = value text (Int renders its decimal text; Bool renders via rust_literal_bool), 1 = wildcard fallback (Float and Unit patterns render '_' regardless of value -- pinned by rust_pattern_literal_text; such a pattern therefore matches EVERYTHING, silently widening the match arm), 2 = quoted template (String: a quote, the escaped contents, a quote -- as in expression position; the escape rule is per-character and mirror-pinned, Phase 29), 3 = quoted template (Char: a single quote, the escaped character, a single quote -- as in expression position; the escape rule is per-character and mirror-pinned, Phase 29). Total over all six IRLiteral kinds. Char stood in family 1 through Phase 123 (the F4 widening: every Char pattern rendered '_', collapsing any Char match to its first arm -- the defect Phase 123's facade rehearsal measured in char_to_digit); the Phase 124 amendment (2026-11-23) moves Char to family 3 and retires the widening in both emitters.
 
 pub fn rust_pattern_literal_form(kind: i64) -> i64 {
     match kind {
@@ -701,7 +701,7 @@ pub fn rust_pattern_literal_form(kind: i64) -> i64 {
             2
         },
         4 => {
-            1
+            3
         },
         5 => {
             1
@@ -715,14 +715,11 @@ pub fn rust_pattern_literal_form(kind: i64) -> i64 {
 }
 
 pub(crate) mod rust_pattern_literal_text {
-//! Fixed text of the pattern-literal fallback rows (src/codegen/mod.rs:821): Float (1), Char (4) and Unit (5) literal patterns all render '_'. Int, Bool and String literals are value-dependent and unpinned here.
+//! Fixed text of the pattern-literal fallback rows: Float (1) and Unit (5) literal patterns render '_'. Int, Bool and String literals are value-dependent and unpinned here. Char (4) stood in this table through Phase 123; the Phase 124 amendment (2026-11-23) moves it to the quoted template (rust_pattern_literal_form family 3), so its row is removed here and kind 4 is unpinned in this table.
 
 pub fn rust_pattern_literal_text(kind: i64) -> String {
     match kind {
         1 => {
-            "_".to_string()
-        },
-        4 => {
             "_".to_string()
         },
         5 => {
@@ -965,7 +962,7 @@ pub fn rust_expr_record_text(name: String, fields: String) -> String {
 }
 
 pub(crate) mod rust_constraint_form {
-//! Rendering family of a constraint in constraint_to_rust (src/codegen/mod.rs:1162-1174) -- the walker behind generate_rust's precondition debug_assert!s: 0 = fixed text 'true' (True itself, plus every kind the catch-all swallows: Expr, Forall, Exists, Implies, Or, Predicate -- pinned row by row in rust_constraint_fixed_text), 1 = negation template ('!(' + inner rendering + ')'), 2 = equality template (left + ' == ' + right, operands rendered by expr_to_rust), 3 = order (rust_order_form: LessThan/LessThanOrEqual are templates over expr_to_rust operands, GreaterThan/GreaterThanOrEqual fall back to 'true'), 4 = conjunction template ('(' + parts joined ' && ' + ')'). Total over all eleven Constraint kinds. Pinning family 0 completely is the point: an Or precondition, for example, asserts nothing in generated code today.
+//! Rendering family of a constraint in constraint_to_rust -- the walker behind generate_rust's precondition debug_assert!s: 0 = fixed text 'true' (True itself, plus Forall and Exists -- the quantified pair, kept as a NAMED fallback: a quantified proposition has no value-level rendering a debug_assert could evaluate; pinned row by row in rust_constraint_fixed_text), 1 = negation template ('!(' + inner rendering + ')'), 2 = equality template (left + ' == ' + right, operands rendered by the assert-position expression walker), 3 = order (rust_order_form: all four operators are templates over assert-position operands, separators pinned by rust_order_separator), 4 = conjunction template ('(' + parts joined ' && ' + ')'), 5 = expression template (Expr: the carried expression rendered by the assert-position walker -- expr_to_rust's rendering with the clone rule at call arguments: a plain-variable call argument renders cloned, so the proposition cannot consume the function's argument), 6 = disjunction template ('(' + parts joined ' || ' + ')'), 7 = implication template ('(!(' + antecedent + ') || (' + consequent + '))'), 8 = call template (Predicate: the name, then '(' + arguments joined ', ' + ')' -- arguments rendered by the assert-position walker, clone rule included). Total over all eleven Constraint kinds. Through Phase 123, family 0 also swallowed Expr, Implies, Or and Predicate (the NF-116-2 placeholder: an Or precondition, for example, asserted nothing in generated code); the Phase 124 amendment (2026-11-23) gives those kinds their genuine families and narrows family 0 to the three rows above.
 
 pub fn rust_constraint_form(kind: i64) -> i64 {
     match kind {
@@ -973,7 +970,7 @@ pub fn rust_constraint_form(kind: i64) -> i64 {
             0
         },
         1 => {
-            0
+            5
         },
         2 => {
             0
@@ -982,13 +979,13 @@ pub fn rust_constraint_form(kind: i64) -> i64 {
             0
         },
         4 => {
-            0
+            7
         },
         5 => {
             4
         },
         6 => {
-            0
+            6
         },
         7 => {
             1
@@ -1000,7 +997,7 @@ pub fn rust_constraint_form(kind: i64) -> i64 {
             3
         },
         10 => {
-            0
+            8
         },
         _ => {
             0
@@ -1011,29 +1008,17 @@ pub fn rust_constraint_form(kind: i64) -> i64 {
 }
 
 pub(crate) mod rust_constraint_fixed_text {
-//! Fixed text of constraint_to_rust's True arm and catch-all (src/codegen/mod.rs:1163,1173): True (0), Expr (1), Forall (2), Exists (3), Implies (4), Or (6) and Predicate (10) all render 'true'.
+//! Fixed text of constraint_to_rust's True arm and named fallback: True (0), Forall (2) and Exists (3) render 'true' -- True genuinely, the quantified pair because a quantified proposition has no value-level rendering a debug_assert could evaluate (the fallback is named here and in rust_constraint_form's family 0, never silent). Through Phase 123 this table also carried Expr (1), Implies (4), Or (6) and Predicate (10); the Phase 124 amendment (2026-11-23) gives those kinds genuine templates and their rows are removed here.
 
 pub fn rust_constraint_fixed_text(kind: i64) -> String {
     match kind {
         0 => {
             "true".to_string()
         },
-        1 => {
-            "true".to_string()
-        },
         2 => {
             "true".to_string()
         },
         3 => {
-            "true".to_string()
-        },
-        4 => {
-            "true".to_string()
-        },
-        6 => {
-            "true".to_string()
-        },
-        10 => {
             "true".to_string()
         },
         _ => {
@@ -1045,7 +1030,7 @@ pub fn rust_constraint_fixed_text(kind: i64) -> String {
 }
 
 pub(crate) mod rust_order_form {
-//! Rendering family of an Order constraint's operator (constraint_to_rust, src/codegen/mod.rs:1166-1167): 0 = comparison template with separator ' < ' (LessThan), 1 = comparison template with separator ' <= ' (LessThanOrEqual), 2 = fallback fixed text 'true' (GreaterThan and GreaterThanOrEqual have no arm and are swallowed by the catch-all, so a '>' precondition asserts nothing in generated code). Total over all four OrderOp codes. The separators are pinned by rust_order_separator.
+//! Rendering family of an Order constraint's operator (constraint_to_rust): 0 = comparison template with separator ' < ' (LessThan), 1 = comparison template with separator ' <= ' (LessThanOrEqual), 2 = comparison template with separator ' > ' (GreaterThan), 3 = comparison template with separator ' >= ' (GreaterThanOrEqual). Total over all four OrderOp codes. The separators are pinned by rust_order_separator. Through Phase 123, GreaterThan and GreaterThanOrEqual stood in a fallback family (rendered 'true' -- a '>' precondition asserted nothing in generated code); the Phase 124 amendment (2026-11-23) gives both their templates.
 
 pub fn rust_order_form(op: i64) -> i64 {
     match op {
@@ -1059,7 +1044,7 @@ pub fn rust_order_form(op: i64) -> i64 {
             2
         },
         3 => {
-            2
+            3
         },
         _ => {
             0
@@ -1070,7 +1055,7 @@ pub fn rust_order_form(op: i64) -> i64 {
 }
 
 pub(crate) mod rust_order_separator {
-//! Infix separator of an order comparison in constraint_to_rust, spaces included: ' < ' for LessThan (0), ' <= ' for LessThanOrEqual (1). GreaterThan and GreaterThanOrEqual never reach a separator (rust_order_form family 2) and are unpinned here.
+//! Infix separator of an order comparison in constraint_to_rust, spaces included: ' < ' for LessThan (0), ' <= ' for LessThanOrEqual (1), ' > ' for GreaterThan (2), ' >= ' for GreaterThanOrEqual (3). Total over all four OrderOp codes since the Phase 124 amendment (2026-11-23); before it, GreaterThan and GreaterThanOrEqual never reached a separator (rust_order_form's fallback family) and were unpinned here.
 
 pub fn rust_order_separator(op: i64) -> String {
     match op {
@@ -1079,6 +1064,12 @@ pub fn rust_order_separator(op: i64) -> String {
         },
         1 => {
             " <= ".to_string()
+        },
+        2 => {
+            " > ".to_string()
+        },
+        3 => {
+            " >= ".to_string()
         },
         _ => {
             "".to_string()

@@ -413,8 +413,14 @@ impl Adapter {
             IRLiteral::String(s) => syn::rust_string_literal_text::rust_string_literal_text(
                 self.literal_contents(s),
             ),
-            // Float / Char / Unit widen to the wildcard text
-            // the rust_pattern_literal_text table pins.
+            // Phase 124: Char literal patterns render
+            // literally — the escaped character inside
+            // single quotes, the expression position's
+            // own glue (as in literal_text below),
+            // retiring the F4 widening. Float / Unit
+            // widen to the wildcard text the
+            // rust_pattern_literal_text table pins.
+            IRLiteral::Char(c) => format!("'{}'", escape_rust_char(*c)),
             other => syn::rust_pattern_literal_text::rust_pattern_literal_text(lit_kind(other)),
         })
     }
@@ -557,9 +563,19 @@ impl Adapter {
 
     pub(crate) fn constraint_text(&self, cons: &Constraint) -> Result<String, String> {
         Ok(match cons {
+            // Phase 124 (NF-116-2, global): the Expr and
+            // Predicate forms render genuinely, through
+            // the assert-position walker below — as the
+            // original now renders them.
+            Constraint::Expr(expr) => self.sexpr_assert_text(expr)?,
+            Constraint::Predicate(name, args) => self.sexpr_assert_call(name, args)?,
             Constraint::Not(inner) => format!("!({})", self.constraint_text(inner)?),
             Constraint::Eq(a, b) => {
-                format!("{} == {}", self.sexpr_text(a)?, self.sexpr_text(b)?)
+                format!(
+                    "{} == {}",
+                    self.sexpr_assert_text(a)?,
+                    self.sexpr_assert_text(b)?
+                )
             }
             Constraint::Order(op, a, b) => {
                 let sep = syn::rust_order_separator::rust_order_separator(order_code(*op));
@@ -568,10 +584,18 @@ impl Adapter {
                     // constraint_to_rust_assembled): orders
                     // with no separator render the constant
                     // "true" — assembly glue, exactly as the
-                    // assembly writes it (shim 8).
+                    // assembly writes it (shim 8). Since the
+                    // Phase 124 amendment every OrderOp
+                    // carries a separator, so this branch is
+                    // the table's silence, never a rendering.
                     "true".to_string()
                 } else {
-                    format!("{}{}{}", self.sexpr_text(a)?, sep, self.sexpr_text(b)?)
+                    format!(
+                        "{}{}{}",
+                        self.sexpr_assert_text(a)?,
+                        sep,
+                        self.sexpr_assert_text(b)?
+                    )
                 }
             }
             Constraint::And(parts) => {
@@ -579,12 +603,82 @@ impl Adapter {
                     parts.iter().map(|p| self.constraint_text(p)).collect();
                 format!("({})", rendered?.join(" && "))
             }
-            // True and every catch-all kind: the fixed text
-            // the rust_constraint_fixed_text table pins.
+            Constraint::Or(parts) => {
+                let rendered: Result<Vec<String>, String> =
+                    parts.iter().map(|p| self.constraint_text(p)).collect();
+                format!("({})", rendered?.join(" || "))
+            }
+            Constraint::Implies(a, b) => format!(
+                "(!({}) || ({}))",
+                self.constraint_text(a)?,
+                self.constraint_text(b)?
+            ),
+            // True and the two quantified kinds: the
+            // fixed text the rust_constraint_fixed_text
+            // table pins (the quantified pair is the
+            // named fallback — no value-level rendering
+            // of a quantified proposition exists).
             _ => syn::rust_constraint_fixed_text::rust_constraint_fixed_text(
                 constraint_kind(cons),
             ),
         })
+    }
+
+    /// Assert-position spec expressions (Phase 124):
+    /// the constraint walker's operand rendering — the
+    /// original's assert_expr_to_rust, composed as the
+    /// original composes it: calls and binary operations
+    /// recurse through the assert walker (the clone rule
+    /// reaches calls nested in a proposition); the
+    /// pseudo-calls keep their forms over assert-rendered
+    /// operands; every other form takes sexpr_text's
+    /// rendering.
+    pub(crate) fn sexpr_assert_text(&self, expr: &SpecExpr) -> Result<String, String> {
+        Ok(match expr {
+            SpecExpr::Call(name, args) => {
+                match syn::rust_expr_call_form::rust_expr_call_form(name.clone()) {
+                    1 => {
+                        let rendered: Result<Vec<String>, String> =
+                            args.iter().map(|a| self.sexpr_assert_text(a)).collect();
+                        syn::rust_expr_list_text::rust_expr_list_text(rendered?.join(", "))
+                    }
+                    2 => {
+                        let rendered: Result<Vec<String>, String> =
+                            args.iter().map(|a| self.sexpr_assert_text(a)).collect();
+                        syn::rust_expr_tuple_text::rust_expr_tuple_text(rendered?.join(", "))
+                    }
+                    3 => "None".to_string(),
+                    _ => self.sexpr_assert_call(name, args)?,
+                }
+            }
+            SpecExpr::BinOp(op, lhs, rhs) => format!(
+                "({} {} {})",
+                self.sexpr_assert_text(lhs)?,
+                syn::spec_binop_symbol::spec_binop_symbol(spec_binop_code(*op)),
+                self.sexpr_assert_text(rhs)?,
+            ),
+            _ => self.sexpr_text(expr)?,
+        })
+    }
+
+    /// A call at assert position: a plain-variable
+    /// argument renders cloned (the clone rule — the
+    /// proposition must not consume the function's
+    /// argument); every other argument renders through
+    /// the assert walker.
+    fn sexpr_assert_call(
+        &self,
+        name: &str,
+        args: &[SpecExpr],
+    ) -> Result<String, String> {
+        let rendered: Result<Vec<String>, String> = args
+            .iter()
+            .map(|arg| match arg {
+                SpecExpr::Var(v) => Ok(format!("{}.clone()", rust_ident(v))),
+                _ => self.sexpr_assert_text(arg),
+            })
+            .collect();
+        Ok(format!("{}({})", rust_ident(name), rendered?.join(", ")))
     }
 
     // ── Expressions (ir_expr_assembled) ──

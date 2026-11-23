@@ -11316,6 +11316,22 @@ spec exclaim {
     /// rust_stmt_form's constraints did not move — its
     /// amendment is doc and tests only — so it has no
     /// fixture consequence.)
+    ///
+    /// Phase 124 extension (2026-11-23): the Char-cascade
+    /// amendments. Six bodies are REPLACED in place — the
+    /// Phase 55/78 replacement precedent for amended
+    /// specs: rust_pattern_literal_form (the Char row
+    /// takes the quoted-template family 3),
+    /// rust_pattern_literal_text (the Char row is gone —
+    /// a template family has no fixed text),
+    /// rust_constraint_form (Expr/Implies/Or/Predicate
+    /// take their genuine families 5/7/6/8),
+    /// rust_constraint_fixed_text (only True and the
+    /// quantified pair keep fixed text), rust_order_form
+    /// (Gt/Ge take their own template families) and
+    /// rust_order_separator (the Gt/Ge rows join). The
+    /// other 63 bodies are asserted byte-identical below,
+    /// unchanged.
     #[test]
     fn constraint_seed_bodies_byte_identical_for_recognized_specs() {
         let root = env!("CARGO_MANIFEST_DIR");

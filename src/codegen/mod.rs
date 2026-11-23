@@ -225,6 +225,99 @@ fn scan_library_use(node: &IRNode, entry_names: &std::collections::BTreeSet<Stri
     }
 }
 
+/// The library entries a spec-language expression names
+/// in call position (Phase 124): the companion walker to
+/// `scan_library_use` for the `Expr` tree a `require:`
+/// row carries. Since NF-116-2's global fix, a generated
+/// Rust file carries its function's precondition asserts
+/// rendered genuinely, so an entry a precondition calls
+/// is used by the file exactly as one the body calls.
+fn scan_expr_library_use(
+    expr: &Expr,
+    entry_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Call(name, args) => {
+            if entry_names.contains(name) {
+                out.insert(name.clone());
+            }
+            for a in args {
+                scan_expr_library_use(a, entry_names, out);
+            }
+        }
+        Expr::Field(inner, _)
+        | Expr::UnaryOp(_, inner)
+        | Expr::Length(inner) => scan_expr_library_use(inner, entry_names, out),
+        Expr::Index(a, b) | Expr::BinOp(_, a, b) => {
+            scan_expr_library_use(a, entry_names, out);
+            scan_expr_library_use(b, entry_names, out);
+        }
+        Expr::Lambda(_, body) => scan_expr_library_use(body, entry_names, out),
+        Expr::Comprehension { collection, body, .. } => {
+            scan_expr_library_use(collection, entry_names, out);
+            scan_expr_library_use(body, entry_names, out);
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            scan_expr_library_use(receiver, entry_names, out);
+            for a in args {
+                scan_expr_library_use(a, entry_names, out);
+            }
+        }
+        Expr::RecordLit { fields, .. } => {
+            for (_, value) in fields {
+                scan_expr_library_use(value, entry_names, out);
+            }
+        }
+        Expr::Var(_)
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::CharLit(_) => {}
+    }
+}
+
+/// The library entries a constraint's genuine rendering
+/// names: Predicate callees and the calls inside
+/// rendered expression positions, recursing through the
+/// rendered connectives. The quantified rows render as
+/// the named `true` fallback (see constraint_to_rust),
+/// so their interiors are not scanned — the generated
+/// file never names them.
+fn scan_constraint_library_use(
+    cons: &Constraint,
+    entry_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match cons {
+        Constraint::True | Constraint::Forall { .. } | Constraint::Exists { .. } => {}
+        Constraint::Expr(e) => scan_expr_library_use(e, entry_names, out),
+        Constraint::Predicate(name, args) => {
+            if entry_names.contains(name) {
+                out.insert(name.clone());
+            }
+            for a in args {
+                scan_expr_library_use(a, entry_names, out);
+            }
+        }
+        Constraint::Not(inner) => scan_constraint_library_use(inner, entry_names, out),
+        Constraint::Eq(a, b) | Constraint::Order(_, a, b) => {
+            scan_expr_library_use(a, entry_names, out);
+            scan_expr_library_use(b, entry_names, out);
+        }
+        Constraint::And(parts) | Constraint::Or(parts) => {
+            for p in parts {
+                scan_constraint_library_use(p, entry_names, out);
+            }
+        }
+        Constraint::Implies(a, b) => {
+            scan_constraint_library_use(a, entry_names, out);
+            scan_constraint_library_use(b, entry_names, out);
+        }
+    }
+}
+
 /// Refuse generation for `target` when the body makes a
 /// library call the target cannot render. With
 /// `builtins_too`, builtin-tier calls refuse as well
@@ -266,6 +359,16 @@ fn reject_library_calls(
 /// A candidate that IS an entry is its own function and
 /// gains no helper. Bodies using no entry render
 /// byte-identically to the pre-116 route.
+///
+/// Phase 124 extends "uses" to the precondition rows:
+/// since NF-116-2's global fix the candidate's own
+/// rendering carries its `require:` asserts genuinely,
+/// so an entry a precondition names (the standing
+/// exhibit: `list_binary_search`'s require over
+/// `list_is_sorted`) is used by the file exactly as
+/// one the body calls — and the closure likewise
+/// follows each emitted entry's own preconditions, so
+/// a helper's assert never names an absent function.
 fn generate_rust_with_library(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
     let mut out = generate_rust_route(candidate)?;
     let entry_names = library_entry_names();
@@ -273,12 +376,29 @@ fn generate_rust_with_library(candidate: &CandidateImplementation) -> Result<Str
     let mut direct = LibraryUse::default();
     scan_library_use(&candidate.body, &entry_names, &mut direct);
     let mut queue: Vec<String> = direct.entries.into_iter().collect();
+    let mut from_preconditions: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for pre in &candidate.spec.preconditions {
+        scan_constraint_library_use(pre, &entry_names, &mut from_preconditions);
+    }
+    queue.extend(from_preconditions);
     while let Some(name) = queue.pop() {
         if used.insert(name.clone()) {
             if let Some(body) = crate::stdlib::shipped_body(&name) {
                 let mut inner = LibraryUse::default();
                 scan_library_use(&body, &entry_names, &mut inner);
                 queue.extend(inner.entries);
+            }
+            if let Some(spec) = crate::stdlib::prelude_specs()
+                .iter()
+                .find(|s| s.name == name)
+            {
+                let mut inner: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                for pre in &spec.preconditions {
+                    scan_constraint_library_use(pre, &entry_names, &mut inner);
+                }
+                queue.extend(inner);
             }
         }
     }
@@ -1868,6 +1988,16 @@ fn ir_pattern_to_rust(pattern: &IRPattern) -> String {
             IRLiteral::Int(n) => n.to_string(),
             IRLiteral::Bool(b) => b.to_string(),
             IRLiteral::String(s) => format!("\"{}\"", escape_rust_str(s)),
+            // Phase 124: Char literal patterns render
+            // literally — the F4 widening (every Char
+            // pattern through the `_` catch-all below,
+            // collapsing any Char match to its first
+            // arm) is RETIRED; the escape is the
+            // expression position's own (escape_rust_char,
+            // mirror-pinned since Phase 29). Float and
+            // Unit keep the wildcard: no literal pattern
+            // form exists for them in this emitter.
+            IRLiteral::Char(c) => format!("'{}'", escape_rust_char(*c)),
             _ => "_".into(),
         },
         IRPattern::Constructor(name, sub_patterns) => {
@@ -3004,18 +3134,128 @@ fn ty_to_python(ty: &TypeRef) -> String {
     }
 }
 
+/// Render a constraint as the proposition of a
+/// precondition `debug_assert!` (the Phase 55 form).
+///
+/// Phase 124 — NF-116-2 taken GLOBALLY (the facade's
+/// Phase 123 crate-local renderer, promoted): every
+/// shape renders GENUINELY, a parsed `require:` row's
+/// Expr and Predicate forms included, except the two
+/// quantified kinds. Forall / Exists keep the `true`
+/// placeholder as a NAMED FALLBACK: a quantified
+/// proposition has no value-level rendering a
+/// debug_assert could evaluate (the classification
+/// spec — rust_constraint_form's family 0 — states
+/// exactly this row set, and the Phase 124 ROAD note
+/// records it). Operands render through the
+/// assert-position expression walker
+/// (assert_expr_to_rust), whose one deviation from
+/// expr_to_rust is the clone rule: a call argument
+/// that is a plain variable renders cloned, so the
+/// proposition cannot consume the function's argument
+/// (the assert is a proposition, not a use).
 fn constraint_to_rust(constraint: &Constraint) -> String {
     match constraint {
         Constraint::True => "true".into(),
+        Constraint::Expr(expr) => assert_expr_to_rust(expr),
+        Constraint::Predicate(name, args) => assert_call_to_rust(name, args),
         Constraint::Not(inner) => format!("!({})", constraint_to_rust(inner)),
-        Constraint::Eq(a, b) => format!("{} == {}", expr_to_rust(a), expr_to_rust(b)),
-        Constraint::Order(OrderOp::LessThan, a, b) => format!("{} < {}", expr_to_rust(a), expr_to_rust(b)),
-        Constraint::Order(OrderOp::LessThanOrEqual, a, b) => format!("{} <= {}", expr_to_rust(a), expr_to_rust(b)),
+        Constraint::Eq(a, b) => format!(
+            "{} == {}",
+            assert_expr_to_rust(a),
+            assert_expr_to_rust(b)
+        ),
+        Constraint::Order(op, a, b) => {
+            let rust_op = match op {
+                OrderOp::LessThan => "<",
+                OrderOp::LessThanOrEqual => "<=",
+                OrderOp::GreaterThan => ">",
+                OrderOp::GreaterThanOrEqual => ">=",
+            };
+            format!(
+                "{} {} {}",
+                assert_expr_to_rust(a),
+                rust_op,
+                assert_expr_to_rust(b)
+            )
+        }
         Constraint::And(parts) => {
             let p: Vec<String> = parts.iter().map(constraint_to_rust).collect();
             format!("({})", p.join(" && "))
         }
-        _ => "true".into(),
+        Constraint::Or(parts) => {
+            let p: Vec<String> = parts.iter().map(constraint_to_rust).collect();
+            format!("({})", p.join(" || "))
+        }
+        Constraint::Implies(a, b) => format!(
+            "(!({}) || ({}))",
+            constraint_to_rust(a),
+            constraint_to_rust(b)
+        ),
+        // The named fallback (see this function's
+        // header): quantified propositions have no
+        // value-level assert rendering.
+        Constraint::Forall { .. } | Constraint::Exists { .. } => "true".into(),
+    }
+}
+
+/// Render a call at assert position (see
+/// constraint_to_rust's header for the clone rule): a
+/// plain-variable argument renders cloned; every other
+/// argument renders through the assert walker.
+fn assert_call_to_rust(name: &str, args: &[Expr]) -> String {
+    let rendered: Vec<String> = args
+        .iter()
+        .map(|arg| match arg {
+            Expr::Var(v) => format!("{}.clone()", rust_ident(v)),
+            _ => assert_expr_to_rust(arg),
+        })
+        .collect();
+    format!("{}({})", rust_ident(name), rendered.join(", "))
+}
+
+/// Render an expression at assert position: calls and
+/// binary operations recurse through the assert walker
+/// (so the clone rule reaches calls nested in a
+/// proposition); the parser's pseudo-calls keep
+/// expr_to_rust's forms over assert-rendered operands;
+/// every other form takes expr_to_rust's rendering,
+/// standing catch-alls included.
+fn assert_expr_to_rust(expr: &Expr) -> String {
+    match expr {
+        Expr::Call(name, args) => match name.as_str() {
+            "List" => {
+                let rendered: Vec<String> =
+                    args.iter().map(assert_expr_to_rust).collect();
+                format!("vec![{}]", rendered.join(", "))
+            }
+            "__tuple__" => {
+                let rendered: Vec<String> =
+                    args.iter().map(assert_expr_to_rust).collect();
+                format!("({})", rendered.join(", "))
+            }
+            "None" => "None".to_string(),
+            _ => assert_call_to_rust(name, args),
+        },
+        Expr::BinOp(op, lhs, rhs) => {
+            let rust_op = match op {
+                BinOp::Add => "+", BinOp::Sub => "-",
+                BinOp::Mul => "*", BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::Eq => "==", BinOp::Neq => "!=",
+                BinOp::And => "&&", BinOp::Or => "||",
+                BinOp::Lt => "<", BinOp::Le => "<=",
+                BinOp::Gt => ">", BinOp::Ge => ">=",
+                BinOp::Concat => "+",
+            };
+            format!(
+                "({} {} {})",
+                assert_expr_to_rust(lhs),
+                rust_op,
+                assert_expr_to_rust(rhs)
+            )
+        }
+        _ => expr_to_rust(expr),
     }
 }
 
@@ -5504,12 +5744,16 @@ mod tests {
     // One measured subtlety, recorded rather than worked
     // around silently: a parsed `require: a == b` lands
     // in Constraint::Expr (parse_expr consumes `==` as a
-    // BinOp), which the native constraint_to_rust renders
-    // through its standing "true" catch-all — so the
-    // fixture hands generate step_ok's precondition in
-    // the engine-constructed Constraint::Eq form, the
-    // shape that renderer's Eq arm (and the M3 corpus's
-    // constraint cases) exists for. The spec text below
+    // BinOp). Before Phase 124 the native
+    // constraint_to_rust rendered that form through its
+    // "true" catch-all (NF-116-2); since Phase 124 it
+    // renders genuinely — as the parenthesized BinOp
+    // text. The fixture still hands generate step_ok's
+    // precondition in the engine-constructed
+    // Constraint::Eq form: the Eq arm's unparenthesized
+    // rendering is the shape this fixture's pin names
+    // (and the shape the M3 corpus's constraint cases
+    // exist for). The spec text below
     // keeps its `require:` line: it parses and typechecks
     // as written; only the candidate's precondition VALUE
     // is transcribed, exactly as the fixture bodies are

@@ -64,24 +64,6 @@ target, or `None` — and that disclosure travels with
 the function (see its manifest row). With duplicate
 targets, any valid index satisfies the contract.
 
-## Known defect
-
-One entry of the 29 does not stand at its battery
-in this crate: `char_to_digit`. Its shipped body is
-a Match over Char literal patterns, which the Rust
-emitter renders as `_` patterns (the Char-pattern
-widening, in lockstep with the synthesized emitter
-since the M4 gate), so as generated it returns
-`Some(0)` for every `char`. The defect is named
-here and in the function's own rustdoc — not
-silently shipped, and the entry is not silently
-dropped from the frozen surface. The npm package's
-form of the function is exact (the JavaScript
-renderer carries Char patterns). Closing the
-widening is a lockstep cascade recorded as the
-assembling phase's named blocker in the project's
-roadmap.
-
 The builtins `len` and `int_to_str` are not exports:
 they are language builtins, rendered inside generated
 code. A host uses its native equivalent — for `len`,
@@ -100,23 +82,20 @@ is `Result<T, E>` — nesting included, no losses.
 
 Functions whose specifications freeze a `require:`
 row carry it as a genuine `debug_assert!` of the
-rendered condition — in this crate, `int_abs` (the
-Int minimum is excluded), `int_clamp` (`lo <= hi`)
-and `list_binary_search` (the list is sorted). The
+rendered condition — `int_abs` (the Int minimum is
+excluded), `int_clamp` (`lo <= hi`) and
+`list_binary_search` (the list is sorted). The
 asserts are debug-only: an out-of-domain call panics
 on the assert in a debug build, and in a release
 build the behaviour is whatever the body computes —
 out-of-domain inputs are contract violations, outside
 the battery-exactness promise.
 
-This is the NF-116-2 fix, taken at this crate's
-surface: the compiler's general Rust emitter still
-renders parsed `require:` rows as
-`debug_assert!(true, ...)` placeholders, because that
-renderer is mirrored by the self-hosting Codegen spec
-and the two emitters are held byte-equal — closing it
-there is a separate lockstep change. The asserts in
-this crate are real.
+The asserts are the compiler pipeline's own
+rendering (NF-116-2, closed globally in Phase 124:
+the emitter renders parsed `require:` rows
+genuinely, in the native emitter and its self-host
+mirror alike).
 
 ## Versioning
 

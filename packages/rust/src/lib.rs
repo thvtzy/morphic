@@ -36,45 +36,26 @@
 //! uses `slice.len()`, `s.chars().count()` or
 //! `x.to_string()` as appropriate.
 //!
-//! **Preconditions (NF-116-2, taken here).** A
-//! function whose specification freezes a `require:`
-//! row carries it as a genuine `debug_assert!` of the
-//! rendered condition — `int_abs` (the Int minimum is
-//! excluded), `int_clamp` (`lo <= hi`),
-//! `list_binary_search` (the list is sorted; the
-//! assert clones the list, since a proposition must
-//! not consume the argument). The asserts are
-//! debug-only: an out-of-domain call panics on the
-//! assert in a debug build, and in a release build
-//! the behaviour is whatever the body computes —
+//! **Preconditions (NF-116-2, closed globally in
+//! Phase 124).** A function whose specification
+//! freezes a `require:` row carries it as a genuine
+//! `debug_assert!` of the rendered condition —
+//! `int_abs` (the Int minimum is excluded),
+//! `int_clamp` (`lo <= hi`), `list_binary_search`
+//! (the list is sorted; the assert clones the list,
+//! since a proposition must not consume the
+//! argument). The asserts are debug-only: an
+//! out-of-domain call panics on the assert in a
+//! debug build, and in a release build the
+//! behaviour is whatever the body computes —
 //! out-of-domain inputs are contract violations,
-//! outside the battery-exactness promise. This crate
-//! takes the NF-116-2 fix at its own surface: the
-//! compiler's general Rust emitter still renders
-//! parsed `require:` rows as `debug_assert!(true,
-//! ...)` placeholders, because that renderer is
-//! mirrored by the self-hosting Codegen spec and the
-//! two emitters are held byte-equal; closing it there
-//! is a separate lockstep change, recorded in the
-//! project's roadmap. The asserts in this crate are
-//! real.
-//!
-//! **Known defect — `char_to_digit`.** One entry of
-//! the 29 does not stand at its battery in this
-//! crate: its shipped body is a Match over Char
-//! literal patterns, which the Rust emitter renders
-//! as `_` patterns (the Char-pattern widening, in
-//! lockstep with the synthesized emitter since the
-//! M4 gate), so as generated it returns `Some(0)`
-//! for every `char`. The defect is named here and
-//! in the function's own rustdoc — not silently
-//! shipped, and the entry is not silently dropped
-//! from the frozen surface. The npm package's form
-//! of the function is exact (the JavaScript
-//! renderer carries Char patterns). Closing the
-//! widening is a lockstep cascade recorded as the
-//! assembling phase's named blocker in the
-//! project's roadmap.
+//! outside the battery-exactness promise. The
+//! asserts are the compiler pipeline's own
+//! rendering: the emitter renders parsed `require:`
+//! rows genuinely, in the native emitter and its
+//! self-host mirror alike (the one named fallback
+//! is a quantified row, which has no value-level
+//! rendering; no function here carries one).
 //!
 //! **This crate is an artifact, not a compiler.** It
 //! has no dependencies, no build script and no

@@ -37,9 +37,11 @@
 //!   (int_abs, int_clamp, list_sum measured) — the route
 //!   exists at IR level; no name→call API wraps it.
 //! * The Rust target as the contrast: a Tier-1 entry
-//!   generates real typed code — and carries NF-116-2
-//!   verbatim (`debug_assert!(true, ...)` for its
-//!   precondition).
+//!   generates real typed code — and (at this phase)
+//!   carried NF-116-2 verbatim (`debug_assert!(true,
+//!   ...)` for its precondition). Phase 124 closed
+//!   NF-116-2 globally; the probe below is re-aimed
+//!   at the genuine rendering.
 //!
 //! Configuration note (Phase 116/117 precedent): pins
 //! that read the NATIVE prelude (embedded library data)
@@ -312,16 +314,26 @@ fn eval_route_calls_shipped_entries_at_ir_level() {
 
 /// Generated Rust for the same Tier-1 entry is real,
 /// typed, compilable code (Phase 116 pins the compile +
-/// run) — and it carries NF-116-2 verbatim: the
-/// precondition block asserts `true`.
+/// run). At this phase it carried NF-116-2 verbatim —
+/// the precondition block asserted `true`. Phase 124
+/// closed NF-116-2 in the global renderer; this probe
+/// is re-aimed at the genuine assert (int_abs's frozen
+/// row: x differs from the Int minimum), with the
+/// placeholder's absence pinned alongside.
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn rust_int_abs_is_real_code_with_the_nf116_2_marker() {
+fn rust_int_abs_is_real_code_with_the_genuine_precondition() {
     let (spec, body) = entry("int_abs");
     let rust = codegen::generate(&candidate(&spec, body), "rust").expect("Rust generation");
     assert!(rust.contains("pub fn int_abs(x: i64) -> i64"), "{rust}");
     assert!(
-        rust.contains("debug_assert!(true, \"Precondition violated\")"),
-        "NF-116-2 in the generated file:\n{rust}"
+        rust.contains(
+            "debug_assert!((x != ((0 - 9223372036854775807) - 1)), \"Precondition violated\")"
+        ),
+        "the genuine precondition in the generated file:\n{rust}"
+    );
+    assert!(
+        !rust.contains("debug_assert!(true"),
+        "no placeholder remains (NF-116-2 closed):\n{rust}"
     );
 }

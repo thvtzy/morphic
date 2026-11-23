@@ -47,95 +47,67 @@
 //  produced, so gate clause 3's no-warnings build holds
 //  without a second transcription of the bodies.
 //
-//  NF-116-2 — TAKEN at this crate's surface (R9). The
-//  finding: generated Rust degrades every parsed
-//  `require:` row to `debug_assert!(true, …)`, because a
-//  parsed require lands in `Constraint::Expr` /
+//  NF-116-2 — CLOSED GLOBALLY (Phase 124). The
+//  finding: generated Rust degraded every parsed
+//  `require:` row to `debug_assert!(true, …)`, because
+//  a parsed require lands in `Constraint::Expr` /
 //  `Constraint::Predicate` and the native
-//  `constraint_to_rust` renders only the engine-
-//  constructed forms (True/Not/Eq/Order/And), the rest
-//  falling to its `true` catch-all (the Phase 118 probe
-//  pins the placeholder in `generate`'s output). In this
-//  crate the three frozen preconditions render GENUINELY
-//  (facade_constraint_to_rust below): `int_abs` asserts
+//  `constraint_to_rust` rendered only the engine-
+//  constructed forms. Phase 123 took the fix at this
+//  crate's surface only (a facade-local renderer
+//  substituted genuine asserts for the placeholder
+//  block), naming the global fix as residue: the
+//  renderer is mirrored by the self-host Codegen
+//  spec's equations, so closing it there was a
+//  lockstep cascade of its own. Phase 124 ran that
+//  cascade: `constraint_to_rust` now renders Expr /
+//  Predicate / Or / Implies and all four Order
+//  operators genuinely, in the native emitter and
+//  its self-host mirror alike (the clone rule — a
+//  plain-variable call argument clones at assert
+//  position, since a proposition must not consume
+//  the function's argument — is the renderer's own),
+//  and this crate's local renderer is RETIRED: the
+//  three frozen preconditions are produced by the
+//  global path, byte-identical to what the local
+//  renderer produced (`int_abs` asserts
 //  `x != ((0 - 9223372036854775807) - 1)`, `int_clamp`
 //  asserts `(lo <= hi)`, `list_binary_search` asserts
-//  `list_is_sorted(xs.clone())` — cloned, because the
-//  assert is a proposition and must not consume the
-//  argument (the clone rule: a call argument that is a
-//  plain variable of a non-Copy parameter type clones at
-//  assert position). The asserts keep the standing
-//  Phase 55 form — `debug_assert!` under
-//  `#[cfg(debug_assertions)]` — so an out-of-domain call
-//  panics in a debug build (the R3 contract) and the
-//  block compiles away in release. The renderer walks
-//  Expr/Predicate/Eq/Order/And/Or/Not/Implies recursively
-//  (with Call/BinOp recursion inside expressions);
-//  quantified rows (Forall/Exists) have no value-level
-//  rendering and keep the placeholder — none of the 29
-//  carries one (pinned). THE RESIDUE, named in the open:
-//  the compiler's general Rust emitter keeps the
-//  placeholder — `constraint_to_rust` is mirrored by the
-//  self-host Codegen spec's equations and the synthesized
-//  emitter renders through them (the M3 corpus holds the
-//  two byte-equal), so a native-only arm would split the
-//  emitters; the global fix is a lockstep cascade of the
-//  Phase 113 shape, a phase of its own, NOT absorbed
-//  here. This crate's documentation (lib.rs + README)
-//  states both halves: the asserts here are real, and
-//  the placeholder stands elsewhere.
+//  `list_is_sorted(xs.clone())`). The asserts keep
+//  the standing Phase 55 form — `debug_assert!`
+//  under `#[cfg(debug_assertions)]` — so an
+//  out-of-domain call panics in a debug build (the
+//  R3 contract) and the block compiles away in
+//  release. The one named fallback: quantified rows
+//  (Forall/Exists) have no value-level rendering a
+//  debug_assert could evaluate and keep the `true`
+//  text — named in the renderer's own header, in
+//  the Codegen spec's family-0 doc, and in the
+//  Phase 124 ROAD note; none of the 29 carries one
+//  (pinned).
 //
-//  THE CHAR-PATTERN BLOCKER (measured at this phase,
-//  named in the open): the host rehearsal — all 29
-//  entries against their full frozen batteries in a
-//  clean cargo project — stands at 28/29. The failure
-//  is `char_to_digit`, and the cause is not in this
-//  crate's generation: its shipped body is a Match
-//  over Char literal patterns (the char_guard_table
-//  crown of Phase 111), and the Rust emitter's pattern
-//  renderer (`ir_pattern_to_rust`) renders Int/Bool/
-//  String literal patterns literally but Char — like
-//  every other literal kind — through its `_`
-//  catch-all. All eleven arms widen to `_`; the first
-//  matches every input; the function returns Some(0)
-//  for every Char (1 of its 101 battery points — the
-//  digit 0 itself — agrees, by arm order). The
-//  widening is the F4 caveat the M4 gate recorded:
-//  the frozen (synthesized) emitter widens Char
-//  patterns to `_`, and the native renderer is held
-//  in lockstep with it, so the defect stands in every
-//  generated Rust Char match, not only this crate's.
-//  It escaped the standing pins because the routes
-//  that judged the Char entries — the interpreter,
-//  Z3, and the Phase 120 JS renderer, which carries
-//  Char patterns genuinely (the npm package's
-//  char_to_digit is exact) — never execute the Rust
-//  rendering, and Phase 116's Rust compile+run pins
-//  exercised int_abs / list_sum / option_unwrap_or,
-//  none of them a Char-pattern body. THE ROUTES,
-//  priced: (i) a lockstep cascade closing the
-//  widening in both emitters — the Codegen spec's
-//  pattern equation, artifact regeneration, corpus
-//  re-pin; the Phase 113 shape, ~M as its own phase,
-//  and the same cascade would carry NF-116-2's
-//  global fix; (ii) a facade-local rewrite of
-//  Char-literal Matches into equality If-chains
-//  (S–M) — a different body form for the affected
-//  entries in this crate only, a packaging-surface
-//  body change. Neither is absorbed here (the Phase
-//  112 stop-rule precedent: a mispriced surface
-//  returns to the owner). What this phase does: the
-//  crate assembles complete — the frozen surface is
-//  29, the entry is not dropped — with the defect
-//  NAMED at every surface the crate owns (this
-//  header, the crate docs, the README, the
-//  function's own rustdoc, via KNOWN_DEFECTS below)
-//  and pinned as it stands in the phase's tests, in
-//  the Phase 118 probe tradition; when the widening
-//  closes, the pins fail loudly and are re-aimed.
-//  Gate consequence, recorded for Phase 125: clause
-//  2 cannot pass for the crate until route (i) or
-//  (ii) lands.
+//  THE CHAR-PATTERN WIDENING — CLOSED (Phase 124).
+//  Phase 123's host rehearsal stood at 28/29: the
+//  failure was `char_to_digit`, whose shipped body
+//  is a Match over Char literal patterns, and the
+//  Rust emitter's pattern renderer
+//  (`ir_pattern_to_rust`) rendered Int/Bool/String
+//  literal patterns literally but Char through its
+//  `_` catch-all — all eleven arms widened, the
+//  first matched every input, and the function
+//  returned Some(0) for every Char. The widening
+//  was the F4 caveat the M4 gate recorded, held in
+//  lockstep with the synthesized emitter. The owner
+//  chose route (i) — the full lockstep cascade —
+//  and Phase 124 closed it in both emitters: Char
+//  literal patterns render literally (with the
+//  expression renderer's escaping), the F4 caveat
+//  is retired and F4's resolution is
+//  unconditional, and this crate's host rehearsal
+//  now stands at 29/29, `char_to_digit` at 101/101
+//  included. The defect note this crate carried at
+//  every surface (KNOWN_DEFECTS and its rustdoc
+//  injection) is retired with the defect.
 //
 //  REGENERATION DISCIPLINE (gate clause 4's machinery,
 //  the Phase 122 precedent): the checked assembly —
@@ -163,14 +135,11 @@
 //  Phase 125's release acts, after the gate.
 // ─────────────────────────────────────────────────────────────
 
-use std::collections::HashMap;
-
-use crate::spec::ast::{BinOp, Constraint, Expr, FunctionSpec, OrderOp, TypeRef};
 use crate::synthesis::engine::{CandidateImplementation, Provenance, ScoreBreakdown};
 
 use super::bindings::{self, BindingInput};
 use super::package::PackageFile;
-use super::{constraint_to_rust, expr_to_rust, render_rust_function, rust_ident, CodegenError};
+use super::{render_rust_function, CodegenError};
 
 /// The crate's repo home, relative to the repo root.
 pub const RUST_PACKAGE_DIR: &str = "packages/rust";
@@ -251,24 +220,6 @@ target, or `None` — and that disclosure travels with
 the function (see its manifest row). With duplicate
 targets, any valid index satisfies the contract.
 
-## Known defect
-
-One entry of the 29 does not stand at its battery
-in this crate: `char_to_digit`. Its shipped body is
-a Match over Char literal patterns, which the Rust
-emitter renders as `_` patterns (the Char-pattern
-widening, in lockstep with the synthesized emitter
-since the M4 gate), so as generated it returns
-`Some(0)` for every `char`. The defect is named
-here and in the function's own rustdoc — not
-silently shipped, and the entry is not silently
-dropped from the frozen surface. The npm package's
-form of the function is exact (the JavaScript
-renderer carries Char patterns). Closing the
-widening is a lockstep cascade recorded as the
-assembling phase's named blocker in the project's
-roadmap.
-
 The builtins `len` and `int_to_str` are not exports:
 they are language builtins, rendered inside generated
 code. A host uses its native equivalent — for `len`,
@@ -287,23 +238,20 @@ is `Result<T, E>` — nesting included, no losses.
 
 Functions whose specifications freeze a `require:`
 row carry it as a genuine `debug_assert!` of the
-rendered condition — in this crate, `int_abs` (the
-Int minimum is excluded), `int_clamp` (`lo <= hi`)
-and `list_binary_search` (the list is sorted). The
+rendered condition — `int_abs` (the Int minimum is
+excluded), `int_clamp` (`lo <= hi`) and
+`list_binary_search` (the list is sorted). The
 asserts are debug-only: an out-of-domain call panics
 on the assert in a debug build, and in a release
 build the behaviour is whatever the body computes —
 out-of-domain inputs are contract violations, outside
 the battery-exactness promise.
 
-This is the NF-116-2 fix, taken at this crate's
-surface: the compiler's general Rust emitter still
-renders parsed `require:` rows as
-`debug_assert!(true, ...)` placeholders, because that
-renderer is mirrored by the self-hosting Codegen spec
-and the two emitters are held byte-equal — closing it
-there is a separate lockstep change. The asserts in
-this crate are real.
+The asserts are the compiler pipeline's own
+rendering (NF-116-2, closed globally in Phase 124:
+the emitter renders parsed `require:` rows
+genuinely, in the native emitter and its self-host
+mirror alike).
 
 ## Versioning
 
@@ -370,45 +318,26 @@ const CRATE_LIB_RS: &str = r#"//! Morphic's standard library as ready-to-call Ru
 //! uses `slice.len()`, `s.chars().count()` or
 //! `x.to_string()` as appropriate.
 //!
-//! **Preconditions (NF-116-2, taken here).** A
-//! function whose specification freezes a `require:`
-//! row carries it as a genuine `debug_assert!` of the
-//! rendered condition — `int_abs` (the Int minimum is
-//! excluded), `int_clamp` (`lo <= hi`),
-//! `list_binary_search` (the list is sorted; the
-//! assert clones the list, since a proposition must
-//! not consume the argument). The asserts are
-//! debug-only: an out-of-domain call panics on the
-//! assert in a debug build, and in a release build
-//! the behaviour is whatever the body computes —
+//! **Preconditions (NF-116-2, closed globally in
+//! Phase 124).** A function whose specification
+//! freezes a `require:` row carries it as a genuine
+//! `debug_assert!` of the rendered condition —
+//! `int_abs` (the Int minimum is excluded),
+//! `int_clamp` (`lo <= hi`), `list_binary_search`
+//! (the list is sorted; the assert clones the list,
+//! since a proposition must not consume the
+//! argument). The asserts are debug-only: an
+//! out-of-domain call panics on the assert in a
+//! debug build, and in a release build the
+//! behaviour is whatever the body computes —
 //! out-of-domain inputs are contract violations,
-//! outside the battery-exactness promise. This crate
-//! takes the NF-116-2 fix at its own surface: the
-//! compiler's general Rust emitter still renders
-//! parsed `require:` rows as `debug_assert!(true,
-//! ...)` placeholders, because that renderer is
-//! mirrored by the self-hosting Codegen spec and the
-//! two emitters are held byte-equal; closing it there
-//! is a separate lockstep change, recorded in the
-//! project's roadmap. The asserts in this crate are
-//! real.
-//!
-//! **Known defect — `char_to_digit`.** One entry of
-//! the 29 does not stand at its battery in this
-//! crate: its shipped body is a Match over Char
-//! literal patterns, which the Rust emitter renders
-//! as `_` patterns (the Char-pattern widening, in
-//! lockstep with the synthesized emitter since the
-//! M4 gate), so as generated it returns `Some(0)`
-//! for every `char`. The defect is named here and
-//! in the function's own rustdoc — not silently
-//! shipped, and the entry is not silently dropped
-//! from the frozen surface. The npm package's form
-//! of the function is exact (the JavaScript
-//! renderer carries Char patterns). Closing the
-//! widening is a lockstep cascade recorded as the
-//! assembling phase's named blocker in the
-//! project's roadmap.
+//! outside the battery-exactness promise. The
+//! asserts are the compiler pipeline's own
+//! rendering: the emitter renders parsed `require:`
+//! rows genuinely, in the native emitter and its
+//! self-host mirror alike (the one named fallback
+//! is a quantified row, which has no value-level
+//! rendering; no function here carries one).
 //!
 //! **This crate is an artifact, not a compiler.** It
 //! has no dependencies, no build script and no
@@ -445,8 +374,8 @@ const STDLIB_MODULE_HEAD: &str = r#"//! The 29 frozen standard-library entries a
 //! in its rustdoc; the same facts are in the crate's
 //! `morphic.manifest.json`. Functions whose
 //! specifications freeze a `require:` row carry it
-//! as a genuine `debug_assert!` (NF-116-2, taken at
-//! this crate's surface — see the crate docs).
+//! as a genuine `debug_assert!` (NF-116-2, closed
+//! globally in Phase 124 — see the crate docs).
 
 // Generated code: the emitter's uniform rendering
 // style (full parenthesization of expressions,
@@ -490,185 +419,6 @@ keywords = ["morphic", "verified", "formal-verification", "standard-library"]
 [workspace]
 "#
     )
-}
-
-// ── NF-116-2: the genuine precondition rendering ──────
-//
-// The facade-local constraint renderer. The structured
-// forms the native `constraint_to_rust` already renders
-// render identically here (its arms are the same text);
-// the arms it degrades to `true` — a parsed `require:`
-// row's `Expr` and `Predicate` forms — render genuinely.
-// Recursion is this renderer's own throughout, so a
-// degraded form nested inside And/Or/Not/Implies renders
-// genuinely too. Quantified rows keep the placeholder:
-// a `forall` has no value-level assert rendering, and
-// no frozen entry carries one (pinned in the phase's
-// tests).
-
-/// Whether a Morphic type's Rust form is `Copy` — the
-/// clone rule's test (a call argument that is a plain
-/// variable of a non-Copy parameter type clones at
-/// assert position, so the proposition cannot consume
-/// the function's argument).
-fn type_is_copy(ty: &TypeRef) -> bool {
-    matches!(
-        ty,
-        TypeRef::Int
-            | TypeRef::I8
-            | TypeRef::I16
-            | TypeRef::I32
-            | TypeRef::I64
-            | TypeRef::U8
-            | TypeRef::U16
-            | TypeRef::U32
-            | TypeRef::U64
-            | TypeRef::Float
-            | TypeRef::Bool
-            | TypeRef::Char
-            | TypeRef::Unit
-    )
-}
-
-/// Render a call at assert position: callee arguments
-/// that are plain variables of non-Copy parameter
-/// types (per the callee's frozen spec) render as
-/// `name.clone()`; every other argument renders as it
-/// renders. A callee outside the frozen surface takes
-/// the standing rendering throughout.
-fn assert_call_to_rust(name: &str, args: &[Expr], specs: &HashMap<String, FunctionSpec>) -> String {
-    let callee = specs.get(name);
-    let rendered: Vec<String> = args
-        .iter()
-        .enumerate()
-        .map(|(i, arg)| match (arg, callee.and_then(|s| s.params.get(i))) {
-            (Expr::Var(v), Some(param)) if !type_is_copy(&param.ty) => {
-                format!("{}.clone()", rust_ident(v))
-            }
-            _ => assert_expr_to_rust(arg, specs),
-        })
-        .collect();
-    format!("{}({})", rust_ident(name), rendered.join(", "))
-}
-
-/// Render an expression at assert position: calls and
-/// binary operations recurse through the assert
-/// renderer (so the clone rule reaches calls nested in
-/// a proposition); every other form takes the
-/// emitter's own `expr_to_rust` rendering, standing
-/// catch-alls included.
-fn assert_expr_to_rust(expr: &Expr, specs: &HashMap<String, FunctionSpec>) -> String {
-    match expr {
-        Expr::Call(name, args) => assert_call_to_rust(name, args, specs),
-        Expr::BinOp(op, lhs, rhs) => {
-            let rust_op = match op {
-                BinOp::Add => "+",
-                BinOp::Sub => "-",
-                BinOp::Mul => "*",
-                BinOp::Div => "/",
-                BinOp::Mod => "%",
-                BinOp::Eq => "==",
-                BinOp::Neq => "!=",
-                BinOp::And => "&&",
-                BinOp::Or => "||",
-                BinOp::Lt => "<",
-                BinOp::Le => "<=",
-                BinOp::Gt => ">",
-                BinOp::Ge => ">=",
-                BinOp::Concat => "+",
-            };
-            format!(
-                "({} {} {})",
-                assert_expr_to_rust(lhs, specs),
-                rust_op,
-                assert_expr_to_rust(rhs, specs)
-            )
-        }
-        _ => expr_to_rust(expr),
-    }
-}
-
-/// A frozen precondition, rendered genuinely for the
-/// facade (see this section's header).
-fn facade_constraint_to_rust(
-    constraint: &Constraint,
-    specs: &HashMap<String, FunctionSpec>,
-) -> String {
-    match constraint {
-        Constraint::True => "true".into(),
-        Constraint::Expr(expr) => assert_expr_to_rust(expr, specs),
-        Constraint::Predicate(name, args) => assert_call_to_rust(name, args, specs),
-        Constraint::Not(inner) => {
-            format!("!({})", facade_constraint_to_rust(inner, specs))
-        }
-        Constraint::Eq(a, b) => format!(
-            "{} == {}",
-            assert_expr_to_rust(a, specs),
-            assert_expr_to_rust(b, specs)
-        ),
-        Constraint::Order(op, a, b) => {
-            let rust_op = match op {
-                OrderOp::LessThan => "<",
-                OrderOp::LessThanOrEqual => "<=",
-                OrderOp::GreaterThan => ">",
-                OrderOp::GreaterThanOrEqual => ">=",
-            };
-            format!(
-                "{} {} {}",
-                assert_expr_to_rust(a, specs),
-                rust_op,
-                assert_expr_to_rust(b, specs)
-            )
-        }
-        Constraint::And(parts) => {
-            let p: Vec<String> = parts
-                .iter()
-                .map(|c| facade_constraint_to_rust(c, specs))
-                .collect();
-            format!("({})", p.join(" && "))
-        }
-        Constraint::Or(parts) => {
-            let p: Vec<String> = parts
-                .iter()
-                .map(|c| facade_constraint_to_rust(c, specs))
-                .collect();
-            format!("({})", p.join(" || "))
-        }
-        Constraint::Implies(a, b) => format!(
-            "(!({}) || ({}))",
-            facade_constraint_to_rust(a, specs),
-            facade_constraint_to_rust(b, specs)
-        ),
-        // No value-level rendering exists for a
-        // quantified row; the standing placeholder
-        // stands (no frozen entry carries one).
-        Constraint::Forall { .. } | Constraint::Exists { .. } => "true".into(),
-    }
-}
-
-/// The precondition block of `render_rust_function`,
-/// rebuilt with a chosen constraint renderer — the
-/// block's format is that function's own (Phase 55:
-/// the `#[cfg(debug_assertions)]` guard, one
-/// `debug_assert!` per row, the trailing blank line).
-/// Building the block twice — once with the native
-/// renderer, once with the facade's — lets the
-/// assembly substitute the genuine block for the
-/// placeholder block by exact text, never by pattern
-/// guessing.
-fn precondition_block(spec: &FunctionSpec, render: impl Fn(&Constraint) -> String) -> String {
-    if spec.preconditions.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("#[cfg(debug_assertions)]\n{\n");
-    for pre in &spec.preconditions {
-        out.push_str(&format!(
-            "    debug_assert!({}, \"Precondition violated\");\n",
-            render(pre)
-        ));
-    }
-    out.push_str("}\n\n");
-    out
 }
 
 /// Escape a doc line for rustdoc carriage: a `[...]`
@@ -730,39 +480,17 @@ fn candidate_of(input: &BindingInput) -> CandidateImplementation {
     }
 }
 
-/// Known defects carried in the open (see this
-/// file's header, "THE CHAR-PATTERN BLOCKER"): an
-/// entry named here gains the note as an extra
-/// rustdoc paragraph in the assembled crate, so the
-/// defect stands at the function's own surface, not
-/// only in repo docs. The list is data: when the
-/// widening closes, the entry's regenerated form no
-/// longer matches the phase pin that holds this
-/// note's presence, and the note comes out.
-const KNOWN_DEFECTS: &[(&str, &str)] = &[(
-    "char_to_digit",
-    "Known defect — the Char-pattern widening (Phase 123, named in the open): \
-     this entry's shipped body is a Match over Char literal patterns, which \
-     the Rust emitter renders as `_` patterns (the pattern renderer's Literal \
-     catch-all, in lockstep with the synthesized emitter since the M4 gate). \
-     As generated, the first arm matches every input: this function returns \
-     Some(0) for every Char and does NOT stand at its frozen battery in this \
-     crate (1 of its 101 battery points — the digit 0 itself — agrees, by \
-     accident of arm order). The npm package's form of this function is \
-     exact (the JavaScript renderer carries Char patterns). The entry is \
-     carried named — not silently wrong, and not silently dropped from the \
-     frozen surface of 29. Closing the widening is a lockstep cascade of \
-     the Phase 113 shape, recorded as the assembling phase's named blocker.",
-)];
-
 /// One facade function: the pipeline's own rendering
 /// of the shipped body (`render_rust_function`), its
 /// file-head doc block re-carried as the function's
 /// rustdoc with the §2.4 prose (tier, verdict basis,
-/// battery), and its precondition block — when the
-/// spec carries preconditions the native renderer
-/// degrades — substituted with the genuine rendering.
-fn facade_function(input: &BindingInput, specs: &HashMap<String, FunctionSpec>) -> String {
+/// battery). The precondition block stands as the
+/// pipeline renders it — genuinely, since Phase 124
+/// closed NF-116-2 in the global renderer (the
+/// facade-local substitution of Phase 123 is
+/// retired; the global path produces the same three
+/// asserts byte-for-byte).
+fn facade_function(input: &BindingInput) -> String {
     let rendered = render_rust_function(&candidate_of(input));
 
     // Split the file-head doc block (`//!` lines + the
@@ -778,24 +506,7 @@ fn facade_function(input: &BindingInput, specs: &HashMap<String, FunctionSpec>) 
             break;
         }
     }
-    let mut function_text = rest.strip_prefix('\n').unwrap_or(rest).to_string();
-
-    // NF-116-2: substitute the genuine precondition
-    // block for the placeholder block, by exact text.
-    let placeholder = precondition_block(&input.spec, |c| constraint_to_rust(c));
-    if !placeholder.is_empty() {
-        let genuine = precondition_block(&input.spec, |c| {
-            facade_constraint_to_rust(c, specs)
-        });
-        if genuine != placeholder {
-            assert!(
-                function_text.contains(&placeholder),
-                "facade: {}'s rendered form carries its precondition block",
-                input.spec.name
-            );
-            function_text = function_text.replacen(&placeholder, &genuine, 1);
-        }
-    }
+    let function_text = rest.strip_prefix('\n').unwrap_or(rest).to_string();
 
     // The rustdoc: the entry's doc verbatim (with the
     // rustdoc link escape), then the §2.4 prose —
@@ -814,14 +525,6 @@ fn facade_function(input: &BindingInput, specs: &HashMap<String, FunctionSpec>) 
         "/// Battery: {} pinned, {} spec-silent\n",
         input.battery_pinned, input.battery_silent
     ));
-    for (name, note) in KNOWN_DEFECTS {
-        if *name == input.spec.name {
-            out.push_str("///\n");
-            for line in note.lines() {
-                out.push_str(&format!("/// {}\n", escape_rustdoc_line(line)));
-            }
-        }
-    }
     out.push_str(&function_text);
     out
 }
@@ -830,14 +533,10 @@ fn facade_function(input: &BindingInput, specs: &HashMap<String, FunctionSpec>) 
 /// every frozen function, in §2.1's order (the input
 /// order — `bindings::stdlib_inputs` is frozen in it).
 fn stdlib_module(inputs: &[BindingInput]) -> String {
-    let specs: HashMap<String, FunctionSpec> = inputs
-        .iter()
-        .map(|i| (i.spec.name.clone(), i.spec.clone()))
-        .collect();
     let mut out = String::from(STDLIB_MODULE_HEAD);
     out.push('\n');
     for input in inputs {
-        out.push_str(&facade_function(input, &specs));
+        out.push_str(&facade_function(input));
         out.push('\n');
     }
     out

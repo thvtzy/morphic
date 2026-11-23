@@ -29,28 +29,32 @@
 //!   functions in §2.1's order, each with its tier +
 //!   verdict basis + battery in its rustdoc, under the
 //!   generated module's scoped lint allowances;
-//! * NF-116-2 is taken at the crate's surface: no
-//!   `debug_assert!(true` placeholder anywhere; the
-//!   three frozen preconditions render genuinely
-//!   (verbatim pins), and no other function carries a
-//!   precondition block;
-//! * THE CHAR-PATTERN BLOCKER, pinned as it stands in
-//!   the Phase 118 probe tradition: `char_to_digit`'s
-//!   generated form is the widened one (eleven `_`
-//!   arms), its defect note stands at its rustdoc, the
-//!   crate docs and the README — exactly one function
-//!   carries a defect note — and the compiled harness
-//!   asserts the measured wrong behaviour as today's
-//!   truth. When the widening closes (the lockstep
-//!   cascade, route (i), or the facade-local rewrite,
-//!   route (ii)), these pins fail loudly and are
-//!   re-aimed at the new truth at their sites;
+//! * NF-116-2 was taken at the crate's surface in
+//!   this phase (a facade-local renderer); Phase 124
+//!   closed it globally and retired the local
+//!   renderer — the pins below hold the global path's
+//!   output: no `debug_assert!(true` placeholder
+//!   anywhere; the three frozen preconditions render
+//!   genuinely (verbatim pins, byte-identical to what
+//!   the local renderer produced), and no other
+//!   function carries a precondition block;
+//! * THE CHAR-PATTERN WIDENING, closed by Phase
+//!   124's lockstep cascade (route (i), the owner's
+//!   choice): `char_to_digit`'s generated form
+//!   carries its literal Char arms (exactly one `_`
+//!   arm — the shipped wildcard), no surface of the
+//!   crate carries a defect note, and the compiled
+//!   harness answers the entry's full 101-point
+//!   battery. (Phase 123 pinned the widened form as
+//!   it stood, in the Phase 118 probe tradition;
+//!   Phase 124 re-aimed those pins at the new truth,
+//!   as they said they would be.)
 //! * the generated module compiles standalone under
 //!   `rustc --test` and answers the representative
-//!   frozen battery (the Phase 121/122 host set minus
-//!   the blocked entry: 116 points) at 100%, with the
-//!   three genuine asserts panicking on out-of-domain
-//!   calls under debug assertions.
+//!   frozen battery (the Phase 121/122 host set, now
+//!   complete with `char_to_digit`: 217 points) at
+//!   100%, with the three genuine asserts panicking
+//!   on out-of-domain calls under debug assertions.
 //!
 //! Configuration note (the standing one): pins that read
 //! the NATIVE prelude are gated
@@ -292,9 +296,10 @@ fn nf116_2_genuine_asserts_replace_the_placeholder() {
         "no precondition degrades to the placeholder in this crate"
     );
     // The three frozen preconditions, rendered
-    // genuinely (verbatim pins — the facade renderer
-    // of codegen::facade, incl. the clone rule for the
-    // predicate's List argument).
+    // genuinely (verbatim pins — since Phase 124 the
+    // global renderer's own arms, the clone rule
+    // included; byte-identical to the facade-local
+    // renderings this phase first pinned).
     for genuine in [
         "debug_assert!((x != ((0 - 9223372036854775807) - 1)), \"Precondition violated\");",
         "debug_assert!((lo <= hi), \"Precondition violated\");",
@@ -317,17 +322,17 @@ fn nf116_2_genuine_asserts_replace_the_placeholder() {
     );
 }
 
-// ── The Char-pattern blocker, pinned as it stands ────
+// ── The Char-pattern widening: closed (Phase 124) ──
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn char_pattern_widening_is_pinned_as_it_stands() {
+fn char_patterns_render_literally_after_the_cascade() {
     let files = assembled();
     let module = &files["src/stdlib.rs"];
-    // char_to_digit's generated form: the match over
-    // eleven widened arms (the pattern renderer's
-    // Literal catch-all — see codegen::facade's
-    // header for the finding and the priced routes).
+    // char_to_digit's generated form after Phase
+    // 124's cascade: the literal Char arms stand;
+    // exactly one `_` arm remains — the shipped
+    // body's own wildcard.
     let start = module
         .find("pub fn char_to_digit(")
         .expect("char_to_digit is carried");
@@ -337,32 +342,37 @@ fn char_pattern_widening_is_pinned_as_it_stands() {
         .unwrap_or(module.len());
     let segment = &module[start..end];
     assert!(segment.contains("match c {"), "{segment}");
+    for arm in [
+        "'0' =>", "'1' =>", "'2' =>", "'3' =>", "'4' =>", "'5' =>", "'6' =>", "'7' =>",
+        "'8' =>", "'9' =>",
+    ] {
+        assert!(segment.contains(arm), "the literal arm stands: {arm}");
+    }
     assert_eq!(
         segment.matches("_ => {").count(),
-        11,
-        "all eleven Char literal arms widen to `_` as the emitter stands"
+        1,
+        "only the shipped wildcard arm renders as `_`"
     );
-    // The defect is named at every surface the crate
-    // owns, exactly for this one entry.
+    // The defect note is retired at every surface the
+    // crate owns.
     assert_eq!(
         module.matches("Known defect").count(),
-        1,
-        "exactly one function carries a defect note: char_to_digit"
+        0,
+        "no function carries a defect note"
     );
-    assert!(files["src/lib.rs"].contains("Known defect — `char_to_digit`"));
-    assert!(files["README.md"].contains("## Known defect"));
-    assert!(files["README.md"].contains("`char_to_digit`"));
+    assert!(!files["src/lib.rs"].contains("Known defect"));
+    assert!(!files["README.md"].contains("## Known defect"));
 }
 
 // ── The compiled battery (rustc --test harness) ──────
 
 /// The harness battery: the Phase 121/122 clean-host
-/// set minus the blocked entry — int_clamp 13,
+/// set, complete since Phase 124 — int_clamp 13,
 /// option_unwrap_or 28, option_ok_or 9,
-/// result_unwrap_or 36, list_sum 15, list_min 15 =
-/// 116 frozen points, expectations by the batteries'
-/// own mirrors — plus the widening pin (today's
-/// measured truth) and the three assert panics.
+/// result_unwrap_or 36, list_sum 15, list_min 15,
+/// char_to_digit 101 = 217 frozen points,
+/// expectations by the batteries' own mirrors — plus
+/// the three assert panics.
 #[cfg(not(feature = "wasm-playground"))]
 const HARNESS_TESTS: &str = r##"
 #[cfg(test)]
@@ -444,17 +454,24 @@ mod facade_battery {
         }
     }
 
-    /// The blocker, as it stands: the widened match
-    /// returns the first arm for every input. These
-    /// assertions state today's measured truth (the
-    /// Phase 118 tradition); the cascade that closes
-    /// the widening re-aims them.
+    /// char_to_digit's full frozen battery (101
+    /// points — the Phase 111 alphabet), open since
+    /// Phase 124 closed the Char-pattern widening:
+    /// the digit chars map to their values, every
+    /// other char to None (the Phase 111 mirror).
     #[test]
-    fn widening_pin_char_to_digit_as_it_stands() {
-        assert_eq!(char_to_digit('0'), Some(0), "the one agreeing point");
-        assert_eq!(char_to_digit('5'), Some(0), "widened: the first arm answers");
-        assert_eq!(char_to_digit(' '), Some(0), "widened: the first arm answers");
-        assert_eq!(char_to_digit('a'), Some(0), "widened: the first arm answers");
+    fn battery_char_to_digit() {
+        let mut chars: Vec<char> = (32..=126u8).map(char::from).collect();
+        chars.extend(['\t', '\n', '\r', '\u{0}', '\u{b}', '\u{7f}']);
+        assert_eq!(chars.len(), 101, "the frozen alphabet");
+        for c in chars {
+            let want = if c.is_ascii_digit() {
+                Some(c as i64 - '0' as i64)
+            } else {
+                None
+            };
+            assert_eq!(char_to_digit(c), want, "char {c:?}");
+        }
     }
 
     #[test]
