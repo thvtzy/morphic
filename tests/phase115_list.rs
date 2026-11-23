@@ -485,6 +485,7 @@ fn dbg(node: &IRNode) -> String {
 
 // ── The pin ──────────────────────────────────────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn tier2_docs_name_the_tier() {
     let specs = list_specs();
@@ -630,6 +631,7 @@ fn tier2_verdicts_are_inconclusive_the_section_3_9_standing() {
 /// re-crowned and the data updated, in the open (the
 /// Tier-1 discipline).
 #[cfg(feature = "z3-support")]
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn the_pipeline_crowns_no_verified_tier2_body() {
     for (name, total) in BATTERIES {
@@ -685,6 +687,7 @@ fn section_3_4_measured() {
 /// never the Tier-1 standard) and records the sample
 /// it drew. Nothing here touches `runner::trigger`.
 #[cfg(feature = "z3-support")]
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn section_3_4_the_pipeline_crown_for_is_sorted_is_unstable() {
     let report = api::synthesize_seeded_spec(LIST_SRC, "list_is_sorted", 42)
