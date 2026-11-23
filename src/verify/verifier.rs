@@ -1331,7 +1331,158 @@ enum Sym {
         ok_payload: Option<Box<Sym>>,
         err_payload: Option<Box<Sym>>,
     },
+    /// A function-typed parameter in the UF arm's slice
+    /// (Phase 133, G4 D6a / G4_SCOPE §4): the parameter as
+    /// a Z3 uninterpreted function of its declared
+    /// signature. Its only symbolic life is application
+    /// (`sym_apply`) — Z3's congruence is the whole of
+    /// what the arm proves. Every other use declines:
+    /// function values have no equality (D5a — the
+    /// comparison is refused, never encoded as symbol
+    /// equality), no order, no arithmetic, no projection.
+    /// The declaration itself is carried by NAME (the
+    /// pinned z3 crate's `FuncDecl` is not `Clone`): it
+    /// is rebuilt at each use and Z3 interns declarations
+    /// by (name, domain, range), so every rebuild is the
+    /// one symbol — the `int_to_str_uf` precedent.
+    Func {
+        name: String,
+        domain: Vec<UfSort>,
+        range: UfSort,
+    },
     Opaque,
+}
+
+/// A sort in the UF arm's slice (Phase 133, G4_SCOPE §4):
+/// the Z3 sorts whose symbolic values are plain terms
+/// carrying no side conditions — the Int family on the
+/// Int sort, Bool, String. Char is named OUT in both
+/// positions: a UF-produced Char would owe a D5a range
+/// side condition no collector asserts (a countermodel
+/// could refute through a surrogate — the fabricated-
+/// countermodel class the F2 discipline exists to
+/// refuse), and a Char domain point is only as good as
+/// the side conditions its provenance happens to carry.
+/// List / Option / Result / Record / function types have
+/// no Z3 sort in this encoder at all. A signature
+/// mentioning anything outside the slice keeps the
+/// parameter's standing Opaque binding, and its
+/// applications stay unencodable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "z3-support")]
+enum UfSort {
+    Int,
+    Bool,
+    Str,
+}
+
+#[cfg(feature = "z3-support")]
+impl UfSort {
+    fn sort(self) -> z3::Sort {
+        match self {
+            UfSort::Int => z3::Sort::int(),
+            UfSort::Bool => z3::Sort::bool(),
+            UfSort::Str => z3::Sort::string(),
+        }
+    }
+}
+
+/// The UF sort of a single type, if it lies in the slice.
+#[cfg(feature = "z3-support")]
+fn uf_sort_of(ty: &TypeRef) -> Option<UfSort> {
+    match ty {
+        TypeRef::Int
+        | TypeRef::I8
+        | TypeRef::I16
+        | TypeRef::I32
+        | TypeRef::I64
+        | TypeRef::U8
+        | TypeRef::U16
+        | TypeRef::U32
+        | TypeRef::U64 => Some(UfSort::Int),
+        TypeRef::Bool => Some(UfSort::Bool),
+        TypeRef::String => Some(UfSort::Str),
+        _ => None,
+    }
+}
+
+/// The UF signature of a function type, if every domain
+/// sort and the range sort lie in the slice.
+#[cfg(feature = "z3-support")]
+fn uf_signature(ty: &TypeRef) -> Option<(Vec<UfSort>, UfSort)> {
+    let TypeRef::Function(params, ret) = ty else {
+        return None;
+    };
+    let mut domain = Vec::with_capacity(params.len());
+    for p in params {
+        domain.push(uf_sort_of(p)?);
+    }
+    Some((domain, uf_sort_of(ret)?))
+}
+
+/// The UF declaration for a name and signature, rebuilt
+/// at each use (see `Sym::Func` on why the declaration is
+/// carried by name).
+#[cfg(feature = "z3-support")]
+fn uf_decl(name: &str, domain: &[UfSort], range: UfSort) -> z3::FuncDecl {
+    let domain_sorts: Vec<z3::Sort> = domain.iter().map(|s| s.sort()).collect();
+    let domain_refs: Vec<&z3::Sort> = domain_sorts.iter().collect();
+    z3::FuncDecl::new(name, &domain_refs, &range.sort())
+}
+
+/// Apply a function-typed parameter's UF to encoded
+/// arguments (Phase 133): the arm's one operation. The
+/// argument values must carry exactly the domain's sorts
+/// — an Int term at an Int point, and so on — and the
+/// arity must match the declared signature; anything
+/// else declines. The result is the range sort's plain
+/// symbolic value. Congruence is Z3's own (identical
+/// argument terms yield identical result terms) and
+/// nothing beyond congruence is asserted anywhere: no
+/// point values, no extensionality, no injectivity.
+///
+/// Refutation standing: the parameter is universally
+/// quantified — the spec claims its rows for EVERY
+/// function — so a countermodel's finite point graph is
+/// a real function and a Sat through this arm is a
+/// genuine refutation. (The `int_to_str` UF of Phase 100
+/// differs exactly here: it stands for ONE specific
+/// function, its models need not be that function, and
+/// its Sat is guarded — `int_to_str_apps` +
+/// `check_and_eval_ints_uf_guarded`, untouched by this
+/// arm; a row mentioning both UFs is still scanned and
+/// guarded on the `int_to_str` applications.)
+#[cfg(feature = "z3-support")]
+fn sym_apply(func: &Sym, args: Vec<Sym>) -> Option<Sym> {
+    let Sym::Func {
+        name,
+        domain,
+        range,
+    } = func
+    else {
+        return None;
+    };
+    if args.len() != domain.len() {
+        return None;
+    }
+    let mut terms: Vec<z3::ast::Dynamic> = Vec::with_capacity(args.len());
+    for (arg, want) in args.into_iter().zip(domain.iter()) {
+        let term = match (arg, want) {
+            (Sym::Int(i), UfSort::Int) => z3::ast::Dynamic::from_ast(&i),
+            (Sym::Bool(b), UfSort::Bool) => z3::ast::Dynamic::from_ast(&b),
+            (Sym::Str(s), UfSort::Str) => z3::ast::Dynamic::from_ast(&s),
+            _ => return None,
+        };
+        terms.push(term);
+    }
+    let refs: Vec<&dyn z3::ast::Ast> =
+        terms.iter().map(|t| t as &dyn z3::ast::Ast).collect();
+    let applied = uf_decl(name, domain, *range).apply(&refs);
+    match range {
+        UfSort::Int => applied.as_int().map(Sym::Int),
+        UfSort::Bool => applied.as_bool().map(Sym::Bool),
+        UfSort::Str => applied.as_string().map(Sym::Str),
+    }
 }
 
 #[cfg(feature = "z3-support")]
@@ -1524,9 +1675,27 @@ fn fresh_sym(ty: &TypeRef, path: &str, index: &SpecIndex, depth: usize) -> Sym {
             },
             None => Sym::Opaque,
         },
-        // Float, Unit, tuples, sets/maps, function types,
-        // generics, references, streams: no representable
-        // sort in this encoder.
+        // A function-typed parameter (Phase 133, G4 D6a):
+        // an uninterpreted function of its declared
+        // signature when the signature lies in the UF
+        // arm's slice (see `uf_signature`); outside the
+        // slice it keeps the standing Opaque binding. The
+        // declaration is named after the binding path
+        // under a prefix no spec or builtin can carry, so
+        // it can never be mistaken for the `int_to_str`
+        // UF (whose applications the refutation guard
+        // scans for by name) or for another parameter's.
+        TypeRef::Function(..) => match uf_signature(ty) {
+            Some((domain, range)) => Sym::Func {
+                name: format!("uf_param_{path}"),
+                domain,
+                range,
+            },
+            None => Sym::Opaque,
+        },
+        // Float, Unit, tuples, sets/maps, generics,
+        // references, streams: no representable sort in
+        // this encoder.
         _ => Sym::Opaque,
     }
 }
@@ -2005,6 +2174,12 @@ fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
         // A list scrutinee has no literal patterns; an Opaque
         // scrutinee cannot be compared at all.
         (Sym::List(_), _) | (Sym::Opaque, _) => PatternCond::Undecidable,
+        // A function scrutinee (Phase 133): the arm gives
+        // the value no symbolic life beyond application, so
+        // a pattern comparison declines — Undecidable, not
+        // the Never below (disjointness would be a fact
+        // about the value the arm does not trade in).
+        (Sym::Func { .. }, _) => PatternCond::Undecidable,
         // Remaining pairs are provably disjoint sorts —
         // records, tagged values and list-lengths never equal
         // a literal pattern, and a Char never equals an Int,
@@ -2065,6 +2240,24 @@ fn sym_call(function: &str, args: &[IRNode], env: &mut SymEnv, ctx: &EvalCtx) ->
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
                 values.push(sym_eval(arg, env, ctx)?);
+            }
+            // Phase 133 (G4 D6a): a call naming a
+            // function-typed PARAMETER encodes as UF
+            // application. The checker's admission order
+            // (Phase 129) resolves a callee against module
+            // signatures before the parameter environment,
+            // so the arm engages under the same condition:
+            // the index holds no spec of this name and the
+            // environment binds the name to a UF. When it
+            // engages, its outcome is final — an arity or
+            // sort mismatch declines, never falls through
+            // to inlining a namesake.
+            if ctx.index.get(function).is_none() {
+                if let Some(func) = env.get(function) {
+                    if matches!(func, Sym::Func { .. }) {
+                        return sym_apply(func, values);
+                    }
+                }
             }
             sym_invoke(ctx, function, values)
         }
@@ -4117,6 +4310,20 @@ fn stmt_havoc(v: &Sym, path: &str, index: &SpecIndex) -> Option<Sym> {
                 index,
             )?)),
         }),
+        // A function value (Phase 133): its fresh form is
+        // a fresh UF of the same signature under the
+        // havoc path's own name — an arbitrary OTHER
+        // function, which is what havoc means. (The
+        // caller's paths are never the binding path, so
+        // the fresh declaration never coincides with the
+        // value's own.)
+        Sym::Func {
+            domain, range, ..
+        } => Some(Sym::Func {
+            name: format!("uf_param_{path}"),
+            domain: domain.clone(),
+            range: *range,
+        }),
         Sym::CharStr(_) => None,
         Sym::Opaque => Some(Sym::Opaque),
     }
@@ -4953,6 +5160,19 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 let mut values = Vec::with_capacity(args.len());
                 for a in args {
                     values.push(encode_expr(a, env, ctx)?);
+                }
+                // Phase 133 (G4 D6a): a call naming a
+                // function-typed parameter encodes as UF
+                // application, under the same condition as
+                // the body side (`sym_call`): no spec of
+                // this name in the index, and the
+                // environment binds the name to a UF.
+                if ctx.index.get(name).is_none() {
+                    if let Some(func) = env.get(name) {
+                        if matches!(func, Sym::Func { .. }) {
+                            return sym_apply(func, values);
+                        }
+                    }
                 }
                 sym_invoke(ctx, name, values)
             }

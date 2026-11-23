@@ -26,10 +26,11 @@
 //! binding and in-process judging pins; Phase 132
 //! (named-reference supply) flipped the named-reference
 //! probe below — the name binds and judges through a module
-//! index, and the context-free route's pins stand. The
-//! verifier and emitter pins are untouched — those layers
-//! are Phases 133's and the standing exclusions'
-//! respectively.
+//! index, and the context-free route's pins stand. Phase 133
+//! (the UF arm) flipped the verifier pin in the apply probe
+//! below — the body is encodable and the specimen Verifies.
+//! The emitter pins are untouched — that layer is the
+//! standing exclusions'.
 
 use morphic::spec::ast::{Expr, FunctionSpec, TypeRef};
 use morphic::spec::{parser, typeck};
@@ -161,15 +162,24 @@ fn phase127_apply_spec_end_to_end() {
         vec![eval::TestOutcome::Passed, eval::TestOutcome::Passed]
     );
 
-    // Z3: the apply body is outside the encodable subset, and
-    // the verdict over the (unchecked) spec is Inconclusive.
+    // Z3: Phase 133 (D6a) — the apply body encodes under
+    // the UF arm and the specimen Verifies on congruence.
+    // (The audit's standing, pinned here until this phase:
+    // unencodable, Inconclusive.)
     let encodable = verifier::body_is_encodable(&spec, &apply_twice_body());
     let verdict = Verifier::new()
         .verify_one(&candidate(&spec, apply_twice_body()), &spec)
         .status;
     println!("P127|apply|encodable={encodable}|verify={verdict:?}");
-    assert!(!encodable);
-    assert_eq!(verdict, VerificationStatus::Inconclusive);
+    #[cfg(feature = "z3-support")]
+    {
+        assert!(encodable, "the apply body is encodable since Phase 133");
+        assert_eq!(verdict, VerificationStatus::Verified);
+    }
+    #[cfg(not(feature = "z3-support"))]
+    {
+        assert_eq!(verdict, VerificationStatus::Inconclusive);
+    }
 }
 
 #[test]
