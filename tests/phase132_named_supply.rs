@@ -109,6 +109,7 @@ fn phase132_named_reference_binds_and_judges() {
     assert_eq!(eval::valued_test_count_in(&body, apply_named, &index), 1);
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase132_shipped_entry_supply_and_collision_rule() {
     // A shipped entry named in a function position: the

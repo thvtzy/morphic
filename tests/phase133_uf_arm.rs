@@ -560,6 +560,7 @@ fn phase133_corpus_verdict_table() {
     // instrument only prints.
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase133_corpus_verdict_drift() {
     // Gate clause 3's discipline, applied at the phase:

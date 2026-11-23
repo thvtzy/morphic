@@ -54,6 +54,7 @@ fn outcome_of(path: &Path) -> String {
     }
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase129_corpus_check_outcomes() {
     // The standing corpus, pinned as measured BEFORE the
