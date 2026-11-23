@@ -32,7 +32,7 @@
 //
 //  2. THE COMPILED ADAPTER ≡ THE ORIGINAL EMITTER, over both
 //     corpora (m5_s1_adapter_equivalence):
-//       A. the M3 gate corpus (2,721 cases, built by the
+//       A. the M3 gate corpus (2,733 cases, built by the
 //          gate's own corpus builders): adapter vs original
 //          vs the interpreter composition (mode B) — three
 //          ways, byte-compared per case, tallied per class;
@@ -348,7 +348,7 @@ struct ClassTally {
 }
 
 #[test]
-#[ignore = "M5-S1 equivalence: M3 corpus (2,721 cases) + M4 corpus (156 whole files, 156 pipeline runs); run explicitly with --ignored --nocapture m5_s1_adapter_equivalence"]
+#[ignore = "M5-S1 equivalence: M3 corpus (2,733 cases) + M4 corpus (156 whole files, 156 pipeline runs); run explicitly with --ignored --nocapture m5_s1_adapter_equivalence"]
 fn m5_s1_adapter_equivalence() {
     let root = env!("CARGO_MANIFEST_DIR");
     let out_dir = format!("{}/target/m5-s1", root);
@@ -387,7 +387,7 @@ fn m5_s1_adapter_equivalence() {
         sets.push((file, set));
     }
     cases.extend(m3_gate::winner_corpus(&sets));
-    assert_eq!(cases.len(), 2721, "the M3 gate corpus size (Phase 113 re-derivation: Phase 102's 2,717 + 4 — the 4 new spec-expr proof cases for the Option method forms (method-is-some, method-is-none, method-unwrap-option, method-is-some-args); the winner set is unchanged at 130 and the widened rust_expr_method_form winner contributes no new unique subtree)");
+    assert_eq!(cases.len(), 2733, "the M3 gate corpus size (Phase 124 re-derivation: Phase 113's 2,721 + 12 — 6 new proof-constraint cases for the genuine constraint rendering (or-two, predicate-clone, expr-binop, expr-call-clone, implies, exists-catchall) + 6 net new in-spec tests across the six amended Codegen equations (constraint-form +4, order-separator +2, pattern-literal-form +1, pattern-literal-text −1); the winner set is unchanged at 130");
 
     let composed_b = Composed {
         w: &winners,

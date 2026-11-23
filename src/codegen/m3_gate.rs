@@ -1070,8 +1070,14 @@ impl<'a> Composed<'a> {
             // the literal winner, as in expression position.
             IRLiteral::String(s) => self
                 .text1("rust_string_literal_text", v_text(&self.literal_contents(s)))?,
-            // Float / Char / Unit widen to the wildcard text
-            // the rust_pattern_literal_text table pins.
+            // Phase 124: Char literal patterns render
+            // literally — the escaped character inside
+            // single quotes, the expression position's
+            // own glue (as in literal_text below),
+            // retiring the F4 widening. Float / Unit
+            // widen to the wildcard text the
+            // rust_pattern_literal_text table pins.
+            IRLiteral::Char(c) => format!("'{}'", escape_rust_char(*c)),
             other => self.text1("rust_pattern_literal_text", v_int(lit_kind(other)))?,
         })
     }
@@ -1229,9 +1235,19 @@ impl<'a> Composed<'a> {
 
     fn constraint_text(&self, cons: &Constraint) -> Result<String, String> {
         Ok(match cons {
+            // Phase 124 (NF-116-2, global): the Expr and
+            // Predicate forms render genuinely, through
+            // the assert-position walker below — as the
+            // original now renders them.
+            Constraint::Expr(expr) => self.sexpr_assert_text(expr)?,
+            Constraint::Predicate(name, args) => self.sexpr_assert_call(name, args)?,
             Constraint::Not(inner) => format!("!({})", self.constraint_text(inner)?),
             Constraint::Eq(a, b) => {
-                format!("{} == {}", self.sexpr_text(a)?, self.sexpr_text(b)?)
+                format!(
+                    "{} == {}",
+                    self.sexpr_assert_text(a)?,
+                    self.sexpr_assert_text(b)?
+                )
             }
             Constraint::Order(op, a, b) => {
                 let sep = self.text1("rust_order_separator", v_int(order_code(*op)))?;
@@ -1241,14 +1257,19 @@ impl<'a> Composed<'a> {
                     // with no separator render the constant
                     // "true" — assembly glue, exactly as the
                     // assembly writes it. (rust_order_form
-                    // classifies this fallback as form 2 but
-                    // returns a code, not text; the
-                    // rust_constraint_fixed_text table is
-                    // keyed by constraint KIND and has no
-                    // Order row.)
+                    // classifies the separator-less row, but
+                    // since the Phase 124 amendment every
+                    // OrderOp carries a separator, so this
+                    // branch is the table's silence, never a
+                    // rendering.)
                     "true".to_string()
                 } else {
-                    format!("{}{}{}", self.sexpr_text(a)?, sep, self.sexpr_text(b)?)
+                    format!(
+                        "{}{}{}",
+                        self.sexpr_assert_text(a)?,
+                        sep,
+                        self.sexpr_assert_text(b)?
+                    )
                 }
             }
             Constraint::And(parts) => {
@@ -1256,10 +1277,83 @@ impl<'a> Composed<'a> {
                     parts.iter().map(|p| self.constraint_text(p)).collect();
                 format!("({})", rendered?.join(" && "))
             }
-            // True and every catch-all kind: the fixed text
-            // the rust_constraint_fixed_text table pins.
+            Constraint::Or(parts) => {
+                let rendered: Result<Vec<String>, String> =
+                    parts.iter().map(|p| self.constraint_text(p)).collect();
+                format!("({})", rendered?.join(" || "))
+            }
+            Constraint::Implies(a, b) => format!(
+                "(!({}) || ({}))",
+                self.constraint_text(a)?,
+                self.constraint_text(b)?
+            ),
+            // True and the two quantified kinds: the
+            // fixed text the rust_constraint_fixed_text
+            // table pins (the quantified pair is the
+            // named fallback — no value-level rendering
+            // of a quantified proposition exists).
             _ => self.text1("rust_constraint_fixed_text", v_int(constraint_kind(cons)))?,
         })
+    }
+
+    /// Assert-position spec expressions (Phase 124):
+    /// the constraint walker's operand rendering — the
+    /// original's assert_expr_to_rust, composed as the
+    /// original composes it: calls and binary operations
+    /// recurse through the assert walker (the clone rule
+    /// reaches calls nested in a proposition); the
+    /// pseudo-calls keep their forms over assert-rendered
+    /// operands; every other form takes sexpr_text's
+    /// rendering.
+    fn sexpr_assert_text(&self, expr: &SpecExpr) -> Result<String, String> {
+        Ok(match expr {
+            SpecExpr::Call(name, args) => {
+                let form = self
+                    .w
+                    .call_int("rust_expr_call_form", &[v_text(name)])?;
+                match form {
+                    1 => {
+                        let rendered: Result<Vec<String>, String> =
+                            args.iter().map(|a| self.sexpr_assert_text(a)).collect();
+                        self.text1("rust_expr_list_text", v_text(&rendered?.join(", ")))?
+                    }
+                    2 => {
+                        let rendered: Result<Vec<String>, String> =
+                            args.iter().map(|a| self.sexpr_assert_text(a)).collect();
+                        self.text1("rust_expr_tuple_text", v_text(&rendered?.join(", ")))?
+                    }
+                    3 => "None".to_string(),
+                    _ => self.sexpr_assert_call(name, args)?,
+                }
+            }
+            SpecExpr::BinOp(op, lhs, rhs) => format!(
+                "({} {} {})",
+                self.sexpr_assert_text(lhs)?,
+                self.text1("spec_binop_symbol", v_int(spec_binop_code(*op)))?,
+                self.sexpr_assert_text(rhs)?,
+            ),
+            _ => self.sexpr_text(expr)?,
+        })
+    }
+
+    /// A call at assert position: a plain-variable
+    /// argument renders cloned (the clone rule — the
+    /// proposition must not consume the function's
+    /// argument); every other argument renders through
+    /// the assert walker.
+    fn sexpr_assert_call(
+        &self,
+        name: &str,
+        args: &[SpecExpr],
+    ) -> Result<String, String> {
+        let rendered: Result<Vec<String>, String> = args
+            .iter()
+            .map(|arg| match arg {
+                SpecExpr::Var(v) => Ok(format!("{}.clone()", rust_ident(v))),
+                _ => self.sexpr_assert_text(arg),
+            })
+            .collect();
+        Ok(format!("{}({})", rust_ident(name), rendered?.join(", ")))
     }
 
     // ── Expressions (ir_expr_assembled) ──
@@ -2407,7 +2501,7 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             "\"hi\"",
         ),
         ("lit-float", IRPattern::Literal(IRLiteral::Float(1.5)), "_"),
-        ("lit-char", IRPattern::Literal(IRLiteral::Char('a')), "_"),
+        ("lit-char", IRPattern::Literal(IRLiteral::Char('a')), "'a'"),
         ("lit-unit", IRPattern::Literal(IRLiteral::Unit), "_"),
         (
             "ctor-none",
@@ -2734,15 +2828,86 @@ pub(super) fn proof_corpus() -> Vec<Case> {
     let vx = || SpecExpr::Var("x".to_string());
     let cons: Vec<(&str, Constraint, &str)> = vec![
         ("true", Constraint::True, "true"),
-        ("or-catchall", Constraint::Or(vec![Constraint::True]), "true"),
+        // Phase 124: Or renders genuinely (NF-116-2's
+        // global fix) — the disjunction template over
+        // its parts, as And renders its conjunction.
         (
-            "predicate-catchall",
+            "or-one",
+            Constraint::Or(vec![Constraint::True]),
+            "(true)",
+        ),
+        (
+            "or-two",
+            Constraint::Or(vec![
+                Constraint::Eq(vx(), SpecExpr::IntLit(3)),
+                Constraint::Order(OrderOp::LessThan, vx(), SpecExpr::IntLit(4)),
+            ]),
+            "(x == 3 || x < 4)",
+        ),
+        // Phase 124: a Predicate renders as its call,
+        // plain-variable arguments cloned at assert
+        // position (the clone rule).
+        (
+            "predicate-noargs",
             Constraint::Predicate("p".to_string(), vec![]),
-            "true",
+            "p()",
+        ),
+        (
+            "predicate-clone",
+            Constraint::Predicate(
+                "list_is_sorted".to_string(),
+                vec![SpecExpr::Var("xs".to_string())],
+            ),
+            "list_is_sorted(xs.clone())",
+        ),
+        // Phase 124: an Expr row renders through the
+        // assert-position expression walker — a binary
+        // proposition as itself, a nested call under
+        // the clone rule.
+        (
+            "expr-binop",
+            Constraint::Expr(SpecExpr::BinOp(
+                SpecBinOp::Gt,
+                Box::new(vx()),
+                Box::new(SpecExpr::IntLit(0)),
+            )),
+            "(x > 0)",
+        ),
+        (
+            "expr-call-clone",
+            Constraint::Expr(SpecExpr::Call(
+                "len".to_string(),
+                vec![SpecExpr::Var("xs".to_string())],
+            )),
+            "len(xs.clone())",
+        ),
+        // Phase 124: Implies renders as its proposition.
+        (
+            "implies",
+            Constraint::Implies(
+                Box::new(Constraint::Expr(SpecExpr::BinOp(
+                    SpecBinOp::Neq,
+                    Box::new(vx()),
+                    Box::new(SpecExpr::IntLit(0)),
+                ))),
+                Box::new(Constraint::Eq(vx(), SpecExpr::IntLit(3))),
+            ),
+            "(!((x != 0)) || (x == 3))",
         ),
         (
             "forall-catchall",
             Constraint::Forall {
+                vars: vec![],
+                body: Box::new(Constraint::True),
+            },
+            "true",
+        ),
+        // The quantified pair keeps the placeholder as
+        // the NAMED fallback (Phase 124): no value-level
+        // rendering of a quantified proposition exists.
+        (
+            "exists-catchall",
+            Constraint::Exists {
                 vars: vec![],
                 body: Box::new(Constraint::True),
             },
@@ -2773,14 +2938,14 @@ pub(super) fn proof_corpus() -> Vec<Case> {
             "x <= 3",
         ),
         (
-            "order-gt-silent",
+            "order-gt",
             Constraint::Order(OrderOp::GreaterThan, vx(), SpecExpr::IntLit(3)),
-            "true",
+            "x > 3",
         ),
         (
-            "order-ge-silent",
+            "order-ge",
             Constraint::Order(OrderOp::GreaterThanOrEqual, vx(), SpecExpr::IntLit(3)),
-            "true",
+            "x >= 3",
         ),
         (
             "and-two",

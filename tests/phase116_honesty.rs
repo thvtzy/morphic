@@ -30,11 +30,18 @@
 //!   or aggregate model exists in either target) — they
 //!   refuse at generation time with an error naming the
 //!   call and the target.
-//! * Python and JavaScript refuse entry calls the same
-//!   way (neither emitter has a call rendering at all),
-//!   and render the two builtins correctly in the
-//!   expression positions their walkers serve
-//!   (`len(x)`, `str(x)`; `[...(x)].length`, `String(x)`).
+//! * Python refuses entry calls the same way (its
+//!   emitter has no call rendering), and renders the two
+//!   builtins correctly in the expression positions its
+//!   walker serves (`len(x)`, `str(x)`). JavaScript did
+//!   the same at Phase 116 — **Phase 120 reconciled the
+//!   JS half** (1.1 Embeddable, EMBED D5a): the completed
+//!   JS emitter renders entry calls as plain calls to
+//!   the entry's export name, the form Phase 121's
+//!   module assembly satisfies, and the builtins in
+//!   expression and statement positions (`[...(x)].length`
+//!   inside the BigInt form, `String(x)`). The pins
+//!   below are split accordingly at their sites.
 //! * Combinations NOT involving the library keep their
 //!   standing behaviour exactly (pinned below for a
 //!   plain sibling call and a plain BinOp body).
@@ -400,22 +407,27 @@ fn c_and_wasm_keep_standing_behaviour_without_library() {
     assert!(codegen::generate(&binop, "wasm").is_ok());
 }
 
-// ── (a) Python / JS: loud named refusal for entries ─────
+// ── (a) Entry calls: Python refuses loudly; JS renders ──
+//
+// Phase 120 split this pin at its site: the refusal
+// stands for Python (no call rendering; Python as a
+// package target is outside 1.1), while the completed
+// JS emitter renders entry calls as plain calls to the
+// entry's export name — the correct-by-construction
+// case Phase 121's module assembly satisfies.
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn python_and_js_reject_entry_calls_loudly() {
+fn python_rejects_entry_calls_loudly() {
     let cand = candidate(&spec_of("call_abs"), call("int_abs", vec![v("x")]));
-    for target in ["python", "javascript", "js"] {
-        let err = codegen::generate(&cand, target)
-            .err()
-            .unwrap_or_else(|| panic!("{target} must refuse the entry call at generation time"));
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("int_abs") && msg.contains(target),
-            "the refusal names the entry and the target: {msg}"
-        );
-    }
+    let err = codegen::generate(&cand, "python")
+        .err()
+        .unwrap_or_else(|| panic!("python must refuse the entry call at generation time"));
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("int_abs") && msg.contains("python"),
+        "the refusal names the entry and the target: {msg}"
+    );
     // Nested inside a Return / Block, the refusal fires too.
     let nested = candidate(
         &spec_of("call_sum"),
@@ -424,10 +436,29 @@ fn python_and_js_reject_entry_calls_loudly() {
             vec![v("xs")],
         )))]),
     );
-    for target in ["python", "javascript"] {
-        let err = codegen::generate(&nested, target).err().unwrap();
-        assert!(format!("{err}").contains("list_sum"));
+    let err = codegen::generate(&nested, "python").err().unwrap();
+    assert!(format!("{err}").contains("list_sum"));
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+#[test]
+fn js_renders_entry_calls_as_plain_calls() {
+    let cand = candidate(&spec_of("call_abs"), call("int_abs", vec![v("x")]));
+    for target in ["javascript", "js"] {
+        let js = codegen::generate(&cand, target)
+            .unwrap_or_else(|e| panic!("{target} generates entry calls since Phase 120: {e}"));
+        assert!(js.contains("return int_abs(x);"), "{target}:\n{js}");
     }
+    // Nested inside a Return / Block, the call renders too.
+    let nested = candidate(
+        &spec_of("call_sum"),
+        IRNode::Block(vec![IRNode::Return(Box::new(call(
+            "list_sum",
+            vec![v("xs")],
+        )))]),
+    );
+    let js = codegen::generate(&nested, "javascript").unwrap();
+    assert!(js.contains("return list_sum(xs);"), "{js}");
 }
 
 // ── (b) Python / JS: builtins render in expression position

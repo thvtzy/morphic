@@ -59,7 +59,31 @@ enum Command {
     /// Compile a Morphic specification into an optimized implementation
     Build {
         /// Path to .morph spec file
-        input: PathBuf,
+        input: Option<PathBuf>,
+
+        /// Assemble the npm package (@thvtzy/morphic) from
+        /// the standard library's shipped bodies instead of
+        /// compiling a spec file (Phase 122: the assembly
+        /// re-runs the crowning checks and refuses on a
+        /// moved crown; takes no input file)
+        #[arg(long)]
+        package: bool,
+
+        /// Assemble the Rust facade crate (crates.io
+        /// `morphic`) from the standard library's shipped
+        /// bodies instead of compiling a spec file
+        /// (Phase 123: the assembly re-runs the crowning
+        /// checks and refuses on a moved crown; takes no
+        /// input file)
+        #[arg(long)]
+        facade: bool,
+
+        /// Directory the assembled package is written to
+        /// (with --package or --facade; default: the
+        /// package's repo home, packages/npm resp.
+        /// packages/rust)
+        #[arg(long)]
+        out: Option<PathBuf>,
 
         /// Output language (rust, c, wasm)
         #[arg(short, long, default_value = "rust")]
@@ -132,7 +156,116 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Command::Build { input, target, opt_level, output } => {
+        Command::Build { package: true, input, out, .. } => {
+            // Phase 122: `morphic build --package` — assemble
+            // the npm package (@thvtzy/morphic) from the
+            // standard library's shipped bodies. The assembly
+            // re-runs the crowning checks before generating
+            // (codegen::package); a moved crown fails here and
+            // nothing is written.
+            if input.is_some() {
+                anyhow::bail!(
+                    "build --package assembles the standard-library package \
+                     and takes no input file"
+                );
+            }
+            // The assembly reads the EMBEDDED library data,
+            // which exists only in native builds — under the
+            // `wasm-playground` feature (which a workspace
+            // --all-targets build unifies into this bin) the
+            // command refuses by name instead, the StdlibAsset
+            // precedent.
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let files = codegen::package::assemble_npm_package_checked()?;
+                let mass = codegen::package::unpacked_mass(&files);
+                if mass > codegen::package::NPM_UNPACKED_BUDGET {
+                    anyhow::bail!(
+                        "the assembled package is {mass} B unpacked, over the \
+                         frozen budget of {} B (EMBED_SCOPE §4) — refusing to write",
+                        codegen::package::NPM_UNPACKED_BUDGET
+                    );
+                }
+                let dir =
+                    out.unwrap_or_else(|| PathBuf::from(codegen::package::NPM_PACKAGE_DIR));
+                std::fs::create_dir_all(&dir)?;
+                for f in &files {
+                    std::fs::write(dir.join(&f.path), &f.contents)?;
+                }
+                println!(
+                    "{} Assembled {} — {} files, {mass} B unpacked (budget {} B)",
+                    "✓".green().bold(),
+                    codegen::bindings::PACKAGE_NAME,
+                    files.len(),
+                    codegen::package::NPM_UNPACKED_BUDGET
+                );
+                println!("  {} {}", "•".dimmed(), dir.display());
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = out;
+                anyhow::bail!(
+                    "package assembly runs from a native build \
+                     (this build carries no embedded library data)"
+                );
+            }
+        }
+
+        Command::Build { facade: true, input, out, .. } => {
+            // Phase 123: `morphic build --facade` — assemble
+            // the Rust facade crate (crates.io `morphic`)
+            // from the standard library's shipped bodies.
+            // The assembly re-runs the crowning checks
+            // before generating (codegen::facade, sharing
+            // codegen::package's crowning surface); a moved
+            // crown fails here and nothing is written. The
+            // crate carries no size budget (EMBED_SCOPE R8).
+            if input.is_some() {
+                anyhow::bail!(
+                    "build --facade assembles the standard-library crate \
+                     and takes no input file"
+                );
+            }
+            // The assembly reads the EMBEDDED library data,
+            // which exists only in native builds — under the
+            // `wasm-playground` feature the command refuses
+            // by name instead, the --package precedent.
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let files = codegen::facade::assemble_rust_facade_checked()?;
+                let total: usize = files.iter().map(|f| f.contents.len()).sum();
+                let dir =
+                    out.unwrap_or_else(|| PathBuf::from(codegen::facade::RUST_PACKAGE_DIR));
+                for f in &files {
+                    let path = dir.join(&f.path);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&path, &f.contents)?;
+                }
+                println!(
+                    "{} Assembled {} (Rust facade crate) — {} files, {total} B \
+                     (no size budget, EMBED_SCOPE R8)",
+                    "✓".green().bold(),
+                    codegen::facade::CRATE_NAME,
+                    files.len()
+                );
+                println!("  {} {}", "•".dimmed(), dir.display());
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = out;
+                anyhow::bail!(
+                    "facade assembly runs from a native build \
+                     (this build carries no embedded library data)"
+                );
+            }
+        }
+
+        Command::Build { input, target, opt_level, output, .. } => {
+            let input = input.ok_or_else(|| {
+                anyhow::anyhow!("build requires a .morph input file (or --package)")
+            })?;
             println!("{} Compiling {}...", "⚙".bold(), input.display());
             let source = std::fs::read_to_string(&input)?;
 

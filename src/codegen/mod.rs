@@ -25,7 +25,16 @@ pub fn generate(candidate: &CandidateImplementation, target: &str) -> Result<Str
             generate_python(candidate)
         }
         "javascript" | "js" => {
-            reject_library_calls(candidate, target, false)?;
+            // Phase 120 (1.1 Embeddable, EMBED_SCOPE D5a):
+            // the JS route no longer refuses entry calls.
+            // The completed emitter renders them as plain
+            // calls to the entry's export name — the form
+            // Phase 121's module assembly satisfies by
+            // generating the entries into the same module
+            // — which is the correct-by-construction case
+            // the Phase 116 enforcement exists to reach,
+            // not the silent wrongness it kills. See the
+            // reconciliation paragraph below.
             generate_javascript(candidate)
         }
         "ir" => Ok(debug_ir_string(&candidate.body, 0)),
@@ -62,11 +71,26 @@ pub fn generate(candidate: &CandidateImplementation, target: &str) -> Result<Str
 //   scalar i32 model), so NO library call renders there:
 //   entry calls and builtin calls alike refuse at
 //   generation time, naming the call and the target.
-// * python, javascript — entry calls refuse the same
-//   way (neither emitter has any call rendering); the
-//   builtin tier renders correctly in the expression
-//   positions their walkers serve (name-keyed arms in
-//   ir_to_python_expr / ir_to_js_expr).
+// * python — entry calls refuse the same way (the
+//   emitter has no call rendering); the builtin tier
+//   renders correctly in the expression positions its
+//   walker serves (name-keyed arms in ir_to_python_expr).
+// * javascript — Phase 120 RECONCILIATION (1.1
+//   Embeddable, EMBED_SCOPE D5a): the completed JS
+//   emitter renders entry calls as plain calls to the
+//   entry's export name. The enforcement's purpose was
+//   killing silent wrongness; a call the package
+//   assembly provably satisfies — Phase 121 generates
+//   the entries into the same module — is the
+//   correct-by-construction case, so the refusal is
+//   lifted for this target only (python keeps it:
+//   Python as a package target is outside 1.1). The
+//   builtin tier renders in expression AND statement
+//   positions. At this phase's level a sibling
+//   (non-entry) user-function call is indistinguishable
+//   from an unknown name at the generate() boundary, so
+//   both keep the standing fallback; module context is
+//   Phase 121's assembly concern.
 // * ir — the debug dump names every call as it stands.
 //
 // Combinations NOT involving the library keep their
@@ -201,6 +225,99 @@ fn scan_library_use(node: &IRNode, entry_names: &std::collections::BTreeSet<Stri
     }
 }
 
+/// The library entries a spec-language expression names
+/// in call position (Phase 124): the companion walker to
+/// `scan_library_use` for the `Expr` tree a `require:`
+/// row carries. Since NF-116-2's global fix, a generated
+/// Rust file carries its function's precondition asserts
+/// rendered genuinely, so an entry a precondition calls
+/// is used by the file exactly as one the body calls.
+fn scan_expr_library_use(
+    expr: &Expr,
+    entry_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match expr {
+        Expr::Call(name, args) => {
+            if entry_names.contains(name) {
+                out.insert(name.clone());
+            }
+            for a in args {
+                scan_expr_library_use(a, entry_names, out);
+            }
+        }
+        Expr::Field(inner, _)
+        | Expr::UnaryOp(_, inner)
+        | Expr::Length(inner) => scan_expr_library_use(inner, entry_names, out),
+        Expr::Index(a, b) | Expr::BinOp(_, a, b) => {
+            scan_expr_library_use(a, entry_names, out);
+            scan_expr_library_use(b, entry_names, out);
+        }
+        Expr::Lambda(_, body) => scan_expr_library_use(body, entry_names, out),
+        Expr::Comprehension { collection, body, .. } => {
+            scan_expr_library_use(collection, entry_names, out);
+            scan_expr_library_use(body, entry_names, out);
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            scan_expr_library_use(receiver, entry_names, out);
+            for a in args {
+                scan_expr_library_use(a, entry_names, out);
+            }
+        }
+        Expr::RecordLit { fields, .. } => {
+            for (_, value) in fields {
+                scan_expr_library_use(value, entry_names, out);
+            }
+        }
+        Expr::Var(_)
+        | Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::CharLit(_) => {}
+    }
+}
+
+/// The library entries a constraint's genuine rendering
+/// names: Predicate callees and the calls inside
+/// rendered expression positions, recursing through the
+/// rendered connectives. The quantified rows render as
+/// the named `true` fallback (see constraint_to_rust),
+/// so their interiors are not scanned — the generated
+/// file never names them.
+fn scan_constraint_library_use(
+    cons: &Constraint,
+    entry_names: &std::collections::BTreeSet<String>,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match cons {
+        Constraint::True | Constraint::Forall { .. } | Constraint::Exists { .. } => {}
+        Constraint::Expr(e) => scan_expr_library_use(e, entry_names, out),
+        Constraint::Predicate(name, args) => {
+            if entry_names.contains(name) {
+                out.insert(name.clone());
+            }
+            for a in args {
+                scan_expr_library_use(a, entry_names, out);
+            }
+        }
+        Constraint::Not(inner) => scan_constraint_library_use(inner, entry_names, out),
+        Constraint::Eq(a, b) | Constraint::Order(_, a, b) => {
+            scan_expr_library_use(a, entry_names, out);
+            scan_expr_library_use(b, entry_names, out);
+        }
+        Constraint::And(parts) | Constraint::Or(parts) => {
+            for p in parts {
+                scan_constraint_library_use(p, entry_names, out);
+            }
+        }
+        Constraint::Implies(a, b) => {
+            scan_constraint_library_use(a, entry_names, out);
+            scan_constraint_library_use(b, entry_names, out);
+        }
+    }
+}
+
 /// Refuse generation for `target` when the body makes a
 /// library call the target cannot render. With
 /// `builtins_too`, builtin-tier calls refuse as well
@@ -242,6 +359,16 @@ fn reject_library_calls(
 /// A candidate that IS an entry is its own function and
 /// gains no helper. Bodies using no entry render
 /// byte-identically to the pre-116 route.
+///
+/// Phase 124 extends "uses" to the precondition rows:
+/// since NF-116-2's global fix the candidate's own
+/// rendering carries its `require:` asserts genuinely,
+/// so an entry a precondition names (the standing
+/// exhibit: `list_binary_search`'s require over
+/// `list_is_sorted`) is used by the file exactly as
+/// one the body calls — and the closure likewise
+/// follows each emitted entry's own preconditions, so
+/// a helper's assert never names an absent function.
 fn generate_rust_with_library(candidate: &CandidateImplementation) -> Result<String, CodegenError> {
     let mut out = generate_rust_route(candidate)?;
     let entry_names = library_entry_names();
@@ -249,12 +376,29 @@ fn generate_rust_with_library(candidate: &CandidateImplementation) -> Result<Str
     let mut direct = LibraryUse::default();
     scan_library_use(&candidate.body, &entry_names, &mut direct);
     let mut queue: Vec<String> = direct.entries.into_iter().collect();
+    let mut from_preconditions: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
+    for pre in &candidate.spec.preconditions {
+        scan_constraint_library_use(pre, &entry_names, &mut from_preconditions);
+    }
+    queue.extend(from_preconditions);
     while let Some(name) = queue.pop() {
         if used.insert(name.clone()) {
             if let Some(body) = crate::stdlib::shipped_body(&name) {
                 let mut inner = LibraryUse::default();
                 scan_library_use(&body, &entry_names, &mut inner);
                 queue.extend(inner.entries);
+            }
+            if let Some(spec) = crate::stdlib::prelude_specs()
+                .iter()
+                .find(|s| s.name == name)
+            {
+                let mut inner: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                for pre in &spec.preconditions {
+                    scan_constraint_library_use(pre, &entry_names, &mut inner);
+                }
+                queue.extend(inner);
             }
         }
     }
@@ -776,7 +920,8 @@ fn generate_javascript(candidate: &CandidateImplementation) -> Result<String, Co
         params.join(", "),
     ));
 
-    let body = ir_to_javascript(&candidate.body, 1);
+    let mut env = JsEnv::for_spec(&candidate.spec);
+    let body = ir_to_js_tail(&candidate.body, 1, &mut env, JsBreak::Plain);
     out.push_str(&body);
     out.push_str("}\n");
 
@@ -1843,6 +1988,16 @@ fn ir_pattern_to_rust(pattern: &IRPattern) -> String {
             IRLiteral::Int(n) => n.to_string(),
             IRLiteral::Bool(b) => b.to_string(),
             IRLiteral::String(s) => format!("\"{}\"", escape_rust_str(s)),
+            // Phase 124: Char literal patterns render
+            // literally — the F4 widening (every Char
+            // pattern through the `_` catch-all below,
+            // collapsing any Char match to its first
+            // arm) is RETIRED; the escape is the
+            // expression position's own (escape_rust_char,
+            // mirror-pinned since Phase 29). Float and
+            // Unit keep the wildcard: no literal pattern
+            // form exists for them in this emitter.
+            IRLiteral::Char(c) => format!("'{}'", escape_rust_char(*c)),
             _ => "_".into(),
         },
         IRPattern::Constructor(name, sub_patterns) => {
@@ -2114,107 +2269,786 @@ fn ir_to_python_expr(node: &IRNode) -> String {
 }
 
 // ── IR → JavaScript Translation ───────────────────────────
+//
+// Phase 120 (1.1 Embeddable, EMBED_SCOPE §5/D5a): the
+// emitter completed for the embeddable subset — every
+// node the 29 shipped bodies use, plus the
+// plausible-winner vocabulary in the same shapes. The
+// Phase 118 grading it answers: no tail renderer
+// (`int_abs` returned `undefined`), `%`/`<=` rendered
+// as a bare `?` (SyntaxError), Match without an arm,
+// Alloc/Assign dropped (`list_sum` threw
+// ReferenceError), constructors and Index without
+// representation, Int literals as bare JS numbers.
+//
+// Three renderers, mirroring the Rust walker's
+// contexts: statements (value discarded), a tail
+// renderer (the value is returned), and expressions.
+// The frozen boundary semantics (EMBED_SCOPE §3):
+//
+// * Int is BigInt end-to-end (D3a): literals carry the
+//   `n` suffix; `/` and `%` take BigInt's truncating
+//   semantics, which match Morphic Int; `len` yields a
+//   BigInt via the Phase 116 code-point spread form.
+// * Option/Result are the D4a shapes: `Some(x)` is the
+//   payload, `None` is `null`, `Ok`/`Err` are the
+//   discriminated-union objects; Match discriminates
+//   on exactly those forms.
+// * String indexing and `len` count code points (the
+//   Phase 116 stance), via the spread form.
+//
+// Named boundaries (recorded in the ROAD Phase 120
+// note): aggregate equality is JS reference equality
+// (scalar equality is exact; no battery point uses
+// aggregate equality); a Break/Return inside an
+// expression-position IIFE renders as that IIFE's
+// return rather than propagating to the enclosing
+// loop/function as the interpreter does; Guard
+// patterns render as never-matching arms (the
+// interpreter declines guarded arms, so no judged
+// point reaches one); Append/Index on a base whose
+// kind the emitter cannot know take the List/spread
+// resp. direct-index forms.
 
-fn ir_to_javascript(node: &IRNode, indent: usize) -> String {
-    let pad = "    ".repeat(indent);
-    match node {
-        IRNode::Return(expr) => {
-            format!("{}return {};\n", pad, ir_to_js_expr(expr))
+/// The coarse value kind the JS renderer dispatches
+/// on, where a form depends on it (Append, Concat,
+/// Index): derived from spec parameter types, Alloc
+/// types, and literal shapes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum JsTy {
+    Int,
+    Float,
+    Bool,
+    Str,
+    Char,
+    List,
+    Other,
+}
+
+impl JsTy {
+    fn from_type(ty: &TypeRef) -> JsTy {
+        match ty {
+            TypeRef::Int
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64 => JsTy::Int,
+            TypeRef::Float => JsTy::Float,
+            TypeRef::Bool => JsTy::Bool,
+            TypeRef::String => JsTy::Str,
+            TypeRef::Char => JsTy::Char,
+            TypeRef::List(_) | TypeRef::Array(_, _) => JsTy::List,
+            _ => JsTy::Other,
         }
-        IRNode::Block(stmts) => {
-            let mut out = String::new();
-            for stmt in stmts {
-                out.push_str(&ir_to_javascript(stmt, indent));
-            }
-            out
-        }
-        IRNode::If { condition, then_branch, else_branch } => {
-            format!(
-                "{}if ({}) {{\n{}}} else {{\n{}}}\n",
-                pad,
-                ir_to_js_expr(condition),
-                ir_to_javascript(then_branch, indent + 1),
-                ir_to_javascript(else_branch, indent + 1),
-            )
-        }
-        IRNode::For { var, start, end, body } => {
-            format!(
-                "{}for (let {} = {}; {} < {}; {}++) {{\n{}{}}}\n",
-                pad, var,
-                ir_to_js_expr(start),
-                var, ir_to_js_expr(end),
-                var,
-                ir_to_javascript(body, indent + 1),
-                pad,
-            )
-        }
-        // Phase 116: a discarded builtin-tier call still
-        // evaluates — the Rust statement Call arm's stance
-        // (the expression, terminated), name-keyed to the
-        // builtin tier. Every other statement call keeps
-        // the standing fallback below.
-        IRNode::Call { function, .. }
-            if matches!(function.as_str(), "len" | "int_to_str") =>
-        {
-            format!("{}{};\n", pad, ir_to_js_expr(node))
-        }
-        _ => format!("{}// {}\n", pad, "unsupported"),
     }
 }
 
-fn ir_to_js_expr(node: &IRNode) -> String {
-    match node {
-        IRNode::Literal(lit) => match lit {
-            IRLiteral::Int(n) => n.to_string(),
-            IRLiteral::Float(f) => f.to_string(),
-            IRLiteral::Bool(b) => b.to_string(),
-            IRLiteral::String(s) => format!("'{}'", s),
-            IRLiteral::Char(c) => format!("'{}'", c),
-            IRLiteral::Unit => "undefined".into(),
+/// Renderer state: the kinds of the names in scope and
+/// the shipped-entry name set (for the entry-call arm).
+#[derive(Clone)]
+struct JsEnv {
+    types: std::collections::HashMap<String, JsTy>,
+    entries: std::collections::BTreeSet<String>,
+}
+
+impl JsEnv {
+    fn for_spec(spec: &FunctionSpec) -> JsEnv {
+        let types = spec
+            .params
+            .iter()
+            .map(|p| (p.name.clone(), JsTy::from_type(&p.ty)))
+            .collect();
+        JsEnv {
+            types,
+            entries: library_entry_names(),
+        }
+    }
+
+    fn detached() -> JsEnv {
+        JsEnv {
+            types: std::collections::HashMap::new(),
+            entries: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// The kind of an expression, where the renderer
+    /// can know it without a typechecker: variables via
+    /// the environment, literals and collections by
+    /// shape, the builtin calls by their signatures.
+    fn kind_of(&self, node: &IRNode) -> Option<JsTy> {
+        match node {
+            IRNode::Var(name) => self.types.get(name).copied(),
+            IRNode::Literal(lit) => Some(match lit {
+                IRLiteral::Int(_) => JsTy::Int,
+                IRLiteral::Float(_) => JsTy::Float,
+                IRLiteral::Bool(_) => JsTy::Bool,
+                IRLiteral::String(_) => JsTy::Str,
+                IRLiteral::Char(_) => JsTy::Char,
+                IRLiteral::Unit => JsTy::Other,
+            }),
+            IRNode::Collection { kind, .. } => match kind {
+                CollectionKind::List | CollectionKind::Array | CollectionKind::Tuple => {
+                    Some(JsTy::List)
+                }
+                _ => None,
+            },
+            IRNode::Call { function, .. } => match function.as_str() {
+                "len" => Some(JsTy::Int),
+                "int_to_str" => Some(JsTy::Str),
+                _ => None,
+            },
+            IRNode::UnaryOp(IRUnaryOp::Len, _) => Some(JsTy::Int),
+            IRNode::Index(base, _) => match self.kind_of(base) {
+                Some(JsTy::Str) => Some(JsTy::Char),
+                _ => None,
+            },
+            IRNode::RecordLit { .. } => Some(JsTy::Other),
+            _ => None,
+        }
+    }
+}
+
+/// How a `Break` renders in the body being walked:
+/// `Plain` inside statement-position loops (the value,
+/// if any, is discarded — a valued Break inside a
+/// `While` is an interpreter-declined shape anyway);
+/// `Value` inside a tail/expression-position `Loop`,
+/// whose valued Break IS the loop's value and so
+/// renders as the enclosing IIFE/function return.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsBreak {
+    Plain,
+    Value,
+}
+
+/// Escape a string for a single-quoted JS literal.
+/// (The pre-Phase-120 rendering interpolated raw: a
+/// `'\n'` Char literal emitted a literal newline
+/// inside the quotes — a SyntaxError in the generated
+/// module, e.g. in char_is_whitespace's own body.)
+fn js_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn js_literal(lit: &IRLiteral) -> String {
+    match lit {
+        // D3a: Int literals are BigInt literals.
+        IRLiteral::Int(n) => format!("{n}n"),
+        IRLiteral::Float(f) => f.to_string(),
+        IRLiteral::Bool(b) => b.to_string(),
+        IRLiteral::String(s) => format!("'{}'", js_escape(s)),
+        IRLiteral::Char(c) => format!("'{}'", js_escape(&c.to_string())),
+        IRLiteral::Unit => "undefined".into(),
+    }
+}
+
+/// A call in a form the JS emitter stands behind, or
+/// None for the standing fallbacks (`undefined` in
+/// expression position, the standing comment in
+/// statement position). Dispatch order: the builtin
+/// tier (name-keyed, arity-checked — the Phase 116
+/// arms, with `len` now BigInt-valued per D3a); the
+/// list-literal pseudo-call; the D4a constructor
+/// forms; shipped library entries as plain calls to
+/// their export names (the Phase 120 reconciliation —
+/// Phase 121's module assembly satisfies them); any
+/// other capitalized name as a generic tagged-union
+/// object, the constructor form consistent with the
+/// Match discrimination below.
+fn js_call_form(function: &str, args: &[IRNode], env: &JsEnv) -> Option<String> {
+    let rendered: Vec<String> = args.iter().map(|a| ir_to_js_expr(a, env)).collect();
+    match function {
+        "len" if args.len() == 1 => {
+            Some(format!("BigInt([...({})].length)", rendered[0]))
+        }
+        "int_to_str" if args.len() == 1 => Some(format!("String({})", rendered[0])),
+        "List" => Some(format!("[{}]", rendered.join(", "))),
+        "Some" if args.len() == 1 => Some(format!("({})", rendered[0])),
+        "None" if args.is_empty() => Some("null".into()),
+        "Ok" if args.len() == 1 => {
+            Some(format!("({{ tag: \"Ok\", value: {} }})", rendered[0]))
+        }
+        "Err" if args.len() == 1 => {
+            Some(format!("({{ tag: \"Err\", error: {} }})", rendered[0]))
+        }
+        _ if env.entries.contains(function) => {
+            Some(format!("{}({})", function, rendered.join(", ")))
+        }
+        _ if function.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => {
+            Some(format!(
+                "({{ tag: \"{}\", values: [{}] }})",
+                function,
+                rendered.join(", ")
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Collect a pattern's discrimination against the JS
+/// value expression `value`: equality tests to conjoin
+/// and payload bindings to declare. Mirrors the
+/// interpreter's pattern semantics over the §3 forms:
+/// Option payloads ARE the value (`Some` tests
+/// non-null, `None` tests null); Result payloads ride
+/// `.value` / `.error` under the tag test; any other
+/// constructor rides `.values[i]` under its tag test.
+/// A Guard pattern declines in the interpreter
+/// (NotEvaluable when tested), so no judged body can
+/// depend on reaching one: the arm renders
+/// never-matching.
+fn js_pattern_match(
+    pat: &IRPattern,
+    value: &str,
+    tests: &mut Vec<String>,
+    binds: &mut Vec<(String, String)>,
+) {
+    match pat {
+        IRPattern::Wildcard => {}
+        IRPattern::Variable(name) => binds.push((name.clone(), value.to_string())),
+        IRPattern::Literal(lit) => {
+            tests.push(format!("{value} === {}", js_literal(lit)));
+        }
+        IRPattern::Constructor(name, subs) => match (name.as_str(), subs.len()) {
+            ("Some", 1) => {
+                tests.push(format!("{value} !== null"));
+                js_pattern_match(&subs[0], value, tests, binds);
+            }
+            ("None", 0) => {
+                tests.push(format!("{value} === null"));
+            }
+            ("Ok", 1) => {
+                tests.push(format!("{value}.tag === \"Ok\""));
+                js_pattern_match(&subs[0], &format!("{value}.value"), tests, binds);
+            }
+            ("Err", 1) => {
+                tests.push(format!("{value}.tag === \"Err\""));
+                js_pattern_match(&subs[0], &format!("{value}.error"), tests, binds);
+            }
+            _ => {
+                tests.push(format!("{value}.tag === \"{name}\""));
+                for (i, sub) in subs.iter().enumerate() {
+                    js_pattern_match(sub, &format!("{value}.values[{i}]"), tests, binds);
+                }
+            }
         },
+        IRPattern::Guard(inner, _) => {
+            tests.push("false".into());
+            js_pattern_match(inner, value, tests, binds);
+        }
+    }
+}
+
+/// A Match as a discrimination chain over a scrutinee
+/// temp, wrapped in a bare block so the temp and the
+/// arms' bindings stay scoped (sibling Matches in one
+/// Block must not redeclare it). `tail` selects the arm
+/// renderer: tail arms return; statement arms discard.
+fn js_match_chain(
+    scrutinee: &IRNode,
+    cases: &[(IRPattern, IRNode)],
+    indent: usize,
+    env: &mut JsEnv,
+    tail: bool,
+    brk: JsBreak,
+) -> String {
+    let pad = "    ".repeat(indent);
+    let pad1 = "    ".repeat(indent + 1);
+    let pad2 = "    ".repeat(indent + 2);
+    let mut out = format!("{pad}{{\n");
+    out.push_str(&format!(
+        "{pad1}const __scrut = {};\n",
+        ir_to_js_expr(scrutinee, env)
+    ));
+    for (i, (pat, arm)) in cases.iter().enumerate() {
+        let mut tests: Vec<String> = Vec::new();
+        let mut binds: Vec<(String, String)> = Vec::new();
+        js_pattern_match(pat, "__scrut", &mut tests, &mut binds);
+        let last = i + 1 == cases.len();
+        if i == 0 {
+            if tests.is_empty() {
+                out.push_str(&format!("{pad1}if (true) {{\n"));
+            } else {
+                out.push_str(&format!("{pad1}if ({}) {{\n", tests.join(" && ")));
+            }
+        } else if tests.is_empty() && last {
+            out.push_str(" else {\n");
+        } else if tests.is_empty() {
+            out.push_str(" else if (true) {\n");
+        } else {
+            out.push_str(&format!(" else if ({}) {{\n", tests.join(" && ")));
+        }
+        // Arm bindings and Allocs are block-scoped in
+        // the emitted braces; the arm renders against a
+        // clone so neither leaks into the outer env.
+        let mut arm_env = env.clone();
+        for (name, value) in &binds {
+            out.push_str(&format!("{pad2}const {name} = {value};\n"));
+        }
+        if tail {
+            out.push_str(&ir_to_js_tail(arm, indent + 2, &mut arm_env, brk));
+        } else {
+            out.push_str(&ir_to_javascript(arm, indent + 2, &mut arm_env, brk));
+        }
+        out.push_str(&format!("{pad1}}}"));
+    }
+    if !cases.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&format!("{pad}}}\n"));
+    out
+}
+
+/// Statement-level IR → JavaScript: the node's value
+/// is discarded.
+fn ir_to_javascript(node: &IRNode, indent: usize, env: &mut JsEnv, brk: JsBreak) -> String {
+    let pad = "    ".repeat(indent);
+    let pad_inner = "    ".repeat(indent + 1);
+    match node {
+        IRNode::Hole { .. } => format!("{pad}// unsupported\n"),
+
+        IRNode::Block(stmts) => {
+            let mut out = String::new();
+            for stmt in stmts {
+                out.push_str(&ir_to_javascript(stmt, indent, env, brk));
+            }
+            out
+        }
+
+        IRNode::Let { name, value, body } => {
+            let mut out = format!(
+                "{pad}const {} = {};\n",
+                name,
+                ir_to_js_expr(value, env)
+            );
+            if let Some(kind) = env.kind_of(value) {
+                env.types.insert(name.clone(), kind);
+            }
+            out.push_str(&ir_to_javascript(body, indent, env, brk));
+            out
+        }
+
+        IRNode::If { condition, then_branch, else_branch } => {
+            let mut then_env = env.clone();
+            let mut else_env = env.clone();
+            format!(
+                "{}if ({}) {{\n{}{}}} else {{\n{}{}}}\n",
+                pad,
+                ir_to_js_expr(condition, env),
+                ir_to_javascript(then_branch, indent + 1, &mut then_env, brk),
+                pad,
+                ir_to_javascript(else_branch, indent + 1, &mut else_env, brk),
+                pad,
+            )
+        }
+
+        IRNode::While { condition, body, invariant } => {
+            let mut out = String::new();
+            if let Some(inv) = invariant {
+                out.push_str(&format!("{pad}// invariant: {inv}\n"));
+            }
+            let mut body_env = env.clone();
+            out.push_str(&format!(
+                "{}while ({}) {{\n{}{}}}\n",
+                pad,
+                ir_to_js_expr(condition, env),
+                ir_to_javascript(body, indent + 1, &mut body_env, JsBreak::Plain),
+                pad,
+            ));
+            out
+        }
+
+        IRNode::For { var, start, end, body } => {
+            // The interpreter evaluates the bounds once;
+            // the end is hoisted into the init so the JS
+            // loop does too. The loop variable is a
+            // BigInt (D3a), so it indexes arrays directly
+            // (JS converts a BigInt property key to its
+            // decimal string) and compares against the
+            // BigInt end.
+            let mut body_env = env.clone();
+            body_env.types.insert(var.clone(), JsTy::Int);
+            format!(
+                "{}for (let {var} = {}, __end_{var} = {}; {var} < __end_{var}; {var}++) {{\n{}{}}}\n",
+                pad,
+                ir_to_js_expr(start, env),
+                ir_to_js_expr(end, env),
+                ir_to_javascript(body, indent + 1, &mut body_env, JsBreak::Plain),
+                pad,
+            )
+        }
+
+        IRNode::Loop { body, invariant } => {
+            let mut out = String::new();
+            if let Some(inv) = invariant {
+                out.push_str(&format!("{pad}// invariant: {inv}\n"));
+            }
+            let mut body_env = env.clone();
+            out.push_str(&format!(
+                "{}while (true) {{\n{}{}}}\n",
+                pad,
+                ir_to_javascript(body, indent + 1, &mut body_env, JsBreak::Plain),
+                pad,
+            ));
+            out
+        }
+
+        IRNode::Match { scrutinee, cases } => {
+            js_match_chain(scrutinee, cases, indent, env, false, brk)
+        }
+
+        IRNode::Return(expr) => {
+            format!("{pad}return {};\n", ir_to_js_expr(expr, env))
+        }
+
+        IRNode::Alloc { name, ty, initial } => {
+            env.types.insert(name.clone(), JsTy::from_type(ty));
+            format!("{pad}let {} = {};\n", name, ir_to_js_expr(initial, env))
+        }
+
+        IRNode::Assign { target, value } => {
+            format!(
+                "{pad}{} = {};\n",
+                ir_to_js_expr(target, env),
+                ir_to_js_expr(value, env)
+            )
+        }
+
+        IRNode::Break { value } => match (brk, value) {
+            (JsBreak::Value, Some(v)) => {
+                format!("{pad}return {};\n", ir_to_js_expr(v, env))
+            }
+            (JsBreak::Value, None) => format!("{pad}return;\n"),
+            (JsBreak::Plain, _) => format!("{pad}break;\n"),
+        },
+
+        // TryPropagate is Result-only in the interpreter:
+        // an Err payload unwinds as the function's
+        // return; the Ok payload is discarded here.
+        IRNode::TryPropagate(inner) => {
+            format!(
+                "{pad}{{\n{pad_inner}const __try = {};\n{pad_inner}if (__try.tag === \"Err\") {{ return __try; }}\n{pad}}}\n",
+                ir_to_js_expr(inner, env)
+            )
+        }
+
+        IRNode::Typed { node: inner, .. } => ir_to_javascript(inner, indent, env, brk),
+
+        // Statement-position Append on a bound variable
+        // rebinds in the interpreter: `+=` for a String
+        // cell, `.push` for a List cell (the compiled
+        // runner's own rendering of the same shape).
+        IRNode::BinOp(IRBinOp::Append, lhs, rhs)
+            if matches!(lhs.as_ref(), IRNode::Var(_)) =>
+        {
+            let name = ir_to_js_expr(lhs, env);
+            let item = ir_to_js_expr(rhs, env);
+            match env.kind_of(lhs) {
+                Some(JsTy::Str) | Some(JsTy::Char) => {
+                    format!("{pad}{name} += {item};\n")
+                }
+                _ => format!("{pad}{name}.push({item});\n"),
+            }
+        }
+
+        // A statement-position call the emitter stands
+        // behind (builtin tier, constructors, entries)
+        // evaluates as a call statement; every other
+        // statement call keeps the standing fallback.
+        IRNode::Call { function, args } => match js_call_form(function, args, env) {
+            Some(form) => format!("{pad}{form};\n"),
+            None => format!("{pad}// unsupported\n"),
+        },
+
+        // Bare expression statements.
+        IRNode::Literal(_)
+        | IRNode::Var(_)
+        | IRNode::BinOp(..)
+        | IRNode::UnaryOp(..)
+        | IRNode::Index(..)
+        | IRNode::Collection { .. }
+        | IRNode::FieldAccess { .. }
+        | IRNode::RecordLit { .. } => {
+            format!("{pad}{};\n", ir_to_js_expr(node, env))
+        }
+
+        _ => format!("{pad}// unsupported\n"),
+    }
+}
+
+/// Tail-position IR → JavaScript: the node's value is
+/// the enclosing function's (or IIFE's) return value.
+/// This is the renderer Phase 118 found missing — a
+/// bare expression body returns its value.
+fn ir_to_js_tail(node: &IRNode, indent: usize, env: &mut JsEnv, brk: JsBreak) -> String {
+    let pad = "    ".repeat(indent);
+    let pad_inner = "    ".repeat(indent + 1);
+    match node {
+        IRNode::Block(stmts) => {
+            let mut out = String::new();
+            if let Some((last, rest)) = stmts.split_last() {
+                for stmt in rest {
+                    out.push_str(&ir_to_javascript(stmt, indent, env, brk));
+                }
+                out.push_str(&ir_to_js_tail(last, indent, env, brk));
+            }
+            out
+        }
+
+        IRNode::Let { name, value, body } => {
+            let mut out = format!(
+                "{pad}const {} = {};\n",
+                name,
+                ir_to_js_expr(value, env)
+            );
+            if let Some(kind) = env.kind_of(value) {
+                env.types.insert(name.clone(), kind);
+            }
+            out.push_str(&ir_to_js_tail(body, indent, env, brk));
+            out
+        }
+
+        IRNode::If { condition, then_branch, else_branch } => {
+            let mut then_env = env.clone();
+            let mut else_env = env.clone();
+            format!(
+                "{}if ({}) {{\n{}{}}} else {{\n{}{}}}\n",
+                pad,
+                ir_to_js_expr(condition, env),
+                ir_to_js_tail(then_branch, indent + 1, &mut then_env, brk),
+                pad,
+                ir_to_js_tail(else_branch, indent + 1, &mut else_env, brk),
+                pad,
+            )
+        }
+
+        IRNode::Match { scrutinee, cases } => {
+            js_match_chain(scrutinee, cases, indent, env, true, brk)
+        }
+
+        // A tail Loop's valued Break is the function's
+        // return (JsBreak::Value); the loop otherwise
+        // runs until a Break fires.
+        IRNode::Loop { body, invariant } => {
+            let mut out = String::new();
+            if let Some(inv) = invariant {
+                out.push_str(&format!("{pad}// invariant: {inv}\n"));
+            }
+            let mut body_env = env.clone();
+            out.push_str(&format!(
+                "{}while (true) {{\n{}{}}}\n",
+                pad,
+                ir_to_javascript(body, indent + 1, &mut body_env, JsBreak::Value),
+                pad,
+            ));
+            out
+        }
+
+        IRNode::TryPropagate(inner) => {
+            format!(
+                "{pad}{{\n{pad_inner}const __try = {};\n{pad_inner}if (__try.tag === \"Err\") {{ return __try; }}\n{pad_inner}return __try.value;\n{pad}}}\n",
+                ir_to_js_expr(inner, env)
+            )
+        }
+
+        IRNode::Return(_) => ir_to_javascript(node, indent, env, brk),
+
+        IRNode::Break { .. } => ir_to_javascript(node, indent, env, brk),
+
+        // Statement-shaped tails: the value is Unit —
+        // render the statements and fall off the end.
+        IRNode::Alloc { .. }
+        | IRNode::Assign { .. }
+        | IRNode::While { .. }
+        | IRNode::For { .. } => ir_to_javascript(node, indent, env, brk),
+
+        IRNode::Typed { node: inner, .. } => ir_to_js_tail(inner, indent, env, brk),
+
+        IRNode::Hole { .. } => format!("{pad}// unsupported\n"),
+
+        // Every expression-shaped tail returns its value.
+        _ => format!("{pad}return {};\n", ir_to_js_expr(node, env)),
+    }
+}
+
+fn ir_to_js_expr(node: &IRNode, env: &JsEnv) -> String {
+    match node {
+        IRNode::Literal(lit) => js_literal(lit),
         IRNode::Var(name) => name.clone(),
         IRNode::BinOp(op, lhs, rhs) => {
-            let js_op = match op {
-                IRBinOp::Add => "+", IRBinOp::Sub => "-",
-                IRBinOp::Mul => "*", IRBinOp::Div => "/",
-                IRBinOp::Eq => "===", IRBinOp::Neq => "!==",
-                IRBinOp::Lt => "<", IRBinOp::Gt => ">",
-                IRBinOp::And => "&&", IRBinOp::Or => "||",
-                _ => "?",
-            };
-            format!("({} {} {})", ir_to_js_expr(lhs), js_op, ir_to_js_expr(rhs))
+            let l = ir_to_js_expr(lhs, env);
+            let r = ir_to_js_expr(rhs, env);
+            match op {
+                // Expression-position Append is pure in
+                // the interpreter: (List, item) builds a
+                // new list; (String, Char) a new string.
+                IRBinOp::Append => match env.kind_of(lhs) {
+                    Some(JsTy::Str) | Some(JsTy::Char) => format!("({l} + {r})"),
+                    _ => format!("[...({l}), {r}]"),
+                },
+                IRBinOp::Concat => match env.kind_of(lhs) {
+                    Some(JsTy::List) => format!("[...({l}), ...({r})]"),
+                    _ => format!("({l} + {r})"),
+                },
+                // No JS form (no judged body carries it):
+                // the standing catch-all.
+                IRBinOp::Merge => "undefined".into(),
+                _ => {
+                    let js_op = match op {
+                        IRBinOp::Add => "+",
+                        IRBinOp::Sub => "-",
+                        IRBinOp::Mul => "*",
+                        // BigInt division truncates toward
+                        // zero; BigInt % takes the
+                        // dividend's sign — Morphic Int's
+                        // own semantics (the audit §3
+                        // finding D3a rests on).
+                        IRBinOp::Div => "/",
+                        IRBinOp::Mod => "%",
+                        IRBinOp::And => "&&",
+                        IRBinOp::Or => "||",
+                        // Xor is Bool-only in the
+                        // interpreter; `!==` is its exact
+                        // JS form (a `^` would coerce).
+                        IRBinOp::Xor => "!==",
+                        IRBinOp::Eq => "===",
+                        IRBinOp::Neq => "!==",
+                        IRBinOp::Lt => "<",
+                        IRBinOp::Le => "<=",
+                        IRBinOp::Gt => ">",
+                        IRBinOp::Ge => ">=",
+                        IRBinOp::Shl => "<<",
+                        IRBinOp::Shr => ">>",
+                        IRBinOp::Append | IRBinOp::Concat | IRBinOp::Merge => {
+                            unreachable!()
+                        }
+                    };
+                    format!("({l} {js_op} {r})")
+                }
+            }
+        }
+        IRNode::UnaryOp(op, inner) => {
+            let e = ir_to_js_expr(inner, env);
+            match op {
+                IRUnaryOp::Neg => format!("(- {e})"),
+                IRUnaryOp::Not => format!("(! {e})"),
+                IRUnaryOp::Abs => format!("(({e}) < 0 ? (-({e})) : ({e}))"),
+                // D3a form of the Phase 116 arm: the
+                // spread counts code points (String) or
+                // elements (List); BigInt() makes the
+                // count an Int at the boundary.
+                IRUnaryOp::Len => format!("BigInt([...({e})].length)"),
+                // Clone is the identity (Phase 91).
+                IRUnaryOp::Clone => e,
+                // Head/Tail/Init/Last/Reverse are
+                // interpreter-declined (NotEvaluable), so
+                // no judged body carries them: the
+                // standing catch-all.
+                _ => "undefined".into(),
+            }
         }
         // M1 features (Phase 77): object literals and
         // property access are native and
         // declaration-free — the exact record model. The
         // literal's type name has no runtime form in it.
         IRNode::FieldAccess { base, field } => {
-            format!("{}.{}", ir_to_js_expr(base), field)
+            format!("{}.{}", ir_to_js_expr(base, env), field)
         }
         IRNode::RecordLit { fields, .. } => {
             let fields_str: Vec<String> = fields
                 .iter()
-                .map(|(n, v)| format!("{}: {}", n, ir_to_js_expr(v)))
+                .map(|(n, v)| format!("{}: {}", n, ir_to_js_expr(v, env)))
                 .collect();
             format!("{{ {} }}", fields_str.join(", "))
         }
-        // Phase 116 (clause 5): the builtin tier renders.
-        // The spread form counts code points for a string
-        // and elements for a list — the language's
-        // char-count semantics, where a plain `.length`
-        // would count UTF-16 units. Name-keyed,
-        // arity-checked: every other call keeps the
-        // standing catch-all below.
-        IRNode::Call { function, args } if args.len() == 1 => {
-            match function.as_str() {
-                "len" => format!("[...({})].length", ir_to_js_expr(&args[0])),
-                "int_to_str" => format!("String({})", ir_to_js_expr(&args[0])),
-                _ => "undefined".into(),
+        IRNode::Call { function, args } => {
+            js_call_form(function, args, env).unwrap_or_else(|| "undefined".into())
+        }
+        IRNode::If { condition, then_branch, else_branch } => {
+            format!(
+                "(({}) ? ({}) : ({}))",
+                ir_to_js_expr(condition, env),
+                ir_to_js_expr(then_branch, env),
+                ir_to_js_expr(else_branch, env)
+            )
+        }
+        // Statement-carrying nodes in expression
+        // position take IIFE form, with the tail
+        // renderer inside. (Breaks inside ride the
+        // JsBreak::Value form — the named IIFE boundary
+        // in this section's header.)
+        IRNode::Match { scrutinee, cases } => {
+            let mut inner_env = env.clone();
+            let chain = js_match_chain(scrutinee, cases, 1, &mut inner_env, true, JsBreak::Value);
+            format!("(() => {{\n{chain}}})()")
+        }
+        IRNode::Block(_) | IRNode::Let { .. } => {
+            let mut inner_env = env.clone();
+            let body = ir_to_js_tail(node, 1, &mut inner_env, JsBreak::Value);
+            format!("(() => {{\n{body}}})()")
+        }
+        IRNode::Loop { .. } => {
+            let mut inner_env = env.clone();
+            let body = ir_to_js_tail(node, 1, &mut inner_env, JsBreak::Value);
+            format!("(() => {{\n{body}}})()")
+        }
+        IRNode::While { .. } | IRNode::For { .. } => {
+            let mut inner_env = env.clone();
+            let body = ir_to_javascript(node, 1, &mut inner_env, JsBreak::Value);
+            format!("(() => {{\n{body}}})()")
+        }
+        IRNode::TryPropagate(inner) => {
+            format!(
+                "(() => {{ const __try = ({}); if (__try.tag === \"Err\") {{ return __try; }} return __try.value; }})()",
+                ir_to_js_expr(inner, env)
+            )
+        }
+        IRNode::Index(base, idx) => {
+            let b = ir_to_js_expr(base, env);
+            let i = ir_to_js_expr(idx, env);
+            match env.kind_of(base) {
+                // Code-point indexing for a known String
+                // base (the §3 stance the len arm set).
+                Some(JsTy::Str) => format!("[...({b})][{i}]"),
+                _ => format!("({b})[{i}]"),
             }
         }
-        IRNode::UnaryOp(IRUnaryOp::Len, inner) => {
-            format!("[...({})].length", ir_to_js_expr(inner))
+        IRNode::Collection { kind, elements } => match kind {
+            CollectionKind::List | CollectionKind::Array | CollectionKind::Tuple => {
+                let parts: Vec<String> =
+                    elements.iter().map(|e| ir_to_js_expr(e, env)).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            // Set/Map have no §3 form in 1.1: the
+            // standing catch-all.
+            _ => "undefined".into(),
+        },
+        IRNode::Assign { target, value } => {
+            format!(
+                "({} = {})",
+                ir_to_js_expr(target, env),
+                ir_to_js_expr(value, env)
+            )
         }
+        IRNode::Typed { node: inner, .. } => ir_to_js_expr(inner, env),
         _ => "undefined".into(),
     }
 }
@@ -2300,18 +3134,128 @@ fn ty_to_python(ty: &TypeRef) -> String {
     }
 }
 
+/// Render a constraint as the proposition of a
+/// precondition `debug_assert!` (the Phase 55 form).
+///
+/// Phase 124 — NF-116-2 taken GLOBALLY (the facade's
+/// Phase 123 crate-local renderer, promoted): every
+/// shape renders GENUINELY, a parsed `require:` row's
+/// Expr and Predicate forms included, except the two
+/// quantified kinds. Forall / Exists keep the `true`
+/// placeholder as a NAMED FALLBACK: a quantified
+/// proposition has no value-level rendering a
+/// debug_assert could evaluate (the classification
+/// spec — rust_constraint_form's family 0 — states
+/// exactly this row set, and the Phase 124 ROAD note
+/// records it). Operands render through the
+/// assert-position expression walker
+/// (assert_expr_to_rust), whose one deviation from
+/// expr_to_rust is the clone rule: a call argument
+/// that is a plain variable renders cloned, so the
+/// proposition cannot consume the function's argument
+/// (the assert is a proposition, not a use).
 fn constraint_to_rust(constraint: &Constraint) -> String {
     match constraint {
         Constraint::True => "true".into(),
+        Constraint::Expr(expr) => assert_expr_to_rust(expr),
+        Constraint::Predicate(name, args) => assert_call_to_rust(name, args),
         Constraint::Not(inner) => format!("!({})", constraint_to_rust(inner)),
-        Constraint::Eq(a, b) => format!("{} == {}", expr_to_rust(a), expr_to_rust(b)),
-        Constraint::Order(OrderOp::LessThan, a, b) => format!("{} < {}", expr_to_rust(a), expr_to_rust(b)),
-        Constraint::Order(OrderOp::LessThanOrEqual, a, b) => format!("{} <= {}", expr_to_rust(a), expr_to_rust(b)),
+        Constraint::Eq(a, b) => format!(
+            "{} == {}",
+            assert_expr_to_rust(a),
+            assert_expr_to_rust(b)
+        ),
+        Constraint::Order(op, a, b) => {
+            let rust_op = match op {
+                OrderOp::LessThan => "<",
+                OrderOp::LessThanOrEqual => "<=",
+                OrderOp::GreaterThan => ">",
+                OrderOp::GreaterThanOrEqual => ">=",
+            };
+            format!(
+                "{} {} {}",
+                assert_expr_to_rust(a),
+                rust_op,
+                assert_expr_to_rust(b)
+            )
+        }
         Constraint::And(parts) => {
             let p: Vec<String> = parts.iter().map(constraint_to_rust).collect();
             format!("({})", p.join(" && "))
         }
-        _ => "true".into(),
+        Constraint::Or(parts) => {
+            let p: Vec<String> = parts.iter().map(constraint_to_rust).collect();
+            format!("({})", p.join(" || "))
+        }
+        Constraint::Implies(a, b) => format!(
+            "(!({}) || ({}))",
+            constraint_to_rust(a),
+            constraint_to_rust(b)
+        ),
+        // The named fallback (see this function's
+        // header): quantified propositions have no
+        // value-level assert rendering.
+        Constraint::Forall { .. } | Constraint::Exists { .. } => "true".into(),
+    }
+}
+
+/// Render a call at assert position (see
+/// constraint_to_rust's header for the clone rule): a
+/// plain-variable argument renders cloned; every other
+/// argument renders through the assert walker.
+fn assert_call_to_rust(name: &str, args: &[Expr]) -> String {
+    let rendered: Vec<String> = args
+        .iter()
+        .map(|arg| match arg {
+            Expr::Var(v) => format!("{}.clone()", rust_ident(v)),
+            _ => assert_expr_to_rust(arg),
+        })
+        .collect();
+    format!("{}({})", rust_ident(name), rendered.join(", "))
+}
+
+/// Render an expression at assert position: calls and
+/// binary operations recurse through the assert walker
+/// (so the clone rule reaches calls nested in a
+/// proposition); the parser's pseudo-calls keep
+/// expr_to_rust's forms over assert-rendered operands;
+/// every other form takes expr_to_rust's rendering,
+/// standing catch-alls included.
+fn assert_expr_to_rust(expr: &Expr) -> String {
+    match expr {
+        Expr::Call(name, args) => match name.as_str() {
+            "List" => {
+                let rendered: Vec<String> =
+                    args.iter().map(assert_expr_to_rust).collect();
+                format!("vec![{}]", rendered.join(", "))
+            }
+            "__tuple__" => {
+                let rendered: Vec<String> =
+                    args.iter().map(assert_expr_to_rust).collect();
+                format!("({})", rendered.join(", "))
+            }
+            "None" => "None".to_string(),
+            _ => assert_call_to_rust(name, args),
+        },
+        Expr::BinOp(op, lhs, rhs) => {
+            let rust_op = match op {
+                BinOp::Add => "+", BinOp::Sub => "-",
+                BinOp::Mul => "*", BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::Eq => "==", BinOp::Neq => "!=",
+                BinOp::And => "&&", BinOp::Or => "||",
+                BinOp::Lt => "<", BinOp::Le => "<=",
+                BinOp::Gt => ">", BinOp::Ge => ">=",
+                BinOp::Concat => "+",
+            };
+            format!(
+                "({} {} {})",
+                assert_expr_to_rust(lhs),
+                rust_op,
+                assert_expr_to_rust(rhs)
+            )
+        }
+        _ => expr_to_rust(expr),
     }
 }
 
@@ -2493,6 +3437,32 @@ impl std::error::Error for CodegenError {}
 // ── Tests ─────────────────────────────────────────────────
 
 /// The M5-S1 bootstrap artifact (Phase 51): the M3 Codegen
+/// Phase 121 (1.1 Embeddable): the typed-binding
+/// generator — assembled ESM module + `.d.ts` +
+/// `morphic.manifest.json` from (spec, body, verdict)
+/// inputs, for the frozen stdlib surface and, ungated,
+/// for user modules (D1a).
+pub mod bindings;
+
+/// Phase 122 (1.1 Embeddable): the npm package assembly
+/// — Phase 121's binding set plus the package furniture
+/// and per-function modules, assembled into the
+/// package's repo home under the crowning
+/// re-verification (gate clause 4's machinery) and the
+/// frozen unpacked-mass budget (clause 6).
+pub mod package;
+
+/// Phase 123 (1.1 Embeddable): the Rust facade crate
+/// assembly — the 29 frozen entries as real Rust
+/// functions under `morphic::stdlib`, generated from
+/// the shipped bodies through the native function
+/// renderer, assembled into the crate's repo home
+/// (its own workspace root at `packages/rust/`) under
+/// the same crowning re-verification; NF-116-2 taken
+/// at the crate's surface (genuine precondition
+/// asserts), its global residue named in the open.
+pub mod facade;
+
 /// module's 112 synthesized winners, checked in as a versioned
 /// file and compiled into the crate — the compiled codegen the
 /// bootstrap adapter calls. GENERATED FILE (its own header
@@ -4735,11 +5705,17 @@ mod tests {
         );
         // JavaScript: object literals and property access
         // are native and declaration-free — the exact
-        // record model.
-        assert_eq!(ir_to_js_expr(&fa(v("state"), "pos")), "state.pos");
+        // record model. (Phase 120: the expression
+        // renderer takes the renderer's environment, and
+        // Int literals are BigInt literals per EMBED
+        // D3a — the kind field renders `0n`.)
         assert_eq!(
-            ir_to_js_expr(&token_py),
-            "{ kind: 0, lexeme: 'spec' }"
+            ir_to_js_expr(&fa(v("state"), "pos"), &JsEnv::detached()),
+            "state.pos"
+        );
+        assert_eq!(
+            ir_to_js_expr(&token_py, &JsEnv::detached()),
+            "{ kind: 0n, lexeme: 'spec' }"
         );
         // WAT: the emitted WAT has no aggregate concept at
         // all (scalar params/results only, no memory or
@@ -4768,12 +5744,16 @@ mod tests {
     // One measured subtlety, recorded rather than worked
     // around silently: a parsed `require: a == b` lands
     // in Constraint::Expr (parse_expr consumes `==` as a
-    // BinOp), which the native constraint_to_rust renders
-    // through its standing "true" catch-all — so the
-    // fixture hands generate step_ok's precondition in
-    // the engine-constructed Constraint::Eq form, the
-    // shape that renderer's Eq arm (and the M3 corpus's
-    // constraint cases) exists for. The spec text below
+    // BinOp). Before Phase 124 the native
+    // constraint_to_rust rendered that form through its
+    // "true" catch-all (NF-116-2); since Phase 124 it
+    // renders genuinely — as the parenthesized BinOp
+    // text. The fixture still hands generate step_ok's
+    // precondition in the engine-constructed
+    // Constraint::Eq form: the Eq arm's unparenthesized
+    // rendering is the shape this fixture's pin names
+    // (and the shape the M3 corpus's constraint cases
+    // exist for). The spec text below
     // keeps its `require:` line: it parses and typechecks
     // as written; only the candidate's precondition VALUE
     // is transcribed, exactly as the fixture bodies are
