@@ -595,14 +595,27 @@ fn phase133_corpus_verdict_drift() {
         named("VerificationFailed")
     );
     assert_eq!(table.len(), 195);
-    assert_eq!(count("Verified"), 166);
     assert_eq!(no_body, 25);
     assert_eq!(count("NO_BODY"), 25);
-    assert_eq!(
-        named("Inconclusive"),
-        vec!["smallest", "sorted_probe", "total_or_empty"]
-    );
-    assert_eq!(named("VerificationFailed"), vec!["chained_fallback"]);
+    #[cfg(feature = "z3-support")]
+    {
+        assert_eq!(count("Verified"), 166);
+        assert_eq!(
+            named("Inconclusive"),
+            vec!["smallest", "sorted_probe", "total_or_empty"]
+        );
+        assert_eq!(named("VerificationFailed"), vec!["chained_fallback"]);
+    }
+    // The no-Z3 build's honest subset: no verdict is
+    // available, so every judged spec stands Inconclusive
+    // and the table's shape (195 / 25 NO_BODY) is the
+    // drift content.
+    #[cfg(not(feature = "z3-support"))]
+    {
+        assert_eq!(count("Verified"), 0);
+        assert_eq!(count("Inconclusive"), 170);
+        assert_eq!(count("VerificationFailed"), 0);
+    }
 }
 
 #[test]
