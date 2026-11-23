@@ -577,6 +577,19 @@ fn phase133_corpus_verdict_drift() {
     // frozen §3 probe exhibits (apply_twice, apply_req,
     // apply_fa — see `phase133_named_exhibit_movements`),
     // which live in probe sources, not in this corpus.
+    //
+    // Phase 135 amendment, recorded the same way: the
+    // corpus grew by Amendment 2's six specs (195 → 201)
+    // and every standing verdict is identical — 166
+    // Verified, the failed set unchanged. Of the six,
+    // five join NO_BODY (their hand bodies are crowned
+    // through the prelude-merged route, like the
+    // standing Tier-2 entries); `list_fold`'s single
+    // defining equation (`output == fold(xs, init, f)`)
+    // gives it a denotation in this sweep's route and it
+    // stands Inconclusive — the same verdict its shipped
+    // body carries (pinned in
+    // tests/phase135_amendment_build.rs).
     let (table, no_body) = verdict_table();
     let count = |want: &str| table.values().filter(|s| s.as_str() == want).count();
     let named = |want: &str| -> Vec<String> {
@@ -594,26 +607,26 @@ fn phase133_corpus_verdict_drift() {
         named("Inconclusive"),
         named("VerificationFailed")
     );
-    assert_eq!(table.len(), 195);
-    assert_eq!(no_body, 25);
-    assert_eq!(count("NO_BODY"), 25);
+    assert_eq!(table.len(), 201);
+    assert_eq!(no_body, 30);
+    assert_eq!(count("NO_BODY"), 30);
     #[cfg(feature = "z3-support")]
     {
         assert_eq!(count("Verified"), 166);
         assert_eq!(
             named("Inconclusive"),
-            vec!["smallest", "sorted_probe", "total_or_empty"]
+            vec!["list_fold", "smallest", "sorted_probe", "total_or_empty"]
         );
         assert_eq!(named("VerificationFailed"), vec!["chained_fallback"]);
     }
     // The no-Z3 build's honest subset: no verdict is
     // available, so every judged spec stands Inconclusive
-    // and the table's shape (195 / 25 NO_BODY) is the
+    // and the table's shape (201 / 30 NO_BODY) is the
     // drift content.
     #[cfg(not(feature = "z3-support"))]
     {
         assert_eq!(count("Verified"), 0);
-        assert_eq!(count("Inconclusive"), 170);
+        assert_eq!(count("Inconclusive"), 171);
         assert_eq!(count("VerificationFailed"), 0);
     }
 }

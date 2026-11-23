@@ -70,9 +70,15 @@ use super::CodegenError;
 /// The package's repo home, relative to the repo root.
 pub const NPM_PACKAGE_DIR: &str = "packages/npm";
 
-/// The frozen npm budget (EMBED_SCOPE §4): the assembled
-/// package's unpacked mass must not exceed this.
-pub const NPM_UNPACKED_BUDGET: usize = 79_872;
+/// The frozen npm budget: the assembled package's
+/// unpacked mass must not exceed this. EMBED_SCOPE §4
+/// froze 79,872 B for the 29-export package;
+/// STDLIB_SCOPE.md Amendment 2 §A2.5 re-derived the
+/// figure from measured actuals for the 35-export
+/// package — 76,800 B, deliberately below its
+/// predecessor — and the re-derived figure is the one
+/// that binds from 1.2.
+pub const NPM_UNPACKED_BUDGET: usize = 76_800;
 
 /// One file of the assembled package: its path inside
 /// the package and its full contents.
@@ -114,7 +120,7 @@ mean at the boundary.
 
 ## The functions
 
-Twenty-nine exports under their Morphic entry names.
+Thirty-five exports under their Morphic entry names.
 The root module exports all of them; each is also
 importable from its own subpath (for example
 `@thvtzy/morphic/int_clamp`).
@@ -141,7 +147,20 @@ battery point):
 - List: `list_reverse`, `list_contains`, `list_sum`,
   `list_product`, `list_min`, `list_max`, `list_take`,
   `list_drop`, `list_is_sorted`, `list_sort`,
-  `list_binary_search`
+  `list_binary_search`, `list_map`, `list_filter`,
+  `list_fold`, `list_all`, `list_any`, `range`
+
+The last six are the 1.2 amendment's entries
+(STDLIB_SCOPE.md Amendment 2). Five of them are
+higher-order: they take a function argument, and at
+runtime any JavaScript function of the right shape
+answers — including this package's own exports
+(`int_abs`, `int_is_even`, …). In the TypeScript
+declarations a function-typed parameter is typed
+`never` in 1.2: no callable TypeScript function type
+is frozen, and the manifest's `signature` field
+carries the true Morphic signature, so the boundary
+is stated in the package's own surface.
 
 `list_binary_search` is a first-match scan: its contract
 is search semantics — an index naming the target, or
@@ -355,9 +374,23 @@ pub fn check_tier1_crown(
 /// half of the Phase 115 pin: the shipped body stands
 /// executed-exact on its full in-spec battery, every
 /// point evaluable (no spec-silent points at this tier).
+///
+/// Phase 135 (Amendment 2 §A2.4.3, Phase 132's recorded
+/// hand-off): the judging route is the INDEX-CARRYING
+/// one (`run_spec_tests_in` over the prelude-merged
+/// SpecIndex), so an entry whose in-spec tests supply a
+/// function by named reference (the Amendment 2
+/// entries) binds here — on the context-free route those
+/// rows were Unbindable and no such entry could ever
+/// verify. Non-mover, measured at Phase 135: the 29
+/// standing entries' outcomes are identical on both
+/// routes (their points carry no named supply), pinned
+/// in tests/phase135_amendment_build.rs.
 #[cfg(not(feature = "wasm-playground"))]
 pub fn check_tier2_body(spec: &FunctionSpec, body: &IRNode) -> Result<(), String> {
-    let run = eval::run_spec_tests(body, spec);
+    let index =
+        crate::synthesis::engine::SpecIndex::from_specs(&crate::stdlib::prelude_specs());
+    let run = eval::run_spec_tests_in(body, spec, &index);
     if run.passed == run.evaluable && run.evaluable == spec.tests.len() {
         Ok(())
     } else {

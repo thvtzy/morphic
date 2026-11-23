@@ -169,7 +169,9 @@ fn bundled_library_parses_and_checks_standalone() {
     // minus the blocked int_gcd, plus the Char family;
     // Phase 112: String basics and Result/Option;
     // Phase 115: the List family — list_is_empty Tier-1
-    // plus the eleven Tier-2 entries).
+    // plus the eleven Tier-2 entries; Phase 135:
+    // Amendment 2's six Tier-2 entries complete the
+    // List module).
     let specs = stdlib::prelude_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
@@ -204,6 +206,12 @@ fn bundled_library_parses_and_checks_standalone() {
             "list_is_sorted",
             "list_sort",
             "list_binary_search",
+            "list_map",
+            "list_filter",
+            "list_fold",
+            "list_all",
+            "list_any",
+            "range",
         ]
     );
     let abs = &specs[0];
@@ -512,13 +520,19 @@ fn shipped_body_judges_verified_and_golden_exact() {
 /// and the data updated, in the open. (The Tier-2 List
 /// entries are the recorded exception, TIER2_ENTRIES
 /// below: no pipeline crown is claimed for them.)
-/// The Tier-2 List entries (STDLIB_SCOPE §2.6): the
-/// pipeline crowns no executed-exact body for any of
-/// them (Phase 115's measurement), so this pin — which
-/// holds Tier-1 entries to "the pipeline crowns the
-/// shipped body, Verified" — does not extend over them;
-/// their shipped hand bodies are pinned at the Tier-2
-/// standard in tests/phase115_list.rs.
+/// The Tier-2 entries (STDLIB_SCOPE §2.6, plus
+/// Amendment 2's six): the pipeline crowns no
+/// executed-exact body for any of them (Phase 115's
+/// measurement), so this pin — which holds Tier-1
+/// entries to "the pipeline crowns the shipped body,
+/// Verified" — does not extend over them; their shipped
+/// hand bodies are pinned at the Tier-2 standard in
+/// tests/phase115_list.rs (the eleven) and
+/// tests/phase135_amendment_build.rs (Amendment 2's
+/// six, whose in-spec tests carry named-reference rows
+/// the context-free pipeline route does not bind —
+/// their crowning route is the package crown check,
+/// wired to the index-carrying route at Phase 135).
 const TIER2_ENTRIES: &[&str] = &[
     "list_reverse",
     "list_contains",
@@ -531,6 +545,12 @@ const TIER2_ENTRIES: &[&str] = &[
     "list_is_sorted",
     "list_sort",
     "list_binary_search",
+    "list_map",
+    "list_filter",
+    "list_fold",
+    "list_all",
+    "list_any",
+    "range",
 ];
 
 #[cfg(not(feature = "wasm-playground"))]

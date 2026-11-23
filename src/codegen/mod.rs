@@ -2347,12 +2347,17 @@ impl JsTy {
     }
 }
 
-/// Renderer state: the kinds of the names in scope and
-/// the shipped-entry name set (for the entry-call arm).
+/// Renderer state: the kinds of the names in scope,
+/// the shipped-entry name set (for the entry-call arm),
+/// and the bound function variables (Phase 135,
+/// Amendment 2 §A2.4.2: the entry's function-typed
+/// parameters and locals bound to function values — the
+/// application arm's callee set).
 #[derive(Clone)]
 struct JsEnv {
     types: std::collections::HashMap<String, JsTy>,
     entries: std::collections::BTreeSet<String>,
+    functions: std::collections::BTreeSet<String>,
 }
 
 impl JsEnv {
@@ -2362,9 +2367,16 @@ impl JsEnv {
             .iter()
             .map(|p| (p.name.clone(), JsTy::from_type(&p.ty)))
             .collect();
+        let functions = spec
+            .params
+            .iter()
+            .filter(|p| matches!(p.ty, TypeRef::Function(..)))
+            .map(|p| p.name.clone())
+            .collect();
         JsEnv {
             types,
             entries: library_entry_names(),
+            functions,
         }
     }
 
@@ -2372,6 +2384,26 @@ impl JsEnv {
         JsEnv {
             types: std::collections::HashMap::new(),
             entries: std::collections::BTreeSet::new(),
+            functions: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Record a binding of `name` to the value `value`:
+    /// a Lambda / Closure value, or a Var naming an
+    /// already-bound function variable, makes the name
+    /// itself a bound function variable (the application
+    /// arm then renders its calls directly).
+    fn note_binding(&mut self, name: &str, value: &IRNode) {
+        let is_function = match value {
+            IRNode::Lambda { .. } | IRNode::Closure { .. } => true,
+            IRNode::Var(other) => self.functions.contains(other),
+            IRNode::Typed { node, .. } => {
+                matches!(node.as_ref(), IRNode::Lambda { .. } | IRNode::Closure { .. })
+            }
+            _ => false,
+        };
+        if is_function {
+            self.functions.insert(name.to_string());
         }
     }
 
@@ -2469,10 +2501,16 @@ fn js_literal(lit: &IRLiteral) -> String {
 /// list-literal pseudo-call; the D4a constructor
 /// forms; shipped library entries as plain calls to
 /// their export names (the Phase 120 reconciliation —
-/// Phase 121's module assembly satisfies them); any
-/// other capitalized name as a generic tagged-union
-/// object, the constructor form consistent with the
-/// Match discrimination below.
+/// Phase 121's module assembly satisfies them); a bound
+/// function variable as a direct call (Phase 135,
+/// Amendment 2 §A2.4.2's application arm — the
+/// interpreter resolves an environment-bound function
+/// value the same way, after builtins and module
+/// signatures); any other capitalized name as a
+/// generic tagged-union object, the constructor form
+/// consistent with the Match discrimination below.
+/// Callees in none of these classes keep the standing
+/// refusal — no silent form is invented for them.
 fn js_call_form(function: &str, args: &[IRNode], env: &JsEnv) -> Option<String> {
     let rendered: Vec<String> = args.iter().map(|a| ir_to_js_expr(a, env)).collect();
     match function {
@@ -2490,6 +2528,9 @@ fn js_call_form(function: &str, args: &[IRNode], env: &JsEnv) -> Option<String> 
             Some(format!("({{ tag: \"Err\", error: {} }})", rendered[0]))
         }
         _ if env.entries.contains(function) => {
+            Some(format!("{}({})", function, rendered.join(", ")))
+        }
+        _ if env.functions.contains(function) => {
             Some(format!("{}({})", function, rendered.join(", ")))
         }
         _ if function.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => {
@@ -2642,6 +2683,7 @@ fn ir_to_javascript(node: &IRNode, indent: usize, env: &mut JsEnv, brk: JsBreak)
             if let Some(kind) = env.kind_of(value) {
                 env.types.insert(name.clone(), kind);
             }
+            env.note_binding(name, value);
             out.push_str(&ir_to_javascript(body, indent, env, brk));
             out
         }
@@ -2720,8 +2762,14 @@ fn ir_to_javascript(node: &IRNode, indent: usize, env: &mut JsEnv, brk: JsBreak)
         }
 
         IRNode::Alloc { name, ty, initial } => {
+            // The initial renders against the pre-binding
+            // environment (the interpreter evaluates it
+            // before the name exists — no self-capture);
+            // the binding is noted only after.
+            let rendered = ir_to_js_expr(initial, env);
             env.types.insert(name.clone(), JsTy::from_type(ty));
-            format!("{pad}let {} = {};\n", name, ir_to_js_expr(initial, env))
+            env.note_binding(name, initial);
+            format!("{pad}let {} = {};\n", name, rendered)
         }
 
         IRNode::Assign { target, value } => {
@@ -2778,7 +2826,10 @@ fn ir_to_javascript(node: &IRNode, indent: usize, env: &mut JsEnv, brk: JsBreak)
             None => format!("{pad}// unsupported\n"),
         },
 
-        // Bare expression statements.
+        // Bare expression statements. Phase 135
+        // (Amendment 2 §A2.4.2): Map / Filter / Fold join
+        // the group, so renderability does not depend on
+        // a node's position.
         IRNode::Literal(_)
         | IRNode::Var(_)
         | IRNode::BinOp(..)
@@ -2786,7 +2837,10 @@ fn ir_to_javascript(node: &IRNode, indent: usize, env: &mut JsEnv, brk: JsBreak)
         | IRNode::Index(..)
         | IRNode::Collection { .. }
         | IRNode::FieldAccess { .. }
-        | IRNode::RecordLit { .. } => {
+        | IRNode::RecordLit { .. }
+        | IRNode::Map { .. }
+        | IRNode::Filter { .. }
+        | IRNode::Fold { .. } => {
             format!("{pad}{};\n", ir_to_js_expr(node, env))
         }
 
@@ -2822,6 +2876,7 @@ fn ir_to_js_tail(node: &IRNode, indent: usize, env: &mut JsEnv, brk: JsBreak) ->
             if let Some(kind) = env.kind_of(value) {
                 env.types.insert(name.clone(), kind);
             }
+            env.note_binding(name, value);
             out.push_str(&ir_to_js_tail(body, indent, env, brk));
             out
         }
@@ -2886,6 +2941,72 @@ fn ir_to_js_tail(node: &IRNode, indent: usize, env: &mut JsEnv, brk: JsBreak) ->
 
         // Every expression-shaped tail returns its value.
         _ => format!("{pad}return {};\n", ir_to_js_expr(node, env)),
+    }
+}
+
+/// A Lambda / Closure in the arrow-function form
+/// (Phase 135, Amendment 2 §A2.4.2). The Closure arm is
+/// the same form: the capture list has no JavaScript
+/// runtime form — JavaScript closures capture the
+/// enclosing scope lexically. The one seam is named in
+/// the freeze, not hidden: the interpreter's capture is
+/// a by-value snapshot (G4_SCOPE §2.2), so bodies form
+/// closures only over parameters and over locals not
+/// rebound after the closure's creation — the
+/// discipline the amendment's bodies keep — and battery
+/// agreement is the pin.
+///
+/// An expression-shaped body renders `((p) => (body))`;
+/// a statement-shaped body renders the block form with
+/// the tail renderer inside, under the lambda's own
+/// environment (its parameters registered, function-
+/// typed ones as bound function variables).
+fn js_arrow(params: &[(String, TypeRef)], body: &IRNode, env: &JsEnv) -> String {
+    let mut inner = env.clone();
+    let mut names: Vec<String> = Vec::with_capacity(params.len());
+    for (name, ty) in params {
+        names.push(name.clone());
+        inner.types.insert(name.clone(), JsTy::from_type(ty));
+        if matches!(ty, TypeRef::Function(..)) {
+            inner.functions.insert(name.clone());
+        }
+    }
+    let joined = names.join(", ");
+    if js_body_is_expression(body) {
+        format!("(({joined}) => ({}))", ir_to_js_expr(body, &inner))
+    } else {
+        let rendered = ir_to_js_tail(body, 1, &mut inner, JsBreak::Value);
+        format!("(({joined}) => {{\n{rendered}}})")
+    }
+}
+
+/// Whether a Lambda body takes the arrow's expression
+/// form: the node shapes `ir_to_js_expr` renders as
+/// genuine expressions (the IIFE-wrapped statement
+/// shapes included). Statement-shaped bodies (Block,
+/// Let, Match, loops, Return, …) take the block form,
+/// where the tail renderer gives them their returns.
+fn js_body_is_expression(node: &IRNode) -> bool {
+    match node {
+        IRNode::Literal(_)
+        | IRNode::Var(_)
+        | IRNode::BinOp(..)
+        | IRNode::UnaryOp(..)
+        | IRNode::Call { .. }
+        | IRNode::If { .. }
+        | IRNode::Index(..)
+        | IRNode::Collection { .. }
+        | IRNode::FieldAccess { .. }
+        | IRNode::RecordLit { .. }
+        | IRNode::Lambda { .. }
+        | IRNode::Closure { .. }
+        | IRNode::Map { .. }
+        | IRNode::Filter { .. }
+        | IRNode::Fold { .. }
+        | IRNode::TryPropagate(_)
+        | IRNode::Assign { .. } => true,
+        IRNode::Typed { node: inner, .. } => js_body_is_expression(inner),
+        _ => false,
     }
 }
 
@@ -2981,6 +3102,44 @@ fn ir_to_js_expr(node: &IRNode, env: &JsEnv) -> String {
         }
         IRNode::Call { function, args } => {
             js_call_form(function, args, env).unwrap_or_else(|| "undefined".into())
+        }
+        // The higher-order arms (Phase 135, Amendment 2
+        // §A2.4.2): Lambda / Closure in the arrow form;
+        // Map / Filter / Fold as the collection operand
+        // composed with the function operand rendered
+        // through those same forms (a Lambda / Closure
+        // operand becomes an arrow; a Var operand — the
+        // parameter itself — stays the name). The Sort
+        // arm is deliberately absent (the freeze's
+        // recorded decision: no amendment body is a Sort
+        // body), so Sort keeps the catch-all below.
+        IRNode::Lambda { params, body } => js_arrow(params, body, env),
+        IRNode::Closure { params, body, .. } => js_arrow(params, body, env),
+        IRNode::Map { function, over } => {
+            format!(
+                "({}).map({})",
+                ir_to_js_expr(over, env),
+                ir_to_js_expr(function, env)
+            )
+        }
+        IRNode::Filter { predicate, over } => {
+            format!(
+                "({}).filter({})",
+                ir_to_js_expr(over, env),
+                ir_to_js_expr(predicate, env)
+            )
+        }
+        IRNode::Fold {
+            operation,
+            initial,
+            over,
+        } => {
+            format!(
+                "({}).reduce({}, {})",
+                ir_to_js_expr(over, env),
+                ir_to_js_expr(operation, env),
+                ir_to_js_expr(initial, env)
+            )
         }
         IRNode::If { condition, then_branch, else_branch } => {
             format!(

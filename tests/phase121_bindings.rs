@@ -2,8 +2,9 @@
 //! bindings + the tier manifest. The freeze's exit
 //! conditions, pinned:
 //!
-//! * one assembled ESM module exports exactly the 29
-//!   frozen entries (§2.1), generated from the shipped
+//! * one assembled ESM module exports exactly the 35
+//!   frozen entries (§2.1, as amended by STDLIB_SCOPE.md
+//!   Amendment 2 — Phase 135 added the six rows below), generated from the shipped
 //!   bodies through the Phase 120 emitter — no wrappers,
 //!   no extra exports, no missing names; each export
 //!   carries its entry's `doc:` as JSDoc;
@@ -121,6 +122,15 @@ const FROZEN: &[FrozenRow] = &[
     FrozenRow { name: "list_is_sorted", signature: "List<Int> → Bool", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "boolean" },
     FrozenRow { name: "list_sort", signature: "List<Int> → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint[]" },
     FrozenRow { name: "list_binary_search", signature: "(List<Int>, Int) → Option<Int>", tier: "tier-2", basis: "executed-exact", pinned: 64, silent: 3, ts_params: &["bigint[]", "bigint"], ts_return: "bigint | null" },
+    // Amendment 2's six (Phase 135): Tier-2 on the A2.3
+    // batteries; the fn-typed parameters carry §3's
+    // standing `never` in the declarations (A2.4.2).
+    FrozenRow { name: "list_map", signature: "(List<Int>, fn(Int) -> Int) → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 20, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "bigint[]" },
+    FrozenRow { name: "list_filter", signature: "(List<Int>, fn(Int) -> Bool) → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 20, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "bigint[]" },
+    FrozenRow { name: "list_fold", signature: "(List<Int>, Int, fn(Int, Int) -> Int) → Int", tier: "tier-2", basis: "executed-exact", pinned: 18, silent: 0, ts_params: &["bigint[]", "bigint", "never"], ts_return: "bigint" },
+    FrozenRow { name: "list_all", signature: "(List<Int>, fn(Int) -> Bool) → Bool", tier: "tier-2", basis: "executed-exact", pinned: 16, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "boolean" },
+    FrozenRow { name: "list_any", signature: "(List<Int>, fn(Int) -> Bool) → Bool", tier: "tier-2", basis: "executed-exact", pinned: 16, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "boolean" },
+    FrozenRow { name: "range", signature: "(Int, Int) → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint", "bigint"], ts_return: "bigint[]" },
 ];
 
 // ── Helpers ──────────────────────────────────────────────
@@ -198,11 +208,11 @@ fn stdlib_bindings_are_deterministic() {
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn assembled_module_exports_exactly_the_frozen_29() {
+fn assembled_module_exports_exactly_the_frozen_35() {
     let set = bindings::stdlib_bindings().expect("stdlib bindings generate");
     let frozen: Vec<String> = FROZEN.iter().map(|r| r.name.to_string()).collect();
 
-    // Exactly the 29 functions are defined — no wrappers,
+    // Exactly the 35 functions are defined — no wrappers,
     // no helpers, no missing entries — and exactly they
     // are exported.
     assert_eq!(defined_functions(&set.js_module), frozen, "defined functions");
@@ -223,7 +233,7 @@ fn assembled_module_exports_exactly_the_frozen_29() {
 
     // Entry-to-entry calls resolve inside the module:
     // every plain call in the module body names one of
-    // the 29 or a JS builtin form the emitter renders.
+    // the 35 or a JS builtin form the emitter renders.
     assert!(
         !set.js_module.contains("undefined;"),
         "no standing-fallback residue in the assembled module"
@@ -241,7 +251,7 @@ fn manifest_rows_correspond_exactly_to_embed_scope_2_1() {
     assert_eq!(m.package_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(m.morphic_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(m.scope, "EMBED_SCOPE.md");
-    assert_eq!(m.exports.len(), 29, "29 manifest rows");
+    assert_eq!(m.exports.len(), 35, "35 manifest rows");
 
     let by_name: std::collections::BTreeMap<&str, &ManifestExport> =
         m.exports.iter().map(|e| (e.name.as_str(), e)).collect();
@@ -303,8 +313,8 @@ fn declarations_carry_the_frozen_section_3_shapes() {
     // One declaration per export, no more.
     assert_eq!(
         dts.matches("export declare function ").count(),
-        29,
-        "29 declarations"
+        35,
+        "35 declarations"
     );
     for row in FROZEN {
         let spec = prelude_spec(row.name);

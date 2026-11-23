@@ -313,4 +313,61 @@ function list_binary_search(xs, x) {
     return res;
 }
 
-export { int_abs, int_sign, int_min, int_max, int_clamp, int_is_even, int_is_odd, char_is_digit, char_is_alpha, char_is_whitespace, char_is_uppercase, char_is_lowercase, char_to_digit, string_is_empty, result_unwrap_or, option_unwrap_or, option_ok_or, list_is_empty, list_reverse, list_contains, list_sum, list_product, list_min, list_max, list_take, list_drop, list_is_sorted, list_sort, list_binary_search };
+/** list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+function list_map(xs, f) {
+    let out = [];
+    for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
+        out.push(f((xs)[i]));
+    }
+    return out;
+}
+
+/** list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+function list_filter(xs, p) {
+    let out = [];
+    for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
+        if (p((xs)[i])) {
+            out.push((xs)[i]);
+        } else {
+        }
+    }
+    return out;
+}
+
+/** list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+function list_fold(xs, init, f) {
+    let acc = init;
+    for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
+        acc = f(acc, (xs)[i]);
+    }
+    return acc;
+}
+
+/** list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+function list_all(xs, p) {
+    let ok = true;
+    for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
+        ok = (ok && p((xs)[i]));
+    }
+    return ok;
+}
+
+/** list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+function list_any(xs, p) {
+    let ok = false;
+    for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
+        ok = (ok || p((xs)[i]));
+    }
+    return ok;
+}
+
+/** range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9). */
+function range(lo, hi) {
+    let out = [];
+    for (let i = lo, __end_i = hi; i < __end_i; i++) {
+        out.push(i);
+    }
+    return out;
+}
+
+export { int_abs, int_sign, int_min, int_max, int_clamp, int_is_even, int_is_odd, char_is_digit, char_is_alpha, char_is_whitespace, char_is_uppercase, char_is_lowercase, char_to_digit, string_is_empty, result_unwrap_or, option_unwrap_or, option_ok_or, list_is_empty, list_reverse, list_contains, list_sum, list_product, list_min, list_max, list_take, list_drop, list_is_sorted, list_sort, list_binary_search, list_map, list_filter, list_fold, list_all, list_any, range };

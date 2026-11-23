@@ -25,7 +25,7 @@ mean at the boundary.
 
 ## The functions
 
-Twenty-nine exports under their Morphic entry names.
+Thirty-five exports under their Morphic entry names.
 The root module exports all of them; each is also
 importable from its own subpath (for example
 `@thvtzy/morphic/int_clamp`).
@@ -52,7 +52,20 @@ battery point):
 - List: `list_reverse`, `list_contains`, `list_sum`,
   `list_product`, `list_min`, `list_max`, `list_take`,
   `list_drop`, `list_is_sorted`, `list_sort`,
-  `list_binary_search`
+  `list_binary_search`, `list_map`, `list_filter`,
+  `list_fold`, `list_all`, `list_any`, `range`
+
+The last six are the 1.2 amendment's entries
+(STDLIB_SCOPE.md Amendment 2). Five of them are
+higher-order: they take a function argument, and at
+runtime any JavaScript function of the right shape
+answers — including this package's own exports
+(`int_abs`, `int_is_even`, …). In the TypeScript
+declarations a function-typed parameter is typed
+`never` in 1.2: no callable TypeScript function type
+is frozen, and the manifest's `signature` field
+carries the true Morphic signature, so the boundary
+is stated in the package's own surface.
 
 `list_binary_search` is a first-match scan: its contract
 is search semantics — an index naming the target, or

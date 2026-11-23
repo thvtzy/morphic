@@ -844,12 +844,18 @@ fn phase127_emitter_standings_per_target() {
         let text = morphic::api::render(&cand, target).expect("renders");
         println!("P127|emit_full|{target}=\n{text}");
     }
-    // The measured body standings, pinned: only Rust renders
-    // the application. JS accepts the parameter (untyped) and
-    // returns undefined for the body; C types the parameter
+    // The measured body standings, pinned: at the audit
+    // (Phase 127) only Rust rendered the application — JS
+    // accepted the parameter (untyped) and returned
+    // undefined for the body; C types the parameter
     // `void*` and comments the body out; Python passes.
+    // Phase 135 flipped the JS standing (Amendment 2
+    // §A2.4.2's arms): JS now renders the application of
+    // the bound function variable directly, and the Map
+    // node through its arrow arm. C and Python standings
+    // are unchanged (the NF-116-1 class).
     let js = morphic::api::render(&cand, "javascript").unwrap();
-    assert!(js.contains("return undefined"), "{js}");
+    assert!(js.contains("return f(f(x));"), "{js}");
     let c = morphic::api::render(&cand, "c").unwrap();
     assert!(c.contains("void* f") && c.contains("/* unsupported */"), "{c}");
     let py = morphic::api::render(&cand, "python").unwrap();
@@ -880,8 +886,8 @@ fn phase127_emitter_standings_per_target() {
     )
     .unwrap();
     assert!(
-        js_map.contains("return undefined"),
-        "the Map node renders undefined in JS today: {js_map}"
+        js_map.contains(".map(") && js_map.contains("=>"),
+        "the Map node renders through the Phase 135 arrow arm in JS: {js_map}"
     );
     // The Rust route, in full: the generated signature carries
     // the fn-pointer type, and the body applies it — the one

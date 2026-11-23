@@ -14,7 +14,7 @@
 //!   the crate's version, which Phase 125 stamps to
 //!   1.1.0 by bumping the crate and re-running the
 //!   assembly — an exports map naming the root module,
-//!   all 29 per-function subpaths (§2.2) and the
+//!   all 35 per-function subpaths (§2.2) and the
 //!   manifest, every target present in the file set;
 //! * the license files are the repo's own texts, byte
 //!   for byte (the project is dual-licensed
@@ -22,12 +22,13 @@
 //! * per-function modules re-export exactly their entry
 //!   from the root module;
 //! * the assembled unpacked mass stands inside the
-//!   frozen 79,872 B budget (§4 — clause 6's npm half);
+//!   frozen 76,800 B budget (Amendment 2 §A2.5 —
+//!   clause 6's npm half, re-derived at Phase 134);
 //! * the assembly's crown checks have teeth: the Tier-1
 //!   check accepts the standing shipped body and refuses
 //!   a moved one; the Tier-2 check accepts the shipped
 //!   body and refuses a wrong one. (The full re-run over
-//!   all 29 entries is the CLI's `morphic build
+//!   all 35 entries is the CLI's `morphic build
 //!   --package`, exercised at assembly time; the standing
 //!   whole-surface crowning pin is Phase 110's.)
 //!
@@ -73,7 +74,7 @@ fn assembly_is_deterministic() {
     assert_eq!(a, b, "two assemblies are byte-identical file sets");
     // The file set's shape: 4 furniture texts + the 3
     // binding artifacts + 2 shims per export.
-    assert_eq!(a.len(), 4 + 3 + 2 * 29, "65 files in the assembled package");
+    assert_eq!(a.len(), 4 + 3 + 2 * 35, "77 files in the assembled package");
 }
 
 // ── The checked-in package ───────────────────────────────
@@ -139,8 +140,8 @@ fn package_json_carries_the_frozen_shape() {
     let exports = json["exports"].as_object().expect("exports map");
     assert_eq!(
         exports.len(),
-        1 + 29 + 2,
-        "root + 29 subpaths + manifest + package.json"
+        1 + 35 + 2,
+        "root + 35 subpaths + manifest + package.json"
     );
     assert_eq!(exports["."]["types"], "./index.d.ts");
     assert_eq!(exports["."]["import"], "./index.js");

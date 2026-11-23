@@ -63,6 +63,10 @@ fn phase129_corpus_check_outcomes() {
     // live in spec sources inside the test suites, not in
     // any file below. The two non-Ok rows are intentional
     // negative fixtures of the playground.
+    // Phase 135 amendment: the stdlib/list.morph row's
+    // spec count moved 12 → 18 — Amendment 2's six entries
+    // joining the module is the phase's own act, and the
+    // outcome stays CHECK_OK; no other row moved.
     const PINNED: &[(&str, &str)] = &[
         ("examples/binary_search.morph", "CHECK_OK specs=1"),
         ("examples/functional_tokenizer.morph", "CHECK_OK specs=8"),
@@ -90,7 +94,7 @@ fn phase129_corpus_check_outcomes() {
         ("playground/examples/validator.morph", "CHECK_OK specs=7"),
         ("stdlib/char.morph", "CHECK_OK specs=6"),
         ("stdlib/int.morph", "CHECK_OK specs=7"),
-        ("stdlib/list.morph", "CHECK_OK specs=12"),
+        ("stdlib/list.morph", "CHECK_OK specs=18"),
         ("stdlib/option.morph", "CHECK_OK specs=2"),
         ("stdlib/result.morph", "CHECK_OK specs=1"),
         ("stdlib/string.morph", "CHECK_OK specs=1"),

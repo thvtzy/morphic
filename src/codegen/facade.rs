@@ -2,8 +2,10 @@
 //  RUST FACADE CRATE ASSEMBLY (Phase 123, 1.1 Embeddable
 //  — EMBED_SCOPE §5, decision D7a, resolutions R5/R6/R9)
 //
-//  The assembly: the 29 frozen entries (EMBED_SCOPE
-//  §2.1) become the slim crates.io crate `morphic` — the
+//  The assembly: the frozen entries (EMBED_SCOPE
+//  §2.1's 29, plus STDLIB_SCOPE.md Amendment 2's six
+//  from Phase 135 — 35 in total) become the slim
+//  crates.io crate `morphic` — the
 //  pre-generated stdlib functions as real Rust code under
 //  `morphic::stdlib`, plus the frozen tier manifest
 //  (`morphic.manifest.json`, §2.4) and the furniture a
@@ -195,7 +197,7 @@ assert_eq!(int_clamp(15, 0, 10), 10);
 
 ## The functions
 
-Twenty-nine functions under `morphic::stdlib`, under
+Thirty-five functions under `morphic::stdlib`, under
 their Morphic entry names.
 
 Tier 1 — Z3-verified against the function's
@@ -220,7 +222,15 @@ every battery point):
 - List: `list_reverse`, `list_contains`, `list_sum`,
   `list_product`, `list_min`, `list_max`, `list_take`,
   `list_drop`, `list_is_sorted`, `list_sort`,
-  `list_binary_search`
+  `list_binary_search`, `list_map`, `list_filter`,
+  `list_fold`, `list_all`, `list_any`, `range`
+
+The last six are the 1.2 amendment's entries
+(STDLIB_SCOPE.md Amendment 2). Five of them are
+higher-order: their function parameters are ordinary
+Rust `fn` pointers, so a function pointer or a
+non-capturing closure answers — the facade is fully
+typed, with no boundary loss.
 
 `list_binary_search` is a first-match scan: its
 contract is search semantics — an index naming the
@@ -289,8 +299,9 @@ itself: see LICENSE-MIT and LICENSE-APACHE.
 /// constant (the npm package's exports map names its
 /// manifest the same way, §2.4).
 const CRATE_LIB_RS: &str = r#"//! Morphic's standard library as ready-to-call Rust
-//! functions: the 29 entries of the frozen 1.0 library
-//! (EMBED_SCOPE §2.1), pre-generated from their
+//! functions: the 35 entries of the frozen library
+//! (EMBED_SCOPE §2.1, as amended by STDLIB_SCOPE.md
+//! Amendment 2), pre-generated from their
 //! specifications by the Morphic compiler's native
 //! pipeline — the pipeline that judged them — and
 //! shipped with the standing that pipeline produced.
@@ -371,7 +382,7 @@ pub const MANIFEST_JSON: &str = include_str!("../morphic.manifest.json");
 /// The generated stdlib module's head: its module doc
 /// plus the scoped lint allowances for generated code
 /// (measured at Phase 123 — see this file's header).
-const STDLIB_MODULE_HEAD: &str = r#"//! The 29 frozen standard-library entries as real
+const STDLIB_MODULE_HEAD: &str = r#"//! The 35 frozen standard-library entries as real
 //! Rust functions, generated from their shipped
 //! bodies by the Morphic pipeline's Rust renderer —
 //! do not edit (regenerate with
@@ -390,8 +401,10 @@ const STDLIB_MODULE_HEAD: &str = r#"//! The 29 frozen standard-library entries a
 // exhaustive match arms, accumulator bindings)
 // trips these stylistic lints by construction —
 // measured at Phase 123 as 51 warnings over the 29
-// functions (unused_parens ×40,
-// unreachable_patterns ×10, unused_mut ×1). The
+// functions, re-measured at Phase 135 as 43 warnings
+// over the 35 functions (unused_parens ×42,
+// unused_mut ×1; Phase 124's Char-pattern cascade
+// retired the unreachable_patterns class). The
 // allowances are scoped to this generated module so
 // the functions stay byte-identical to the
 // pipeline's rendering while the crate builds
