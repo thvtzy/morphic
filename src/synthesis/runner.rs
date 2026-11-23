@@ -911,61 +911,87 @@ spec count_above {
 "#;
 
     /// The forall-fold scan body for COUNT_SHAPED — the
-    /// Phase 60 family's construction (a Fold over the
-    /// list, counting the elements above the limit). The
-    /// interpreter binds the spec's tests but cannot
-    /// evaluate this body on any of them: the higher-order
-    /// nodes stay outside its subset (G4). The fixture's
-    /// original construction was a For scan (Alloc + For +
-    /// Index + conditional increment); Alloc/Assign
-    /// graduated into the subset in Phase 95 and For in
-    /// Phase 115 (the List family's judging machinery), so
-    /// the scan's unevaluable ingredient is the Fold now —
-    /// the body's semantics (the count of elements above
-    /// the limit) are unchanged.
+    /// Phase 60 family's construction (count the elements
+    /// above the limit). The interpreter binds the spec's
+    /// tests but cannot evaluate this body on any of them:
+    /// its unevaluable ingredient stays outside the
+    /// subset. The fixture's construction has been
+    /// re-based each time the subset grew, semantics
+    /// unchanged (the count of elements above the limit):
+    /// the original was a For scan (Alloc + For + Index +
+    /// conditional increment) — Alloc/Assign graduated in
+    /// Phase 95 and For in Phase 115 (the List family's
+    /// judging machinery); then a Fold over a Lambda —
+    /// the higher-order nodes graduated in Phase 131
+    /// (G4). The ingredient now is the Tail-chop: the
+    /// scan walks the list by repeatedly Assigning
+    /// `rest = Tail(rest)` and reading `Head(rest)`, and
+    /// Head/Tail remain outside the evaluable subset
+    /// (the Phase 95 residual: no measured consumer) —
+    /// while their compiled renderings (`(rest)[0]`,
+    /// `(rest)[1..].to_vec()`) are the standard ones, so
+    /// the compiled vehicle scores the body 3/3.
     fn scan_body() -> IRNode {
         let var = |n: &str| IRNode::Var(n.to_string());
         let int = |n: i64| {
             IRNode::Literal(crate::synthesis::engine::IRLiteral::Int(n))
         };
+        let binop = |op: crate::synthesis::engine::IRBinOp, l: IRNode, r: IRNode| {
+            IRNode::BinOp(op, Box::new(l), Box::new(r))
+        };
         IRNode::Block(vec![
             IRNode::Alloc {
                 name: "count".into(),
                 ty: crate::spec::ast::TypeRef::Int,
-                initial: Box::new(IRNode::Fold {
-                    operation: Box::new(IRNode::Lambda {
-                        params: vec![
-                            ("acc".into(), crate::spec::ast::TypeRef::Int),
-                            ("x".into(), crate::spec::ast::TypeRef::Int),
-                        ],
-                        body: Box::new(IRNode::If {
-                            condition: Box::new(IRNode::BinOp(
-                                crate::synthesis::engine::IRBinOp::Gt,
-                                // The element arrives by
-                                // reference in the compiled
-                                // fold; the Clone read is
-                                // the Phase 61 form that
-                                // compiles (a plain read of
-                                // the borrowed element is
-                                // E0308 against the Int
-                                // limit).
-                                Box::new(IRNode::UnaryOp(
-                                    crate::synthesis::engine::IRUnaryOp::Clone,
-                                    Box::new(var("x")),
-                                )),
-                                Box::new(var("limit")),
-                            )),
-                            then_branch: Box::new(IRNode::BinOp(
+                initial: Box::new(int(0)),
+            },
+            IRNode::Alloc {
+                name: "rest".into(),
+                ty: crate::spec::ast::TypeRef::List(Box::new(
+                    crate::spec::ast::TypeRef::Int,
+                )),
+                initial: Box::new(var("values")),
+            },
+            IRNode::While {
+                condition: Box::new(binop(
+                    crate::synthesis::engine::IRBinOp::Gt,
+                    IRNode::UnaryOp(
+                        crate::synthesis::engine::IRUnaryOp::Len,
+                        Box::new(var("rest")),
+                    ),
+                    int(0),
+                )),
+                body: Box::new(IRNode::Block(vec![
+                    IRNode::If {
+                        condition: Box::new(binop(
+                            crate::synthesis::engine::IRBinOp::Gt,
+                            IRNode::UnaryOp(
+                                crate::synthesis::engine::IRUnaryOp::Head,
+                                Box::new(var("rest")),
+                            ),
+                            var("limit"),
+                        )),
+                        then_branch: Box::new(IRNode::Assign {
+                            target: Box::new(var("count")),
+                            value: Box::new(binop(
                                 crate::synthesis::engine::IRBinOp::Add,
-                                Box::new(var("acc")),
-                                Box::new(int(1)),
+                                var("count"),
+                                int(1),
                             )),
-                            else_branch: Box::new(var("acc")),
                         }),
-                    }),
-                    initial: Box::new(int(0)),
-                    over: Box::new(var("values")),
-                }),
+                        else_branch: Box::new(IRNode::Literal(
+                            crate::synthesis::engine::IRLiteral::Unit,
+                        )),
+                    },
+                    IRNode::Assign {
+                        target: Box::new(var("rest")),
+                        value: Box::new(IRNode::UnaryOp(
+                            crate::synthesis::engine::IRUnaryOp::Tail,
+                            Box::new(var("rest")),
+                        )),
+                    },
+                ])),
+                invariant: None,
             },
             IRNode::Return(Box::new(var("count"))),
         ])
@@ -1445,43 +1471,57 @@ mod tests {
         assert_eq!(concrete_type_for_spec(&spec), "i64");
     }
 
-    /// End-to-end in miniature (ignored: drives real rustc):
-    /// the identity body and the constant-empty body both sit
-    /// at FALLBACK tpr 1.0 before the stage; after it, their
-    /// recorded ratios are the runner's measured ones and
-    /// selection crowns the identity.
+    /// End-to-end in miniature — RE-BASED at Phase 131
+    /// (G4); the compiled premise is retired, the question
+    /// it asked is pinned where it now lives. At Phase 58
+    /// this instrument (ignored: drove real rustc) showed
+    /// the identity body and the constant-empty body
+    /// sitting at FALLBACK tpr 1.0 — mini_sort's tests
+    /// carry lambdas, which the interpreter could not bind
+    /// — and the compiled stage replacing the fallback
+    /// with measured ratios (2/3, 1/3), selection crowning
+    /// the identity. Phase 130 (function values) closed
+    /// that premise: the tests bind, the interpreter
+    /// measures the same two ratios itself, and the stage
+    /// does not fire. The remaining unbindable class —
+    /// nested-tuple test inputs (the Phase 130
+    /// UNBINDABLE_TESTS fixture) — is one the compiled
+    /// harness cannot render either (the Phase 53
+    /// blocker-2 record: tuple inputs generate as
+    /// `__tuple__(...)`), so no spec remains in the
+    /// UnbindableTests arm's joint domain; the arm stands
+    /// for whatever future input form lands there. The
+    /// stage's compiled end-to-end coverage lives on in
+    /// `runner_scores_forall_fold_seed_and_crowns_it`
+    /// (the ConstructedSeeds arm). What this test pins
+    /// now, in-process: the spec binds 3/3; the two bodies
+    /// measure 2/3 and 1/3 under the interpreter; the
+    /// stage returns the pool untouched; selection crowns
+    /// the identity on the measured ratios.
     #[test]
-    #[ignore = "Phase 58 G1 end-to-end: compiles two mini-sort finalists with rustc; run explicitly with --ignored runner_scoring_end_to_end"]
     fn runner_scoring_end_to_end() {
         let spec = spec_from(MINI_SORT);
-        let identity = candidate(1, &spec, IRNode::Var("list".into()), 1.0, 0.0);
-        let empty = candidate(
-            2,
-            &spec,
-            IRNode::Collection {
-                kind: CollectionKind::List,
-                elements: vec![],
-            },
-            1.0,
-            0.0,
-        );
-        // Sanity: both bodies are in the FALLBACK's domain.
-        assert_eq!(crate::synthesis::eval::bindable_test_count(&spec), 0);
+        // The premise, flipped: the lambda tests bind.
+        assert_eq!(crate::synthesis::eval::bindable_test_count(&spec), 3);
+        let identity_body = IRNode::Var("list".into());
+        let empty_body = IRNode::Collection {
+            kind: CollectionKind::List,
+            elements: vec![],
+        };
+        // The interpreter measures what the compiled stage
+        // used to: identity 2/3, constant-empty 1/3.
+        let id_run = crate::synthesis::eval::run_spec_tests(&identity_body, &spec);
+        assert_eq!((id_run.evaluable, id_run.passed), (3, 2));
+        let empty_run = crate::synthesis::eval::run_spec_tests(&empty_body, &spec);
+        assert_eq!((empty_run.evaluable, empty_run.passed), (3, 1));
+        let identity = candidate(1, &spec, identity_body, 2.0 / 3.0, 0.0);
+        let empty = candidate(2, &spec, empty_body, 1.0 / 3.0, 0.0);
         let (pool, outcome) = rescore_finalists_report(vec![identity, empty], &spec);
-        match outcome {
-            RunnerOutcome::Scored { finalists, .. } => {
-                assert_eq!(finalists.len(), 2);
-            }
-            other => panic!("expected Scored, got {:?}", other),
-        }
-        let by_id: HashMap<u64, f64> = pool
-            .iter()
-            .map(|c| (c.id, c.scores.test_pass_ratio))
-            .collect();
-        // identity: empty ✓, single ✓, reverse ✗ → 2/3.
-        assert!((by_id[&1] - 2.0 / 3.0).abs() < 1e-9, "identity tpr {}", by_id[&1]);
-        // constant empty: empty ✓ only → 1/3.
-        assert!((by_id[&2] - 1.0 / 3.0).abs() < 1e-9, "empty tpr {}", by_id[&2]);
+        assert!(
+            matches!(outcome, RunnerOutcome::NotTriggered),
+            "the stage does not fire for a spec the interpreter judges: {outcome:?}"
+        );
+        assert_eq!(tprs(&pool), vec![2.0 / 3.0, 1.0 / 3.0]);
         let winner = selector::select_best(pool, &spec).unwrap();
         assert_eq!(winner.id, 1);
     }

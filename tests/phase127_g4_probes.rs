@@ -514,7 +514,12 @@ fn phase127_bundled_examples_standings() {
     // variables only — a named subset boundary, measured
     // here and carried to Phase 131 (whose frozen standing
     // is the full 6/6, through the Sort node's own arm).
-    assert_eq!((run.evaluable, run.passed), (6, 3));
+    // Phase 131 flip: Assign-to-Index landed, and the
+    // template judges the full 6/6 in-process — the frozen
+    // standing, reached through the template's own scan
+    // body (the Sort NODE's arm is separately pinned in
+    // tests/phase131_ho_judging.rs).
+    assert_eq!((run.evaluable, run.passed), (6, 6));
 
     // binary_search's template through the compiled runner
     // directly: does the compiled judge rescue it, as it did
@@ -553,6 +558,15 @@ fn phase127_bundled_examples_standings() {
         // in-process; a bare `Var("None")` return is the
         // second named boundary — Phase 131's judging work
         // owns the 7/7 standing, §3).
+        // Phase 131 flip (the standing, not this pin): the
+        // template now judges 7/7 in-process — the Let
+        // body's Assigns take effect and the bare
+        // `Var("None")` resolves (both pinned in the
+        // phase130/phase131 test files). This runner pin is
+        // unchanged at 0.0 and means the same thing it has
+        // meant since Phase 130: the stage does not fire
+        // for a spec the interpreter judges, so the pool
+        // comes back untouched.
         assert_eq!(rescored[0].scores.test_pass_ratio, 0.0);
     }
 }
@@ -608,6 +622,17 @@ fn phase127_compiled_runner_judges_what_the_interpreter_cannot() {
     // assigns the compiled-standing re-measurement to
     // Phase 131, whose judging work owns the runner
     // interplay.
+    // Phase 131: the re-measurement §3 assigns here is
+    // recorded in tests/phase131_ho_judging.rs
+    // (phase131_apply_render_compiled_standing_remeasured):
+    // the stage cannot be driven against this spec without
+    // fabricating the trigger premise this campaign
+    // removed, so the body's compiled verdict is measured
+    // through the compiled vehicle (the Phase 53 pattern —
+    // codegen + rustc + a runner main over the spec's own
+    // two tests): Scored 2/2, unregressed. The compiled
+    // route was not taxed by G4; only its invocation
+    // premise moved, by design.
     #[cfg(feature = "compiled-runner")]
     {
         assert!(
@@ -642,6 +667,10 @@ fn phase127_compiled_runner_judges_what_the_interpreter_cannot() {
     // boundary) is the standing measurement. The frozen
     // 6/6 in-process standing and the compiled standing's
     // re-measurement are Phase 131's (§3).
+    // Phase 131 flip (the standing, not this pin): the
+    // in-process run above now reads (6, 6) — the frozen
+    // standing. This runner pin is unchanged: the stage
+    // still does not fire, by the same design.
     #[cfg(feature = "compiled-runner")]
     {
         assert!(
@@ -710,7 +739,19 @@ fn phase127_pipeline_crowns_for_the_bundled_ho_specs() {
     //   this spec: non-progressing candidate loops burn the
     //   full evaluation budget per test — the real cost of
     //   real judging, recorded in the elapsed print.
-    assert_eq!(tprs, vec![0.5, 1.0 / 7.0]);
+    //
+    // RE-PINNED at Phase 131 — the crowns land where the
+    // freeze said they would. With Assign-to-Index, the Let
+    // mutation delta, and the bare-`None` idiom, both
+    // templates judge at full ratio in-process, and the
+    // pipeline crowns the TEMPLATES THEMSELVES at tpr 1.0 —
+    // 6/6 and 7/7 measured by the shipped interpreter (the
+    // gate's closing image: crowned by that interpreter
+    // rather than rescued by a compiler). The
+    // binary_search wall time collapses with its loops
+    // progressing: 773.3 s at the Phase 130 standing to
+    // ~1.7 s in the print above.
+    assert_eq!(tprs, vec![1.0, 1.0]);
 }
 
 #[test]

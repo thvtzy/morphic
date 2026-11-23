@@ -21,9 +21,12 @@
 //!   them declines by name, and test judging declines a
 //!   comparison that would have to compare them — the
 //!   derived-`==` fallback never decides one;
-//! * the higher-order IR nodes (Map/Filter/Fold/Sort) stay
-//!   declined by name — they are Phase 131's arms, not this
-//!   phase's.
+//! * the higher-order IR nodes (Map/Filter/Fold/Sort)
+//!   stayed declined by name at this phase — they were
+//!   Phase 131's arms. (Re-based at Phase 131: the nodes
+//!   evaluate now; the boundary test below pins their new
+//!   standing, and tests/phase131_ho_judging.rs carries
+//!   their positive coverage.)
 
 use morphic::spec::ast::{BinOp as SpecBinOp, Expr, TypeRef};
 use morphic::spec::parser;
@@ -521,41 +524,18 @@ fn phase130_call_declines_name_themselves() {
 // ── The bundled exhibits' in-process standings ────────────
 
 #[test]
-fn phase130_bundled_examples_bind_and_their_templates_partially_judge() {
-    // sort and binary_search (§3): their required end
-    // standings (6/6 and 7/7 in-process) land at Phase 131.
-    // What THIS phase moves is binding and application —
-    // measured here exactly as it stands:
-    //
-    // * both specs' lambda tests now bind in full (the
-    //   Phase 127 pins were 0/6 and 0/7);
-    // * sort's template (bubble sort; comparator applied
-    //   through Call) judges 3/6: the three tests whose
-    //   inputs need a swap decline — the template swaps
-    //   through `Assign` to an Index target, and the
-    //   interpreter's Assign arm rebinds variables only;
-    // * binary_search's template (While/Index/Alloc, all
-    //   Phase 95 vocabulary; comparator applied through
-    //   Call) judges 1/7: "find in middle" passes, decided
-    //   on the first probe. The other six decline, by two
-    //   named boundaries, both pre-existing interpreter
-    //   subset facts and neither a function-value gap:
-    //   (a) the template's progress Assigns (lo/hi) sit
-    //   inside a Let body, and the interpreter's Let
-    //   evaluates its body in a CLONED environment — the
-    //   Assigns never persist, the While never progresses,
-    //   and five cases exhaust the shared budget (the
-    //   decline names the application spends, which
-    //   outnumber the iteration spends per pass); (b) the
-    //   "empty list" case skips the loop and reaches the
-    //   template's final `Return(Var("None"))` — a bare
-    //   constructor NAME as a Var, which the compiled
-    //   runner renders as the variant but which is unbound
-    //   in-process.
-    //
-    // Both residuals are Phase 131's to close (its frozen
-    // standings are the full 6/6 and 7/7); the Map/Filter/
-    // Fold/Sort node arms land there too.
+fn phase130_bundled_examples_bind_and_their_templates_judge() {
+    // sort and binary_search (§3): binding and application
+    // landed at Phase 130 (the standings then were 3/6 and
+    // 1/7 — swap-bound and loop-progress-bound). Their
+    // required end standings (6/6 and 7/7 in-process)
+    // landed at Phase 131 (Assign-to-Index, the Let
+    // mutation delta, the bare-`None` idiom), and this pin
+    // was re-based to them there; tests/
+    // phase131_ho_judging.rs carries the per-item
+    // evidence. What this test continues to pin: both
+    // specs' lambda tests bind in full, and the templates
+    // judge at the frozen standings.
     use morphic::synthesis::templates;
 
     let sort_src = std::fs::read_to_string(concat!(
@@ -570,8 +550,8 @@ fn phase130_bundled_examples_bind_and_their_templates_partially_judge() {
     let run = eval::run_spec_tests(&sort_temps[0].1, &sort_spec);
     assert_eq!(
         (run.evaluable, run.passed),
-        (6, 3),
-        "sort's template at Phase 130: bound and applying, swap-bound"
+        (6, 6),
+        "sort's template at Phase 131: the frozen 6/6 in-process standing"
     );
 
     let bs_src = std::fs::read_to_string(concat!(
@@ -586,20 +566,26 @@ fn phase130_bundled_examples_bind_and_their_templates_partially_judge() {
     let run = eval::run_spec_tests(&bs_temps[0].1, &bs_spec);
     assert_eq!(
         (run.evaluable, run.passed),
-        (7, 1),
-        "binary_search's template at Phase 130: bound and applying, loop-progress-bound"
+        (7, 7),
+        "binary_search's template at Phase 131: the frozen 7/7 in-process standing"
     );
 }
 
-// ── The Phase 131 boundary ────────────────────────────────
+// ── The Phase 131 boundary, re-based ─────────────────────
 
 #[test]
-fn phase130_higher_order_nodes_stay_declined_by_name() {
-    // Map/Filter/Fold/Sort consume the function variant from
-    // Phase 131 — at this phase they keep their standing
-    // declines, verbatim. (sort's and binary_search's
-    // in-process standings move only through the bodies that
-    // avoid these nodes; the nodes themselves are 131's.)
+fn phase131_higher_order_nodes_evaluate_and_decline_only_by_their_own_reasons() {
+    // At Phase 130 this test pinned the four nodes'
+    // blanket declines ("Map (higher-order)" etc.). Phase
+    // 131 landed their arms: Map evaluates outright, and
+    // the remaining three decline here only for their OWN
+    // named reasons — the shared fixture's `inc` is a
+    // one-argument Int function, so as a Filter predicate
+    // its answer is not Bool, and as a Fold operation or
+    // Sort comparator its arity is wrong. The blanket
+    // higher-order decline is gone; tests/
+    // phase131_ho_judging.rs carries the positive
+    // coverage.
     let mut env = eval::Env::new();
     env.insert(
         "xs".into(),
@@ -609,20 +595,22 @@ fn phase130_higher_order_nodes_stay_declined_by_name() {
         &["n"],
         IRNode::BinOp(IRBinOp::Add, Box::new(var("n")), Box::new(int(1))),
     );
+    let map = IRNode::Map {
+        function: Box::new(inc.clone()),
+        over: Box::new(var("xs")),
+    };
+    assert_eq!(
+        eval::eval(&map, &env),
+        Ok(Value::List(vec![Value::Int(2), Value::Int(3)])),
+        "Map evaluates since Phase 131"
+    );
     let cases: Vec<(IRNode, &str)> = vec![
-        (
-            IRNode::Map {
-                function: Box::new(inc.clone()),
-                over: Box::new(var("xs")),
-            },
-            "Map (higher-order)",
-        ),
         (
             IRNode::Filter {
                 predicate: Box::new(inc.clone()),
                 over: Box::new(var("xs")),
             },
-            "Filter (higher-order)",
+            "not Bool",
         ),
         (
             IRNode::Fold {
@@ -630,21 +618,21 @@ fn phase130_higher_order_nodes_stay_declined_by_name() {
                 initial: Box::new(int(0)),
                 over: Box::new(var("xs")),
             },
-            "Fold (higher-order)",
+            "expects 1 argument",
         ),
         (
             IRNode::Sort {
                 comparator: Box::new(inc),
                 collection: Box::new(var("xs")),
             },
-            "Sort (higher-order)",
+            "expects 1 argument",
         ),
     ];
     for (node, expected) in cases {
         let reason = not_evaluable(eval::eval(&node, &env));
         assert!(
             reason.contains(expected),
-            "the node declines by its standing name: {reason}"
+            "the node declines by its own named reason: {reason}"
         );
     }
 }

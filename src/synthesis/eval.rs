@@ -16,16 +16,22 @@
 // │  compiled runner's bodies are written in — and, since    │
 // │  Phase 130 (G4), function values: Lambda/Closure         │
 // │  evaluate to closures and a call through a bound         │
-// │  function value applies it, under the same budget.       │
+// │  function value applies it, under the same budget —      │
+// │  and, since Phase 131 (G4), the higher-order             │
+// │  combinators (Map/Filter/Fold/Sort, applying their       │
+// │  function arguments through those closures), Assign to   │
+// │  an indexed place, a Let body evaluated in the current   │
+// │  environment (its Assigns to pre-existing bindings take  │
+// │  effect, as compiled; its bindings stay scoped), and     │
+// │  the bare-constructor `Var("None")` idiom.               │
 // │  Loops carry an explicit iteration bound (see            │
 // │  MAX_LOOP_ITERATIONS): exceeding it is a judged          │
 // │  `NotEvaluable`, never a hang and never a fabricated     │
 // │  value; closure application spends from the same         │
 // │  budget, so it is not an unbounded recursion channel     │
 // │  beside it. Anything still outside the subset — Holes,   │
-// │  the higher-order combinators (Map/Filter/Fold/Sort,     │
-// │  Phase 131), calls to functions that are not known       │
-// │  pure builtins or bound function values — returns        │
+// │  calls to functions that are not known pure builtins or  │
+// │  bound function values — returns                         │
 // │  `EvalError::NotEvaluable` with a reason. The            │
 // │  evaluator never panics and never guesses a value.       │
 // └──────────────────────────────────────────────────────────┘
@@ -282,11 +288,34 @@ fn eval_flow(
     match node {
         IRNode::Literal(lit) => Ok(Flow::Normal(literal_value(lit))),
 
-        IRNode::Var(name) => env
-            .get(name)
-            .cloned()
-            .map(Flow::Normal)
-            .ok_or_else(|| not_evaluable(format!("unbound variable `{}`", name))),
+        IRNode::Var(name) => match env.get(name) {
+            Some(v) => Ok(Flow::Normal(v.clone())),
+            None => {
+                // The bare-constructor idiom (Phase 131):
+                // a body may carry the nullary constructor
+                // as a bare Var — the binary_search
+                // template's final `Return(Var("None"))` is
+                // the exhibit — and the compiled route
+                // renders the bare name as the variant
+                // itself. An UNBOUND `None` therefore reads
+                // as the constructor value here too. A
+                // binding of the same name wins (the lookup
+                // above ran first): the idiom is the
+                // fallback for an unbound name, never an
+                // override. Only the nullary constructor has
+                // this form in bodies — `Some`/`Ok`/`Err`
+                // are Calls (see eval_call's arms) and a
+                // bare Var naming one still declines below.
+                if name == "None" {
+                    Ok(Flow::Normal(Value::None))
+                } else {
+                    Err(not_evaluable(format!(
+                        "unbound variable `{}`",
+                        name
+                    )))
+                }
+            }
+        },
 
         IRNode::BinOp(op, l, r) => {
             // Statement-position Append on a bound variable
@@ -341,9 +370,51 @@ fn eval_flow(
                 Flow::Broke(b) => return Ok(Flow::Broke(b)),
                 Flow::Normal(v) => v,
             };
-            let mut inner = env.clone();
-            inner.insert(name.clone(), v);
-            eval_flow(body, &mut inner, budget)
+            // The body evaluates in the CURRENT environment
+            // (Phase 131) — the compiled semantics: the
+            // emitter renders `let name = value;` followed
+            // by the body as the continuation of the same
+            // scope, so an Assign (or a statement Append) to
+            // a binding that PRE-DATES the Let takes effect
+            // exactly as it does compiled. Before this phase
+            // the body ran in a clone and those mutations
+            // were discarded on exit — a loop whose progress
+            // step sits inside a Let body (the binary_search
+            // template's While) never progressed in-process
+            // while its compiled form terminated: a
+            // statement-subset divergence, closed here.
+            //
+            // What stays scoped is BINDING, not mutation —
+            // the clone's binding discipline, kept entire:
+            // when the body completes (on any exit — value,
+            // Return, Break, or failure), the Let's own
+            // binding is restored to its pre-Let state and
+            // every name the body created (an Alloc's
+            // binding, a nested construct's leftover) is
+            // removed. A read after the Let therefore sees
+            // exactly the bindings it saw before, with
+            // exactly the mutations the compiled form would
+            // have made to them. The one deliberate
+            // divergence from the compiled text: the Let's
+            // own name, if the body rebinds it, is restored
+            // rather than carried — a Let used as a block
+            // statement is not the tail, and the clone's
+            // scoping of the name itself was never the
+            // divergence being closed.
+            let saved = env.insert(name.clone(), v);
+            let pre_existing: std::collections::HashSet<String> =
+                env.keys().cloned().collect();
+            let result = eval_flow(body, env, budget);
+            env.retain(|key, _| pre_existing.contains(key));
+            match saved {
+                Some(previous) => {
+                    env.insert(name.clone(), previous);
+                }
+                None => {
+                    env.remove(name);
+                }
+            }
+            result
         }
 
         IRNode::Block(stmts) => {
@@ -489,13 +560,17 @@ fn eval_flow(
         }
 
         IRNode::Assign { target, value } => {
-            let IRNode::Var(name) = &**target else {
-                return Err(not_evaluable(
-                    "Assign target is not a variable (only a variable can be rebound)",
-                ));
+            // The assigned value first (the standing
+            // order): a Block there is a body, absorbed by
+            // eval_body_value; a control flow out of it
+            // propagates untouched, as the Var arm has
+            // always done.
+            let v = match eval_body_value(value, env, budget)? {
+                Flow::Normal(v) => v,
+                flow => return Ok(flow),
             };
-            match eval_body_value(value, env, budget)? {
-                Flow::Normal(v) => {
+            match &**target {
+                IRNode::Var(name) => {
                     if !env.contains_key(name) {
                         return Err(not_evaluable(format!(
                             "Assign to unbound variable `{}` (no Alloc binds it)",
@@ -505,7 +580,24 @@ fn eval_flow(
                     env.insert(name.clone(), v.clone());
                     Ok(Flow::Normal(v))
                 }
-                flow => Ok(flow),
+                // An indexed place (Phase 131): `xs[i] = v`
+                // mutates the bound list in place — the
+                // compiled form is a Vec index assignment,
+                // and the sort template's swap is the
+                // exhibit. Places nest (`grid[i][j] = v`).
+                // The failure shapes are the read side's
+                // (eval_index): an unbound base, a non-list
+                // base or element, a negative index, an
+                // out-of-bounds index — each named, never a
+                // panic and never a silent grow.
+                IRNode::Index(..) => {
+                    assign_to_index(target, v.clone(), env, budget)?;
+                    Ok(Flow::Normal(v))
+                }
+                _ => Err(not_evaluable(
+                    "Assign target is not a variable or an indexed place \
+                     (only a variable or an indexed element can be rebound)",
+                )),
             }
         }
 
@@ -667,22 +759,92 @@ fn eval_flow(
             }
         }
 
+        // The higher-order combinators (Phase 131, G4):
+        // Map/Filter/Fold/Sort evaluate by applying their
+        // function argument — a Lambda/Closure node, or any
+        // node evaluating to a bound function value —
+        // through the closure machinery of Phase 130
+        // (apply_value below), so every application spends
+        // the shared budget and nests under the depth bound
+        // exactly as a Call through a bound name does. The
+        // semantics are the compiled forms': Map applies
+        // per element in order; Filter keeps the elements
+        // its predicate answers `true` for (a non-Bool
+        // answer declines — truthiness is never guessed);
+        // Fold is the left fold from its initial value;
+        // Sort orders by the comparator whose `true` means
+        // "the first argument precedes" (the spec-level
+        // meaning: cmp(output[i], output[j]) holds for
+        // i < j), stably — elements the comparator cannot
+        // separate in either direction keep their input
+        // order, as the compiled `sort_by` is stable. A
+        // non-function function-position, a non-List
+        // collection, and a non-Bool comparator answer each
+        // decline by name.
+        IRNode::Map { function, over } => {
+            let items = eval_list_operand("Map", over, env, budget)?;
+            let f = eval_function_operand("Map", function, env, budget)?;
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(apply_value(&f, vec![item], budget)?);
+            }
+            Ok(Flow::Normal(Value::List(out)))
+        }
+
+        IRNode::Filter { predicate, over } => {
+            let items = eval_list_operand("Filter", over, env, budget)?;
+            let f = eval_function_operand("Filter", predicate, env, budget)?;
+            let mut out = Vec::new();
+            for item in items {
+                match apply_value(&f, vec![item.clone()], budget)? {
+                    Value::Bool(true) => out.push(item),
+                    Value::Bool(false) => {}
+                    other => {
+                        return Err(not_evaluable(format!(
+                            "Filter predicate's answer is not Bool (got {:?}): \
+                             a predicate must answer Bool",
+                            other
+                        )));
+                    }
+                }
+            }
+            Ok(Flow::Normal(Value::List(out)))
+        }
+
+        IRNode::Fold {
+            operation,
+            initial,
+            over,
+        } => {
+            let items = eval_list_operand("Fold", over, env, budget)?;
+            let f = eval_function_operand("Fold", operation, env, budget)?;
+            let mut acc = eval_flow(initial, env, budget)?.into_value()?;
+            for item in items {
+                acc = apply_value(&f, vec![acc, item], budget)?;
+            }
+            Ok(Flow::Normal(acc))
+        }
+
+        IRNode::Sort {
+            comparator,
+            collection,
+        } => {
+            let items = eval_list_operand("Sort", collection, env, budget)?;
+            let f = eval_function_operand("Sort", comparator, env, budget)?;
+            let sorted = sort_values(items, &f, budget)?;
+            Ok(Flow::Normal(Value::List(sorted)))
+        }
+
         // Everything below stays outside the subset:
-        // unfilled holes, the higher-order combinators
-        // (Phase 131 — they consume the function variant
-        // Phase 130 added, but their own evaluation arms
-        // are that phase's), and struct definitions. None
-        // of them can be given a value without guessing, so
-        // they are reported as not evaluable. (For graduated
+        // unfilled holes and struct definitions. Neither
+        // can be given a value without guessing, so they
+        // are reported as not evaluable. (For graduated
         // into the subset in Phase 115 — its arm sits with
-        // the other loop forms above; Lambda/Closure
-        // graduated in Phase 130 — their arms sit with the
-        // Call arm above.)
+        // the other loop forms above; Lambda/Closure in
+        // Phase 130 — their arms sit with the Call arm
+        // above; Map/Filter/Fold/Sort in Phase 131 — their
+        // arms sit directly above this comment.)
         IRNode::Hole { .. } => Err(not_evaluable("unfilled Hole")),
-        IRNode::Map { .. } => Err(not_evaluable("Map (higher-order)")),
-        IRNode::Filter { .. } => Err(not_evaluable("Filter (higher-order)")),
-        IRNode::Fold { .. } => Err(not_evaluable("Fold (higher-order)")),
-        IRNode::Sort { .. } => Err(not_evaluable("Sort (higher-order)")),
         IRNode::StructDef { .. } => Err(not_evaluable("StructDef (declaration)")),
         // M1 features (Phase 75): record construction and
         // field projection over Value::Record (D2a/D3a).
@@ -1041,6 +1203,214 @@ fn apply_closure(
     let result = eval_flow(body, &mut call_env, budget);
     budget.depth -= 1;
     result?.into_value()
+}
+
+/// Apply a function VALUE to argument values (Phase 131):
+/// the value-level entry to `apply_closure`, shared by the
+/// higher-order arms. A non-function value declines by
+/// name at the call sites (they know their node's name);
+/// here the shape is already a closure.
+fn apply_value(
+    f: &Value,
+    args: Vec<Value>,
+    budget: &mut Budget,
+) -> Result<Value, EvalError> {
+    match f {
+        Value::Function {
+            params,
+            body,
+            env: captured,
+        } => apply_closure(params, body, captured, args, budget),
+        other => Err(not_evaluable(format!(
+            "applied a non-function value ({:?}): only a function value can be applied",
+            other
+        ))),
+    }
+}
+
+/// The collection operand of a higher-order node (Phase
+/// 131): evaluates to the element list, or declines naming
+/// the node and the actual shape.
+fn eval_list_operand(
+    node_name: &str,
+    over: &IRNode,
+    env: &mut Env,
+    budget: &mut Budget,
+) -> Result<Vec<Value>, EvalError> {
+    match eval_flow(over, env, budget)?.into_value()? {
+        Value::List(items) => Ok(items),
+        other => Err(not_evaluable(format!(
+            "{} over a value that is not a List ({:?}): the combinator is defined over lists",
+            node_name, other
+        ))),
+    }
+}
+
+/// The function operand of a higher-order node (Phase
+/// 131): evaluates to a function value — a Lambda/Closure
+/// node, or a Var (or any expression) bound to one — or
+/// declines naming the node.
+fn eval_function_operand(
+    node_name: &str,
+    function: &IRNode,
+    env: &mut Env,
+    budget: &mut Budget,
+) -> Result<Value, EvalError> {
+    let f = eval_flow(function, env, budget)?.into_value()?;
+    match f {
+        Value::Function { .. } => Ok(f),
+        other => Err(not_evaluable(format!(
+            "{} with a function argument that is not a function value ({:?})",
+            node_name, other
+        ))),
+    }
+}
+
+/// Stable ordering by a Bool comparator (Phase 131): the
+/// comparator's `true` means its first argument strictly
+/// precedes its second; a pair the comparator cannot
+/// separate in either direction is equivalent and keeps
+/// its input order (the merge below always takes the left
+/// run's head on equivalence — the compiled `sort_by` is
+/// stable the same way). A non-Bool comparator answer
+/// declines by name. Merge sort: O(n log n) comparator
+/// applications, each spending the shared budget through
+/// apply_value.
+fn sort_values(
+    items: Vec<Value>,
+    comparator: &Value,
+    budget: &mut Budget,
+) -> Result<Vec<Value>, EvalError> {
+    if items.len() <= 1 {
+        return Ok(items);
+    }
+    let mid = items.len() / 2;
+    let mut halves = items.into_iter();
+    let left: Vec<Value> = halves.by_ref().take(mid).collect();
+    let right: Vec<Value> = halves.collect();
+    let left = sort_values(left, comparator, budget)?;
+    let right = sort_values(right, comparator, budget)?;
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let mut left = left.into_iter().peekable();
+    let mut right = right.into_iter().peekable();
+    // Does `a` strictly precede `b` under the comparator?
+    let precedes = |a: &Value, b: &Value, budget: &mut Budget| -> Result<bool, EvalError> {
+        match apply_value(comparator, vec![a.clone(), b.clone()], budget)? {
+            Value::Bool(v) => Ok(v),
+            other => Err(not_evaluable(format!(
+                "Sort comparator's answer is not Bool (got {:?}): \
+                 a comparator must answer Bool",
+                other
+            ))),
+        }
+    };
+    while left.peek().is_some() && right.peek().is_some() {
+        let take_right = {
+            let l = left.peek().expect("peeked");
+            let r = right.peek().expect("peeked");
+            // Take the right head only when it strictly
+            // precedes the left head; equivalence (neither
+            // direction precedes) keeps the left head
+            // first — stability.
+            precedes(r, l, budget)?
+        };
+        if take_right {
+            out.push(right.next().expect("peeked"));
+        } else {
+            out.push(left.next().expect("peeked"));
+        }
+    }
+    out.extend(left);
+    out.extend(right);
+    Ok(out)
+}
+
+/// Assign into an indexed place (Phase 131): the target
+/// is an `Index` chain rooted at a variable; the value is
+/// written into the bound list at the indexed slot,
+/// navigating nested lists for nested places. Index
+/// expressions evaluate root-first (the order the compiled
+/// place evaluates). The failure shapes are eval_index's:
+/// unbound root, non-list base or element, negative index,
+/// out-of-bounds index — each named.
+fn assign_to_index(
+    target: &IRNode,
+    value: Value,
+    env: &mut Env,
+    budget: &mut Budget,
+) -> Result<(), EvalError> {
+    // Walk the chain down to its root variable, collecting
+    // the index nodes outermost-first.
+    let mut index_nodes: Vec<&IRNode> = Vec::new();
+    let mut cursor = target;
+    let root = loop {
+        match cursor {
+            IRNode::Index(base, idx) => {
+                index_nodes.push(idx);
+                cursor = base;
+            }
+            IRNode::Var(name) => break name,
+            _ => {
+                return Err(not_evaluable(
+                    "Assign target is not a variable or an indexed place \
+                     (only a variable or an indexed element can be rebound)",
+                ));
+            }
+        }
+    };
+    if !env.contains_key(root) {
+        return Err(not_evaluable(format!(
+            "Assign target's base `{}` is not bound (no Alloc binds it)",
+            root
+        )));
+    }
+    // Indices evaluate innermost-first (root-first): the
+    // reverse of the collection order above.
+    let mut indices: Vec<i64> = Vec::with_capacity(index_nodes.len());
+    for node in index_nodes.iter().rev() {
+        match eval_flow(node, env, budget)?.into_value()? {
+            Value::Int(i) => indices.push(i),
+            other => {
+                return Err(not_evaluable(format!(
+                    "Assign target's index is not Int (got {:?})",
+                    other
+                )));
+            }
+        }
+    }
+    let slot = env.get_mut(root).expect("root checked bound above");
+    assign_at_path(slot, &indices, value)
+}
+
+/// Write `value` into the list slot at `path` inside
+/// `slot` (Phase 131): the recursive half of
+/// assign_to_index, over an already-located value.
+fn assign_at_path(slot: &mut Value, path: &[i64], value: Value) -> Result<(), EvalError> {
+    let (first, rest) = match path.split_first() {
+        Some(pair) => pair,
+        // The path is never empty (the target was an Index
+        // node); an empty path would be the Var arm's job.
+        None => {
+            *slot = value;
+            return Ok(());
+        }
+    };
+    let items = match slot {
+        Value::List(items) => items,
+        other => {
+            return Err(not_evaluable(format!(
+                "Assign target indexes into a non-list value ({:?})",
+                other
+            )));
+        }
+    };
+    if *first < 0 {
+        return Err(not_evaluable("negative list index"));
+    }
+    let element = items
+        .get_mut(*first as usize)
+        .ok_or_else(|| not_evaluable("list index out of bounds"))?;
+    assign_at_path(element, rest, value)
 }
 
 /// Evaluate one D1a builtin method call on an already
@@ -2170,9 +2540,11 @@ mod tests {
         // env (no Alloc binds `x`).
         // Re-pinned at Phase 130 (G4): Lambda left this
         // list — it evaluates to a function value now (the
-        // phase130_* tests are its positive coverage). The
-        // Map case stands for the higher-order nodes, which
-        // stay declined by name until Phase 131.
+        // phase130_* tests are its positive coverage).
+        // Re-pinned at Phase 131 (G4): the Map case left
+        // this list with the rest of the higher-order
+        // nodes — they evaluate now (the phase131_* tests
+        // are their positive coverage, declines included).
         let cases: Vec<IRNode> = vec![
             IRNode::Hole { id: 0, expected_type: None },
             IRNode::While {
@@ -2183,16 +2555,6 @@ mod tests {
             IRNode::Assign {
                 target: Box::new(var("x")),
                 value: Box::new(int(1)),
-            },
-            IRNode::Map {
-                function: Box::new(IRNode::Lambda {
-                    params: vec![("n".into(), crate::spec::ast::TypeRef::Int)],
-                    body: Box::new(var("n")),
-                }),
-                over: Box::new(IRNode::Collection {
-                    kind: CollectionKind::List,
-                    elements: vec![int(1)],
-                }),
             },
             IRNode::Call { function: "is_sorted".into(), args: vec![] },
             IRNode::Call { function: "first".into(), args: vec![int(1)] },
@@ -3307,15 +3669,32 @@ mod tests {
             }
             other => panic!("expected NotEvaluable, got {other:?}"),
         }
-        // A non-variable Assign target: named, not guessed.
-        let bad = IRNode::Assign {
+        // An indexed Assign target (Phase 131): the place
+        // is written, and the statement's value is the
+        // assigned value. (The mutation itself is observed
+        // through a following read in the phase131 tests;
+        // the point here is the shape left the decline
+        // list.) A target that is neither a variable nor an
+        // indexed place keeps the named decline.
+        let indexed = IRNode::Assign {
             target: Box::new(IRNode::Index(Box::new(var("xs")), Box::new(int(0)))),
+            value: Box::new(int(1)),
+        };
+        assert_eq!(
+            eval(
+                &indexed,
+                &env_with(&[("xs", Value::List(vec![Value::Int(0)]))])
+            ),
+            Ok(Value::Int(1))
+        );
+        let bad = IRNode::Assign {
+            target: Box::new(binop(IRBinOp::Add, var("xs"), int(1))),
             value: Box::new(int(1)),
         };
         match eval(&bad, &env_with(&[("xs", Value::List(vec![Value::Int(0)]))])) {
             Err(EvalError::NotEvaluable(reason)) => {
                 assert!(
-                    reason.contains("not a variable"),
+                    reason.contains("not a variable or an indexed place"),
                     "the failure must name the cause, got: {reason}"
                 );
             }

@@ -566,9 +566,17 @@ fn phase106_hand_body_boundaries() {
     ));
     assert_eq!(verdict, VerificationStatus::Inconclusive);
 
-    // Higher-order map: the IR has a Map node and the Rust emitter
-    // renders it, but the interpreter and Z3 encoder both decline
-    // the node, independently of G4's test-binding wall.
+    // Higher-order map: at the audit, the IR had a Map node
+    // and the Rust emitter rendered it, but the interpreter
+    // and Z3 encoder both declined the node, independently
+    // of G4's test-binding wall. INVERTED AT ITS SITE
+    // (Phase 131, the Phase 112 precedent): G4's build gave
+    // the interpreter function values (Phase 130) and the
+    // Map arm (Phase 131), so the body now judges
+    // [Passed, Passed] in-process. The encoder half of the
+    // audit's sentence stands — a Map node's Z3 encoding
+    // is §3.9's, not G4's (G4_SCOPE §6) — so the verdict
+    // stays Inconclusive, and the render pin is unmoved.
     let map_inc = checked_spec(
         r#"Probe { spec probe_map_inc {
             input: xs: List<Int>
@@ -602,10 +610,10 @@ fn phase106_hand_body_boundaries() {
         verdict,
         rust.contains(".iter().map(")
     );
-    assert!(matches!(
-        outcomes[0],
-        eval::TestOutcome::BodyNotEvaluable(_)
-    ));
+    assert!(
+        outcomes.iter().all(|o| matches!(o, eval::TestOutcome::Passed)),
+        "Phase 131: the Map body judges in-process now: {outcomes:?}"
+    );
     assert_eq!(verdict, VerificationStatus::Inconclusive);
     assert!(rust.contains(".iter().map("));
 }
