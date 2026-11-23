@@ -817,8 +817,11 @@ mod tests {
     }
 
     /// A miniature of examples/sort.morph: generic, fn-typed
-    /// parameter, lambda-carrying tuple tests — the trigger
-    /// shape.
+    /// parameter, lambda-carrying tuple tests. (Until
+    /// Phase 130 this was also the trigger's UnbindableTests
+    /// shape; its tests bind since the evaluator gained
+    /// function values — the trigger's standing fixture is
+    /// UNBINDABLE_TESTS below.)
     const MINI_SORT: &str = r#"
 Mini {
 spec mini_sort<T> {
@@ -838,6 +841,26 @@ spec mini_sort<T> {
     test "reverse" {
         input: ([2, 1], |a, b| a < b)
         expect: [1, 2]
+    }
+}
+}
+"#;
+
+    /// A spec whose only test still cannot bind after
+    /// Phase 130: the input tuple carries a NESTED tuple,
+    /// and there is no tuple Value for the element to map
+    /// to — the remaining Unbindable class (with named
+    /// function references, until Phase 132). The Phase 58
+    /// trigger's standing fixture.
+    const UNBINDABLE_TESTS: &str = r#"
+Mini {
+spec nested_pair {
+    input: pair: List<Int>, x: Int
+    output: Int
+
+    test "nested" {
+        input: ((1, 2), 3)
+        expect: 3
     }
 }
 }
@@ -1112,9 +1135,13 @@ spec add_one {
         );
         assert!(trigger(&[mutation], &spec).is_none());
         // No candidates / the Phase 58 trigger: unchanged.
-        let mini = spec_from(MINI_SORT);
-        let any = candidate(1, &mini, IRNode::Var("list".into()), 1.0, 0.0);
-        assert!(matches!(trigger(&[any], &mini), Some(Trigger::UnbindableTests)));
+        // (Its fixture is UNBINDABLE_TESTS since Phase 130 —
+        // MINI_SORT's lambda-carrying tests bind now that
+        // the evaluator has function values, so mini_sort no
+        // longer stands in UnbindableTests territory.)
+        let unbindable = spec_from(UNBINDABLE_TESTS);
+        let any = candidate(1, &unbindable, IRNode::Var("x".into()), 1.0, 0.0);
+        assert!(matches!(trigger(&[any], &unbindable), Some(Trigger::UnbindableTests)));
     }
 
     /// The guaranteed-slot rule: a triggering seed outside

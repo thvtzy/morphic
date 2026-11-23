@@ -8052,10 +8052,12 @@ fn evaluate_candidate(candidate: &CandidateImplementation, spec: &FunctionSpec) 
     // it does not get the benefit of the doubt.
     //
     // FALLBACK: if a spec has tests but NONE of them can be
-    // mapped (e.g. tuple test inputs carrying a lambda for a
-    // fn-typed parameter — the evaluator has no function
-    // values, so sort's and binary_search's tests still
-    // cannot bind; tuple inputs of first-order values DO bind
+    // mapped (e.g. tuple test inputs carrying a nested tuple
+    // or a named function reference — lambda-carrying tuple
+    // inputs DO bind elementwise since Phase 130 gave the
+    // evaluator function values, so sort's and
+    // binary_search's tests bind and are measured for real;
+    // tuple inputs of first-order values have bound
     // elementwise since Phase 53), there is no truth signal
     // to measure. Keep the previous structural behavior
     // (tests assumed passed) rather than punishing every
@@ -14480,11 +14482,18 @@ spec exclaim {
 
     /// Phase 53: the FALLBACK keeps its legitimate domain,
     /// stated explicitly. A spec whose tests exist but NONE
-    /// can be mapped — here sort.morph's shape: tuple inputs
-    /// carrying a lambda for a fn-typed parameter, which the
-    /// evaluator cannot represent as a value — still scores
-    /// every candidate the fallback 1.0, exactly as before
-    /// the tuple fix.
+    /// can be mapped still scores every candidate the
+    /// fallback 1.0, exactly as before the tuple fix.
+    /// Re-based at Phase 130 (G4): the original fixture was
+    /// sort.morph's shape — a tuple input carrying a lambda
+    /// for a fn-typed parameter, which the evaluator could
+    /// not represent as a value — but a lambda maps to a
+    /// closure since Phase 130, so that shape binds and is
+    /// measured for real (the sort_shape unit test in
+    /// synthesis::eval pins its new standing). The
+    /// fallback's remaining domain is an element that still
+    /// cannot be mapped: here a NESTED tuple, for which
+    /// there is no tuple Value.
     #[test]
     fn evaluate_candidate_unmappable_tests_keep_fallback() {
         let mut spec = dummy_spec();
@@ -14511,8 +14520,8 @@ spec exclaim {
                 "__tuple__".into(),
                 vec![
                     Expr::Call(
-                        "List".into(),
-                        vec![Expr::IntLit(3), Expr::IntLit(1), Expr::IntLit(2)],
+                        "__tuple__".into(),
+                        vec![Expr::IntLit(3), Expr::IntLit(1)],
                     ),
                     Expr::Lambda(
                         vec![

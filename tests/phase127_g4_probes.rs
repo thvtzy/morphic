@@ -19,6 +19,13 @@
 //!
 //! Every probe prints a `P127|...` line with the measured
 //! standing; the assertions pin exactly what the line reports.
+//!
+//! Standings since the audit, flipped in place at their
+//! sites: Phase 129 (checker admission) flipped the check
+//! pins; Phase 130 (interpreter function values) flipped the
+//! binding and in-process judging pins. The verifier and
+//! emitter pins are untouched — those layers are Phases
+//! 133's and the standing exclusions' respectively.
 
 use morphic::spec::ast::{Expr, FunctionSpec, TypeRef};
 use morphic::spec::{parser, typeck};
@@ -128,23 +135,27 @@ fn phase127_apply_spec_end_to_end() {
     // The remaining layers are probed on the PARSED spec (the
     // binding and judging layers do not consult the checker):
     //
-    // Test binding: the lambda inputs cannot become values.
+    // Test binding: Phase 130 (D1a/D2a) gave the evaluator
+    // function values, so the lambda inputs become closures
+    // and both tests bind — the audit's Unbindable standing
+    // (reason: "it carries a value the interpreter cannot
+    // represent, e.g. a function/lambda") ends here.
     let bindable = eval::bindable_test_count(&spec);
     println!(
         "P127|apply|bindable={}/{}",
         bindable,
         spec.tests.len()
     );
-    assert_eq!(bindable, 0, "lambda test inputs bind nothing today");
+    assert_eq!(bindable, 2, "lambda test inputs bind since Phase 130");
 
-    // Executed judging never reaches the body: the tests are
-    // Unbindable before any candidate is evaluated.
+    // Executed judging reaches the body now: the faithful
+    // apply body passes both tests in-process.
     let outcomes = eval::test_outcomes(&apply_twice_body(), &spec);
     println!("P127|apply|outcomes={outcomes:?}");
-    assert!(matches!(
-        outcomes[0],
-        eval::TestOutcome::Unbindable(_)
-    ));
+    assert_eq!(
+        outcomes,
+        vec![eval::TestOutcome::Passed, eval::TestOutcome::Passed]
+    );
 
     // Z3: the apply body is outside the encodable subset, and
     // the verdict over the (unchecked) spec is Inconclusive.
@@ -269,9 +280,11 @@ fn phase127_apply_body_declines_by_name_in_eval() {
             test { input: (|n| n, 5); expect: 5 }
         } }"#,
     );
-    // Even this spec's only test carries a lambda, so use a
-    // body-level measurement instead: evaluate the apply body
-    // in an env where every non-function input is bound.
+    // Evaluate the apply body in an env where every
+    // non-function input is bound but `f` itself is not: the
+    // call still declines with the standing reason — since
+    // Phase 130 because the callee is UNBOUND in this env,
+    // not because application is impossible.
     let mut env = eval::Env::new();
     env.insert("x".into(), Value::Int(5));
     let result = eval::eval(&call("f", vec![var("x")]), &env);
@@ -287,6 +300,8 @@ fn phase127_apply_body_declines_by_name_in_eval() {
     }
 
     // And the Lambda/Closure nodes themselves, as bodies:
+    // since Phase 130 they evaluate to function values (the
+    // audit pinned their named declines; this is the flip).
     for (label, body) in [
         (
             "lambda",
@@ -307,10 +322,25 @@ fn phase127_apply_body_declines_by_name_in_eval() {
         let result = eval::eval(&body, &env);
         println!("P127|apply_body|{label}={result:?}");
         assert!(
-            matches!(result, Err(eval::EvalError::NotEvaluable(_))),
-            "{label} must decline as a function value"
+            matches!(result, Ok(Value::Function { .. })),
+            "{label} evaluates to a function value since Phase 130"
         );
     }
+
+    // With `f` bound to the evaluated lambda, the same apply
+    // body evaluates end to end: f(x) = x = 5.
+    let f = eval::eval(
+        &IRNode::Lambda {
+            params: vec![("n".into(), TypeRef::Int)],
+            body: Box::new(var("n")),
+        },
+        &env,
+    )
+    .expect("lambda evaluates");
+    env.insert("f".into(), f);
+    let result = eval::eval(&call("f", vec![var("x")]), &env);
+    println!("P127|apply_body|applied={result:?}");
+    assert_eq!(result, Ok(Value::Int(5)));
     let _ = spec;
 }
 
@@ -361,6 +391,22 @@ fn phase127_fn_equality_has_no_home() {
             .status;
         println!("P127|fn_eq|verify={verdict:?}");
         assert_eq!(verdict, VerificationStatus::Inconclusive);
+        // The executed side, since Phase 130 (D5a): the test
+        // binds (two lambdas), and a body performing the
+        // comparison declines it by name — function values
+        // have no equality, decided rather than inherited
+        // from the derived-== fallback. The verdict above is
+        // the verifier's standing and does not move.
+        let bindable = eval::bindable_test_count(spec);
+        println!("P127|fn_eq|bindable={}/{}", bindable, spec.tests.len());
+        assert_eq!(bindable, 1);
+        let comparing = IRNode::BinOp(IRBinOp::Eq, Box::new(var("f")), Box::new(var("g")));
+        let outcomes = eval::test_outcomes(&comparing, spec);
+        println!("P127|fn_eq|outcomes={outcomes:?}");
+        assert!(
+            matches!(outcomes[0], eval::TestOutcome::BodyNotEvaluable(_)),
+            "the executed comparison declines: {outcomes:?}"
+        );
     }
 }
 
@@ -420,12 +466,22 @@ fn phase127_bundled_examples_standings() {
                 bindable,
                 spec.tests.len()
             );
-            assert_eq!(bindable, 0, "{name}'s lambda tests bind nothing today");
+            // Phase 130 flip: the lambda tests bind in full —
+            // the audit's 0/N standing was the binding wall,
+            // and it is gone. (Judging the bound tests is the
+            // template-run measurement below and Phase 131's
+            // frozen standings.)
+            assert_eq!(
+                bindable,
+                spec.tests.len(),
+                "{name}'s lambda tests all bind since Phase 130"
+            );
             #[cfg(feature = "compiled-runner")]
             assert_eq!(
                 runner::trigger(&[candidate(spec, var("list"))], spec),
-                Some(runner::Trigger::UnbindableTests),
-                "{name} sits in the runner's UnbindableTests territory"
+                None,
+                "{name} has left the runner's UnbindableTests territory \
+                 (all tests bind; the probe's candidate is no constraint seed)"
             );
         }
     }
@@ -450,7 +506,15 @@ fn phase127_bundled_examples_standings() {
         "P127|example|sort|template_run=evaluable:{} passed:{}|verify={verdict:?}",
         run.evaluable, run.passed
     );
-    assert_eq!(run.evaluable, 0);
+    // Phase 130 flip: all six tests are evaluable now (they
+    // bind, and the template's comparator calls apply). The
+    // three tests whose inputs need a swap still do not
+    // pass: the template swaps through `Assign` to an Index
+    // target, and the interpreter's Assign arm binds
+    // variables only — a named subset boundary, measured
+    // here and carried to Phase 131 (whose frozen standing
+    // is the full 6/6, through the Sort node's own arm).
+    assert_eq!((run.evaluable, run.passed), (6, 3));
 
     // binary_search's template through the compiled runner
     // directly: does the compiled judge rescue it, as it did
@@ -472,13 +536,23 @@ fn phase127_bundled_examples_standings() {
             "P127|example|binary_search|runner={outcome:?}|tpr={}",
             rescored[0].scores.test_pass_ratio
         );
-        // In the compiled-runner configuration: judged — and
-        // failed at compilation (the G5 wall: the template's
-        // i64 list indices do not compile in the harness's
-        // generated Rust), so the runner's 0/7 is a compilation
-        // verdict, not a binding verdict. Without the runner
-        // the ratio stands at its in-process 0. Either way the
-        // pin is 0.0.
+        // The pin is 0.0 in every configuration, but its
+        // MEANING changed at Phase 130 — recorded honestly:
+        // at the audit, in the compiled-runner configuration
+        // the stage fired (unbindable tests), judged the
+        // template, and it failed at compilation (the G5
+        // wall: i64 list indices in the harness's generated
+        // Rust) — a compilation verdict, not a binding one.
+        // Since Phase 130 the tests bind, the stage does not
+        // fire, and 0.0 is the candidate's untouched
+        // constructed score. The template's in-process
+        // standing is measured in the phase130 test file
+        // (7 evaluable, 1 passed — its progress Assigns sit
+        // inside a Let body whose cloned environment
+        // discards them, so its loop does not progress
+        // in-process; a bare `Var("None")` return is the
+        // second named boundary — Phase 131's judging work
+        // owns the 7/7 standing, §3).
         assert_eq!(rescored[0].scores.test_pass_ratio, 0.0);
     }
 }
@@ -486,13 +560,17 @@ fn phase127_bundled_examples_standings() {
 #[test]
 fn phase127_compiled_runner_judges_what_the_interpreter_cannot() {
     // The decisive judging-context measurement, in two pairs.
+    // At the audit the pairs measured a split: the compiled
+    // judge scored what the in-process judge could not.
+    // Since Phase 130 the split is closed — both pairs now
+    // pin the in-process standing as primary and the compiled
+    // stage's non-invocation as its consequence (the
+    // per-pair comments carry the detail).
     //
     // Pair 1: a body that APPLIES its fn-typed parameter,
     // against lambda-carrying tests. (The spec's constraint
     // is beside the point for this instrument — the runner
-    // executes tests only, per runner.rs policy; what is
-    // measured is purely whether the compiled judge can score
-    // an application body against lambda tests at all.)
+    // executes tests only, per runner.rs policy.)
     let spec = checked_spec(
         r#"Probe { spec apply_render {
             input: f: fn(Int) -> Int, x: Int
@@ -511,12 +589,33 @@ fn phase127_compiled_runner_judges_what_the_interpreter_cannot() {
         "P127|judges|apply_in_process=evaluable:{} passed:{}",
         in_process.evaluable, in_process.passed
     );
-    assert_eq!(in_process.evaluable, 0);
+    // Phase 130 flip: the in-process judge scores the apply
+    // body 2/2 (at the audit that number existed only on the
+    // compiled side).
+    assert_eq!((in_process.evaluable, in_process.passed), (2, 2));
     let (rescored, outcome) = runner::rescore_finalists_report(vec![cand], &spec);
     let tpr = rescored[0].scores.test_pass_ratio;
     println!("P127|judges|apply_runner={outcome:?}|compiled_tpr={tpr}");
+    // The compiled stage's standing, re-pinned at Phase 130:
+    // at the audit this call Scored the body 2/2 (tpr 1.0)
+    // because the stage's trigger — unbindable tests — fired.
+    // The tests bind now, so the trigger does not fire and
+    // the stage returns the pool untouched: the compiled
+    // judge is no longer INVOKED for this spec, because the
+    // in-process judge above covers it. The capability is
+    // not taxed (the stage's own instruments measure it
+    // where the trigger still fires); §3 of the freeze
+    // assigns the compiled-standing re-measurement to
+    // Phase 131, whose judging work owns the runner
+    // interplay.
     #[cfg(feature = "compiled-runner")]
-    assert_eq!(tpr, 1.0, "the compiled judge scores the apply body 2/2");
+    {
+        assert!(
+            matches!(outcome, runner::RunnerOutcome::NotTriggered),
+            "the stage no longer fires for a spec the interpreter judges: {outcome:?}"
+        );
+        assert_eq!(tpr, 0.0, "the pool is returned untouched (constructed score)");
+    }
     #[cfg(not(feature = "compiled-runner"))]
     assert_eq!(tpr, 0.0, "no compiled runner in this configuration");
 
@@ -535,8 +634,22 @@ fn phase127_compiled_runner_judges_what_the_interpreter_cannot() {
     let (rescored, outcome) = runner::rescore_finalists_report(vec![template_cand], &sort_spec);
     let tpr = rescored[0].scores.test_pass_ratio;
     println!("P127|judges|sort_runner={outcome:?}|compiled_tpr={tpr}");
+    // Same Phase 130 re-pin as pair 1: at the audit the
+    // stage fired on sort's unbindable tests and scored the
+    // template 6/6 (tpr 1.0); the tests bind now, the
+    // trigger does not fire, and the in-process run above
+    // (6 evaluable, 3 passed — the swap's Assign-to-Index
+    // boundary) is the standing measurement. The frozen
+    // 6/6 in-process standing and the compiled standing's
+    // re-measurement are Phase 131's (§3).
     #[cfg(feature = "compiled-runner")]
-    assert_eq!(tpr, 1.0, "the compiled judge scores sort's template 6/6 today");
+    {
+        assert!(
+            matches!(outcome, runner::RunnerOutcome::NotTriggered),
+            "the stage no longer fires for sort: {outcome:?}"
+        );
+        assert_eq!(tpr, 0.0, "the pool is returned untouched (constructed score)");
+    }
     #[cfg(not(feature = "compiled-runner"))]
     assert_eq!(tpr, 0.0, "no compiled runner in this configuration");
 }
@@ -545,7 +658,10 @@ fn phase127_compiled_runner_judges_what_the_interpreter_cannot() {
 fn phase127_pipeline_crowns_for_the_bundled_ho_specs() {
     // The production pipeline (seeded profile, seed 42) on the
     // two bundled specs whose tests carry lambdas: what does
-    // the crown look like TODAY, with the runner in the loop?
+    // the crown look like TODAY? (At the audit: with the
+    // runner in the loop. Since Phase 130 the runner stage
+    // does not fire for these specs — the crowns pinned
+    // below are the in-process judge's measurements.)
     let mut tprs = Vec::new();
     for name in ["sort", "binary_search"] {
         let path = format!("{}/examples/{name}.morph", env!("CARGO_MANIFEST_DIR"));
@@ -566,21 +682,35 @@ fn phase127_pipeline_crowns_for_the_bundled_ho_specs() {
         println!("P127|pipeline|{name}|winner_body={}", w.body_debug);
         tprs.push(w.test_pass_ratio);
     }
-    // The standings the prints record, pinned: with the
-    // compiled runner, sort's crown is its template at tpr 1
-    // (rescued by the runner — a real 6/6) and binary_search's
-    // crown is its template at tpr 0 (the runner judged it
-    // and its compiled form failed — G5). WITHOUT the runner
-    // both crowns read 1.0 — vacuously: the engine's scoring
-    // fallback assigns 1.0 when a spec has tests but zero are
-    // evaluable ("tests assumed passed"), and nothing in that
-    // configuration replaces the fallback with a measurement.
-    // The same number, two different epistemic standings —
-    // which is precisely the judging hole G4 closes.
-    #[cfg(feature = "compiled-runner")]
-    assert_eq!(tprs, vec![1.0, 0.0]);
-    #[cfg(not(feature = "compiled-runner"))]
-    assert_eq!(tprs, vec![1.0, 1.0]);
+    // The standings the prints record, pinned — RE-PINNED at
+    // Phase 130, and the numbers now mean something different
+    // in kind, not just in value:
+    //
+    // At the audit, with the compiled runner, sort's crown
+    // was its template at tpr 1.0 (rescued by the runner — a
+    // real 6/6 through rustc) and binary_search's was its
+    // template at tpr 0.0 (the runner judged it and its
+    // compiled form failed — G5); WITHOUT the runner both
+    // read a vacuous fallback 1.0 (zero tests evaluable).
+    //
+    // Since Phase 130 the tests bind and bodies evaluate
+    // in-process, so both crowns are the in-process judge's
+    // honest measurements, identical in every configuration:
+    // * sort: 0.5 — the template itself stands at 3/6
+    //   in-process (the Assign-to-Index swap boundary), a
+    //   trivial return-the-input body ties it at 3/6, and
+    //   selection crowns the trivial body. The crown DROPPED
+    //   from the runner-rescued 1.0 because the rescue is no
+    //   longer invoked and the honest number is lower; the
+    //   frozen 6/6 standing is Phase 131's to earn.
+    // * binary_search: 1/7 ≈ 0.142857 — its template, at its
+    //   true in-process standing (the Let-clone loop-progress
+    //   boundary and the bare Var("None") return; Phase 131
+    //   owns the 7/7). The pipeline now takes minutes on
+    //   this spec: non-progressing candidate loops burn the
+    //   full evaluation budget per test — the real cost of
+    //   real judging, recorded in the elapsed print.
+    assert_eq!(tprs, vec![0.5, 1.0 / 7.0]);
 }
 
 #[test]

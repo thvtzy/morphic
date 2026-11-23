@@ -13,13 +13,20 @@
 // │  While, Loop, Break, TryPropagate, constructor-pattern   │
 // │  Match, and Clone — and, since Phase 115 (the List       │
 // │  family's judging machinery), the bounded For scan the   │
-// │  compiled runner's bodies are written in. Loops carry    │
-// │  an explicit iteration bound (see MAX_LOOP_ITERATIONS):  │
-// │  exceeding it is a judged `NotEvaluable`, never a hang   │
-// │  and never a fabricated value. Anything still outside    │
-// │  the subset — Holes, lambdas, higher-order combinators,  │
-// │  calls to functions that are not known pure builtins —   │
-// │  returns `EvalError::NotEvaluable` with a reason. The    │
+// │  compiled runner's bodies are written in — and, since    │
+// │  Phase 130 (G4), function values: Lambda/Closure         │
+// │  evaluate to closures and a call through a bound         │
+// │  function value applies it, under the same budget.       │
+// │  Loops carry an explicit iteration bound (see            │
+// │  MAX_LOOP_ITERATIONS): exceeding it is a judged          │
+// │  `NotEvaluable`, never a hang and never a fabricated     │
+// │  value; closure application spends from the same         │
+// │  budget, so it is not an unbounded recursion channel     │
+// │  beside it. Anything still outside the subset — Holes,   │
+// │  the higher-order combinators (Map/Filter/Fold/Sort,     │
+// │  Phase 131), calls to functions that are not known       │
+// │  pure builtins or bound function values — returns        │
+// │  `EvalError::NotEvaluable` with a reason. The            │
 // │  evaluator never panics and never guesses a value.       │
 // └──────────────────────────────────────────────────────────┘
 
@@ -28,7 +35,7 @@ use crate::spec::ast::{Constraint, Expr, FunctionSpec, OrderOp, Param};
 use std::collections::HashMap;
 
 /// A runtime value in the evaluable subset.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -61,6 +68,84 @@ pub enum Value {
     Some(Box<Value>),
     /// `None()` — an Option empty value (Phase 75).
     None,
+    /// A function value (Phase 130, G4 — G4_SCOPE §2.1, the
+    /// ONE function variant): the parameter names, the body,
+    /// and the captured environment — a by-value snapshot of
+    /// bindings taken where the lambda was evaluated (§2.2;
+    /// for the IR `Closure` node, exactly its named captures
+    /// resolved against the enclosing environment). Applying
+    /// it evaluates the body in the captured environment
+    /// extended with the argument bindings (§2.3).
+    ///
+    /// There is NO equality on function values (§2.6, D5a):
+    /// the manual `PartialEq` below never equates one, and
+    /// `values_equal` — the judged comparison — declines
+    /// them explicitly before any structural comparison can
+    /// see one.
+    Function {
+        params: Vec<String>,
+        body: Box<IRNode>,
+        env: Env,
+    },
+}
+
+/// Structural equality for the first-order variants — the
+/// semantics the derived instance gave them, replicated by
+/// hand because the derive cannot exist once `Value` holds
+/// an `IRNode` body (the IR carries no `PartialEq`), and
+/// must not exist for the function variant anyway: a
+/// function value is unequal to everything, including
+/// itself (G4_SCOPE §2.6 — there is no equality on function
+/// values; judged comparisons decline them in
+/// `values_equal`, and this instance is only the floor
+/// under non-judged uses like pattern matching, where a
+/// function value simply never matches a literal).
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Char(a), Value::Char(b)) => a == b,
+            (Value::Unit, Value::Unit) => true,
+            (Value::List(a), Value::List(b)) => a == b,
+            (
+                Value::Record {
+                    type_name: t1,
+                    fields: f1,
+                },
+                Value::Record {
+                    type_name: t2,
+                    fields: f2,
+                },
+            ) => t1 == t2 && f1 == f2,
+            (Value::Ok(a), Value::Ok(b)) => a == b,
+            (Value::Err(a), Value::Err(b)) => a == b,
+            (Value::Some(a), Value::Some(b)) => a == b,
+            (Value::None, Value::None) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Whether a value is, or anywhere contains, a function
+/// value — the reach of the §2.6 no-equality rule: a judged
+/// comparison that would have to compare a function value
+/// anywhere inside its operands declines rather than
+/// compares the rest.
+fn contains_function(v: &Value) -> bool {
+    match v {
+        Value::Function { .. } => true,
+        Value::List(items) => items.iter().any(contains_function),
+        Value::Record { fields, .. } => {
+            fields.iter().any(|(_, f)| contains_function(f))
+        }
+        Value::Ok(inner) | Value::Err(inner) | Value::Some(inner) => {
+            contains_function(inner)
+        }
+        _ => false,
+    }
 }
 
 /// Variable environment for one evaluation.
@@ -127,14 +212,62 @@ impl Flow {
 /// that and three orders above the in-spec tests, while
 /// keeping one runaway evaluation in the millisecond range
 /// (an iteration here is a handful of environment writes).
+///
+/// Since Phase 130 (G4, G4_SCOPE §2.3) the same counter is
+/// also the application budget: applying a closure spends
+/// one unit, so closure application is not an unbounded
+/// recursion channel beside the loop bound — a
+/// self-application bomb declines `NotEvaluable` against
+/// this discipline (in practice against the application
+/// DEPTH bound below, which it reaches first), exactly as
+/// a runaway loop declines against the iteration bound.
 const MAX_LOOP_ITERATIONS: usize = 10_000;
+
+/// The application nesting bound of one evaluation
+/// (Phase 130, G4_SCOPE §2.3's stack-facing half): at most
+/// this many closure applications may be LIVE at once.
+/// Sequential applications — a loop or a Map applying a
+/// closure per element — nest one deep and are bounded by
+/// the step counter alone; only NESTED application (a
+/// closure body applying a closure that applies…) counts
+/// here, because nested application is host-stack
+/// recursion in the interpreter itself.
+///
+/// Size rationale, measured on this tree (debug build):
+/// the application chain (eval_flow → eval_call →
+/// apply_closure → eval_flow…) costs tens of KB of host
+/// stack per live level, and a fat body (application under
+/// If/BinOp layers) exhausts the smallest stack in the
+/// building — the test harness's 2 MB threads — at ~30
+/// nested applications. A bound of 10 keeps the worst case
+/// near a third of that stack with the entry chain
+/// included, and stands 5× above the deepest nesting any
+/// honest body shape performs (apply_twice nests 2; the
+/// templates' comparator applications nest 1). A body that
+/// needs deeper application nesting declines here by name
+/// — recursion in this language is a named-spec feature,
+/// not an interpreter-application one (§2.2).
+const MAX_APPLICATION_DEPTH: usize = 10;
+
+/// The budget state of one top-level `eval` call: the
+/// shared step counter (loop iterations + closure
+/// applications) and the live application depth. One
+/// struct, threaded exactly where the bare counter was
+/// threaded before Phase 130.
+struct Budget {
+    steps: usize,
+    depth: usize,
+}
 
 /// Evaluate an IR node in `env`. The environment is cloned
 /// internally wherever a construct binds variables, so the
 /// caller's env is never mutated.
 pub fn eval(node: &IRNode, env: &Env) -> Result<Value, EvalError> {
     let mut working = env.clone();
-    let mut budget = MAX_LOOP_ITERATIONS;
+    let mut budget = Budget {
+        steps: MAX_LOOP_ITERATIONS,
+        depth: 0,
+    };
     match eval_flow(node, &mut working, &mut budget)? {
         Flow::Normal(v) | Flow::Returned(v) => Ok(v),
         Flow::Broke(_) => Err(not_evaluable("Break outside a loop")),
@@ -144,7 +277,7 @@ pub fn eval(node: &IRNode, env: &Env) -> Result<Value, EvalError> {
 fn eval_flow(
     node: &IRNode,
     env: &mut Env,
-    budget: &mut usize,
+    budget: &mut Budget,
 ) -> Result<Flow, EvalError> {
     match node {
         IRNode::Literal(lit) => Ok(Flow::Normal(literal_value(lit))),
@@ -247,6 +380,52 @@ fn eval_flow(
 
         IRNode::Call { function, args } => {
             eval_call(function, args, env, budget).map(Flow::Normal)
+        }
+
+        // Function values (Phase 130, G4 §2.1/§2.2): a
+        // Lambda evaluates to a closure capturing a by-value
+        // snapshot of the environment in force here — the
+        // whole environment, cloned. A lambda evaluated as a
+        // Let's value therefore does NOT capture the Let's
+        // own binding (the Let evaluates the value before
+        // inserting it): no self-capture, no fixpoint.
+        IRNode::Lambda { params, body } => Ok(Flow::Normal(Value::Function {
+            params: params.iter().map(|(name, _)| name.clone()).collect(),
+            body: body.clone(),
+            env: env.clone(),
+        })),
+
+        // The Closure node (§2.2): captures resolve BY NAME
+        // against the enclosing environment — exactly the
+        // named bindings enter the snapshot, nothing else
+        // (an in-scope binding the node does not name is not
+        // captured, and the body declines it as unbound when
+        // applied). An unbound capture name declines here,
+        // by name, at creation.
+        IRNode::Closure {
+            params,
+            captures,
+            body,
+        } => {
+            let mut captured = Env::new();
+            for name in captures {
+                match env.get(name) {
+                    Some(v) => {
+                        captured.insert(name.clone(), v.clone());
+                    }
+                    None => {
+                        return Err(not_evaluable(format!(
+                            "Closure capture `{}` is not bound in the enclosing environment",
+                            name
+                        )));
+                    }
+                }
+            }
+            Ok(Flow::Normal(Value::Function {
+                params: params.iter().map(|(name, _)| name.clone()).collect(),
+                body: body.clone(),
+                env: captured,
+            }))
         }
 
         IRNode::Collection { elements, .. } => {
@@ -489,15 +668,17 @@ fn eval_flow(
         }
 
         // Everything below stays outside the subset:
-        // unfilled holes, function values, higher-order
-        // combinators, and struct definitions. None of them
-        // can be given a value without guessing, so they are
-        // reported as not evaluable. (For graduated into the
-        // subset in Phase 115 — its arm sits with the other
-        // loop forms above.)
+        // unfilled holes, the higher-order combinators
+        // (Phase 131 — they consume the function variant
+        // Phase 130 added, but their own evaluation arms
+        // are that phase's), and struct definitions. None
+        // of them can be given a value without guessing, so
+        // they are reported as not evaluable. (For graduated
+        // into the subset in Phase 115 — its arm sits with
+        // the other loop forms above; Lambda/Closure
+        // graduated in Phase 130 — their arms sit with the
+        // Call arm above.)
         IRNode::Hole { .. } => Err(not_evaluable("unfilled Hole")),
-        IRNode::Lambda { .. } => Err(not_evaluable("Lambda (function value)")),
-        IRNode::Closure { .. } => Err(not_evaluable("Closure (function value)")),
         IRNode::Map { .. } => Err(not_evaluable("Map (higher-order)")),
         IRNode::Filter { .. } => Err(not_evaluable("Filter (higher-order)")),
         IRNode::Fold { .. } => Err(not_evaluable("Fold (higher-order)")),
@@ -549,14 +730,30 @@ fn eval_flow(
 /// subset. Exhaustion is a judged `NotEvaluable` — the
 /// evaluation produced no answer — never a hang and never
 /// a fabricated exit value.
-fn spend_iteration(budget: &mut usize) -> Result<(), EvalError> {
-    if *budget == 0 {
+fn spend_iteration(budget: &mut Budget) -> Result<(), EvalError> {
+    if budget.steps == 0 {
         return Err(not_evaluable(format!(
             "loop iteration bound exceeded ({} iterations): the body does not terminate within the interpreter's bound",
             MAX_LOOP_ITERATIONS
         )));
     }
-    *budget -= 1;
+    budget.steps -= 1;
+    Ok(())
+}
+
+/// Spend one closure application of an evaluation's budget
+/// (Phase 130, G4_SCOPE §2.3): application draws on the
+/// SAME counter as loop iterations (`spend_iteration`), so
+/// the two runaway shapes share one bound and one failure
+/// mode. The message names the shared discipline.
+fn spend_application(budget: &mut Budget) -> Result<(), EvalError> {
+    if budget.steps == 0 {
+        return Err(not_evaluable(format!(
+            "function application bound exceeded: applications share the interpreter's evaluation budget with loop iterations ({} total), and it is exhausted",
+            MAX_LOOP_ITERATIONS
+        )));
+    }
+    budget.steps -= 1;
     Ok(())
 }
 
@@ -572,7 +769,7 @@ fn spend_iteration(budget: &mut usize) -> Result<(), EvalError> {
 fn eval_body_value(
     node: &IRNode,
     env: &mut Env,
-    budget: &mut usize,
+    budget: &mut Budget,
 ) -> Result<Flow, EvalError> {
     let flow = eval_flow(node, env, budget)?;
     if matches!(node, IRNode::Block(_)) {
@@ -704,7 +901,7 @@ fn eval_call(
     function: &str,
     args: &[IRNode],
     env: &mut Env,
-    budget: &mut usize,
+    budget: &mut Budget,
 ) -> Result<Value, EvalError> {
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
@@ -765,14 +962,85 @@ fn eval_call(
                 "int_to_str expects exactly one Int argument",
             )),
         },
-        // Template-internal pseudo-calls ("first", "rest",
-        // "push", "combine", …) and spec-to-spec calls are not
-        // builtins: there is no definition to execute here.
-        other => Err(not_evaluable(format!(
-            "call to unknown function `{}`",
-            other
-        ))),
+        // Not a builtin. Since Phase 130 (G4, §2.3) a call
+        // whose callee name is bound in the environment to
+        // a FUNCTION VALUE applies it — this is how a body
+        // applies its function-typed parameter (`f(x)`) and
+        // any Let-bound closure. The builtin arms above keep
+        // their standing precedence (the checker resolves
+        // builtins and module signatures before variables
+        // the same way). A name bound to a non-function value
+        // declines by name; a name bound nowhere keeps the
+        // standing decline. Template-internal pseudo-calls
+        // ("first", "rest", "push", "combine", …) and
+        // spec-to-spec calls land in one of those two
+        // declines: there is no definition to execute here.
+        other => match env.get(other) {
+            Some(Value::Function {
+                params,
+                body,
+                env: captured,
+            }) => apply_closure(params, body, captured, values, budget),
+            Some(_) => Err(not_evaluable(format!(
+                "call to `{}`, which is bound to a non-function value (only a function value can be applied)",
+                other
+            ))),
+            None => Err(not_evaluable(format!(
+                "call to unknown function `{}`",
+                other
+            ))),
+        },
     }
+}
+
+/// Apply a closure value to argument values (Phase 130, G4
+/// §2.3): the parameters bind to the arguments in the
+/// closure's CAPTURED environment — never the call site's —
+/// extended with those bindings (a parameter shadows a
+/// captured binding of the same name), and the body
+/// evaluates there, drawing on the caller's remaining
+/// budget: the body's own loops and nested applications
+/// spend from the same counter the caller is spending.
+/// Application itself spends one unit up front
+/// (`spend_application`), and live applications nest at
+/// most `MAX_APPLICATION_DEPTH` deep — the discipline's
+/// two halves: total work bounded by the shared counter,
+/// recursion depth bounded so a self-application bomb
+/// declines by name instead of exhausting the host stack.
+/// Arity is the checker's coarse discipline made concrete:
+/// a mismatch declines by name.
+fn apply_closure(
+    params: &[String],
+    body: &IRNode,
+    captured: &Env,
+    args: Vec<Value>,
+    budget: &mut Budget,
+) -> Result<Value, EvalError> {
+    if args.len() != params.len() {
+        return Err(not_evaluable(format!(
+            "function value expects {} argument(s), {} given",
+            params.len(),
+            args.len()
+        )));
+    }
+    spend_application(budget)?;
+    if budget.depth >= MAX_APPLICATION_DEPTH {
+        return Err(not_evaluable(format!(
+            "function application depth bound exceeded ({} nested applications): application nesting is bounded with the shared evaluation budget, so a self-application recursion declines instead of exhausting the host stack",
+            MAX_APPLICATION_DEPTH
+        )));
+    }
+    budget.depth += 1;
+    let mut call_env = captured.clone();
+    for (param, arg) in params.iter().zip(args) {
+        call_env.insert(param.clone(), arg);
+    }
+    // A Return inside the body is the application's result
+    // (into_value's standing reading); a Break with no
+    // enclosing loop inside the body declines there.
+    let result = eval_flow(body, &mut call_env, budget);
+    budget.depth -= 1;
+    result?.into_value()
 }
 
 /// Evaluate one D1a builtin method call on an already
@@ -914,25 +1182,54 @@ fn as_f64(v: &Value) -> Option<f64> {
 /// other — everything from 2^53 up, e.g. the Int minimum and
 /// its neighbours — compare equal, which silently corrupted
 /// both test outcomes and `require:` evaluation at extremes.
-fn values_equal(l: &Value, r: &Value) -> bool {
+///
+/// Returns `None` for DECLINED (Phase 130, G4_SCOPE §2.6,
+/// D5a): there is no equality on function values, so a
+/// comparison whose operands are — or anywhere contain — a
+/// function value is not decided here at all. The derived
+/// structural `==` must never see a closure (it would hand
+/// it a syntactic equality over body AST + captured
+/// environment that means nothing); each caller turns the
+/// decline into its own standing outcome (a `NotEvaluable`
+/// in evaluated positions, an undecided row in `require:`
+/// evaluation, a declined comparison in test judging).
+fn values_equal(l: &Value, r: &Value) -> Option<bool> {
+    if contains_function(l) || contains_function(r) {
+        return None;
+    }
     if let (Value::Int(a), Value::Int(b)) = (l, r) {
-        return a == b;
+        return Some(a == b);
     }
     if let (Some(a), Some(b)) = (as_f64(l), as_f64(r)) {
         if matches!(l, Value::Int(_) | Value::Float(_))
             && matches!(r, Value::Int(_) | Value::Float(_))
         {
-            return a == b;
+            return Some(a == b);
         }
     }
-    l == r
+    Some(l == r)
 }
 
 fn eval_binop(op: IRBinOp, l: Value, r: Value) -> Result<Value, EvalError> {
     use IRBinOp::*;
     match op {
-        Eq => Ok(Value::Bool(values_equal(&l, &r))),
-        Neq => Ok(Value::Bool(!values_equal(&l, &r))),
+        // Equality declines on function values (§2.6): the
+        // comparison is outside the evaluable subset, named
+        // — never a structural guess.
+        Eq => values_equal(&l, &r)
+            .map(Value::Bool)
+            .ok_or_else(|| {
+                not_evaluable(
+                    "equality on function values: function values have no equality (G4 §2.6)",
+                )
+            }),
+        Neq => values_equal(&l, &r)
+            .map(|eq| Value::Bool(!eq))
+            .ok_or_else(|| {
+                not_evaluable(
+                    "equality on function values: function values have no equality (G4 §2.6)",
+                )
+            }),
         Lt | Le | Gt | Ge => {
             let ord = match (&l, &r) {
                 (Value::Int(a), Value::Int(b)) => a.partial_cmp(b),
@@ -1118,6 +1415,18 @@ fn eval_unaryop(op: IRUnaryOp, v: Value) -> Result<Value, EvalError> {
 /// and constraints themselves are never mapped here at all
 /// (Z3 judges them natively, Phase 76; the compiled runner
 /// renders them, Phase 77).
+///
+/// A second carve-out (Phase 130, G4 §2.5): `Expr::Lambda`
+/// maps HERE to a function value, because `expr_to_ir`
+/// likewise lowers it to a Hole. The body is lowered once,
+/// at mapping time, through `expr_to_ir` (a body part the
+/// lowering drops — a method call, say — becomes a Hole in
+/// the closure's body and declines by name when the closure
+/// is applied). The captured environment is empty: a test
+/// literal is a closed supply form, and a body reaching
+/// past its parameters for a free name declines as an
+/// unbound variable at application, never a guessed
+/// capture.
 pub fn value_of_expr(expr: &Expr) -> Option<Value> {
     match expr {
         Expr::IntLit(n) => Some(Value::Int(*n)),
@@ -1125,6 +1434,11 @@ pub fn value_of_expr(expr: &Expr) -> Option<Value> {
         Expr::BoolLit(b) => Some(Value::Bool(*b)),
         Expr::StringLit(s) => Some(Value::Str(s.clone())),
         Expr::CharLit(c) => Some(Value::Char(*c)),
+        Expr::Lambda(params, body) => Some(Value::Function {
+            params: params.iter().map(|(name, _)| name.clone()).collect(),
+            body: Box::new(super::engine::expr_to_ir(body)),
+            env: Env::new(),
+        }),
         Expr::MethodCall {
             receiver,
             name,
@@ -1159,10 +1473,13 @@ pub fn value_of_expr(expr: &Expr) -> Option<Value> {
 ///   parameter count.
 ///
 /// A tuple whose arity differs from the parameter count, or
-/// with an element that cannot be mapped (a lambda for a
-/// fn-typed parameter — the evaluator has no function values;
-/// a nested tuple — there is no tuple Value), does not bind:
-/// the test is excluded, exactly as before.
+/// with an element that cannot be mapped (a nested tuple —
+/// there is no tuple Value; a bare sibling name in a
+/// function position — the named-reference supply form is
+/// Phase 132's, and `value_of_expr` has no module index to
+/// resolve it against), does not bind: the test is
+/// excluded, exactly as before. A lambda element DOES map
+/// since Phase 130 — to a closure (see `value_of_expr`).
 fn bind_test_env(params: &[Param], input: &Expr) -> Option<Env> {
     // Tuple form: bind elementwise. Checked before the
     // whole-value mapping, which cannot represent a tuple.
@@ -1221,9 +1538,11 @@ pub struct TestRun {
 /// the spec's test encodings alone: it equals `evaluable` for
 /// every candidate. A spec whose count falls short of its
 /// test count has tests the interpreter cannot judge (the
-/// lambda-carrying tuple residue) — the trigger signal for
-/// the compiled-runner final scoring in synthesis::runner
-/// (Phase 58), which exists for exactly that residue.
+/// tuple-carrying residue: nested tuples, named function
+/// references — lambda-carrying tests bind since Phase 130)
+/// — the trigger signal for the compiled-runner final
+/// scoring in synthesis::runner (Phase 58), which exists
+/// for exactly that residue.
 pub fn bindable_test_count(spec: &FunctionSpec) -> usize {
     test_bindability(spec).iter().filter(|b| **b).count()
 }
@@ -1282,7 +1601,11 @@ fn constraint_holds_at(c: &Constraint, env: &Env) -> Option<bool> {
         },
         Constraint::Eq(a, b) => {
             let (x, y) = (value_of_expr_at(a, env)?, value_of_expr_at(b, env)?);
-            Some(values_equal(&x, &y))
+            // A comparison involving a function value
+            // declines (values_equal's None): the row is
+            // undecided at this point — it neither silences
+            // the point nor judges it (Phase 130, §2.6).
+            values_equal(&x, &y)
         }
         Constraint::Order(op, a, b) => {
             let (x, y) = (value_of_expr_at(a, env)?, value_of_expr_at(b, env)?);
@@ -1369,14 +1692,21 @@ pub enum TestOutcome {
     /// the evaluator's own reason. The test still counts as
     /// evaluable — the interpreter COULD judge it; this body
     /// gave it nothing to judge (see `valued_test_count`).
+    /// Also this outcome when the body DID produce a value
+    /// but the expected-output comparison declines it — a
+    /// function value on either side of the comparison
+    /// (Phase 130, §2.6): the interpreter could judge the
+    /// body; the comparison is what is outside its subset.
     BodyNotEvaluable(String),
     /// The test itself cannot be mapped to interpreter
     /// values, so no candidate could ever be judged against
     /// it. The payload is the reason CLASS: the expected
     /// output is unmappable, the input is unmappable (it
     /// carries a value with no interpreter representation,
-    /// e.g. a function/lambda for a fn-typed parameter), or
-    /// the input's shape does not match the parameter list.
+    /// e.g. a tuple — there is no tuple value — or a named
+    /// function reference, whose supply form is Phase
+    /// 132's), or the input's shape does not match the
+    /// parameter list.
     Unbindable(String),
     /// The test binds, but its input VIOLATES the spec's
     /// own `require:` precondition (Phase 109, §3.1): the
@@ -1407,7 +1737,7 @@ pub fn test_outcomes(body: &IRNode, spec: &FunctionSpec) -> Vec<TestOutcome> {
                 return TestOutcome::Unbindable(if value_of_expr(&test.input).is_none() {
                     "input cannot be mapped to an interpreter value \
                      (it carries a value the interpreter cannot represent, \
-                     e.g. a function/lambda)"
+                     e.g. a tuple or a named function reference)"
                         .into()
                 } else {
                     "input does not match the spec's parameter list (shape/arity)".into()
@@ -1425,8 +1755,25 @@ pub fn test_outcomes(body: &IRNode, spec: &FunctionSpec) -> Vec<TestOutcome> {
                 );
             }
             match eval(body, &env) {
-                Ok(actual) if values_equal(&actual, &expected) => TestOutcome::Passed,
-                Ok(_) => TestOutcome::Failed,
+                Ok(actual) => match values_equal(&actual, &expected) {
+                    Some(true) => TestOutcome::Passed,
+                    Some(false) => TestOutcome::Failed,
+                    // The comparison itself declines
+                    // (Phase 130, §2.6): the body produced a
+                    // value (or the expectation is one) that
+                    // is — or contains — a function value,
+                    // and function values have no equality.
+                    // The test counts as evaluable (the
+                    // interpreter could judge the body; it
+                    // is the COMPARISON that is outside its
+                    // subset) and can never be passed on a
+                    // structural guess.
+                    None => TestOutcome::BodyNotEvaluable(
+                        "expected-output comparison declines function values: \
+                         function values have no equality (G4 §2.6)"
+                            .into(),
+                    ),
+                },
                 Err(EvalError::NotEvaluable(reason)) => {
                     TestOutcome::BodyNotEvaluable(reason)
                 }
@@ -1821,6 +2168,11 @@ mod tests {
         // iteration bound, not by shape. The Assign case
         // remains because its target is unbound in this
         // env (no Alloc binds `x`).
+        // Re-pinned at Phase 130 (G4): Lambda left this
+        // list — it evaluates to a function value now (the
+        // phase130_* tests are its positive coverage). The
+        // Map case stands for the higher-order nodes, which
+        // stay declined by name until Phase 131.
         let cases: Vec<IRNode> = vec![
             IRNode::Hole { id: 0, expected_type: None },
             IRNode::While {
@@ -1832,7 +2184,16 @@ mod tests {
                 target: Box::new(var("x")),
                 value: Box::new(int(1)),
             },
-            IRNode::Lambda { params: vec![], body: Box::new(int(1)) },
+            IRNode::Map {
+                function: Box::new(IRNode::Lambda {
+                    params: vec![("n".into(), crate::spec::ast::TypeRef::Int)],
+                    body: Box::new(var("n")),
+                }),
+                over: Box::new(IRNode::Collection {
+                    kind: CollectionKind::List,
+                    elements: vec![int(1)],
+                }),
+            },
             IRNode::Call { function: "is_sorted".into(), args: vec![] },
             IRNode::Call { function: "first".into(), args: vec![int(1)] },
         ];
@@ -2021,8 +2382,11 @@ mod tests {
     #[test]
     fn test_outcomes_classify_unbindable_reason_classes() {
         use crate::spec::ast::TypeRef;
-        // A lambda input for a fn-typed parameter: the
-        // evaluator has no function values (the sort residue).
+        // A lambda input for a fn-typed parameter: until
+        // Phase 130 (G4) this was the Unbindable exemplar —
+        // the evaluator had no function values (the sort
+        // residue). A lambda maps to a closure now, so the
+        // test binds and judges like any other.
         let mut spec = dummy_spec_with(
             "apply_cmp",
             vec![Param {
@@ -2043,12 +2407,11 @@ mod tests {
             property: false,
         }];
         let outcomes = test_outcomes(&boolean(true), &spec);
-        match &outcomes[0] {
-            TestOutcome::Unbindable(reason) => {
-                assert!(reason.contains("function"), "reason class must name the cause: {reason}")
-            }
-            other => panic!("expected Unbindable, got {other:?}"),
-        }
+        assert_eq!(outcomes, vec![TestOutcome::Passed]);
+        assert_eq!(
+            run_spec_tests(&boolean(true), &spec),
+            TestRun { evaluable: 1, passed: 1 }
+        );
 
         // A scalar input for a two-parameter spec: the value
         // maps fine; the SHAPE does not match the parameters.
@@ -2074,7 +2437,7 @@ mod tests {
             }
             other => panic!("expected Unbindable, got {other:?}"),
         }
-        // Neither unbindable test enters the evaluable count.
+        // The unbindable test does not enter the evaluable count.
         assert_eq!(
             run_spec_tests(&int(0), &spec),
             TestRun { evaluable: 0, passed: 0 }
@@ -2110,11 +2473,14 @@ mod tests {
         // answers on every test (valued 3 — it returns the
         // alloc'd 0, wrong on the merits, which is exactly
         // the distinction this counter exists to draw). The
-        // still-unevaluable example is a Lambda body: the
-        // evaluator holds no function values (G4), so it
-        // values nowhere. (Until Phase 115 the example was
-        // a For body; For graduated into the subset with
-        // the List family's judging machinery.)
+        // still-unevaluable example is a Map body: the
+        // higher-order nodes stay outside the subset until
+        // Phase 131 (G4). (Until Phase 130 the example was
+        // a Lambda body — a Lambda evaluates to a function
+        // value now, so it values everywhere. Until
+        // Phase 115 the example was a For body; For
+        // graduated into the subset with the List family's
+        // judging machinery.)
         let alloc_body = IRNode::Block(vec![
             IRNode::Alloc {
                 name: "acc".into(),
@@ -2124,11 +2490,14 @@ mod tests {
             IRNode::Return(Box::new(var("acc"))),
         ]);
         assert_eq!(valued_test_count(&alloc_body, &spec), 3);
-        let lambda_body = IRNode::Lambda {
-            params: vec![("x".into(), crate::spec::ast::TypeRef::Int)],
-            body: Box::new(var("kind")),
+        let map_body = IRNode::Map {
+            function: Box::new(IRNode::Lambda {
+                params: vec![("x".into(), crate::spec::ast::TypeRef::Int)],
+                body: Box::new(var("kind")),
+            }),
+            over: Box::new(var("kind")),
         };
-        assert_eq!(valued_test_count(&lambda_body, &spec), 0);
+        assert_eq!(valued_test_count(&map_body, &spec), 0);
     }
 
     #[test]
@@ -2287,12 +2656,16 @@ mod tests {
     }
 
     #[test]
-    fn run_spec_tests_tuple_with_lambda_element_stays_excluded() {
+    fn run_spec_tests_tuple_with_lambda_element_binds() {
         // sort.morph's shape: (list, cmp) where cmp's test
-        // value is a lambda. The evaluator has no function
-        // values, so the element cannot be mapped and the test
-        // stays excluded — the FALLBACK's remaining legitimate
-        // domain, unchanged by the tuple fix.
+        // value is a lambda. Until Phase 130 (G4) the element
+        // could not be mapped — the evaluator had no function
+        // values — and the test stayed excluded (this test's
+        // previous form pinned exactly that). A lambda maps
+        // to a closure now: the test binds, and the identity
+        // body fails it on the merits (the list comes back
+        // unsorted), which is the FALLBACK leaving this
+        // shape's domain.
         let mut spec = dummy_spec_with(
             "sort_shape",
             vec![
@@ -2332,8 +2705,16 @@ mod tests {
             tuple(vec![list_lit(&[3, 1, 2]), lambda]),
             list_lit(&[1, 2, 3]),
         )];
+        let env = bind_test_env(&spec.params, &spec.tests[0].input)
+            .expect("tuple input with a lambda element must bind");
+        assert!(
+            matches!(env.get("cmp"), Some(Value::Function { .. })),
+            "the lambda element binds as a function value, got {:?}",
+            env.get("cmp")
+        );
+        assert_eq!(bindable_test_count(&spec), 1);
         let run = run_spec_tests(&var("list"), &spec);
-        assert_eq!(run, TestRun { evaluable: 0, passed: 0 });
+        assert_eq!(run, TestRun { evaluable: 1, passed: 0 });
     }
 
     #[test]
