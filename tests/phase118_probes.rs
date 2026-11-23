@@ -9,18 +9,25 @@
 //! What is pinned here:
 //!
 //! * The JavaScript emitter's coverage of the shipped
-//!   library bodies (the pre-generated-JS route): Tier-1
-//!   expression bodies and Match bodies vanish into
-//!   `// unsupported` (no tail renderer — NF-116-1), a
-//!   Tier-2 For body loses its accumulator statements and
-//!   returns an undeclared variable, `%` / `<=` render as
-//!   a bare `?` (unparseable JS), Int literals render as
+//!   library bodies (the pre-generated-JS route): as
+//!   pinned at Phase 118, Tier-1 expression bodies and
+//!   Match bodies vanished into `// unsupported` (no
+//!   tail renderer — NF-116-1), a Tier-2 For body lost
+//!   its accumulator statements and returned an
+//!   undeclared variable, `%` / `<=` rendered as a bare
+//!   `?` (unparseable JS), Int literals rendered as
 //!   bare JS numbers (precision boundary at 2^53), Int
-//!   division renders as JS float division, and
-//!   constructors / Index have no representation
-//!   (`undefined`). Entry CALLS, by contrast, refuse
-//!   loudly since Phase 116 — the asymmetry is the
-//!   finding: calls refuse, bodies break.
+//!   division rendered as JS float division, and
+//!   constructors / Index had no representation
+//!   (`undefined`); entry CALLS, by contrast, refused
+//!   loudly since Phase 116 — the asymmetry was the
+//!   finding: calls refuse, bodies break. **Phase 120
+//!   closed this gap** (the embeddable subset, EMBED
+//!   D3a/D4a/D5a): the JS pins below are re-aimed at
+//!   the completed emitter — tail renderer, BigInt Int
+//!   semantics, the D4a constructor forms, entry calls
+//!   as plain calls — and tests/phase120_js_emitter.rs
+//!   carries the node-executed battery.
 //! * The WAT target's type map: Morphic Int renders as
 //!   WAT i32 (truncation in the signature itself), and a
 //!   Tier-1 body renders as a comment.
@@ -42,7 +49,7 @@
 //! their spec from a local parsed module and run in
 //! every configuration.
 
-use morphic::codegen::{self, CodegenError};
+use morphic::codegen;
 use morphic::spec::ast::FunctionSpec;
 use morphic::spec::parser;
 #[cfg(not(feature = "wasm-playground"))]
@@ -118,122 +125,140 @@ fn js_of_hand(body: IRNode) -> String {
 
 // ── The JS route: shipped bodies ───────────────────────
 
-/// NF-116-1's tail gap, at the simplest Tier-1 body in
-/// the library: `int_abs`'s If renders, its value
-/// branches do not — the generated function contains no
-/// `return` at all and answers `undefined` for every
-/// input (node-run measured in the audit).
+/// Phase 120 re-aim: the tail renderer exists now.
+/// `int_abs`'s If branches return their values (BigInt
+/// forms per D3a); nothing in the body is unsupported.
+/// (As pinned at Phase 118 the generated function
+/// contained no `return` at all — NF-116-1's tail gap.)
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn js_tier1_int_abs_has_no_return() {
+fn js_tier1_int_abs_returns_its_value() {
     let js = js_of_entry("int_abs");
     assert!(js.contains("function int_abs(x)"), "{js}");
-    assert!(js.contains("// unsupported"), "{js}");
-    assert!(!js.contains("return"), "no return survives:\n{js}");
+    assert!(js.contains("return (0n - x);"), "{js}");
+    assert!(js.contains("return x;"), "{js}");
+    assert!(!js.contains("// unsupported"), "{js}");
 }
 
-/// Bare-expression bodies vanish wholesale in statement
-/// position — even `string_is_empty`, whose only
-/// ingredient (`len`) has a correct JS expression arm.
+/// Phase 120 re-aim: bare-expression bodies return
+/// through the tail renderer — `string_is_empty`'s
+/// `len` ingredient included (the BigInt form of the
+/// Phase 116 code-point arm).
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn js_expression_bodies_vanish() {
+fn js_expression_bodies_return() {
     for name in ["string_is_empty", "list_is_empty", "int_is_even"] {
         let js = js_of_entry(name);
-        assert!(js.contains("// unsupported"), "{name}:\n{js}");
-        assert!(!js.contains("return"), "{name} must not return:\n{js}");
+        assert!(js.contains("return"), "{name} returns:\n{js}");
+        assert!(!js.contains("// unsupported"), "{name}:\n{js}");
     }
+    let js = js_of_entry("string_is_empty");
+    assert!(js.contains("BigInt([...(s)].length)"), "{js}");
 }
 
-/// Match bodies (the Result/Option/Char entries' shape)
-/// have no JS arm at all.
+/// Phase 120 re-aim: Match bodies render as
+/// discrimination chains over a scrutinee temp (the
+/// D4a forms), arms returning through the tail
+/// renderer.
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn js_match_bodies_vanish() {
+fn js_match_bodies_render() {
     for name in ["option_unwrap_or", "char_to_digit"] {
         let js = js_of_entry(name);
-        assert!(js.contains("// unsupported"), "{name}:\n{js}");
-        assert!(!js.contains("return"), "{name} must not return:\n{js}");
+        assert!(js.contains("const __scrut ="), "{name}:\n{js}");
+        assert!(js.contains("return"), "{name} returns:\n{js}");
+        assert!(!js.contains("// unsupported"), "{name}:\n{js}");
     }
 }
 
-/// A Tier-2 For body partially renders — the loop and
-/// its `len` bound survive; the accumulator's Alloc and
-/// Assign statements drop, leaving `return acc;` naming
-/// a variable nothing declares (node: ReferenceError).
+/// Phase 120 re-aim: the Tier-2 For body renders whole
+/// — the accumulator's Alloc declares it, Assign
+/// updates it, the BigInt For hoists its `len` bound,
+/// and `return acc;` names a declared variable.
+/// (Phase 118 pinned the dropped-accumulator form:
+/// node threw ReferenceError.)
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn js_tier2_list_sum_drops_its_accumulator() {
+fn js_tier2_list_sum_declares_its_accumulator() {
     let js = js_of_entry("list_sum");
-    assert!(js.contains("for (let i = 0;"), "{js}");
-    assert!(js.contains("// unsupported"), "{js}");
+    assert!(js.contains("let acc = 0n;"), "{js}");
+    assert!(js.contains("for (let i = 0n, __end_i ="), "{js}");
     assert!(js.contains("return acc;"), "{js}");
+    assert!(!js.contains("// unsupported"), "{js}");
 }
 
-/// The asymmetry Phase 116 left: a body CALLING an
-/// entry refuses loudly by name on JS, while the
-/// entries' own bodies (above) silently break.
+/// Phase 120 re-aim — the entry-call reconciliation:
+/// a body CALLING an entry now generates on JS, the
+/// call rendered as a plain call to the entry's export
+/// name (Phase 121's module assembly satisfies it;
+/// tests/phase120_js_emitter.rs runs the assembled
+/// form under node). Phase 116's loud refusal stands
+/// for C/WAT (all library calls) and Python (entry
+/// calls) — see tests/phase116_honesty.rs.
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn js_entry_calls_refuse_loudly() {
+fn js_entry_calls_render_as_plain_calls() {
     let body = ret(IRNode::Call {
         function: "int_abs".into(),
         args: vec![var("x")],
     });
-    let err = codegen::generate(&candidate(&hand_spec(), body), "javascript")
-        .expect_err("entry calls refuse on JS");
-    assert!(
-        matches!(err, CodegenError::UnrenderableLibraryCall { ref name, .. } if name == "int_abs"),
-        "{err}"
-    );
+    let js = codegen::generate(&candidate(&hand_spec(), body), "javascript")
+        .expect("entry calls generate on JS since Phase 120");
+    assert!(js.contains("return int_abs(x);"), "{js}");
 }
 
 // ── The JS route: expression-level losses ──────────────
 
-/// `%` and `<=` (and `>=`) have no JS operator arm: the
-/// fallback string is a bare `?`, producing
-/// `return (x ? 2);` — a SyntaxError under node --check.
+/// Phase 120 re-aim: `%` and `<=` (and `>=`) have real
+/// operator arms over BigInt operands. (Phase 118
+/// pinned the bare-`?` fallback — `return (x ? 2);`, a
+/// SyntaxError under node --check.)
 #[test]
-fn js_mod_and_le_render_a_bare_question_mark() {
-    for op in [IRBinOp::Mod, IRBinOp::Le] {
-        let js = js_of_hand(ret(IRNode::BinOp(op, Box::new(var("x")), Box::new(lit(2)))));
-        assert!(js.contains("return (x ? 2);"), "{js}");
-    }
+fn js_mod_and_le_render_real_operators() {
+    let js = js_of_hand(ret(IRNode::BinOp(IRBinOp::Mod, Box::new(var("x")), Box::new(lit(2)))));
+    assert!(js.contains("return (x % 2n);"), "{js}");
+    let js = js_of_hand(ret(IRNode::BinOp(IRBinOp::Le, Box::new(var("x")), Box::new(lit(2)))));
+    assert!(js.contains("return (x <= 2n);"), "{js}");
 }
 
-/// Int literals render as bare JS number literals: the
-/// i64 maximum is emitted digit-exact, and a JS engine
-/// parses it to 9223372036854775808 (2^63) — the
-/// precision boundary a typed binding must decide.
+/// Phase 120 re-aim (D3a): Int literals are BigInt
+/// literals — the i64 maximum carries the `n` suffix,
+/// so a JS engine reads it digit-exact. (Phase 118
+/// pinned the bare-number form, which JS parses to
+/// 9223372036854775808.)
 #[test]
-fn js_int_literal_is_a_bare_js_number() {
+fn js_int_literal_is_a_bigint_literal() {
     let js = js_of_hand(ret(lit(i64::MAX)));
-    assert!(js.contains("return 9223372036854775807;"), "{js}");
+    assert!(js.contains("return 9223372036854775807n;"), "{js}");
 }
 
-/// Morphic Int division truncates; the JS rendering is
-/// the float-division operator, verbatim.
+/// Phase 120 re-aim: Int division renders over a
+/// BigInt operand — BigInt `/` truncates toward zero,
+/// which is Morphic Int's semantics (the audit §3
+/// finding), not JS float division.
 #[test]
-fn js_int_division_renders_float_division() {
+fn js_int_division_is_bigint_division() {
     let js = js_of_hand(ret(IRNode::BinOp(
         IRBinOp::Div,
         Box::new(var("x")),
         Box::new(lit(2)),
     )));
-    assert!(js.contains("return (x / 2);"), "{js}");
+    assert!(js.contains("return (x / 2n);"), "{js}");
 }
 
-/// Constructors and Index have no JS representation:
-/// both render as the literal `undefined`.
+/// Phase 120 re-aim (D4a): constructors and Index have
+/// representations — `Some(x)` is the payload itself,
+/// Index is element access. (Phase 118 pinned both as
+/// the literal `undefined`.)
 #[test]
-fn js_constructors_and_index_render_undefined() {
+fn js_constructors_and_index_render_forms() {
     let some = js_of_hand(ret(IRNode::Call {
         function: "Some".into(),
         args: vec![var("x")],
     }));
-    assert!(some.contains("return undefined;"), "{some}");
+    assert!(some.contains("return (x);"), "{some}");
     let index = js_of_hand(ret(IRNode::Index(Box::new(var("x")), Box::new(lit(0)))));
-    assert!(index.contains("return undefined;"), "{index}");
+    assert!(index.contains("return (x)[0n];"), "{index}");
 }
 
 // ── The WAT target ─────────────────────────────────────
