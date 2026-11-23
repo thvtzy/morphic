@@ -1,0 +1,147 @@
+{
+  "name": "@thvtzy/morphic",
+  "version": "1.0.0",
+  "description": "Morphic's verified standard library as ready-to-import functions: pre-generated from the specifications the Morphic pipeline verified (Tier-1) or proved executed-exact (Tier-2). Per-function tiers and batteries: morphic.manifest.json.",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./int_abs": {
+      "types": "./int_abs.d.ts",
+      "import": "./int_abs.js"
+    },
+    "./int_sign": {
+      "types": "./int_sign.d.ts",
+      "import": "./int_sign.js"
+    },
+    "./int_min": {
+      "types": "./int_min.d.ts",
+      "import": "./int_min.js"
+    },
+    "./int_max": {
+      "types": "./int_max.d.ts",
+      "import": "./int_max.js"
+    },
+    "./int_clamp": {
+      "types": "./int_clamp.d.ts",
+      "import": "./int_clamp.js"
+    },
+    "./int_is_even": {
+      "types": "./int_is_even.d.ts",
+      "import": "./int_is_even.js"
+    },
+    "./int_is_odd": {
+      "types": "./int_is_odd.d.ts",
+      "import": "./int_is_odd.js"
+    },
+    "./char_is_digit": {
+      "types": "./char_is_digit.d.ts",
+      "import": "./char_is_digit.js"
+    },
+    "./char_is_alpha": {
+      "types": "./char_is_alpha.d.ts",
+      "import": "./char_is_alpha.js"
+    },
+    "./char_is_whitespace": {
+      "types": "./char_is_whitespace.d.ts",
+      "import": "./char_is_whitespace.js"
+    },
+    "./char_is_uppercase": {
+      "types": "./char_is_uppercase.d.ts",
+      "import": "./char_is_uppercase.js"
+    },
+    "./char_is_lowercase": {
+      "types": "./char_is_lowercase.d.ts",
+      "import": "./char_is_lowercase.js"
+    },
+    "./char_to_digit": {
+      "types": "./char_to_digit.d.ts",
+      "import": "./char_to_digit.js"
+    },
+    "./string_is_empty": {
+      "types": "./string_is_empty.d.ts",
+      "import": "./string_is_empty.js"
+    },
+    "./result_unwrap_or": {
+      "types": "./result_unwrap_or.d.ts",
+      "import": "./result_unwrap_or.js"
+    },
+    "./option_unwrap_or": {
+      "types": "./option_unwrap_or.d.ts",
+      "import": "./option_unwrap_or.js"
+    },
+    "./option_ok_or": {
+      "types": "./option_ok_or.d.ts",
+      "import": "./option_ok_or.js"
+    },
+    "./list_is_empty": {
+      "types": "./list_is_empty.d.ts",
+      "import": "./list_is_empty.js"
+    },
+    "./list_reverse": {
+      "types": "./list_reverse.d.ts",
+      "import": "./list_reverse.js"
+    },
+    "./list_contains": {
+      "types": "./list_contains.d.ts",
+      "import": "./list_contains.js"
+    },
+    "./list_sum": {
+      "types": "./list_sum.d.ts",
+      "import": "./list_sum.js"
+    },
+    "./list_product": {
+      "types": "./list_product.d.ts",
+      "import": "./list_product.js"
+    },
+    "./list_min": {
+      "types": "./list_min.d.ts",
+      "import": "./list_min.js"
+    },
+    "./list_max": {
+      "types": "./list_max.d.ts",
+      "import": "./list_max.js"
+    },
+    "./list_take": {
+      "types": "./list_take.d.ts",
+      "import": "./list_take.js"
+    },
+    "./list_drop": {
+      "types": "./list_drop.d.ts",
+      "import": "./list_drop.js"
+    },
+    "./list_is_sorted": {
+      "types": "./list_is_sorted.d.ts",
+      "import": "./list_is_sorted.js"
+    },
+    "./list_sort": {
+      "types": "./list_sort.d.ts",
+      "import": "./list_sort.js"
+    },
+    "./list_binary_search": {
+      "types": "./list_binary_search.d.ts",
+      "import": "./list_binary_search.js"
+    },
+    "./morphic.manifest.json": "./morphic.manifest.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "*.js",
+    "*.d.ts",
+    "morphic.manifest.json",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "sideEffects": false,
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thvtzy/morphic.git"
+  },
+  "homepage": "https://thvtzy.github.io/morphic/",
+  "keywords": ["morphic", "verified", "formal-verification", "standard-library"]
+}

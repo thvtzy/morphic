@@ -3204,6 +3204,14 @@ impl std::error::Error for CodegenError {}
 /// for user modules (D1a).
 pub mod bindings;
 
+/// Phase 122 (1.1 Embeddable): the npm package assembly
+/// — Phase 121's binding set plus the package furniture
+/// and per-function modules, assembled into the
+/// package's repo home under the crowning
+/// re-verification (gate clause 4's machinery) and the
+/// frozen unpacked-mass budget (clause 6).
+pub mod package;
+
 /// module's 112 synthesized winners, checked in as a versioned
 /// file and compiled into the crate — the compiled codegen the
 /// bootstrap adapter calls. GENERATED FILE (its own header

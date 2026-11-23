@@ -1,0 +1,327 @@
+{
+  "package": "@thvtzy/morphic",
+  "packageVersion": "1.0.0",
+  "morphicVersion": "1.0.0",
+  "scope": "EMBED_SCOPE.md",
+  "exports": [
+    {
+      "name": "int_abs",
+      "signature": "Int → Int",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 16,
+        "specSilent": 1
+      },
+      "doc": "int_abs(x) = |x|. The Int minimum is excluded by precondition: its absolute value is not representable in Int (STDLIB_SCOPE.md 2.2, frozen domain note)."
+    },
+    {
+      "name": "int_sign",
+      "signature": "Int → Int",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 11,
+        "specSilent": 0
+      },
+      "doc": "int_sign(x) = -1 when x is negative, 0 when x is zero, 1 when x is positive (STDLIB_SCOPE.md 2.2). The Int minimum maps to -1; no exclusion is needed."
+    },
+    {
+      "name": "int_min",
+      "signature": "(Int, Int) → Int",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 16,
+        "specSilent": 0
+      },
+      "doc": "int_min(a, b) = the smaller of a and b; equal arguments give that value (STDLIB_SCOPE.md 2.2)."
+    },
+    {
+      "name": "int_max",
+      "signature": "(Int, Int) → Int",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 16,
+        "specSilent": 0
+      },
+      "doc": "int_max(a, b) = the larger of a and b; equal arguments give that value (STDLIB_SCOPE.md 2.2)."
+    },
+    {
+      "name": "int_clamp",
+      "signature": "(Int, Int, Int) → Int",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 13,
+        "specSilent": 2
+      },
+      "doc": "int_clamp(x, lo, hi) = x confined to [lo, hi]: lo when x is below, hi when x is above, x between (STDLIB_SCOPE.md 2.2). Requires lo <= hi; at lo = hi every x gives lo."
+    },
+    {
+      "name": "int_is_even",
+      "signature": "Int → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "int_is_even(x) = true iff 2 divides x, sign-independent: -4 is even, -3 is not (STDLIB_SCOPE.md 2.2)."
+    },
+    {
+      "name": "int_is_odd",
+      "signature": "Int → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "int_is_odd(x) = true iff 2 does not divide x; the exact complement of int_is_even, negatives included (STDLIB_SCOPE.md 2.2)."
+    },
+    {
+      "name": "char_is_digit",
+      "signature": "Char → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 101,
+        "specSilent": 0
+      },
+      "doc": "char_is_digit(c) = true iff c is in '0'..='9' (STDLIB_SCOPE.md 2.3)."
+    },
+    {
+      "name": "char_is_alpha",
+      "signature": "Char → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 101,
+        "specSilent": 0
+      },
+      "doc": "char_is_alpha(c) = true iff c is in 'A'..='Z' or 'a'..='z' — ASCII letters only (STDLIB_SCOPE.md 2.3)."
+    },
+    {
+      "name": "char_is_whitespace",
+      "signature": "Char → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 101,
+        "specSilent": 0
+      },
+      "doc": "char_is_whitespace(c) = true iff c is one of space, tab, newline, carriage return — the standing tokenizer spec's is_whitespace contract, adopted unchanged (STDLIB_SCOPE.md 2.3)."
+    },
+    {
+      "name": "char_is_uppercase",
+      "signature": "Char → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 101,
+        "specSilent": 0
+      },
+      "doc": "char_is_uppercase(c) = true iff c is in 'A'..='Z'; non-letters give false (STDLIB_SCOPE.md 2.3)."
+    },
+    {
+      "name": "char_is_lowercase",
+      "signature": "Char → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 101,
+        "specSilent": 0
+      },
+      "doc": "char_is_lowercase(c) = true iff c is in 'a'..='z'; non-letters give false (STDLIB_SCOPE.md 2.3)."
+    },
+    {
+      "name": "char_to_digit",
+      "signature": "Char → Option<Int>",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 101,
+        "specSilent": 0
+      },
+      "doc": "char_to_digit(c) = Some(d) when c is in '0'..='9' with d the digit's value, None for every other char (STDLIB_SCOPE.md 2.3)."
+    },
+    {
+      "name": "string_is_empty",
+      "signature": "String → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "string_is_empty(s) = true iff s is the empty string: len(s) == 0 (STDLIB_SCOPE.md 2.4)."
+    },
+    {
+      "name": "result_unwrap_or",
+      "signature": "(Result<Int, String>, Int) → Int",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 36,
+        "specSilent": 0
+      },
+      "doc": "result_unwrap_or(r, d) = the Ok payload of r, or d when r is Err (STDLIB_SCOPE.md 2.5)."
+    },
+    {
+      "name": "option_unwrap_or",
+      "signature": "(Option<Int>, Int) → Int",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 28,
+        "specSilent": 0
+      },
+      "doc": "option_unwrap_or(o, d) = the Some payload of o, or d when o is None (STDLIB_SCOPE.md 2.5)."
+    },
+    {
+      "name": "option_ok_or",
+      "signature": "(Option<Int>, String) → Result<Int, String>",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 9,
+        "specSilent": 0
+      },
+      "doc": "option_ok_or(o, e) = Ok(v) when o is Some(v), or Err(e) with e unchanged when o is None (STDLIB_SCOPE.md 2.5)."
+    },
+    {
+      "name": "list_is_empty",
+      "signature": "List<Int> → Bool",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "list_is_empty(xs) = true iff xs has no elements: len(xs) == 0 (STDLIB_SCOPE.md 2.6). Tier-1."
+    },
+    {
+      "name": "list_reverse",
+      "signature": "List<Int> → List<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "list_reverse(xs) = the elements of xs in reverse order; empty gives empty, a singleton gives itself (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_contains",
+      "signature": "(List<Int>, Int) → Bool",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 75,
+        "specSilent": 0
+      },
+      "doc": "list_contains(xs, x) = true iff some element of xs equals x; the empty list gives false (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_sum",
+      "signature": "List<Int> → Int",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "list_sum(xs) = the sum of the elements of xs; the empty list gives 0. Arithmetic is the language's standing Int arithmetic (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_product",
+      "signature": "List<Int> → Int",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 13,
+        "specSilent": 0
+      },
+      "doc": "list_product(xs) = the product of the elements of xs; the empty list gives 1, and any zero element gives 0 (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_min",
+      "signature": "List<Int> → Option<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "list_min(xs) = Some(m) with m the least element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_max",
+      "signature": "List<Int> → Option<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_take",
+      "signature": "(List<Int>, Int) → List<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 28,
+        "specSilent": 0
+      },
+      "doc": "list_take(xs, n) = the first n elements of xs, with n clamped into [0, len(xs)]: n <= 0 gives the empty list, n >= len(xs) gives xs unchanged (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_drop",
+      "signature": "(List<Int>, Int) → List<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 28,
+        "specSilent": 0
+      },
+      "doc": "list_drop(xs, n) = xs without its first n elements, with n clamped into [0, len(xs)]: n <= 0 gives xs unchanged, n >= len(xs) gives the empty list (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_is_sorted",
+      "signature": "List<Int> → Bool",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "list_is_sorted(xs) = true iff xs is non-strictly ascending (every adjacent pair a <= b); the empty list and singletons give true. The library form of Appendix A's is_sorted (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_sort",
+      "signature": "List<Int> → List<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 15,
+        "specSilent": 0
+      },
+      "doc": "list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    },
+    {
+      "name": "list_binary_search",
+      "signature": "(List<Int>, Int) → Option<Int>",
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact",
+      "battery": {
+        "pinned": 64,
+        "specSilent": 3
+      },
+      "doc": "list_binary_search(xs, x) = Some(i) with xs[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+    }
+  ]
+}
