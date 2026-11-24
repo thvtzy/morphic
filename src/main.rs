@@ -117,6 +117,13 @@ enum Command {
     /// Start the Morphic language server (LSP)
     Lsp,
 
+    /// Serve the Model Context Protocol over stdio
+    /// (Phase 149, DISEBAR_SCOPE §3): the seeded,
+    /// bounded, LLM-free tool surface over the compiler's
+    /// DTO API — check / synthesize / verify / library.
+    /// Ships only in the Z3-enabled native build.
+    Mcp,
+
     /// Initialize a new Morphic project
     Init {
         /// Project name
@@ -150,8 +157,10 @@ fn main() -> anyhow::Result<()> {
 
     // The stdlib-asset subcommand's stdout IS the asset
     // file (Phase 112) — the banner would corrupt it, so
-    // that one command runs without it.
-    if !matches!(cli.command, Command::StdlibAsset) {
+    // that one command runs without it. The mcp
+    // subcommand's stdout IS the JSON-RPC stream
+    // (Phase 149) — same discipline.
+    if !matches!(cli.command, Command::StdlibAsset | Command::Mcp) {
         println!("{}", banner.cyan());
     }
 
@@ -374,6 +383,29 @@ fn main() -> anyhow::Result<()> {
         Command::Lsp => {
             println!("{} Starting Morphic Language Server...", "🔌".bold());
             // TODO: LSP implementation
+        }
+
+        Command::Mcp => {
+            // Phase 149 (DISEBAR_SCOPE §3): the MCP server
+            // — hand-rolled stdio JSON-RPC over the DTO
+            // API (src/mcp.rs). It ships only in the
+            // Z3-enabled native build (§3 R3): the
+            // verdicts it serves are the verifier's own,
+            // and a build without the verifier could only
+            // dress executed evidence as verdicts — so
+            // other builds refuse by name instead.
+            #[cfg(feature = "z3-support")]
+            {
+                morphic::mcp::run_stdio()?;
+            }
+            #[cfg(not(feature = "z3-support"))]
+            {
+                anyhow::bail!(
+                    "the MCP server ships only in the Z3-enabled native build \
+                     (DISEBAR_SCOPE §3 R3) — this build has no verifier to serve \
+                     verdicts from"
+                );
+            }
         }
 
         Command::StdlibAsset => {

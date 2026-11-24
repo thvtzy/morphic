@@ -20,7 +20,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::spec::ast::FunctionSpec;
-use crate::synthesis::engine::{self, CandidateImplementation, SynthesisConfig};
+use crate::synthesis::engine::{
+    self, CandidateImplementation, Provenance, ScoreBreakdown, SynthesisConfig,
+};
 use crate::synthesis::{eval, runner, selector};
 use crate::verify::verifier::Verifier;
 
@@ -169,6 +171,162 @@ pub fn check(source: &str) -> CheckReport {
 /// does not assemble or execute anything.
 pub fn render(candidate: &CandidateImplementation, target: &str) -> Result<String, String> {
     crate::codegen::generate(candidate, target).map_err(|e| e.to_string())
+}
+
+// ── Standalone verify (Phase 149, DISEBAR_SCOPE §3) ────
+
+/// Where a candidate body for `verify_body` comes from.
+/// A body is never transported as text in this phase:
+/// the two sources are the ones a caller can name today
+/// — a shipped library body, or the body a spec's own
+/// rows denote through the standing resolver. The
+/// serialized-IR source arrives with Phase 150's bundle
+/// format (DISEBAR_SCOPE §4), which is what user bodies
+/// in transport form are waiting on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BodySource {
+    /// The shipped body of the named standard-library
+    /// entry (`stdlib::shipped_body`).
+    Library(String),
+    /// The body the named spec's own rows denote
+    /// (`SpecIndex::callee_body`'s resolver chain).
+    Denoted,
+}
+
+/// One postcondition row's judgment in a `VerifyReport`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyRowReport {
+    pub constraint: String,
+    pub holds: bool,
+}
+
+/// The outcome of judging ONE candidate body against ONE
+/// spec: the verifier's verdict (its own, produced by
+/// `Verifier::verify_one` at call time — in a no-Z3
+/// build the honest Inconclusive, `verification_available`
+/// false), the per-row results, and the executed half
+/// (the interpreter's counts on the same body, through
+/// the index-carrying route of Phase 135).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyReport {
+    pub spec_name: String,
+    /// "library:<entry>" | "denoted" — where the judged
+    /// body came from.
+    pub body_source: String,
+    pub verification_available: bool,
+    /// "Verified" | "VerificationFailed" | "Inconclusive"
+    /// | "Malformed"
+    pub status: String,
+    pub rows: Vec<VerifyRowReport>,
+    pub tests_passed: usize,
+    pub tests_evaluable: usize,
+    pub tests_total: usize,
+    pub verification_time_ms: u64,
+}
+
+/// The standalone verify entry point (the audit's §1(b)
+/// gap): parse + typecheck `source`, resolve the named
+/// spec, obtain the candidate body from `body_source`,
+/// and judge it in-process. The verdict is never a
+/// caller's claim and never cached — it is `verify_one`'s
+/// output for this body and this spec, now.
+pub fn verify_body(
+    source: &str,
+    spec_name: &str,
+    body_source: &BodySource,
+) -> Result<VerifyReport, StageError> {
+    let err = |stage: &str, e: &dyn std::fmt::Display| StageError {
+        stage: stage.into(),
+        message: e.to_string(),
+        line: None,
+        column: None,
+    };
+    let parsed = crate::spec::parser::parse(source).map_err(|e| StageError {
+        stage: "parse".into(),
+        message: e.to_string(),
+        line: Some(e.line),
+        column: Some(e.column),
+    })?;
+    let checked = crate::spec::typeck::check(parsed).map_err(|e| err("typecheck", &e))?;
+    let functions = checked.spec.functions;
+    let spec = functions
+        .iter()
+        .find(|f| f.name == spec_name)
+        .ok_or_else(|| StageError {
+            stage: "verify".into(),
+            message: format!(
+                "No spec named '{}' in this module (specs: {})",
+                spec_name,
+                functions.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            line: None,
+            column: None,
+        })?
+        .clone();
+
+    let index = engine::SpecIndex::from_specs(&functions);
+    let (body, body_source_text) = match body_source {
+        BodySource::Library(entry) => (
+            crate::stdlib::shipped_body(entry).ok_or_else(|| StageError {
+                stage: "verify".into(),
+                message: format!(
+                    "no shipped body for library entry '{entry}' \
+                     (the library tool lists the shipped entries)"
+                ),
+                line: None,
+                column: None,
+            })?,
+            format!("library:{entry}"),
+        ),
+        BodySource::Denoted => (
+            index.callee_body(spec_name).ok_or_else(|| StageError {
+                stage: "verify".into(),
+                message: format!(
+                    "spec '{spec_name}' denotes no body through the resolver — \
+                     its rows are not in a denoting form (an equation row or a guard table)"
+                ),
+                line: None,
+                column: None,
+            })?,
+            "denoted".to_string(),
+        ),
+    };
+
+    let candidate = CandidateImplementation {
+        id: 0,
+        body: body.clone(),
+        spec_name: spec.name.clone(),
+        spec: spec.clone(),
+        score: 0.0,
+        scores: ScoreBreakdown {
+            test_pass_ratio: 0.0,
+            constraint_score: 0.0,
+            complexity_score: 0.0,
+            quality_score: 0.0,
+            synthesis_time_us: 0,
+        },
+        generation: 0,
+        provenance: Provenance::HumanGuided,
+        verified: false,
+        verification_status: None,
+    };
+    let result = Verifier::with_specs(&functions).verify_one(&candidate, &spec);
+    let run = eval::run_spec_tests_in(&body, &spec, &index);
+    Ok(VerifyReport {
+        spec_name: spec.name.clone(),
+        body_source: body_source_text,
+        verification_available: cfg!(feature = "z3-support"),
+        status: format!("{:?}", result.status),
+        rows: result
+            .constraint_results
+            .iter()
+            .map(|r| VerifyRowReport { constraint: r.constraint.clone(), holds: r.holds })
+            .collect(),
+        tests_passed: run.passed,
+        tests_evaluable: run.evaluable,
+        tests_total: spec.tests.len(),
+        verification_time_ms: result.verification_time_ms,
+    })
 }
 
 // ── Seeded synthesis (the playground profile, D3) ──────────

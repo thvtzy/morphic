@@ -19,6 +19,7 @@
 
 pub mod api;
 pub mod codegen;
+pub mod mcp;
 pub mod spec;
 pub mod stdlib;
 pub mod synthesis;
