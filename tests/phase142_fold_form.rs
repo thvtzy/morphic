@@ -222,6 +222,16 @@ fn phase142_the_fold_three_crowned() {
 
 // ── The arm decides fold rows in both directions ───────
 
+// Native-only: this test's specimens name stdlib
+// entries (`list_take`, in the take-prefix specimen),
+// which the checker resolves against the prelude —
+// under `wasm-playground` the prelude is the
+// (uninstalled) runtime asset and the probe sources
+// do not typecheck. The gate is the sibling crown
+// tests' own, added at Phase 144 when PR #14's CI
+// (the --workspace --all-targets configuration)
+// measured the absence.
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase142_fold_rows_encode_and_decide() {
     // A fold over a concrete list is computed outright
