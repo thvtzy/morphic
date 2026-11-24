@@ -60,7 +60,10 @@
 
 use std::collections::HashMap;
 
-use crate::spec::ast::{FunctionSpec, TypeRef};
+use crate::spec::ast::{
+    BinOp as SpecBinOp, Constraint, Expr as SpecExpr, FunctionSpec, OrderOp, TypeRef,
+    UnaryOp as SpecUnaryOp,
+};
 use crate::synthesis::engine::{
     IRBinOp, IRLiteral, IRNode, IRPattern, IRUnaryOp, SpecIndex, MAX_INLINE_DEPTH,
 };
@@ -78,16 +81,18 @@ enum Abs {
     ListLen,
     /// A `List<Int>` value as a pair (Phase 139, W1) —
     /// mirrors `Sym::ArrayLen`: the standing length term
-    /// plus an `Array<Int, Int>` term. Abstractly the
-    /// pair carries no element facts (W1 builds no
-    /// consumer of them), so the shape is a unit: `len`
-    /// is an (Unknown) Int, an Int Append stores (the
-    /// shape survives), merges of two pairs — or of a
-    /// pair with a concrete Int list, through the §2.5
-    /// bridge — stay pairs; indexing, equality and
-    /// concatenation are `None`, exactly as the real
-    /// evaluator's arms stand at W1.
-    ArrayLen,
+    /// plus an `Array<Int, Int>` term. The pair carries
+    /// no element facts; at W2 it carries its length's
+    /// abstract form (`AbsLen`), which is what the
+    /// mirror's guard discharge (§2.3) computes over:
+    /// `len` is an (Unknown) Int, an Int Append stores
+    /// (the shape survives, the form grows), merges of
+    /// two pairs — or of a pair with a concrete Int list,
+    /// through the §2.5 bridge — stay pairs; indexing
+    /// exists only under the guard discharge, equality
+    /// (§2.4) and Concat-as-length (§2.6) have their arms,
+    /// exactly as the real evaluator's stand at W2.
+    ArrayLen { len: AbsLen },
     /// A Char scalar (Phase 76): Known iff the real term
     /// is a Z3 numeral (literal / constant index).
     Char(IntVal),
@@ -115,6 +120,56 @@ enum Abs {
         range: AbsUfSort,
     },
     Opaque,
+}
+
+/// The abstract form of a paired binding's length term
+/// (Phase 140) — the facts the mirror's guard domain can
+/// state about it. `Known` is a numeral: a crossed
+/// literal's count, grown by appends. `Param(name, off)`
+/// is the named parameter's length term plus a constant
+/// offset (appends shift the offset); it is set only for
+/// a parameter bound directly in `param_env`, the one
+/// place a length has a spec-level name the require facts
+/// can speak about. `Unknown` is everything else —
+/// nested pairs (record fields, Option payloads), merges
+/// of unlike forms: reads over an Unknown length decline
+/// on the mirror side. That is a sound subset of the real
+/// side's solver discharge (which works on the terms
+/// themselves), never a superset: the mirror may decline
+/// a read the solver would discharge — over a nested
+/// pair's length, or under non-linear require facts the
+/// difference domain cannot state — and the agreement
+/// battery pins the two equal on every shape the corpus
+/// exercises.
+#[derive(Debug, Clone, PartialEq)]
+enum AbsLen {
+    Known(i64),
+    Param(String, i64),
+    Unknown,
+}
+
+impl AbsLen {
+    /// Append's growth: the length term plus one.
+    fn grown(&self) -> AbsLen {
+        match self {
+            AbsLen::Known(n) => AbsLen::Known(n + 1),
+            AbsLen::Param(name, off) => AbsLen::Param(name.clone(), off + 1),
+            AbsLen::Unknown => AbsLen::Unknown,
+        }
+    }
+
+    /// An ite merge's form: the merged length denotes the
+    /// shared form when both sides agree (the real term
+    /// is `ite(c, t, t)`, which is `t` in every model);
+    /// unlike forms merge to a term the domain cannot
+    /// state.
+    fn merged(&self, other: &AbsLen) -> AbsLen {
+        if self == other {
+            self.clone()
+        } else {
+            AbsLen::Unknown
+        }
+    }
 }
 
 /// A sort in the UF arm's slice (Phase 133) — mirrors
@@ -246,12 +301,73 @@ enum StrVal {
 
 type AbsEnv = HashMap<String, Abs>;
 
+/// A base a guard-domain term speaks about (Phase 140):
+/// a spec Int parameter's value, or a spec `List<Int>`
+/// parameter's length. Facts and goals are stated over
+/// bases, never over binder names — the domain's analogue
+/// of the real side's guards being Z3 terms, not names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum AbsBase {
+    Var(String),
+    LenOf(String),
+}
+
+/// A simple term in the guard domain: a base plus a
+/// constant offset (`base + off`); a `None` base is the
+/// constant `off` itself.
+#[derive(Debug, Clone, PartialEq)]
+struct AbsTerm {
+    base: Option<AbsBase>,
+    off: i64,
+}
+
+/// A comparison operator in an extracted guard fact.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AbsCmp {
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// One atomic comparison between simple terms, extracted
+/// from a spec's `require:` row (Phase 140). The domain
+/// is difference logic over the bases: each fact is a
+/// lower bound on a difference of two base values, and
+/// entailment is the longest-path closure — sound over
+/// the integers, and a subset of what the real side's
+/// solver derives from the same rows' terms (an extracted
+/// fact is a conjunct of its row, stated exactly).
+#[derive(Debug, Clone)]
+struct AbsFact {
+    lhs: AbsTerm,
+    cmp: AbsCmp,
+    rhs: AbsTerm,
+}
+
 /// The inlining context, mirroring verifier::EvalCtx field
 /// for field (same cap, same cycle guard).
 struct AbsCtx<'a> {
     index: &'a SpecIndex,
     visiting: Vec<String>,
     depth: usize,
+    /// The guard facts in scope for the index arm's
+    /// discharge (Phase 140), extracted from the spec's
+    /// require rows — the mirror of EvalCtx's guard terms.
+    facts: Vec<AbsFact>,
+    /// The spec's parameter names whose `Var` form the
+    /// guard domain may still speak about. A name leaves
+    /// the set when a Let or Match binding shadows it (the
+    /// facts speak about the parameter's value, not the
+    /// binding's), and the set clears inside an inlined
+    /// callee, whose parameters are bound to argument
+    /// VALUES: a callee's same-named parameter is a
+    /// different value, and the caller facts say nothing
+    /// about it by name. (Length bases survive inlining —
+    /// they are carried by the argument VALUES' forms, not
+    /// looked up by name.)
+    params: std::collections::HashSet<String>,
 }
 
 impl<'a> AbsCtx<'a> {
@@ -260,6 +376,8 @@ impl<'a> AbsCtx<'a> {
             index,
             visiting: Vec::new(),
             depth: 0,
+            facts: Vec::new(),
+            params: std::collections::HashSet::new(),
         }
     }
 
@@ -274,6 +392,45 @@ impl<'a> AbsCtx<'a> {
             index: self.index,
             visiting,
             depth: self.depth + 1,
+            facts: self.facts.clone(),
+            params: self.params.clone(),
+        }
+    }
+
+    /// The root context for judging `spec`'s bodies
+    /// (Phase 140): the require facts extracted, the
+    /// parameter names live.
+    fn for_spec(index: &'a SpecIndex, spec: &FunctionSpec) -> Self {
+        let mut ctx = Self::root(index);
+        ctx.facts = guard_facts(spec);
+        ctx.params = spec.params.iter().map(|p| p.name.clone()).collect();
+        ctx
+    }
+
+    /// The same context with one parameter name shadowed
+    /// by a local binding (Phase 140).
+    fn without_param(&self, name: &str) -> Self {
+        let mut params = self.params.clone();
+        params.remove(name);
+        Self {
+            index: self.index,
+            visiting: self.visiting.clone(),
+            depth: self.depth,
+            facts: self.facts.clone(),
+            params,
+        }
+    }
+
+    /// The same context inside an inlined callee (Phase
+    /// 140): no parameter name is live (see the field
+    /// doc), the facts stand.
+    fn for_callee(&self) -> Self {
+        Self {
+            index: self.index,
+            visiting: self.visiting.clone(),
+            depth: self.depth,
+            facts: self.facts.clone(),
+            params: std::collections::HashSet::new(),
         }
     }
 }
@@ -294,7 +451,19 @@ impl AbsFlow {
 fn param_env(spec: &FunctionSpec, index: &SpecIndex) -> AbsEnv {
     let mut env = AbsEnv::new();
     for p in &spec.params {
-        env.insert(p.name.clone(), fresh_abs(&p.ty, index, 0));
+        let mut val = fresh_abs(&p.ty, index, 0);
+        // A directly-bound `List<Int>` parameter's length
+        // is the parameter's own length term (Phase 140) —
+        // the base the guard facts speak about. Nested
+        // pairs (record fields, Option payloads) keep the
+        // Unknown form: their lengths have no spec-level
+        // name a require could state a fact over.
+        if matches!(&p.ty, TypeRef::List(el) if matches!(**el, TypeRef::Int)) {
+            if let Abs::ArrayLen { len } = &mut val {
+                *len = AbsLen::Param(p.name.clone(), 0);
+            }
+        }
+        env.insert(p.name.clone(), val);
     }
     env
 }
@@ -326,8 +495,13 @@ fn fresh_abs(ty: &TypeRef, index: &SpecIndex, depth: usize) -> Abs {
         TypeRef::List(inner) => match **inner {
             // Phase 139 (W1): `List<Int>` binds as the
             // pair, mirroring `fresh_sym` — every other
-            // element sort keeps ListLen (§9 R9).
-            TypeRef::Int => Abs::ArrayLen,
+            // element sort keeps ListLen (§9 R9). The
+            // length form starts Unknown; `param_env`
+            // names it for a directly-bound parameter
+            // (Phase 140).
+            TypeRef::Int => Abs::ArrayLen {
+                len: AbsLen::Unknown,
+            },
             _ => Abs::ListLen,
         },
         TypeRef::Option(inner) => Abs::Option {
@@ -405,7 +579,12 @@ fn abs_eval_flow(node: &IRNode, env: &mut AbsEnv, ctx: &AbsCtx) -> Option<AbsFlo
             };
             let mut inner = env.clone();
             inner.insert(name.clone(), v);
-            abs_eval_flow(body, &mut inner, ctx)
+            // The binding shadows a same-named parameter
+            // for the guard domain (Phase 140): the facts
+            // speak about the parameter's value, not this
+            // binding's.
+            let inner_ctx = ctx.without_param(name);
+            abs_eval_flow(body, &mut inner, &inner_ctx)
         }
 
         IRNode::Block(stmts) => {
@@ -442,9 +621,25 @@ fn abs_eval_flow(node: &IRNode, env: &mut AbsEnv, ctx: &AbsCtx) -> Option<AbsFlo
         }
 
         IRNode::Index(coll, idx) => {
-            let coll = abs_eval(coll, env, ctx)?;
-            let idx = abs_eval(idx, env, ctx)?;
-            Some(AbsFlow::Normal(abs_index(coll, idx)?))
+            let coll_v = abs_eval(coll, env, ctx)?;
+            let idx_v = abs_eval(idx, env, ctx)?;
+            // The paired binding (Phase 140, §2.3): the
+            // read exists only under the guard discipline —
+            // the mirror's discharge over the spec's
+            // require facts, in the difference domain. The
+            // read's value is an Int term the domain does
+            // not track: Int(Unknown), exactly as the real
+            // select is a non-numeral term.
+            if let (Abs::ArrayLen { len }, Abs::Int(_)) = (&coll_v, &idx_v) {
+                let len_t = abs_len_form(len)?;
+                let idx_t = abs_index_term(idx, env, ctx)?;
+                return if abs_guard_discharged(&ctx.facts, &idx_t, &len_t) {
+                    Some(AbsFlow::Normal(Abs::Int(IntVal::Unknown)))
+                } else {
+                    None
+                };
+            }
+            Some(AbsFlow::Normal(abs_index(coll_v, idx_v)?))
         }
 
         IRNode::FieldAccess { base, field } => {
@@ -594,7 +789,10 @@ fn abs_match(
             IRPattern::Variable(name) => {
                 let mut inner = env.clone();
                 inner.insert(name.clone(), scrut.clone());
-                arms.push((false, abs_eval(body, &mut inner, ctx)?));
+                // The pattern binding shadows a same-named
+                // parameter for the guard domain (Phase 140).
+                let inner_ctx = ctx.without_param(name);
+                arms.push((false, abs_eval(body, &mut inner, &inner_ctx)?));
                 break;
             }
             IRPattern::Literal(lit) => match abs_pattern_cond(&scrut, lit) {
@@ -619,18 +817,25 @@ fn abs_match(
                         side,
                     } => {
                         let mut inner = env.clone();
+                        // A payload binding shadows a
+                        // same-named parameter for the guard
+                        // domain (Phase 140).
+                        let mut inner_ctx_holder;
+                        let mut arm_ctx = ctx;
                         match (pargs.len(), &payload) {
                             (0, _) => {}
                             (1, Some(p)) => match &pargs[0] {
                                 IRPattern::Variable(n) => {
                                     inner.insert(n.clone(), (**p).clone());
+                                    inner_ctx_holder = ctx.without_param(n);
+                                    arm_ctx = &inner_ctx_holder;
                                 }
                                 IRPattern::Wildcard => {}
                                 _ => return None,
                             },
                             _ => return None,
                         }
-                        let value = abs_eval(body, &mut inner, ctx)?;
+                        let value = abs_eval(body, &mut inner, arm_ctx)?;
                         match side {
                             AbsTagSide::Pos => covers_pos = true,
                             AbsTagSide::Neg => covers_neg = true,
@@ -729,7 +934,12 @@ fn abs_invoke(ctx: &AbsCtx, name: &str, args: Vec<Abs>) -> Option<Abs> {
         .map(|p| p.name.clone())
         .zip(args)
         .collect();
-    abs_eval(&body, &mut env, &ctx.child(name))
+    // Inside the callee no parameter NAME is live for the
+    // guard domain (Phase 140): the callee's parameters are
+    // bound to argument values, and the facts speak about
+    // the caller's parameters by name. Length bases survive
+    // — they ride on the argument values' forms.
+    abs_eval(&body, &mut env, &ctx.child(name).for_callee())
 }
 
 fn abs_call(
@@ -811,7 +1021,7 @@ fn abs_len(v: Abs) -> Option<Abs> {
         // A paired binding's length is the same standing
         // term (Phase 139): a binding constant, not a
         // numeral — mirrors `sym_len`'s ArrayLen arm.
-        Abs::ArrayLen => Some(Abs::Int(IntVal::Unknown)),
+        Abs::ArrayLen { .. } => Some(Abs::Int(IntVal::Unknown)),
         _ => None,
     }
 }
@@ -830,6 +1040,388 @@ fn abs_int_to_str(v: Abs) -> Option<Abs> {
         }
         Abs::Int(IntVal::Unknown) => Some(Abs::Str(StrVal::Unknown)),
         _ => None,
+    }
+}
+
+/// Extract the guard facts from a spec's require rows
+/// (Phase 140): the top-level conjuncts that are atomic
+/// comparisons between simple terms. Anything else — an
+/// implication (conditional, not a fact), a disjunction,
+/// a negation, a quantifier, a comparison over a term the
+/// domain cannot state — contributes nothing. The real
+/// side's solver works from the rows' full terms, so its
+/// discharge is a superset of this domain's; the mirror
+/// declining where the domain cannot state the fact is
+/// the sound direction (see `AbsLen`).
+fn guard_facts(spec: &FunctionSpec) -> Vec<AbsFact> {
+    let mut out = Vec::new();
+    for row in &spec.preconditions {
+        collect_facts(row, spec, &mut out);
+    }
+    out
+}
+
+fn collect_facts(c: &Constraint, spec: &FunctionSpec, out: &mut Vec<AbsFact>) {
+    match c {
+        Constraint::And(parts) => {
+            for p in parts {
+                collect_facts(p, spec, out);
+            }
+        }
+        Constraint::Expr(e) => collect_expr_facts(e, spec, out),
+        Constraint::Eq(a, b) => push_fact(a, AbsCmp::Eq, b, spec, out),
+        Constraint::Order(op, a, b) => {
+            let cmp = match op {
+                OrderOp::LessThan => AbsCmp::Lt,
+                OrderOp::LessThanOrEqual => AbsCmp::Le,
+                OrderOp::GreaterThan => AbsCmp::Gt,
+                OrderOp::GreaterThanOrEqual => AbsCmp::Ge,
+            };
+            push_fact(a, cmp, b, spec, out);
+        }
+        _ => {}
+    }
+}
+
+fn collect_expr_facts(e: &SpecExpr, spec: &FunctionSpec, out: &mut Vec<AbsFact>) {
+    match e {
+        SpecExpr::BinOp(SpecBinOp::And, a, b) => {
+            collect_expr_facts(a, spec, out);
+            collect_expr_facts(b, spec, out);
+        }
+        SpecExpr::BinOp(op, a, b) => {
+            let cmp = match op {
+                SpecBinOp::Eq => AbsCmp::Eq,
+                SpecBinOp::Lt => AbsCmp::Lt,
+                SpecBinOp::Le => AbsCmp::Le,
+                SpecBinOp::Gt => AbsCmp::Gt,
+                SpecBinOp::Ge => AbsCmp::Ge,
+                // Neq yields no difference bound (a ≠ fact
+                // alone entails no ≥ fact over a free Int —
+                // the real side cannot use it alone either).
+                _ => return,
+            };
+            push_fact(a, cmp, b, spec, out);
+        }
+        _ => {}
+    }
+}
+
+fn push_fact(a: &SpecExpr, cmp: AbsCmp, b: &SpecExpr, spec: &FunctionSpec, out: &mut Vec<AbsFact>) {
+    if let (Some(lhs), Some(rhs)) = (spec_term(a, spec), spec_term(b, spec)) {
+        out.push(AbsFact { lhs, cmp, rhs });
+    }
+}
+
+/// A simple term over a spec expression: a parameter
+/// base (an Int parameter, or a `List<Int>` parameter's
+/// length) plus a constant offset, closed under ± a
+/// constant. Anything wider — a product, a base ± a base,
+/// a field's length (no spec-level name) — is not a term
+/// the domain can state.
+fn spec_term(e: &SpecExpr, spec: &FunctionSpec) -> Option<AbsTerm> {
+    match e {
+        SpecExpr::IntLit(n) => Some(AbsTerm {
+            base: None,
+            off: *n,
+        }),
+        SpecExpr::Var(name) => {
+            if spec
+                .params
+                .iter()
+                .any(|p| &p.name == name && matches!(p.ty, TypeRef::Int))
+            {
+                Some(AbsTerm {
+                    base: Some(AbsBase::Var(name.clone())),
+                    off: 0,
+                })
+            } else {
+                None
+            }
+        }
+        SpecExpr::Length(inner) => spec_len_term(inner, spec),
+        SpecExpr::Call(name, args) if name == "len" && args.len() == 1 => {
+            spec_len_term(&args[0], spec)
+        }
+        SpecExpr::BinOp(op, a, b) => {
+            let x = spec_term(a, spec)?;
+            let y = spec_term(b, spec)?;
+            combine_spec_terms(*op, x, y)
+        }
+        SpecExpr::UnaryOp(SpecUnaryOp::Neg, inner) => match spec_term(inner, spec)? {
+            AbsTerm { base: None, off } => Some(AbsTerm {
+                base: None,
+                off: -off,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn spec_len_term(inner: &SpecExpr, spec: &FunctionSpec) -> Option<AbsTerm> {
+    match inner {
+        SpecExpr::Var(name) => {
+            let is_int_list = spec.params.iter().any(|p| {
+                &p.name == name
+                    && matches!(&p.ty, TypeRef::List(el) if matches!(**el, TypeRef::Int))
+            });
+            if is_int_list {
+                Some(AbsTerm {
+                    base: Some(AbsBase::LenOf(name.clone())),
+                    off: 0,
+                })
+            } else {
+                None
+            }
+        }
+        // A list literal's length is its count (the parser
+        // lowers `[a, b]` to a `List` call).
+        SpecExpr::Call(name, args) if name == "List" => Some(AbsTerm {
+            base: None,
+            off: args.len() as i64,
+        }),
+        _ => None,
+    }
+}
+
+fn combine_spec_terms(op: SpecBinOp, x: AbsTerm, y: AbsTerm) -> Option<AbsTerm> {
+    match op {
+        SpecBinOp::Add => {
+            if x.base.is_none() {
+                Some(AbsTerm {
+                    base: y.base,
+                    off: x.off + y.off,
+                })
+            } else if y.base.is_none() {
+                Some(AbsTerm {
+                    base: x.base,
+                    off: x.off + y.off,
+                })
+            } else {
+                None
+            }
+        }
+        SpecBinOp::Sub => {
+            // Only a constant subtrahend keeps the term
+            // simple; a negated base is not a simple term.
+            if y.base.is_none() {
+                Some(AbsTerm {
+                    base: x.base,
+                    off: x.off - y.off,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The mirror's guard discharge (Phase 140): the read at
+/// `idx` into a pair of length `len` exists only when the
+/// extracted facts entail `0 <= idx < len` in difference
+/// logic — the longest-path closure of the facts' bounds.
+/// Sound over the integers (each extracted fact is a
+/// conjunct of its require row, stated exactly), and a
+/// subset of the real side's solver entailment over the
+/// same rows.
+fn abs_guard_discharged(facts: &[AbsFact], idx: &AbsTerm, len: &AbsTerm) -> bool {
+    // Nodes: the constant base (None) plus every base the
+    // facts or the goal mention.
+    let mut nodes: Vec<Option<AbsBase>> = vec![None];
+    for t in facts
+        .iter()
+        .flat_map(|f| [&f.lhs.base, &f.rhs.base])
+        .chain([&idx.base, &len.base])
+    {
+        if !nodes.contains(t) {
+            nodes.push(t.clone());
+        }
+    }
+    let n = nodes.len();
+    let pos = |b: &Option<AbsBase>| nodes.iter().position(|x| x == b).unwrap();
+    // dist[i][j] = the best known lower bound of
+    // val(node_i) − val(node_j); NEG = no bound known.
+    const NEG: i64 = i64::MIN / 4;
+    let mut dist = vec![vec![NEG; n]; n];
+    for (i, row) in dist.iter_mut().enumerate() {
+        row[i] = 0;
+    }
+    for f in facts {
+        let (a, b) = (pos(&f.lhs.base), pos(&f.rhs.base));
+        let (oa, ob) = (f.lhs.off, f.rhs.off);
+        // value(lhs) = val(a) + oa, value(rhs) = val(b) + ob.
+        let mut bound = |i: usize, j: usize, w: i64, dist: &mut Vec<Vec<i64>>| {
+            if w > dist[i][j] {
+                dist[i][j] = w;
+            }
+        };
+        match f.cmp {
+            AbsCmp::Ge => bound(a, b, ob - oa, &mut dist),
+            AbsCmp::Gt => bound(a, b, ob - oa + 1, &mut dist),
+            AbsCmp::Le => bound(b, a, oa - ob, &mut dist),
+            AbsCmp::Lt => bound(b, a, oa - ob + 1, &mut dist),
+            AbsCmp::Eq => {
+                bound(a, b, ob - oa, &mut dist);
+                bound(b, a, oa - ob, &mut dist);
+            }
+        }
+    }
+    // Longest-path closure (the node count is the spec's
+    // parameter count plus a constant — tiny).
+    for k in 0..n {
+        for i in 0..n {
+            for j in 0..n {
+                if dist[i][k] != NEG && dist[k][j] != NEG {
+                    let via = dist[i][k].saturating_add(dist[k][j]);
+                    if via > dist[i][j] {
+                        dist[i][j] = via;
+                    }
+                }
+            }
+        }
+    }
+    // Inconsistent facts (a positive cycle) entail
+    // everything — the solver side discharges vacuously
+    // under an unsatisfiable guard set too, and the
+    // verdict layer declines such specs whole on both
+    // builds before encodability is consulted.
+    if (0..n).any(|i| dist[i][i] > 0) {
+        return true;
+    }
+    let zero = pos(&None);
+    let ii = pos(&idx.base);
+    let ll = pos(&len.base);
+    // 0 <= idx  ⟺  val(ii) − val(0) >= −idx.off
+    if dist[ii][zero] < -idx.off {
+        return false;
+    }
+    // idx < len  ⟺  val(ll) − val(ii) >= idx.off − len.off + 1
+    if dist[ll][ii] < idx.off - len.off + 1 {
+        return false;
+    }
+    true
+}
+
+/// The guard-domain form of a pair's abstract length.
+fn abs_len_form(len: &AbsLen) -> Option<AbsTerm> {
+    match len {
+        AbsLen::Known(m) => Some(AbsTerm {
+            base: None,
+            off: *m,
+        }),
+        AbsLen::Param(name, off) => Some(AbsTerm {
+            base: Some(AbsBase::LenOf(name.clone())),
+            off: *off,
+        }),
+        AbsLen::Unknown => None,
+    }
+}
+
+/// The guard-domain form of `len(e)` on the IR side: the
+/// length form of the value `e` denotes, carried by the
+/// value itself (a parameter pair's form survives Lets,
+/// merges that agree, and inlining, exactly as the real
+/// length term does).
+fn abs_len_term(node: &IRNode, env: &mut AbsEnv, ctx: &AbsCtx) -> Option<AbsTerm> {
+    match node {
+        IRNode::Var(name) => match env.get(name) {
+            Some(Abs::ArrayLen { len }) => abs_len_form(len),
+            Some(Abs::List(items)) => Some(AbsTerm {
+                base: None,
+                off: items.len() as i64,
+            }),
+            _ => None,
+        },
+        IRNode::Collection { elements, .. } => Some(AbsTerm {
+            base: None,
+            off: elements.len() as i64,
+        }),
+        IRNode::Call { function, args } if function == "List" => Some(AbsTerm {
+            base: None,
+            off: args.len() as i64,
+        }),
+        _ => match abs_eval(node, env, ctx) {
+            Some(Abs::List(items)) => Some(AbsTerm {
+                base: None,
+                off: items.len() as i64,
+            }),
+            _ => None,
+        },
+    }
+}
+
+/// The guard-domain form of an index expression on the IR
+/// side: a parameter base (an unshadowed Int parameter,
+/// or a length form) plus a constant offset, closed under
+/// ± a constant; failing that, the constant form when the
+/// evaluated value is a known numeral (a computed literal:
+/// `1 + 1`, a constant read from a literal list, …).
+/// Anything wider is not a term the domain can state, and
+/// the read declines on the mirror side.
+fn abs_index_term(node: &IRNode, env: &mut AbsEnv, ctx: &AbsCtx) -> Option<AbsTerm> {
+    match node {
+        IRNode::Var(name) => match env.get(name) {
+            Some(Abs::Int(IntVal::Known(n))) => Some(AbsTerm {
+                base: None,
+                off: *n,
+            }),
+            Some(Abs::Int(IntVal::Unknown)) if ctx.params.contains(name) => Some(AbsTerm {
+                base: Some(AbsBase::Var(name.clone())),
+                off: 0,
+            }),
+            _ => None,
+        },
+        IRNode::Call { function, args } if function == "len" && args.len() == 1 => {
+            abs_len_term(&args[0], env, ctx)
+        }
+        IRNode::UnaryOp(IRUnaryOp::Len, inner) => abs_len_term(inner, env, ctx),
+        IRNode::BinOp(op, l, r) if matches!(op, IRBinOp::Add | IRBinOp::Sub) => {
+            let x = abs_index_term(l, env, ctx)?;
+            let y = abs_index_term(r, env, ctx)?;
+            match op {
+                IRBinOp::Add => {
+                    if x.base.is_none() {
+                        Some(AbsTerm {
+                            base: y.base,
+                            off: x.off + y.off,
+                        })
+                    } else if y.base.is_none() {
+                        Some(AbsTerm {
+                            base: x.base,
+                            off: x.off + y.off,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    if y.base.is_none() {
+                        Some(AbsTerm {
+                            base: x.base,
+                            off: x.off - y.off,
+                        })
+                    } else {
+                        None
+                    }
+                }
+            }
+        }
+        IRNode::UnaryOp(IRUnaryOp::Neg, inner) => match abs_index_term(inner, env, ctx)? {
+            AbsTerm { base: None, off } => Some(AbsTerm {
+                base: None,
+                off: -off,
+            }),
+            _ => None,
+        },
+        _ => match abs_eval(node, env, ctx) {
+            Some(Abs::Int(IntVal::Known(n))) => Some(AbsTerm {
+                base: None,
+                off: n,
+            }),
+            _ => None,
+        },
     }
 }
 
@@ -883,17 +1475,24 @@ fn abs_ite(a: Abs, b: Abs) -> Option<Abs> {
         (Abs::CharStr, Abs::CharStr) => Some(Abs::CharStr),
         (Abs::ListLen, Abs::ListLen) => Some(Abs::ListLen),
         // Two paired bindings merge as a pair (Phase 139,
-        // mirroring sym_ite's §2.11 arm).
-        (Abs::ArrayLen, Abs::ArrayLen) => Some(Abs::ArrayLen),
+        // mirroring sym_ite's §2.11 arm); the merged
+        // length keeps the form both sides share
+        // (Phase 140 — see `AbsLen::merged`).
+        (Abs::ArrayLen { len: la }, Abs::ArrayLen { len: lb }) => Some(Abs::ArrayLen {
+            len: la.merged(&lb),
+        }),
         // A pair meets a concrete list through the §2.5
         // bridge, mirroring `sym_pair_of_concrete`: the
         // concrete side crosses exactly when every
         // element is an Int (an empty list crosses
         // vacuously); any other element sort declines,
-        // as the real crossing declines.
-        (Abs::ArrayLen, Abs::List(items)) | (Abs::List(items), Abs::ArrayLen) => {
+        // as the real crossing declines. The crossed
+        // length form is the literal's count.
+        (Abs::ArrayLen { len }, Abs::List(items)) | (Abs::List(items), Abs::ArrayLen { len }) => {
             if items.iter().all(|it| matches!(it, Abs::Int(_))) {
-                Some(Abs::ArrayLen)
+                Some(Abs::ArrayLen {
+                    len: len.merged(&AbsLen::Known(items.len() as i64)),
+                })
             } else {
                 None
             }
@@ -1044,10 +1643,52 @@ fn abs_binop(kind: BinKind, l: Abs, r: Abs) -> Option<Abs> {
         // Append over a paired binding (Phase 139):
         // §2.6's store form, mirroring the real arm's
         // item discipline — the item must be an Int; the
-        // pair survives with its length grown (abstractly
-        // the shape is all that survives). Any other item
-        // declines, as the real store declines.
-        (Append, Abs::ArrayLen, Abs::Int(_)) => Some(Abs::ArrayLen),
+        // pair survives with its length form grown by one
+        // (Phase 140). Any other item declines, as the
+        // real store declines.
+        (Append, Abs::ArrayLen { len }, Abs::Int(_)) => Some(Abs::ArrayLen {
+            len: len.grown(),
+        }),
+        // Equality over paired bindings (Phase 140,
+        // §2.4): the shape exists exactly when the real
+        // pointwise form does — pair vs pair, and pair vs
+        // concrete list through the §2.5 bridge (every
+        // element an Int; an empty list crosses
+        // vacuously). Neq is the negation, same shapes.
+        // A pair against a length-only binding has no arm
+        // on either side.
+        (Eq, Abs::ArrayLen { .. }, Abs::ArrayLen { .. }) => Some(Abs::Bool),
+        (Neq, Abs::ArrayLen { .. }, Abs::ArrayLen { .. }) => Some(Abs::Bool),
+        (Eq, Abs::ArrayLen { .. }, Abs::List(items))
+        | (Eq, Abs::List(items), Abs::ArrayLen { .. }) => {
+            if items.iter().all(|it| matches!(it, Abs::Int(_))) {
+                Some(Abs::Bool)
+            } else {
+                None
+            }
+        }
+        (Neq, Abs::ArrayLen { .. }, Abs::List(items))
+        | (Neq, Abs::List(items), Abs::ArrayLen { .. }) => {
+            if items.iter().all(|it| matches!(it, Abs::Int(_))) {
+                Some(Abs::Bool)
+            } else {
+                None
+            }
+        }
+        // Concat of two paired bindings (Phase 140,
+        // §2.6): declines elementwise, binds as the
+        // length-only form with the exact sum length —
+        // mirroring the real arms, the bridge crossing
+        // included.
+        (Concat, Abs::ArrayLen { .. }, Abs::ArrayLen { .. }) => Some(Abs::ListLen),
+        (Concat, Abs::ArrayLen { .. }, Abs::List(items))
+        | (Concat, Abs::List(items), Abs::ArrayLen { .. }) => {
+            if items.iter().all(|it| matches!(it, Abs::Int(_))) {
+                Some(Abs::ListLen)
+            } else {
+                None
+            }
+        }
         // Append of an indexed char onto a string (Phase
         // 91): a concatenation term, never a known literal.
         (Append, Abs::Str(_), Abs::CharStr) => Some(Abs::Str(StrVal::Unknown)),
@@ -1303,7 +1944,7 @@ fn abs_unary_ir(op: IRUnaryOp, v: Abs) -> Option<Abs> {
 /// where no solver exists.
 pub fn body_is_encodable_pure(spec: &FunctionSpec, body: &IRNode, index: &SpecIndex) -> bool {
     let mut env = param_env(spec, index);
-    abs_eval(body, &mut env, &AbsCtx::root(index)).is_some()
+    abs_eval(body, &mut env, &AbsCtx::for_spec(index, spec)).is_some()
 }
 
 #[cfg(test)]

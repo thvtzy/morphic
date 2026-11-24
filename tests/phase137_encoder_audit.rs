@@ -129,7 +129,19 @@ fn phase137_length_level_still_verifies() {
 
 #[test]
 fn phase137_decline_shapes_by_name() {
-    // (1) Indexing into a symbolic list.
+    // (1) Indexing into a symbolic list. RETIRED IN
+    // PLACE at Phase 140 (W2) per LIST_ENCODER_SCOPE §9
+    // R10: the pin below was the audit's standing — at
+    // Phase 137 the List parameter bound length-only
+    // (`ListLen`), so the read had no element term at
+    // all. W1 (Phase 139) bound the pair; W2 (Phase 140)
+    // built the index arm under §2.3's guard discipline,
+    // and this specimen's requires (`i >= 0`,
+    // `i < len(xs)`) are exactly its guard: the read now
+    // encodes on both sides of the mirror and the spec
+    // Verifies. The unguarded shape still declines —
+    // Phase 140's own battery pins it (the §4.1 probe
+    // pair: `oob_read` never Verifies).
     let idx = one(
         r#"Probe { spec probe_index {
             input: xs: List<Int>, i: Int
@@ -144,10 +156,24 @@ fn phase137_decline_shapes_by_name() {
     let enc = verifier::body_is_encodable(&idx, &body);
     let status = verdict(&idx, body);
     println!("P137|A|decline|symbolic_index|encodable={enc}|verify={status:?}");
-    assert!(!enc, "indexing a symbolic (ListLen) list is unencodable");
+    assert!(enc, "the require-guarded index encodes since Phase 140 (W2)");
+    #[cfg(feature = "z3-support")]
+    assert_eq!(status, VerificationStatus::Verified);
+    #[cfg(not(feature = "z3-support"))]
     assert_eq!(status, VerificationStatus::Inconclusive);
 
     // (2) List equality between two symbolic lists.
+    // RETIRED IN PLACE at Phase 140 (W2) per
+    // LIST_ENCODER_SCOPE §9 R10: at Phase 137 the two
+    // parameters bound length-only and equality had no
+    // arm at all. W2 built the equality arm in the
+    // frozen §2.4 form — equal lengths ∧ pointwise
+    // equality over [0, len), never raw array equality
+    // (R1) — and the shape now encodes on both sides of
+    // the mirror and Verifies (the body denotes exactly
+    // the row's claim). Its teeth are Phase 140's pins:
+    // two free pairs are refutably unequal in general,
+    // so the form is a semantics, not a rubber stamp.
     let eq = one(
         r#"Probe { spec probe_list_eq {
             input: xs: List<Int>, ys: List<Int>
@@ -160,7 +186,10 @@ fn phase137_decline_shapes_by_name() {
     let enc = verifier::body_is_encodable(&eq, &body);
     let status = verdict(&eq, body);
     println!("P137|A|decline|list_equality|encodable={enc}|verify={status:?}");
-    assert!(!enc, "equality of two ListLen values is unencodable");
+    assert!(enc, "pair equality encodes in the §2.4 form since Phase 140 (W2)");
+    #[cfg(feature = "z3-support")]
+    assert_eq!(status, VerificationStatus::Verified);
+    #[cfg(not(feature = "z3-support"))]
     assert_eq!(status, VerificationStatus::Inconclusive);
 
     // (3) An element quantifier as the whole contract

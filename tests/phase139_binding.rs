@@ -396,17 +396,35 @@ fn phase139_mirror_agrees_on_the_binding_shapes() {
         (
             IRNode::Index(Box::new(v("xs")), Box::new(i(0))),
             false,
-            "index a pair (W2's arm, not yet built)",
+            // W2's arm is built (Phase 140); the shape
+            // still declines HERE because this battery's
+            // spec states no guard — a literal index into
+            // a parameter pair is in range only under a
+            // hypothesis (§2.3). The guarded standings are
+            // Phase 140's own battery.
+            "index a pair, unguarded in this spec (§2.3 decline)",
         ),
         (
             bin(IRBinOp::Eq, v("xs"), v("ys")),
-            false,
-            "pair equality (W2's form, not yet built)",
+            // Standing updated at Phase 140 (W2): the
+            // equality arm is built, in §2.4's pointwise
+            // form — the shape encodes on both sides, as
+            // this battery's agreement discipline requires.
+            // At W1 it declined, as the label then said.
+            true,
+            "pair equality (W2's form, built at Phase 140)",
         ),
         (
             bin(IRBinOp::Concat, v("xs"), v("ys")),
-            false,
-            "concat of pairs (§2.6's named decline)",
+            // Standing updated at Phase 140 (W2): §2.6's
+            // named answer — Concat declines ELEMENTWISE
+            // and binds as its exact length (the length-
+            // only form), so the shape encodes on both
+            // sides as a ListLen; every element row over
+            // it still declines (Phase 140's battery pins
+            // that half). At W1 the value declined whole.
+            true,
+            "concat of pairs (§2.6: binds as its exact length since Phase 140)",
         ),
         (ite(v("b"), v("xs"), v("ys")), true, "merge two pairs"),
         (
