@@ -106,13 +106,19 @@ fn phase137_tier2_standings() {
     // contracts — list_sum, list_product, list_fold
     // (tests/phase142_fold_form.rs) — under §2.8's
     // prefix definition, so their pins retire in place
-    // per §9 R10. The other six stand Inconclusive, each
-    // for its named reason: the four remaining
-    // higher-order entries await the UF-composition arm
-    // (W5, Phase 143), list_sort is the standing
-    // residue (§3.10 + the two-binder row), and
-    // list_binary_search is the named stretch, judged
-    // at the Phase 144 re-tier.
+    // per §9 R10. At Phase 143 (W5) the UF-composition
+    // arm crowned the four remaining higher-order
+    // entries — list_map, list_filter, list_all,
+    // list_any (tests/phase143_uf_composition.rs) —
+    // under §2.9's composition (application at guarded
+    // element terms + the four body-side
+    // characterizations carried as stated invariants),
+    // so their pins retire in place the same way. The
+    // other two stand Inconclusive, each for its named
+    // reason: list_sort is the standing residue (§3.10
+    // + the two-binder row), and list_binary_search is
+    // the named stretch, judged at the Phase 144
+    // re-tier.
     const CROWNED_AT_W3: &[&str] = &[
         "list_reverse",
         "list_contains",
@@ -124,6 +130,7 @@ fn phase137_tier2_standings() {
         "range",
     ];
     const CROWNED_AT_W4: &[&str] = &["list_sum", "list_product", "list_fold"];
+    const CROWNED_AT_W5: &[&str] = &["list_map", "list_filter", "list_all", "list_any"];
     let specs = stdlib::prelude_specs();
     for name in TIER2 {
         let spec = specs.iter().find(|s| &s.name == name).expect("entry ships");
@@ -131,7 +138,10 @@ fn phase137_tier2_standings() {
         let status = Verifier::with_specs(&specs).verify_one(&candidate(spec, body), spec).status;
         println!("P137|A|tier2|{name}={status:?}");
         #[cfg(feature = "z3-support")]
-        if CROWNED_AT_W3.contains(name) || CROWNED_AT_W4.contains(name) {
+        if CROWNED_AT_W3.contains(name)
+            || CROWNED_AT_W4.contains(name)
+            || CROWNED_AT_W5.contains(name)
+        {
             assert_eq!(status, VerificationStatus::Verified, "{name}");
         } else {
             assert_eq!(status, VerificationStatus::Inconclusive, "{name}");

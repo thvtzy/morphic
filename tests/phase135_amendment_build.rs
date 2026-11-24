@@ -440,8 +440,8 @@ Probe {
     println!("P135PIN|range|prelude-merge check: entry + quantifier domain coexist");
 }
 
-/// The six's verdicts — the Tier-2 standing as Phase 142
-/// (W4) leaves it. At Phase 135 all six verified
+/// The six's verdicts — the Tier-2 standing as Phase 143
+/// (W5) leaves it. At Phase 135 all six verified
 /// Inconclusive (their quantified element rows were
 /// outside the encoder; nothing about them was refuted —
 /// the Phase 115 pin form). Phase 141's W3 arms crowned
@@ -453,13 +453,18 @@ Probe {
 /// it needed is §2.9's Fold point (the prefix step over
 /// UF applications), which the W4 build carries — so
 /// its pin retires in place the same way
-/// (tests/phase142_fold_form.rs). The four remaining
-/// higher-order entries' element rows wait on W5's UF
-/// composition proper (Phase 143) and stay Inconclusive.
+/// (tests/phase142_fold_form.rs). At Phase 143 the
+/// UF-composition arm crowned the four remaining
+/// higher-order entries — list_map, list_filter,
+/// list_all, list_any — under §2.9's composition, so
+/// their pins retire in place the same way
+/// (tests/phase143_uf_composition.rs). All six now
+/// Verify with their shipped bodies; the tier LABELS
+/// move at Phase 144's re-tier, not here.
 #[cfg(feature = "z3-support")]
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn phase135_verdicts_the_tier2_standing_after_w4() {
+fn phase135_verdicts_the_tier2_standing_after_w5() {
     let specs = list_specs();
     for name in SIX {
         let spec = spec_of(&specs, name);
@@ -467,26 +472,12 @@ fn phase135_verdicts_the_tier2_standing_after_w4() {
         let verdict = Verifier::with_specs(&specs)
             .verify_one(&candidate(&spec, body), &spec)
             .status;
-        if name == "range" {
-            assert_eq!(
-                verdict,
-                VerificationStatus::Verified,
-                "range: crowned at Phase 141 (W3) — Verified with its shipped body"
-            );
-        } else if name == "list_fold" {
-            assert_eq!(
-                verdict,
-                VerificationStatus::Verified,
-                "list_fold: crowned at Phase 142 (W4) — Verified with its shipped body"
-            );
-        } else {
-            assert_eq!(
-                verdict,
-                VerificationStatus::Inconclusive,
-                "{name}: element-level verdicts wait on W5's UF composition — \
-                 Inconclusive is the honest Tier-2 standing"
-            );
-        }
+        assert_eq!(
+            verdict,
+            VerificationStatus::Verified,
+            "{name}: crowned by the W-arms (range at W3, list_fold at W4, \
+             the higher-order four at W5) — Verified with its shipped body"
+        );
     }
 }
 

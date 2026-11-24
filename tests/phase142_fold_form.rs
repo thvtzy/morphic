@@ -433,12 +433,13 @@ fn phase142_teeth_wrong_bodies_do_not_verify() {
     assert_eq!(status, VerificationStatus::Inconclusive);
 }
 
-// ── Drift: the eight stand, the W5 four + residue stand ─
+// ── Drift: the eight stand, the W5 four crowned, the residue stands ─
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn phase142_the_rest_stand() {
-    // The eight crowned at Phase 141 do not move at W4.
+fn phase142_standings_after_w5() {
+    // The eight crowned at Phase 141 do not move at W4
+    // — and do not move at W5 either.
     let specs = stdlib::prelude_specs();
     let verifier = Verifier::with_specs(&specs);
     for name in [
@@ -460,17 +461,26 @@ fn phase142_the_rest_stand() {
         #[cfg(not(feature = "z3-support"))]
         assert_eq!(status, VerificationStatus::Inconclusive, "{name}");
     }
-    // The HO four are W5's, binary_search is the named
-    // stretch, sort the standing residue: none move at
-    // W4 (list_fold's move is the crown test's, above).
-    for name in [
-        "list_map",
-        "list_filter",
-        "list_all",
-        "list_any",
-        "list_binary_search",
-        "list_sort",
-    ] {
+    // At Phase 142 the four higher-order entries stood
+    // Inconclusive here (W5's, not yet built). At Phase
+    // 143 the UF-composition arm crowned them
+    // (tests/phase143_uf_composition.rs), so their pins
+    // retire in place per §9 R10: they Verify with
+    // their shipped bodies. binary_search is the named
+    // stretch and sort the standing residue: neither
+    // moves at W4 or W5 (list_fold's move is the crown
+    // test's, above).
+    for name in ["list_map", "list_filter", "list_all", "list_any"] {
+        let spec = specs.iter().find(|s| &s.name == name).expect("entry ships");
+        let body = stdlib::shipped_body(name).expect("entry has a shipped body");
+        let status = verifier.verify_one(&candidate(spec, body), spec).status;
+        println!("P142|stand|{name}={status:?}");
+        #[cfg(feature = "z3-support")]
+        assert_eq!(status, VerificationStatus::Verified, "{name}");
+        #[cfg(not(feature = "z3-support"))]
+        assert_eq!(status, VerificationStatus::Inconclusive, "{name}");
+    }
+    for name in ["list_binary_search", "list_sort"] {
         let spec = specs.iter().find(|s| &s.name == name).expect("entry ships");
         let body = stdlib::shipped_body(name).expect("entry has a shipped body");
         let status = verifier.verify_one(&candidate(spec, body), spec).status;

@@ -2216,6 +2216,44 @@ pub fn shipped_loop_invariant(name: &str) -> Option<&'static str> {
             "0 <= i; len(xs) >= 0 implies i <= len(xs); \
              acc == fold(list_take(xs, i), init, f)",
         ),
+        // out is the mapped prefix (Phase 143, §2.9's
+        // Map point): its length is the counter, and
+        // position j holds the UF's application at the
+        // input's element there — pointwise congruence
+        // at guarded indices, nothing more.
+        "list_map" => Some(
+            "len(out) == i; 0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             forall j: Int in range(len(out)): out[j] == f(xs[j])",
+        ),
+        // out is a filtered prefix, stated at exactly
+        // its contract's strength (§2.9's Filter point,
+        // §9 R6): no longer than the consumed prefix,
+        // and the predicate holds at every element it
+        // holds — no order, no completeness, no
+        // subsequence claim.
+        "list_filter" => Some(
+            "len(out) <= i; 0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             forall j: Int in range(len(out)): p(out[j]) == true",
+        ),
+        // ok is the prefix conjunction, stated in both
+        // directions (§2.9's All point): a failing
+        // element inside the prefix is recorded (the
+        // forall form), and a recorded failure is
+        // witnessed inside the prefix (the exists form).
+        "list_all" => Some(
+            "0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             forall j: Int in range(len(xs)): j >= i || p(xs[j]) == true || ok == false; \
+             ok == false implies (exists j: Int in range(len(xs)): j < i && p(xs[j]) == false)",
+        ),
+        // ok is the prefix disjunction, dually (the Any
+        // point): a passing element inside the prefix
+        // is recorded, and a recorded pass is witnessed
+        // inside the prefix.
+        "list_any" => Some(
+            "0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             forall j: Int in range(len(xs)): j >= i || p(xs[j]) == false || ok == true; \
+             ok == true implies (exists j: Int in range(len(xs)): j < i && p(xs[j]) == true)",
+        ),
         _ => None,
     }
 }

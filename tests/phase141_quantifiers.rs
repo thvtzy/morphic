@@ -565,7 +565,7 @@ fn phase141_the_eight_crowned() {
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn phase141_the_six_stand_inconclusive() {
+fn phase141_the_residue_stands_after_w5() {
     // The drift discipline's other half, as the later
     // arms leave it. At Phase 141 nine stood here: the
     // fold-form three (W4), the HO five (W5),
@@ -574,20 +574,16 @@ fn phase141_the_six_stand_inconclusive() {
     // 142 (W4) the fold-form arm crowned list_sum,
     // list_product and list_fold (the crown evidence is
     // tests/phase142_fold_form.rs), so their pins retire
-    // from this list in place, per §9 R10. The six that
-    // remain do not move at W4: the HO four are W5's,
-    // binary_search is the named stretch, sort the
-    // standing residue.
+    // from this list in place, per §9 R10. At Phase 143
+    // (W5) the UF-composition arm crowned list_map,
+    // list_filter, list_all and list_any
+    // (tests/phase143_uf_composition.rs), so their pins
+    // retire the same way. The two that remain do not
+    // move at W5: binary_search is the named stretch,
+    // sort the standing residue.
     let specs = stdlib::prelude_specs();
     let verifier = Verifier::with_specs(&specs);
-    for name in [
-        "list_sort",
-        "list_binary_search",
-        "list_map",
-        "list_filter",
-        "list_all",
-        "list_any",
-    ] {
+    for name in ["list_sort", "list_binary_search"] {
         let spec = specs.iter().find(|s| &s.name == name).expect("entry ships");
         let body = stdlib::shipped_body(name).expect("entry has a shipped body");
         let status = verifier.verify_one(&candidate(spec, body), spec).status;
