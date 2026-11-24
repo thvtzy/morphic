@@ -1,7 +1,7 @@
 {
   "package": "morphic",
-  "packageVersion": "1.3.0",
-  "morphicVersion": "1.3.0",
+  "packageVersion": "1.4.0",
+  "morphicVersion": "1.4.0",
   "scope": "EMBED_SCOPE.md",
   "exports": [
     {
