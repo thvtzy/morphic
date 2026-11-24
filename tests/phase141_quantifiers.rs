@@ -343,6 +343,7 @@ fn phase141_length_wellformedness_is_a_side_condition() {
 
 // ── Mirror agreement on the quantifier shapes ──────────
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase141_mirror_agreement_on_quantifier_shapes() {
     // (a) A require-guarded body read under a spec whose
@@ -599,6 +600,7 @@ fn phase141_the_residue_stands_after_w5() {
     }
 }
 
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase141_crown_teeth_wrong_bodies_do_not_verify() {
     let specs = stdlib::prelude_specs();
