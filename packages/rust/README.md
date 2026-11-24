@@ -28,7 +28,7 @@ mean at the boundary.
 
 ```toml
 [dependencies]
-morphic = "1.2.0"
+morphic = "1.3.0"
 ```
 
 ```rust

@@ -62,6 +62,25 @@ use morphic::synthesis::eval;
 use morphic::verify::verdict::VerificationStatus;
 use morphic::verify::verifier::Verifier;
 
+/// This binary's tests serialize on one lock. The
+/// surfaces test's binding generation re-runs all 35
+/// crown checks while the clause-1 test judges the
+/// fifteen — on this box (1.5 shared vCPU) the two
+/// racing solver loads flipped a fold crown to
+/// Inconclusive twice at the 1.3.0 stamp run (the
+/// recorded load class of Phases 142–143: heavy crowns
+/// flip under parallel test load, each passing solo).
+/// The lock removes the intra-binary race; no
+/// assertion is weakened, and the gate evidence in
+/// the ROAD note rests on solo runs regardless. The
+/// guard is recovered from poisoning
+/// (`unwrap_or_else(into_inner)`): if one test's
+/// crown flips under ambient load and panics, the
+/// others must still stand on their own assertions,
+/// not on a PoisonError — measured at the stamp,
+/// where one flip cascaded to two poison failures.
+static GATE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn candidate(spec: &FunctionSpec, body: IRNode) -> CandidateImplementation {
     CandidateImplementation {
         id: 144,
@@ -118,6 +137,7 @@ const FIFTEEN: &[&str] = &[
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase144_clause1_the_fifteen_verified_and_battery_exact() {
+    let _serial = GATE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let specs = stdlib::prelude_specs();
     let verifier = Verifier::with_specs(&specs);
     let index = SpecIndex::from_specs(&specs);
@@ -146,6 +166,7 @@ fn phase144_clause1_the_fifteen_verified_and_battery_exact() {
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase144_clause1_residue_and_stretch_stand_inconclusive() {
+    let _serial = GATE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // list_sort: the standing residue. list_binary_search:
     // the stretch, judged at Part 0 — its require is not
     // assumable in the crown route (the isolation pin
@@ -167,6 +188,7 @@ fn phase144_clause1_residue_and_stretch_stand_inconclusive() {
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase144_part0_the_require_is_not_assumable_in_the_crown_route() {
+    let _serial = GATE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // The stretch's blocker, isolated: a spec whose
     // only content is `require: list_is_sorted(xs)`
     // over a trivially true row and body. If the
@@ -233,6 +255,7 @@ fn phase144_part0_the_require_is_not_assumable_in_the_crown_route() {
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn phase144_clause4_retier_surfaces() {
+    let _serial = GATE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     // The generator's inputs: exactly the fifteen at
     // tier-1 / z3-verified on the encoder crown route;
     // the two non-movers at tier-2 / executed-exact;
