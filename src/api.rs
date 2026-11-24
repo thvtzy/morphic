@@ -176,13 +176,16 @@ pub fn render(candidate: &CandidateImplementation, target: &str) -> Result<Strin
 // ── Standalone verify (Phase 149, DISEBAR_SCOPE §3) ────
 
 /// Where a candidate body for `verify_body` comes from.
-/// A body is never transported as text in this phase:
-/// the two sources are the ones a caller can name today
-/// — a shipped library body, or the body a spec's own
-/// rows denote through the standing resolver. The
-/// serialized-IR source arrives with Phase 150's bundle
-/// format (DISEBAR_SCOPE §4), which is what user bodies
-/// in transport form are waiting on.
+/// The two sources a caller could name at Phase 149 — a
+/// shipped library body, or the body a spec's own rows
+/// denote through the standing resolver — plus the third
+/// that Phase 150's IR text serialization
+/// (`synthesis::irtext`, DISEBAR_SCOPE §4.2) makes
+/// possible: the body itself, carried as text. §3.3 named
+/// this source as 150's consequence; it arrives here as
+/// the freeze's recorded extension, through the same
+/// parser the bundles use, declining malformed text by
+/// name.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BodySource {
     /// The shipped body of the named standard-library
@@ -191,6 +194,10 @@ pub enum BodySource {
     /// The body the named spec's own rows denote
     /// (`SpecIndex::callee_body`'s resolver chain).
     Denoted,
+    /// A body carried as IR text (Phase 150): parsed by
+    /// `irtext::parse_ir`, which declines malformed or
+    /// foreign-version text by name.
+    IrText(String),
 }
 
 /// One postcondition row's judgment in a `VerifyReport`.
@@ -210,8 +217,8 @@ pub struct VerifyRowReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyReport {
     pub spec_name: String,
-    /// "library:<entry>" | "denoted" — where the judged
-    /// body came from.
+    /// "library:<entry>" | "denoted" | "ir-text" — where
+    /// the judged body came from.
     pub body_source: String,
     pub verification_available: bool,
     /// "Verified" | "VerificationFailed" | "Inconclusive"
@@ -289,6 +296,15 @@ pub fn verify_body(
                 column: None,
             })?,
             "denoted".to_string(),
+        ),
+        BodySource::IrText(text) => (
+            crate::synthesis::irtext::parse_ir(text).map_err(|e| StageError {
+                stage: "verify".into(),
+                message: e,
+                line: None,
+                column: None,
+            })?,
+            "ir-text".to_string(),
         ),
     };
 
@@ -482,6 +498,35 @@ pub fn synthesize_seeded_spec(
         })?
         .clone();
     synthesize_spec(&functions, &spec, seed)
+}
+
+/// The seeded run over an already-checked module given
+/// as ASTs — `synthesize_seeded_spec` without the text
+/// round-trip. Phase 150's bundle re-verification uses
+/// it: the consumer holds a bundle's spec as an AST and
+/// reconstructs the module it was crowned in, so the
+/// pipeline crown is re-run over ASTs, not re-serialized
+/// text.
+pub fn synthesize_seeded_functions(
+    functions: &[FunctionSpec],
+    spec_name: &str,
+    seed: u64,
+) -> Result<SynthesisReport, StageError> {
+    let spec = functions
+        .iter()
+        .find(|f| f.name == spec_name)
+        .ok_or_else(|| StageError {
+            stage: "synthesis".into(),
+            message: format!(
+                "No spec named '{}' in this module (specs: {})",
+                spec_name,
+                functions.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            line: None,
+            column: None,
+        })?
+        .clone();
+    synthesize_spec(functions, &spec, seed)
 }
 
 fn parse_and_first(

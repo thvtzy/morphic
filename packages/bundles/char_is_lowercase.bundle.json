@@ -1,0 +1,140 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "char_is_lowercase",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 6,
+    "evaluable": 6,
+    "passed": 6
+  },
+  "spec": {
+    "name": "char_is_lowercase",
+    "doc": "char_is_lowercase(c) = true iff c is in 'a'..='z'; non-letters give false (STDLIB_SCOPE.md 2.3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "c",
+        "ty": "Char",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "BinOp": [
+                "And",
+                {
+                  "BinOp": [
+                    "Ge",
+                    {
+                      "Var": "c"
+                    },
+                    {
+                      "CharLit": "a"
+                    }
+                  ]
+                },
+                {
+                  "BinOp": [
+                    "Le",
+                    {
+                      "Var": "c"
+                    },
+                    {
+                      "CharLit": "z"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "first",
+        "input": {
+          "CharLit": "a"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "last",
+        "input": {
+          "CharLit": "z"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "upper",
+        "input": {
+          "CharLit": "A"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "digit",
+        "input": {
+          "CharLit": "5"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "before range",
+        "input": {
+          "CharLit": "`"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "space",
+        "input": {
+          "CharLit": " "
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(binop And (binop Ge (var \"c\") (lit (char \"a\"))) (binop Le (var \"c\") (lit (char \"z\"))))\n"
+}

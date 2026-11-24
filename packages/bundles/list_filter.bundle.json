@@ -1,0 +1,612 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "list_filter",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "encoder",
+  "battery": {
+    "total": 8,
+    "evaluable": 8,
+    "passed": 8
+  },
+  "spec": {
+    "name": "list_filter",
+    "doc": "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified of exactly its two frozen rows and executed-exact on the full battery (LIST_ENCODER_SCOPE.md 3.3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "xs",
+        "ty": {
+          "List": "Int"
+        },
+        "annotations": {}
+      },
+      {
+        "name": "p",
+        "ty": {
+          "Function": [
+            [
+              "Int"
+            ],
+            "Bool"
+          ]
+        },
+        "annotations": {}
+      }
+    ],
+    "return_type": {
+      "List": "Int"
+    },
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Le",
+            {
+              "Call": [
+                "len",
+                [
+                  {
+                    "Var": "output"
+                  }
+                ]
+              ]
+            },
+            {
+              "Call": [
+                "len",
+                [
+                  {
+                    "Var": "xs"
+                  }
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Forall": {
+          "vars": [
+            [
+              "i",
+              "Int"
+            ]
+          ],
+          "body": {
+            "Expr": {
+              "BinOp": [
+                "Eq",
+                {
+                  "Call": [
+                    "p",
+                    [
+                      {
+                        "Index": [
+                          {
+                            "Var": "output"
+                          },
+                          {
+                            "Var": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "BoolLit": true
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "empty lambda",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  []
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Gt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "all pass",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 3
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Gt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "none pass",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 3
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Gt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 9
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "typical",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 3
+                    },
+                    {
+                      "IntLit": 4
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Eq",
+                      {
+                        "BinOp": [
+                          "Mod",
+                          {
+                            "Var": "x"
+                          },
+                          {
+                            "IntLit": 2
+                          }
+                        ]
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 4
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negatives",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "BinOp": [
+                        "Sub",
+                        {
+                          "IntLit": 0
+                        },
+                        {
+                          "IntLit": 2
+                        }
+                      ]
+                    },
+                    {
+                      "BinOp": [
+                        "Sub",
+                        {
+                          "IntLit": 0
+                        },
+                        {
+                          "IntLit": 1
+                        }
+                      ]
+                    },
+                    {
+                      "IntLit": 0
+                    },
+                    {
+                      "IntLit": 1
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Lt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 2
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 1
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "duplicates",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 3
+                    },
+                    {
+                      "IntLit": 3
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Eq",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 2
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 2
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "named even",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 3
+                    },
+                    {
+                      "IntLit": 4
+                    },
+                    {
+                      "IntLit": 5
+                    },
+                    {
+                      "IntLit": 6
+                    }
+                  ]
+                ]
+              },
+              {
+                "Var": "int_is_even"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 4
+              },
+              {
+                "IntLit": 6
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "named odd empty",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  []
+                ]
+              },
+              {
+                "Var": "int_is_odd"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(block (alloc \"out\" (List Int) (collection List)) (for \"i\" (lit (int 0)) (unop Len (var \"xs\")) (if (call \"p\" (index (var \"xs\") (var \"i\"))) (binop Append (var \"out\") (index (var \"xs\") (var \"i\"))) (block))) (return (var \"out\")))\n"
+}

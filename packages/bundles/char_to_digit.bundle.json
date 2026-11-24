@@ -1,0 +1,591 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "char_to_digit",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 8,
+    "evaluable": 8,
+    "passed": 8
+  },
+  "spec": {
+    "name": "char_to_digit",
+    "doc": "char_to_digit(c) = Some(d) when c is in '0'..='9' with d the digit's value, None for every other char (STDLIB_SCOPE.md 2.3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "c",
+        "ty": "Char",
+        "annotations": {}
+      }
+    ],
+    "return_type": {
+      "Option": "Int"
+    },
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "0"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "1"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 1
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "2"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 2
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "3"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 3
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "4"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 4
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "5"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 5
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "6"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 6
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "7"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 7
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "8"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 8
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "9"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Some",
+                    [
+                      {
+                        "IntLit": 9
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Ge",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "0"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "None",
+                    []
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Le",
+                {
+                  "Var": "c"
+                },
+                {
+                  "CharLit": "9"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "None",
+                    []
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "zero",
+        "input": {
+          "CharLit": "0"
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "nine",
+        "input": {
+          "CharLit": "9"
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "IntLit": 9
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "middle",
+        "input": {
+          "CharLit": "4"
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "IntLit": 4
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "seven",
+        "input": {
+          "CharLit": "7"
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "IntLit": 7
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "letter",
+        "input": {
+          "CharLit": "a"
+        },
+        "expected_output": {
+          "Call": [
+            "None",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "space",
+        "input": {
+          "CharLit": " "
+        },
+        "expected_output": {
+          "Call": [
+            "None",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "below range",
+        "input": {
+          "CharLit": "/"
+        },
+        "expected_output": {
+          "Call": [
+            "None",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "above range",
+        "input": {
+          "CharLit": ":"
+        },
+        "expected_output": {
+          "Call": [
+            "None",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(match (var \"c\") (case (plit (char \"0\")) (call \"Some\" (lit (int 0)))) (case (plit (char \"1\")) (call \"Some\" (lit (int 1)))) (case (plit (char \"2\")) (call \"Some\" (lit (int 2)))) (case (plit (char \"3\")) (call \"Some\" (lit (int 3)))) (case (plit (char \"4\")) (call \"Some\" (lit (int 4)))) (case (plit (char \"5\")) (call \"Some\" (lit (int 5)))) (case (plit (char \"6\")) (call \"Some\" (lit (int 6)))) (case (plit (char \"7\")) (call \"Some\" (lit (int 7)))) (case (plit (char \"8\")) (call \"Some\" (lit (int 8)))) (case (plit (char \"9\")) (call \"Some\" (lit (int 9)))) (case wildcard (call \"None\")))\n"
+}

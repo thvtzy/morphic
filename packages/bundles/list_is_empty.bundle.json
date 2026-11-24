@@ -1,0 +1,141 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "list_is_empty",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 4,
+    "evaluable": 4,
+    "passed": 4
+  },
+  "spec": {
+    "name": "list_is_empty",
+    "doc": "list_is_empty(xs) = true iff xs has no elements: len(xs) == 0 (STDLIB_SCOPE.md 2.6). Tier-1.",
+    "generics": [],
+    "params": [
+      {
+        "name": "xs",
+        "ty": {
+          "List": "Int"
+        },
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Call": [
+                    "len",
+                    [
+                      {
+                        "Var": "xs"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "empty",
+        "input": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "singleton",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 7
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "typical",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "zero is an element",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(binop Eq (call \"len\" (var \"xs\")) (lit (int 0)))\n"
+}

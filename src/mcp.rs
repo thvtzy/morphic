@@ -24,6 +24,17 @@
 //  synthesis runs only the seeded, bounded, LLM-free
 //  playground profile — there is no LLM key in that
 //  profile for a call to reach.
+//
+//  THE THIRD BODY SOURCE (§3.3 / R1, Phase 150): the
+//  freeze named `verify`'s two sources and recorded that
+//  a third — a body carried as a serialization — would
+//  arrive with Phase 150's bundle format. It has: kind
+//  "ir-text" carries the body in the morphic-ir text
+//  serialization (synthesis::irtext), parsed by the same
+//  reader the bundles use, declining malformed or
+//  foreign-version text by name. The widening is this
+//  note and the §4 freeze text that ordered it — never
+//  silent.
 // ─────────────────────────────────────────────────────────────
 
 use serde_json::{json, Value};
@@ -258,15 +269,18 @@ fn opt_seed(args: &Value) -> Result<u64, StageError> {
     }
 }
 
-/// The verify tool's `body` argument: exactly the two
-/// body sources of DISEBAR_SCOPE §3.3.
+/// The verify tool's `body` argument: the body sources
+/// of DISEBAR_SCOPE §3.3 — library and denoted from the
+/// freeze, plus ir-text, the third source the freeze's
+/// §3.3/R1 recorded as Phase 150's consequence.
 fn body_source_arg(args: &Value) -> Result<BodySource, StageError> {
     let Some(body) = args.get("body") else {
         return Err(arguments_error("missing required argument 'body'".into()));
     };
     let Some(kind) = body.get("kind").and_then(Value::as_str) else {
         return Err(arguments_error(
-            "argument 'body' requires a 'kind' (\"library\" | \"denoted\")".into(),
+            "argument 'body' requires a 'kind' (\"library\" | \"denoted\" | \"ir-text\")"
+                .into(),
         ));
     };
     match kind {
@@ -280,8 +294,18 @@ fn body_source_arg(args: &Value) -> Result<BodySource, StageError> {
             Ok(BodySource::Library(entry.to_string()))
         }
         "denoted" => Ok(BodySource::Denoted),
+        "ir-text" => {
+            let Some(text) = body.get("text").and_then(Value::as_str) else {
+                return Err(arguments_error(
+                    "body kind 'ir-text' requires a 'text' carrying the body in the \
+                     morphic-ir text serialization"
+                        .into(),
+                ));
+            };
+            Ok(BodySource::IrText(text.to_string()))
+        }
         other => Err(arguments_error(format!(
-            "unknown body kind: '{other}' (kinds: library, denoted)"
+            "unknown body kind: '{other}' (kinds: library, denoted, ir-text)"
         ))),
     }
 }
@@ -381,7 +405,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "verify",
-            "description": "Judge one candidate body against one spec with the native verifier, in-process: the verdict, the per-row results, and the executed test counts. The body is named by source: a shipped library body, or the body the spec's own rows denote through the resolver.",
+            "description": "Judge one candidate body against one spec with the native verifier, in-process: the verdict, the per-row results, and the executed test counts. The body is named by source: a shipped library body, the body the spec's own rows denote through the resolver, or the body itself carried as IR text (the morphic-ir serialization of Phase 150's bundles).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -390,8 +414,9 @@ fn tool_definitions() -> Value {
                     "body": {
                         "type": "object",
                         "properties": {
-                            "kind": {"type": "string", "enum": ["library", "denoted"]},
-                            "entry": {"type": "string", "description": "For kind 'library': the shipped entry whose body is judged."}
+                            "kind": {"type": "string", "enum": ["library", "denoted", "ir-text"]},
+                            "entry": {"type": "string", "description": "For kind 'library': the shipped entry whose body is judged."},
+                            "text": {"type": "string", "description": "For kind 'ir-text': the body in the morphic-ir text serialization."}
                         },
                         "required": ["kind"],
                         "additionalProperties": false

@@ -1,0 +1,303 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "int_max",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 7,
+    "evaluable": 7,
+    "passed": 7
+  },
+  "spec": {
+    "name": "int_max",
+    "doc": "int_max(a, b) = the larger of a and b; equal arguments give that value (STDLIB_SCOPE.md 2.2).",
+    "generics": [],
+    "params": [
+      {
+        "name": "a",
+        "ty": "Int",
+        "annotations": {}
+      },
+      {
+        "name": "b",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Int",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Lt",
+                {
+                  "Var": "a"
+                },
+                {
+                  "Var": "b"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Var": "a"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Ge",
+                {
+                  "Var": "a"
+                },
+                {
+                  "Var": "b"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Var": "b"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "first larger",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 7
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 7
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "second larger",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 3
+              },
+              {
+                "IntLit": 7
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 7
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "equal",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 4
+              },
+              {
+                "IntLit": 4
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 4
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "both negative",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 2
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 9
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 2
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "int maximum first",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 9223372036854775807
+              },
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 9223372036854775807
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "int maximum second",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 9223372036854775807
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 9223372036854775807
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "near minimum",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "BinOp": [
+                      "Sub",
+                      {
+                        "IntLit": 0
+                      },
+                      {
+                        "IntLit": 9223372036854775807
+                      }
+                    ]
+                  },
+                  {
+                    "IntLit": 1
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 9223372036854775807
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 9223372036854775807
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(if (binop Lt (var \"a\") (var \"b\")) (var \"b\") (var \"a\"))\n"
+}

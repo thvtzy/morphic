@@ -78,6 +78,18 @@ enum Command {
         #[arg(long)]
         facade: bool,
 
+        /// Produce the re-verification bundles
+        /// (Phase 150, DISEBAR_SCOPE §4): one bundle per
+        /// standard-library entry — spec + body in IR text
+        /// + claimed verdict/tier + battery + crown route —
+        /// through the checked route (the crowning surface
+        /// re-runs first, as assembly does). Written to
+        /// packages/bundles, a sibling of both packages,
+        /// in neither package's file set. Takes no input
+        /// file.
+        #[arg(long)]
+        bundles: bool,
+
         /// Directory the assembled package is written to
         /// (with --package or --facade; default: the
         /// package's repo home, packages/npm resp.
@@ -102,6 +114,28 @@ enum Command {
     Check {
         /// Path to .morph spec file
         input: PathBuf,
+    },
+
+    /// Re-verify a proof-carrying bundle (Phase 150,
+    /// DISEBAR_SCOPE §4): re-run the crown by the bundle's
+    /// stated route from (spec, body) alone, re-run the
+    /// executed battery, and answer whether the claimed
+    /// verdict reproduces. Tamper fails by name.
+    VerifyBundle {
+        /// Path to the .bundle.json file
+        file: PathBuf,
+    },
+
+    /// The standard-library self-check (Phase 150,
+    /// DISEBAR_SCOPE §4.3): re-verify every shipped
+    /// entry's crown from the shipped data alone and
+    /// report per-entry standings. (`verify` with no
+    /// target refuses by name — spec-file verification
+    /// is `check` / the synthesis path.)
+    Verify {
+        /// Re-verify the whole shipped standard library
+        #[arg(long)]
+        library: bool,
     },
 
     /// Synthesize interactively — see candidates in real-time
@@ -266,6 +300,128 @@ fn main() -> anyhow::Result<()> {
                 let _ = out;
                 anyhow::bail!(
                     "facade assembly runs from a native build \
+                     (this build carries no embedded library data)"
+                );
+            }
+        }
+
+        Command::Build { bundles: true, input, out, .. } => {
+            // Phase 150: `morphic build --bundles` — produce
+            // the re-verification bundles through the checked
+            // route (src/pcc.rs): the whole crowning surface
+            // re-runs first, as assembly does, and a moved
+            // crown fails here with nothing written. The
+            // bundles are a sibling artifact (packages/
+            // bundles) — in neither package's file set, so
+            // neither package's budget is charged for them.
+            if input.is_some() {
+                anyhow::bail!(
+                    "build --bundles produces the standard library's \
+                     re-verification bundles and takes no input file"
+                );
+            }
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let files = morphic::pcc::produce_all_bundles_checked()
+                    .map_err(anyhow::Error::msg)?;
+                let total: usize = files.iter().map(|(_, c)| c.len()).sum();
+                let dir = out.unwrap_or_else(|| PathBuf::from(morphic::pcc::BUNDLES_DIR));
+                std::fs::create_dir_all(&dir)?;
+                for (name, contents) in &files {
+                    std::fs::write(dir.join(name), contents)?;
+                }
+                println!(
+                    "{} Produced {} re-verification bundles — {total} B total \
+                     (sibling artifact; no package budget charged)",
+                    "✓".green().bold(),
+                    files.len()
+                );
+                println!("  {} {}", "•".dimmed(), dir.display());
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = out;
+                anyhow::bail!(
+                    "bundle production runs from a native build \
+                     (this build carries no embedded library data)"
+                );
+            }
+        }
+
+        Command::VerifyBundle { file } => {
+            // Phase 150: `morphic verify-bundle <file>` —
+            // the consumer verb. The judgment is the
+            // library's (src/pcc.rs); this arm is the shell.
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let text = std::fs::read_to_string(&file)?;
+                match morphic::pcc::verify_bundle_text(&text) {
+                    Ok(summary) => println!("{} {summary}", "✓".green().bold()),
+                    Err(reason) => anyhow::bail!("bundle refused: {reason}"),
+                }
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = &file;
+                anyhow::bail!(
+                    "bundle re-verification runs from a native build \
+                     (this build carries no embedded library data)"
+                );
+            }
+        }
+
+        Command::Verify { library } => {
+            // Phase 150: `morphic verify --library` — the
+            // stdlib self-check; the library function does
+            // the work (src/pcc.rs `verify_library`), this
+            // arm reports its standings.
+            if !library {
+                anyhow::bail!(
+                    "verify needs a target: --library re-verifies the shipped \
+                     standard library; a bundle is verified with verify-bundle"
+                );
+            }
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let standings =
+                    morphic::pcc::verify_library().map_err(anyhow::Error::msg)?;
+                let mut failed = 0usize;
+                for s in &standings {
+                    if s.reproduced {
+                        println!(
+                            "  {} {} — {} via {}: {}",
+                            "✓".green().bold(),
+                            s.name,
+                            s.tier,
+                            s.crown_route,
+                            s.detail
+                        );
+                    } else {
+                        failed += 1;
+                        println!(
+                            "  {} {} — {} via {}: {}",
+                            "✗".red().bold(),
+                            s.name,
+                            s.tier,
+                            s.crown_route,
+                            s.detail
+                        );
+                    }
+                }
+                println!(
+                    "{} {} of {} shipped crowns reproduce from the shipped data",
+                    if failed == 0 { "✓".green().bold() } else { "✗".red().bold() },
+                    standings.len() - failed,
+                    standings.len()
+                );
+                if failed > 0 {
+                    anyhow::bail!("{failed} shipped crown(s) do not reproduce");
+                }
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                anyhow::bail!(
+                    "the library self-check runs from a native build \
                      (this build carries no embedded library data)"
                 );
             }

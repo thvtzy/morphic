@@ -1,0 +1,504 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "list_any",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "encoder",
+  "battery": {
+    "total": 8,
+    "evaluable": 8,
+    "passed": 8
+  },
+  "spec": {
+    "name": "list_any",
+    "doc": "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "xs",
+        "ty": {
+          "List": "Int"
+        },
+        "annotations": {}
+      },
+      {
+        "name": "p",
+        "ty": {
+          "Function": [
+            [
+              "Int"
+            ],
+            "Bool"
+          ]
+        },
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Forall": {
+          "vars": [
+            [
+              "i",
+              "Int"
+            ]
+          ],
+          "body": {
+            "Implies": [
+              {
+                "Expr": {
+                  "BinOp": [
+                    "Eq",
+                    {
+                      "Call": [
+                        "p",
+                        [
+                          {
+                            "Index": [
+                              {
+                                "Var": "xs"
+                              },
+                              {
+                                "Var": "i"
+                              }
+                            ]
+                          }
+                        ]
+                      ]
+                    },
+                    {
+                      "BoolLit": true
+                    }
+                  ]
+                }
+              },
+              {
+                "Expr": {
+                  "BinOp": [
+                    "Eq",
+                    {
+                      "Var": "output"
+                    },
+                    {
+                      "BoolLit": true
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "Implies": [
+          {
+            "Forall": {
+              "vars": [
+                [
+                  "i",
+                  "Int"
+                ]
+              ],
+              "body": {
+                "Expr": {
+                  "BinOp": [
+                    "Eq",
+                    {
+                      "Call": [
+                        "p",
+                        [
+                          {
+                            "Index": [
+                              {
+                                "Var": "xs"
+                              },
+                              {
+                                "Var": "i"
+                              }
+                            ]
+                          }
+                        ]
+                      ]
+                    },
+                    {
+                      "BoolLit": false
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "Expr": {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "BoolLit": false
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "empty lambda",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  []
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Gt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "none pass",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 0
+                    },
+                    {
+                      "BinOp": [
+                        "Sub",
+                        {
+                          "IntLit": 0
+                        },
+                        {
+                          "IntLit": 1
+                        }
+                      ]
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Gt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "one passes",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 0
+                    },
+                    {
+                      "IntLit": 5
+                    },
+                    {
+                      "IntLit": 0
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Gt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "singleton pass",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 7
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Gt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "all pass",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 2
+                    }
+                  ]
+                ]
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Gt",
+                      {
+                        "Var": "x"
+                      },
+                      {
+                        "IntLit": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "named even",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 3
+                    },
+                    {
+                      "IntLit": 4
+                    }
+                  ]
+                ]
+              },
+              {
+                "Var": "int_is_even"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "named odd none",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 4
+                    }
+                  ]
+                ]
+              },
+              {
+                "Var": "int_is_odd"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "named even empty",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  []
+                ]
+              },
+              {
+                "Var": "int_is_even"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(block (alloc \"ok\" Bool (lit (bool false))) (for \"i\" (lit (int 0)) (unop Len (var \"xs\")) (assign (var \"ok\") (binop Or (var \"ok\") (call \"p\" (index (var \"xs\") (var \"i\")))))) (return (var \"ok\")))\n"
+}

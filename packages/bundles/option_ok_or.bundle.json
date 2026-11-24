@@ -1,0 +1,255 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "option_ok_or",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 4,
+    "evaluable": 4,
+    "passed": 4
+  },
+  "spec": {
+    "name": "option_ok_or",
+    "doc": "option_ok_or(o, e) = Ok(v) when o is Some(v), or Err(e) with e unchanged when o is None (STDLIB_SCOPE.md 2.5).",
+    "generics": [],
+    "params": [
+      {
+        "name": "o",
+        "ty": {
+          "Option": "Int"
+        },
+        "annotations": {}
+      },
+      {
+        "name": "e",
+        "ty": "String",
+        "annotations": {}
+      }
+    ],
+    "return_type": {
+      "Result": [
+        "Int",
+        "String"
+      ]
+    },
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "MethodCall": {
+                "receiver": {
+                  "Var": "o"
+                },
+                "name": "is_none",
+                "args": []
+              }
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Ok",
+                    [
+                      {
+                        "MethodCall": {
+                          "receiver": {
+                            "Var": "o"
+                          },
+                          "name": "unwrap",
+                          "args": []
+                        }
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "MethodCall": {
+                "receiver": {
+                  "Var": "o"
+                },
+                "name": "is_some",
+                "args": []
+              }
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "Err",
+                    [
+                      {
+                        "Var": "e"
+                      }
+                    ]
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "some to ok",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Some",
+                  [
+                    {
+                      "IntLit": 4
+                    }
+                  ]
+                ]
+              },
+              {
+                "StringLit": "missing"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Ok",
+            [
+              {
+                "IntLit": 4
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "none to err",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "None",
+                  []
+                ]
+              },
+              {
+                "StringLit": "missing"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Err",
+            [
+              {
+                "StringLit": "missing"
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "none empty error",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "None",
+                  []
+                ]
+              },
+              {
+                "StringLit": ""
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Err",
+            [
+              {
+                "StringLit": ""
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "some zero to ok",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Some",
+                  [
+                    {
+                      "IntLit": 0
+                    }
+                  ]
+                ]
+              },
+              {
+                "StringLit": "e"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Ok",
+            [
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(match (var \"o\") (case (ctor \"Some\" (pvar \"v\")) (call \"Ok\" (var \"v\"))) (case (ctor \"None\") (call \"Err\" (var \"e\"))))\n"
+}

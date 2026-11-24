@@ -1,0 +1,299 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "int_sign",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 7,
+    "evaluable": 7,
+    "passed": 7
+  },
+  "spec": {
+    "name": "int_sign",
+    "doc": "int_sign(x) = -1 when x is negative, 0 when x is zero, 1 when x is positive (STDLIB_SCOPE.md 2.2). The Int minimum maps to -1; no exclusion is needed.",
+    "generics": [],
+    "params": [
+      {
+        "name": "x",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Int",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Ge",
+                {
+                  "Var": "x"
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "BinOp": [
+                    "Sub",
+                    {
+                      "IntLit": 0
+                    },
+                    {
+                      "IntLit": 1
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "Var": "x"
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Le",
+                {
+                  "Var": "x"
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "IntLit": 1
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "Call": [
+                "int_clamp",
+                [
+                  {
+                    "Var": "x"
+                  },
+                  {
+                    "BinOp": [
+                      "Sub",
+                      {
+                        "IntLit": 0
+                      },
+                      {
+                        "IntLit": 1
+                      }
+                    ]
+                  },
+                  {
+                    "IntLit": 1
+                  }
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "negative",
+        "input": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 5
+            }
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 1
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "zero",
+        "input": {
+          "IntLit": 0
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "positive",
+        "input": {
+          "IntLit": 7
+        },
+        "expected_output": {
+          "IntLit": 1
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "minus one",
+        "input": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 1
+            }
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 1
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "one",
+        "input": {
+          "IntLit": 1
+        },
+        "expected_output": {
+          "IntLit": 1
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "int minimum",
+        "input": {
+          "BinOp": [
+            "Sub",
+            {
+              "BinOp": [
+                "Sub",
+                {
+                  "IntLit": 0
+                },
+                {
+                  "IntLit": 9223372036854775807
+                }
+              ]
+            },
+            {
+              "IntLit": 1
+            }
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 1
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "int maximum",
+        "input": {
+          "IntLit": 9223372036854775807
+        },
+        "expected_output": {
+          "IntLit": 1
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(if (binop Gt (if (binop Lt (var \"x\") (binop Sub (lit (int 0)) (lit (int 1)))) (binop Sub (lit (int 0)) (lit (int 1))) (var \"x\")) (lit (int 1))) (lit (int 1)) (if (binop Lt (var \"x\") (binop Sub (lit (int 0)) (lit (int 1)))) (binop Sub (lit (int 0)) (lit (int 1))) (var \"x\")))\n"
+}
