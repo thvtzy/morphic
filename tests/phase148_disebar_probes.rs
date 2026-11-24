@@ -187,6 +187,14 @@ fn p148_pcc_crown_check_reverifies_from_spec_and_body() {
 /// imported file could provide is still undefined, while
 /// a prelude entry needs no import at all. There is no
 /// module system for a registry to address yet.
+///
+/// The prelude half measures the NATIVE prelude: under
+/// `wasm-playground` the prelude is the wasm stub (no
+/// stdlib entries), so the whole probe is native-only —
+/// the Phase 136 cfg pattern, applied at Phase 151 when
+/// CI's workspace --all-targets configuration (feature
+/// unification) exposed the missing gate.
+#[cfg(not(feature = "wasm-playground"))]
 #[test]
 fn p148_registry_import_parsed_not_resolved() {
     let with_import = "M {\n\
