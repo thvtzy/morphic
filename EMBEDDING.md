@@ -50,7 +50,7 @@ import { int_clamp, list_min, option_ok_or } from "@thvtzy/morphic";
 const clamped: bigint = int_clamp(15n, 0n, 10n);
 console.log(clamped); // 10n
 
-// A Tier-2 function returning an Option: T | null.
+// A Tier-1 function returning an Option: T | null.
 const smallest: bigint | null = list_min([3n, 1n, 2n]);
 console.log(smallest); // 1n
 console.log(list_min([])); // null — the empty case is a value
@@ -99,7 +99,7 @@ fn main() {
     let clamped: i64 = int_clamp(15, 0, 10);
     println!("{clamped}"); // 10
 
-    // A Tier-2 function returning an Option.
+    // A Tier-1 function returning an Option.
     let smallest: Option<i64> = list_min(vec![3, 1, 2]);
     println!("{smallest:?}"); // Some(1)
     println!("{:?}", list_min(vec![])); // None — a value, not an error
@@ -160,7 +160,8 @@ both packages.
 ## The 1.2 higher-order exports
 
 Six exports are new in 1.2 (STDLIB_SCOPE.md
-Amendment 2), all Tier-2:
+Amendment 2); all six stand at Tier-1 since the
+1.3 re-tier:
 
 | Export | Morphic signature | What it does |
 |---|---|---|
@@ -258,20 +259,23 @@ the native pipeline before the package existed:
 
 - **Tier-1 — `z3-verified`.** The function's body was
   proven against its specification by Z3, and is
-  golden-exact on its frozen battery. 18 of the 35
+  golden-exact on its frozen battery. 33 of the 35
   exports are Tier-1.
 - **Tier-2 — `executed-exact`.** The function's body is
   held to 100% agreement with its frozen battery at
-  every point, executed — but element-level symbolic
-  verification of List bodies awaits the post-1.0 List
-  encoder, so no Verified claim is made. 17 of the 35
-  exports are Tier-2 (all List functions except
-  `list_is_empty`, plus `range`). The tier is a property of the proof
+  every point, executed — but no Verified claim is
+  made. 2 of the 35 exports are Tier-2: `list_sort`
+  and `list_binary_search`, each with a named residue
+  in its manifest row (a contract form the encoder
+  does not carry; a `require:` the crown route cannot
+  assume). The tier is a property of the proof
   standard, not of the behaviour: a Tier-2 function is
   not "less correct" on any measured point, it is less
-  *proven*. When the List encoder lands, Tier-2 labels
-  upgrade in place at a lockstep release; the functions'
-  bytes do not change.
+  *proven*. The List encoder landed at 1.3, and
+  fifteen Tier-2 labels upgraded in place at that
+  lockstep release, exactly as this paragraph always
+  stated they would; the functions' bytes did not
+  change.
 
 The tier is a fact of the package surface, not only of
 the project's docs. Read it in three places, all

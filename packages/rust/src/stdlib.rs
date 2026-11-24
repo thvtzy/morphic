@@ -282,10 +282,10 @@ pub fn list_is_empty(xs: Vec<i64>) -> bool {
     ((xs).len() as i64 == 0)
 }
 
-/// list_reverse(xs) = the elements of xs in reverse order; empty gives empty, a singleton gives itself (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_reverse(xs) = the elements of xs in reverse order; empty gives empty, a singleton gives itself (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 15 pinned, 0 spec-silent
 pub fn list_reverse(xs: Vec<i64>) -> Vec<i64> {
     let mut out: Vec<i64> = vec![];
@@ -295,10 +295,10 @@ pub fn list_reverse(xs: Vec<i64>) -> Vec<i64> {
     return out;
 }
 
-/// list_contains(xs, x) = true iff some element of xs equals x; the empty list gives false (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_contains(xs, x) = true iff some element of xs equals x; the empty list gives false (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 75 pinned, 0 spec-silent
 pub fn list_contains(xs: Vec<i64>, x: i64) -> bool {
     let mut found: bool = false;
@@ -308,10 +308,10 @@ pub fn list_contains(xs: Vec<i64>, x: i64) -> bool {
     return found;
 }
 
-/// list_sum(xs) = the sum of the elements of xs; the empty list gives 0. Arithmetic is the language's standing Int arithmetic (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_sum(xs) = the sum of the elements of xs; the empty list gives 0. Arithmetic is the language's standing Int arithmetic (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 15 pinned, 0 spec-silent
 pub fn list_sum(xs: Vec<i64>) -> i64 {
     let mut acc: i64 = 0;
@@ -321,10 +321,10 @@ pub fn list_sum(xs: Vec<i64>) -> i64 {
     return acc;
 }
 
-/// list_product(xs) = the product of the elements of xs; the empty list gives 1, and any zero element gives 0 (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_product(xs) = the product of the elements of xs; the empty list gives 1, and any zero element gives 0 (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 13 pinned, 0 spec-silent
 pub fn list_product(xs: Vec<i64>) -> i64 {
     let mut acc: i64 = 1;
@@ -334,10 +334,10 @@ pub fn list_product(xs: Vec<i64>) -> i64 {
     return acc;
 }
 
-/// list_min(xs) = Some(m) with m the least element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_min(xs) = Some(m) with m the least element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 15 pinned, 0 spec-silent
 pub fn list_min(xs: Vec<i64>) -> Option<i64> {
     if ((xs).len() as i64 == 0) {
@@ -351,10 +351,10 @@ pub fn list_min(xs: Vec<i64>) -> Option<i64> {
 }
 }
 
-/// list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 15 pinned, 0 spec-silent
 pub fn list_max(xs: Vec<i64>) -> Option<i64> {
     if ((xs).len() as i64 == 0) {
@@ -368,10 +368,10 @@ pub fn list_max(xs: Vec<i64>) -> Option<i64> {
 }
 }
 
-/// list_take(xs, n) = the first n elements of xs, with n clamped into [0, len(xs)]: n <= 0 gives the empty list, n >= len(xs) gives xs unchanged (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_take(xs, n) = the first n elements of xs, with n clamped into [0, len(xs)]: n <= 0 gives the empty list, n >= len(xs) gives xs unchanged (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 28 pinned, 0 spec-silent
 pub fn list_take(xs: Vec<i64>, n: i64) -> Vec<i64> {
     let mut out: Vec<i64> = vec![];
@@ -386,10 +386,10 @@ pub fn list_take(xs: Vec<i64>, n: i64) -> Vec<i64> {
     return out;
 }
 
-/// list_drop(xs, n) = xs without its first n elements, with n clamped into [0, len(xs)]: n <= 0 gives xs unchanged, n >= len(xs) gives the empty list (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_drop(xs, n) = xs without its first n elements, with n clamped into [0, len(xs)]: n <= 0 gives xs unchanged, n >= len(xs) gives the empty list (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 28 pinned, 0 spec-silent
 pub fn list_drop(xs: Vec<i64>, n: i64) -> Vec<i64> {
     let mut out: Vec<i64> = vec![];
@@ -404,10 +404,10 @@ pub fn list_drop(xs: Vec<i64>, n: i64) -> Vec<i64> {
     return out;
 }
 
-/// list_is_sorted(xs) = true iff xs is non-strictly ascending (every adjacent pair a <= b); the empty list and singletons give true. The library form of Appendix A's is_sorted (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_is_sorted(xs) = true iff xs is non-strictly ascending (every adjacent pair a <= b); the empty list and singletons give true. The library form of Appendix A's is_sorted (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 15 pinned, 0 spec-silent
 pub fn list_is_sorted(xs: Vec<i64>) -> bool {
     let mut ok: bool = true;
@@ -417,7 +417,7 @@ pub fn list_is_sorted(xs: Vec<i64>) -> bool {
     return ok;
 }
 
-/// list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; standing residue at 1.3 — row 1 is the is_permutation Predicate (unencoded, 3.10) and row 3 a two-binder forall past the Phase 94 envelope (LIST_ENCODER_SCOPE.md 3.3).
 ///
 /// Tier: tier-2
 /// Verdict basis: executed-exact
@@ -454,7 +454,7 @@ pub fn list_sort(xs: Vec<i64>) -> Vec<i64> {
     return out;
 }
 
-/// list_binary_search(xs, x) = Some(i) with xs\[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a).
+/// list_binary_search(xs, x) = Some(i) with xs\[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; at 1.3 its element rows encode, but its require: is not assumable in the crown route — list_is_sorted's contract is quantifier-shaped, with no expression-level denotation for the precondition machinery — so no Verified claim is made (LIST_ENCODER_SCOPE.md 3.3; Phase 144 measurement).
 ///
 /// Tier: tier-2
 /// Verdict basis: executed-exact
@@ -477,10 +477,10 @@ pub fn list_binary_search(xs: Vec<i64>, x: i64) -> Option<i64> {
     return res;
 }
 
-/// list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+/// list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 20 pinned, 0 spec-silent
 pub fn list_map(xs: Vec<i64>, f: fn(i64) -> i64) -> Vec<i64> {
     let mut out: Vec<i64> = vec![];
@@ -490,10 +490,10 @@ pub fn list_map(xs: Vec<i64>, f: fn(i64) -> i64) -> Vec<i64> {
     return out;
 }
 
-/// list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+/// list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified of exactly its two frozen rows and executed-exact on the full battery (LIST_ENCODER_SCOPE.md 3.3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 20 pinned, 0 spec-silent
 pub fn list_filter(xs: Vec<i64>, p: fn(i64) -> bool) -> Vec<i64> {
     let mut out: Vec<i64> = vec![];
@@ -506,10 +506,10 @@ pub fn list_filter(xs: Vec<i64>, p: fn(i64) -> bool) -> Vec<i64> {
     return out;
 }
 
-/// list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+/// list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 18 pinned, 0 spec-silent
 pub fn list_fold(xs: Vec<i64>, init: i64, f: fn(i64, i64) -> i64) -> i64 {
     let mut acc: i64 = init;
@@ -519,10 +519,10 @@ pub fn list_fold(xs: Vec<i64>, init: i64, f: fn(i64, i64) -> i64) -> i64 {
     return acc;
 }
 
-/// list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+/// list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 16 pinned, 0 spec-silent
 pub fn list_all(xs: Vec<i64>, p: fn(i64) -> bool) -> bool {
     let mut ok: bool = true;
@@ -532,10 +532,10 @@ pub fn list_all(xs: Vec<i64>, p: fn(i64) -> bool) -> bool {
     return ok;
 }
 
-/// list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).
+/// list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 16 pinned, 0 spec-silent
 pub fn list_any(xs: Vec<i64>, p: fn(i64) -> bool) -> bool {
     let mut ok: bool = false;
@@ -545,10 +545,10 @@ pub fn list_any(xs: Vec<i64>, p: fn(i64) -> bool) -> bool {
     return ok;
 }
 
-/// range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9).
+/// range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).
 ///
-/// Tier: tier-2
-/// Verdict basis: executed-exact
+/// Tier: tier-1
+/// Verdict basis: z3-verified
 /// Battery: 15 pinned, 0 spec-silent
 pub fn range(lo: i64, hi: i64) -> Vec<i64> {
     let mut out: Vec<i64> = vec![];

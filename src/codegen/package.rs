@@ -27,10 +27,16 @@
 //  REGENERATION DISCIPLINE (gate clause 4's machinery):
 //  the checked assembly — `assemble_npm_package_checked`,
 //  what the CLI runs — FIRST re-runs the crowning surface
-//  in-process. For each Tier-1 entry, the seeded
+//  in-process. For each Tier-1 entry, its crown is
+//  re-verified by the route that produced it (the
+//  entry's `CrownRoute`, bindings.rs): the seeded
 //  production pipeline (seed 42, the Phase 110 pin's own
 //  call) must crown exactly the shipped body, Verified
-//  and golden-exact; for each Tier-2 entry, the shipped
+//  and golden-exact — or, for the fifteen entries the
+//  1.3 list-encoder campaign crowned (Phase 144), the
+//  shipped body must Verify through `verify_one` over
+//  the prelude index, every row Proven, battery-exact;
+//  for each Tier-2 entry, the shipped
 //  body must stand executed-exact on its full in-spec
 //  battery through the interpreter (the in-process half
 //  of the Phase 115 pin; its compiled-route half stands
@@ -136,7 +142,17 @@ specification, and golden-exact on its frozen battery:
 - String: `string_is_empty`
 - Result / Option: `result_unwrap_or`,
   `option_unwrap_or`, `option_ok_or`
-- List: `list_is_empty`
+- List: `list_is_empty`, `list_reverse`,
+  `list_contains`, `list_sum`, `list_product`,
+  `list_min`, `list_max`, `list_take`, `list_drop`,
+  `list_is_sorted`, `list_map`, `list_filter`,
+  `list_fold`, `list_all`, `list_any`, `range`
+
+Fifteen of the List entries upgraded at 1.3, when
+the list-element encoder landed (the 1.3 list-encoder
+campaign): their labels upgraded in place, exactly as
+the tier mechanism always stated — the functions'
+bytes did not change.
 
 Tier 2 — executed-exact on the full frozen battery, the
 tier printed here and in the manifest (the tier is a
@@ -144,14 +160,19 @@ property of the proof standard, not of the behavior;
 each function is held to 100% agreement on every
 battery point):
 
-- List: `list_reverse`, `list_contains`, `list_sum`,
-  `list_product`, `list_min`, `list_max`, `list_take`,
-  `list_drop`, `list_is_sorted`, `list_sort`,
-  `list_binary_search`, `list_map`, `list_filter`,
-  `list_fold`, `list_all`, `list_any`, `range`
+- List: `list_sort`, `list_binary_search`
 
-The last six are the 1.2 amendment's entries
-(STDLIB_SCOPE.md Amendment 2). Five of them are
+The two carry named residues, stated in their
+manifest rows: `list_sort`'s contract opens with the
+`is_permutation` predicate form, which the encoder
+does not carry, and closes with a two-binder
+quantifier past its envelope; `list_binary_search`'s
+`require:` names a quantifier-shaped contract the
+crown route cannot assume.
+
+The last six Tier-1 List entries are the 1.2
+amendment's entries (STDLIB_SCOPE.md Amendment 2).
+Five of them are
 higher-order: they take a function argument, and at
 runtime any JavaScript function of the right shape
 answers — including this package's own exports
@@ -370,6 +391,60 @@ pub fn check_tier1_crown(
     Ok(())
 }
 
+/// One encoder-crowned Tier-1 entry's crown check
+/// (Phase 144, the 1.3 re-tier): the crown these
+/// entries hold is the one Phases 141–143 measured —
+/// the shipped hand body, judged by `verify_one` over
+/// the prelude index, Verified with every postcondition
+/// row Proven, and battery-exact on its in-spec tests
+/// through the index-carrying route (the executed half,
+/// shared with the Tier-2 check). The seeded synthesis
+/// pipeline is NOT this crown's route: its pool holds
+/// no candidate for these specs and it crowns a
+/// different, unverified body (measured at Phase 144),
+/// so the Phase 110 procedure cannot re-verify them.
+/// The `Err` carries the reason, for the assembly's
+/// refusal message.
+#[cfg(not(feature = "wasm-playground"))]
+pub fn check_encoder_crown(spec: &FunctionSpec, shipped: &IRNode) -> Result<(), String> {
+    let name = &spec.name;
+    let specs = crate::stdlib::prelude_specs();
+    let verifier = crate::verify::verifier::Verifier::with_specs(&specs);
+    let candidate = crate::synthesis::engine::CandidateImplementation {
+        id: 0,
+        body: shipped.clone(),
+        spec_name: name.clone(),
+        spec: spec.clone(),
+        score: 0.0,
+        scores: crate::synthesis::engine::ScoreBreakdown {
+            test_pass_ratio: 0.0,
+            constraint_score: 0.0,
+            complexity_score: 0.0,
+            quality_score: 0.0,
+            synthesis_time_us: 0,
+        },
+        generation: 0,
+        provenance: crate::synthesis::engine::Provenance::HumanGuided,
+        verified: false,
+        verification_status: None,
+    };
+    let result = verifier.verify_one(&candidate, spec);
+    if result.status != crate::verify::verdict::VerificationStatus::Verified {
+        return Err(format!(
+            "{name}: the shipped body is not Verified in this build (status: {:?}) — \
+             package assembly requires the Z3-enabled native build",
+            result.status
+        ));
+    }
+    if !result.constraint_results.iter().all(|r| r.holds) {
+        return Err(format!(
+            "{name}: not every postcondition row is Proven for the shipped body"
+        ));
+    }
+    check_tier2_body(spec, shipped).map_err(|e| format!("{name}: executed half: {e}"))?;
+    Ok(())
+}
+
 /// One Tier-2 entry's executed check — the in-process
 /// half of the Phase 115 pin: the shipped body stands
 /// executed-exact on its full in-spec battery, every
@@ -431,7 +506,14 @@ pub fn verify_crowns() -> Result<(), CodegenError> {
             ))
         })?;
         let checked = if input.tier == "tier-1" {
-            check_tier1_crown(source, spec, &input.body)
+            match input.crown_route {
+                bindings::CrownRoute::Pipeline => {
+                    check_tier1_crown(source, spec, &input.body)
+                }
+                bindings::CrownRoute::Encoder => {
+                    check_encoder_crown(spec, &input.body)
+                }
+            }
         } else {
             check_tier2_body(spec, &input.body)
         };

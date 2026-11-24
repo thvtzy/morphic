@@ -580,7 +580,14 @@ fn phase141_the_residue_stands_after_w5() {
     // (tests/phase143_uf_composition.rs), so their pins
     // retire the same way. The two that remain do not
     // move at W5: binary_search is the named stretch,
-    // sort the standing residue.
+    // sort the standing residue. Phase 144 judged the
+    // stretch: it does not land — binary_search's
+    // require is not assumable in the crown route
+    // (its callee's contract has no expression-level
+    // denotation; measured in isolation in
+    // tests/phase144_gate_merge.rs) — so both pins
+    // stand exactly as asserted here, their reasons
+    // now measured and named on the entries' surfaces.
     let specs = stdlib::prelude_specs();
     let verifier = Verifier::with_specs(&specs);
     for name in ["list_sort", "list_binary_search"] {

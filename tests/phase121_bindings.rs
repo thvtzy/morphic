@@ -111,26 +111,31 @@ const FROZEN: &[FrozenRow] = &[
     FrozenRow { name: "option_unwrap_or", signature: "(Option<Int>, Int) → Int", tier: "tier-1", basis: "z3-verified", pinned: 28, silent: 0, ts_params: &["bigint | null", "bigint"], ts_return: "bigint" },
     FrozenRow { name: "option_ok_or", signature: "(Option<Int>, String) → Result<Int, String>", tier: "tier-1", basis: "z3-verified", pinned: 9, silent: 0, ts_params: &["bigint | null", "string"], ts_return: RESULT_INT_STRING },
     FrozenRow { name: "list_is_empty", signature: "List<Int> → Bool", tier: "tier-1", basis: "z3-verified", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "boolean" },
-    FrozenRow { name: "list_reverse", signature: "List<Int> → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint[]" },
-    FrozenRow { name: "list_contains", signature: "(List<Int>, Int) → Bool", tier: "tier-2", basis: "executed-exact", pinned: 75, silent: 0, ts_params: &["bigint[]", "bigint"], ts_return: "boolean" },
-    FrozenRow { name: "list_sum", signature: "List<Int> → Int", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint" },
-    FrozenRow { name: "list_product", signature: "List<Int> → Int", tier: "tier-2", basis: "executed-exact", pinned: 13, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint" },
-    FrozenRow { name: "list_min", signature: "List<Int> → Option<Int>", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint | null" },
-    FrozenRow { name: "list_max", signature: "List<Int> → Option<Int>", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint | null" },
-    FrozenRow { name: "list_take", signature: "(List<Int>, Int) → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 28, silent: 0, ts_params: &["bigint[]", "bigint"], ts_return: "bigint[]" },
-    FrozenRow { name: "list_drop", signature: "(List<Int>, Int) → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 28, silent: 0, ts_params: &["bigint[]", "bigint"], ts_return: "bigint[]" },
-    FrozenRow { name: "list_is_sorted", signature: "List<Int> → Bool", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "boolean" },
+    FrozenRow { name: "list_reverse", signature: "List<Int> → List<Int>", tier: "tier-1", basis: "z3-verified", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint[]" },
+    FrozenRow { name: "list_contains", signature: "(List<Int>, Int) → Bool", tier: "tier-1", basis: "z3-verified", pinned: 75, silent: 0, ts_params: &["bigint[]", "bigint"], ts_return: "boolean" },
+    FrozenRow { name: "list_sum", signature: "List<Int> → Int", tier: "tier-1", basis: "z3-verified", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint" },
+    FrozenRow { name: "list_product", signature: "List<Int> → Int", tier: "tier-1", basis: "z3-verified", pinned: 13, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint" },
+    FrozenRow { name: "list_min", signature: "List<Int> → Option<Int>", tier: "tier-1", basis: "z3-verified", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint | null" },
+    FrozenRow { name: "list_max", signature: "List<Int> → Option<Int>", tier: "tier-1", basis: "z3-verified", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint | null" },
+    FrozenRow { name: "list_take", signature: "(List<Int>, Int) → List<Int>", tier: "tier-1", basis: "z3-verified", pinned: 28, silent: 0, ts_params: &["bigint[]", "bigint"], ts_return: "bigint[]" },
+    FrozenRow { name: "list_drop", signature: "(List<Int>, Int) → List<Int>", tier: "tier-1", basis: "z3-verified", pinned: 28, silent: 0, ts_params: &["bigint[]", "bigint"], ts_return: "bigint[]" },
+    FrozenRow { name: "list_is_sorted", signature: "List<Int> → Bool", tier: "tier-1", basis: "z3-verified", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "boolean" },
     FrozenRow { name: "list_sort", signature: "List<Int> → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint[]"], ts_return: "bigint[]" },
     FrozenRow { name: "list_binary_search", signature: "(List<Int>, Int) → Option<Int>", tier: "tier-2", basis: "executed-exact", pinned: 64, silent: 3, ts_params: &["bigint[]", "bigint"], ts_return: "bigint | null" },
     // Amendment 2's six (Phase 135): Tier-2 on the A2.3
-    // batteries; the fn-typed parameters carry §3's
+    // batteries at 1.2; the fn-typed parameters carry §3's
     // standing `never` in the declarations (A2.4.2).
-    FrozenRow { name: "list_map", signature: "(List<Int>, fn(Int) -> Int) → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 20, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "bigint[]" },
-    FrozenRow { name: "list_filter", signature: "(List<Int>, fn(Int) -> Bool) → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 20, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "bigint[]" },
-    FrozenRow { name: "list_fold", signature: "(List<Int>, Int, fn(Int, Int) -> Int) → Int", tier: "tier-2", basis: "executed-exact", pinned: 18, silent: 0, ts_params: &["bigint[]", "bigint", "never"], ts_return: "bigint" },
-    FrozenRow { name: "list_all", signature: "(List<Int>, fn(Int) -> Bool) → Bool", tier: "tier-2", basis: "executed-exact", pinned: 16, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "boolean" },
-    FrozenRow { name: "list_any", signature: "(List<Int>, fn(Int) -> Bool) → Bool", tier: "tier-2", basis: "executed-exact", pinned: 16, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "boolean" },
-    FrozenRow { name: "range", signature: "(Int, Int) → List<Int>", tier: "tier-2", basis: "executed-exact", pinned: 15, silent: 0, ts_params: &["bigint", "bigint"], ts_return: "bigint[]" },
+    // Phase 144 (the 1.3 re-tier): the fifteen entries
+    // the list-encoder campaign crowned — the nine
+    // §2.6 rows above and these six — carry tier-1 /
+    // z3-verified; list_sort and list_binary_search
+    // stay tier-2 with named residues.
+    FrozenRow { name: "list_map", signature: "(List<Int>, fn(Int) -> Int) → List<Int>", tier: "tier-1", basis: "z3-verified", pinned: 20, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "bigint[]" },
+    FrozenRow { name: "list_filter", signature: "(List<Int>, fn(Int) -> Bool) → List<Int>", tier: "tier-1", basis: "z3-verified", pinned: 20, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "bigint[]" },
+    FrozenRow { name: "list_fold", signature: "(List<Int>, Int, fn(Int, Int) -> Int) → Int", tier: "tier-1", basis: "z3-verified", pinned: 18, silent: 0, ts_params: &["bigint[]", "bigint", "never"], ts_return: "bigint" },
+    FrozenRow { name: "list_all", signature: "(List<Int>, fn(Int) -> Bool) → Bool", tier: "tier-1", basis: "z3-verified", pinned: 16, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "boolean" },
+    FrozenRow { name: "list_any", signature: "(List<Int>, fn(Int) -> Bool) → Bool", tier: "tier-1", basis: "z3-verified", pinned: 16, silent: 0, ts_params: &["bigint[]", "never"], ts_return: "boolean" },
+    FrozenRow { name: "range", signature: "(Int, Int) → List<Int>", tier: "tier-1", basis: "z3-verified", pinned: 15, silent: 0, ts_params: &["bigint", "bigint"], ts_return: "bigint[]" },
 ];
 
 // ── Helpers ──────────────────────────────────────────────
@@ -706,6 +711,7 @@ fn ungated_generator_carries_only_pipeline_verdicts() {
         verdict_basis: basis.to_string(),
         battery_pinned: 3,
         battery_silent: 0,
+        crown_route: bindings::CrownRoute::Pipeline,
     };
     let set = bindings::generate_bindings(&[input], "user-bindings", "0.0.0", "UserBindings")
         .expect("user bindings generate");

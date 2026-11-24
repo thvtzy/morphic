@@ -208,15 +208,19 @@ const SIX: [&str; 6] = [
     "range",
 ];
 
-/// The frozen doc texts (Amendment 2 §A2.1), verbatim.
+/// The frozen doc texts (Amendment 2 §A2.1), verbatim
+/// — except the tier sentence of each, which
+/// LIST_ENCODER_SCOPE §5.1 updates at the Phase 144
+/// re-tier (the six stand Tier-1 from 1.3; the
+/// contract sentences are untouched).
 fn frozen_doc(name: &str) -> &'static str {
     match name {
-        "list_map" => "list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "list_filter" => "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "list_fold" => "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "list_all" => "list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "list_any" => "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "range" => "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9).",
+        "list_map" => "list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+        "list_filter" => "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified of exactly its two frozen rows and executed-exact on the full battery (LIST_ENCODER_SCOPE.md 3.3).",
+        "list_fold" => "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+        "list_all" => "list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+        "list_any" => "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+        "range" => "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
         other => panic!("no frozen doc for {other}"),
     }
 }
@@ -1317,9 +1321,9 @@ fn phase135_packages_carry_the_six_at_35() {
             .find(|r| r["name"] == name)
             .unwrap_or_else(|| panic!("{name}: manifest row present"));
         assert_eq!(row["signature"], signature, "{name}: the A2.1 signature");
-        assert_eq!(row["tier"], "tier-2", "{name}: tier-2 in the manifest");
+        assert_eq!(row["tier"], "tier-1", "{name}: tier-1 in the manifest (Phase 144 re-tier)");
         assert_eq!(
-            row["verdictBasis"], "executed-exact",
+            row["verdictBasis"], "z3-verified",
             "{name}: verdict basis in the manifest"
         );
         assert_eq!(row["battery"]["pinned"], pinned, "{name}: battery pinned");

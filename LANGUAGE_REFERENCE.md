@@ -655,11 +655,16 @@ row:
   100% golden-exact** through the production pipeline.
 - **Tier-2** — **executed-exact** on the full battery through
   the compiled runner, the tier printed here and in the
-  entry's doc comment. Tier-2 exists only for the List
-  element-level entries: the verifier binds a List parameter
-  as its length only, so no element-level entry can Verify
-  until the post-1.0 list-encoder campaign (§3.9 of the
-  audit) lands, with this library as its test corpus.
+  entry's doc comment. Tier-2 was the List element-level
+  entries' standard while the verifier bound a List parameter
+  as its length only. The post-1.0 list-encoder campaign
+  (§3.9 of the audit; `LIST_ENCODER_SCOPE.md`) landed at 1.3
+  and fifteen of the seventeen upgraded to Tier-1 with this
+  library as its test corpus; the two that remain Tier-2
+  carry named residues (`list_sort`: the `is_permutation`
+  Predicate row and a two-binder forall; `list_binary_search`:
+  a `require:` the crown route cannot assume), stated in
+  their rows' doc comments.
 
 ### Builtins
 
@@ -759,23 +764,23 @@ campaign (Option's arm added Phase 112).
 | Entry | Signature | Tier | Semantics | Example |
 |---|---|---|---|---|
 | `list_is_empty` | `List<Int> → Bool` | Tier-1 | True iff `len(xs) == 0` | `list_is_empty(List()) == true` |
-| `list_reverse` | `List<Int> → List<Int>` | Tier-2 | The elements in reverse order; empty → empty; singleton → itself | `list_reverse(List(1, 2, 3)) == List(3, 2, 1)` |
-| `list_contains` | `(List<Int>, Int) → Bool` | Tier-2 | True iff some element equals the target; empty → false | `list_contains(List(1, 2, 3), 2) == true` |
-| `list_sum` | `List<Int> → Int` | Tier-2 | The sum of the elements; empty → 0 | `list_sum(List(1, 2, 3)) == 6` |
-| `list_product` | `List<Int> → Int` | Tier-2 | The product of the elements; empty → 1; any zero element → 0 | `list_product(List(2, 3, 4)) == 24` |
-| `list_min` | `List<Int> → Option<Int>` | Tier-2 | Empty → `None`; otherwise `Some(m)` with m the least element | `list_min(List(3, 1, 2)) == Some(1)` |
-| `list_max` | `List<Int> → Option<Int>` | Tier-2 | Empty → `None`; otherwise `Some(m)` with m the greatest element | `list_max(List(3, 1, 2)) == Some(3)` |
-| `list_take` | `(List<Int>, Int) → List<Int>` | Tier-2 | The first n elements, n clamped into [0, len(xs)]: n ≤ 0 → empty; n ≥ len(xs) → xs unchanged | `list_take(List(1, 2, 3), 2) == List(1, 2)` |
-| `list_drop` | `(List<Int>, Int) → List<Int>` | Tier-2 | xs without its first n elements, with the same clamping | `list_drop(List(1, 2, 3), 2) == List(3)` |
-| `list_is_sorted` | `List<Int> → Bool` | Tier-2 | True iff the list is non-strictly ascending (every adjacent pair a ≤ b); empty and singleton → true | `list_is_sorted(List(1, 2, 2, 3)) == true` |
+| `list_reverse` | `List<Int> → List<Int>` | Tier-1 | The elements in reverse order; empty → empty; singleton → itself | `list_reverse(List(1, 2, 3)) == List(3, 2, 1)` |
+| `list_contains` | `(List<Int>, Int) → Bool` | Tier-1 | True iff some element equals the target; empty → false | `list_contains(List(1, 2, 3), 2) == true` |
+| `list_sum` | `List<Int> → Int` | Tier-1 | The sum of the elements; empty → 0 | `list_sum(List(1, 2, 3)) == 6` |
+| `list_product` | `List<Int> → Int` | Tier-1 | The product of the elements; empty → 1; any zero element → 0 | `list_product(List(2, 3, 4)) == 24` |
+| `list_min` | `List<Int> → Option<Int>` | Tier-1 | Empty → `None`; otherwise `Some(m)` with m the least element | `list_min(List(3, 1, 2)) == Some(1)` |
+| `list_max` | `List<Int> → Option<Int>` | Tier-1 | Empty → `None`; otherwise `Some(m)` with m the greatest element | `list_max(List(3, 1, 2)) == Some(3)` |
+| `list_take` | `(List<Int>, Int) → List<Int>` | Tier-1 | The first n elements, n clamped into [0, len(xs)]: n ≤ 0 → empty; n ≥ len(xs) → xs unchanged | `list_take(List(1, 2, 3), 2) == List(1, 2)` |
+| `list_drop` | `(List<Int>, Int) → List<Int>` | Tier-1 | xs without its first n elements, with the same clamping | `list_drop(List(1, 2, 3), 2) == List(3)` |
+| `list_is_sorted` | `List<Int> → Bool` | Tier-1 | True iff the list is non-strictly ascending (every adjacent pair a ≤ b); empty and singleton → true | `list_is_sorted(List(1, 2, 2, 3)) == true` |
 | `list_sort` | `List<Int> → List<Int>` | Tier-2 | The elements in non-strict ascending order; the output is a permutation of the input (judged on the executed battery) | `list_sort(List(3, 1, 2)) == List(1, 2, 3)` |
 | `list_binary_search` | `(List<Int>, Int) → Option<Int>` | Tier-2 | `require:` the list is sorted. Present → `Some(i)` with xs[i] equal to the target (with duplicate targets any valid index satisfies the contract — the specific index is spec-silent); absent → `None`. The shipped body is a first-match scan (the G5 scope-around: generated Rust cannot index a Vec by an Int variable) | `list_binary_search(List(1, 2, 3), 2) == Some(1)` |
-| `list_map` | `(List<Int>, fn(Int) -> Int) → List<Int>` | Tier-2 | `f` applied to each element, in order; empty → empty | `list_map(List(1, 2, 3), \|x\| x + 1) == List(2, 3, 4)` |
-| `list_filter` | `(List<Int>, fn(Int) -> Bool) → List<Int>` | Tier-2 | The elements for which `p` holds, in their original order; empty → empty; none pass → empty | `list_filter(List(1, 2, 3, 4), int_is_even) == List(2, 4)` |
-| `list_fold` | `(List<Int>, Int, fn(Int, Int) -> Int) → Int` | Tier-2 | The **left** fold in element order, starting from the accumulator `init`; empty → `init` | `list_fold(List(1, 2, 3), 100, \|a, x\| a - x) == 94` |
-| `list_all` | `(List<Int>, fn(Int) -> Bool) → Bool` | Tier-2 | True iff `p` holds of every element; empty → true (vacuous truth) | `list_all(List(2, 4, 6), int_is_even) == true` |
-| `list_any` | `(List<Int>, fn(Int) -> Bool) → Bool` | Tier-2 | True iff `p` holds of at least one element; empty → false | `list_any(List(1, 3, 4), int_is_even) == true` |
-| `range` | `(Int, Int) → List<Int>` | Tier-2 | The ascending list [lo, lo + 1, …, hi − 1]; `lo == hi` → empty; `lo > hi` → empty (no descending form, no precondition) | `range(0, 3) == List(0, 1, 2)` |
+| `list_map` | `(List<Int>, fn(Int) -> Int) → List<Int>` | Tier-1 | `f` applied to each element, in order; empty → empty | `list_map(List(1, 2, 3), \|x\| x + 1) == List(2, 3, 4)` |
+| `list_filter` | `(List<Int>, fn(Int) -> Bool) → List<Int>` | Tier-1 | The elements for which `p` holds, in their original order; empty → empty; none pass → empty | `list_filter(List(1, 2, 3, 4), int_is_even) == List(2, 4)` |
+| `list_fold` | `(List<Int>, Int, fn(Int, Int) -> Int) → Int` | Tier-1 | The **left** fold in element order, starting from the accumulator `init`; empty → `init` | `list_fold(List(1, 2, 3), 100, \|a, x\| a - x) == 94` |
+| `list_all` | `(List<Int>, fn(Int) -> Bool) → Bool` | Tier-1 | True iff `p` holds of every element; empty → true (vacuous truth) | `list_all(List(2, 4, 6), int_is_even) == true` |
+| `list_any` | `(List<Int>, fn(Int) -> Bool) → Bool` | Tier-1 | True iff `p` holds of at least one element; empty → false | `list_any(List(1, 3, 4), int_is_even) == true` |
+| `range` | `(Int, Int) → List<Int>` | Tier-1 | The ascending list [lo, lo + 1, …, hi − 1]; `lo == hi` → empty; `lo > hi` → empty (no descending form, no precondition) | `range(0, 3) == List(0, 1, 2)` |
 
 The six rows from `list_map` to `range` are the 1.2
 amendment's entries (`STDLIB_SCOPE.md` Amendment 2,
@@ -785,16 +790,17 @@ plus `range` — whose name the quantifier domains
 already spelled (`range(0, len(xs) - 1)` is a parser
 position, not a call; the two coexist through the
 prelude merge, pinned by Phase 135's merge check).
-All six ship at Tier-2 — executed-exact on their
+They shipped at Tier-2 — executed-exact on their
 frozen batteries (105 pinned points, judged
 in-process through the index-carrying route). A
 supplied function may be a lambda or the name of a
 shipped entry (named-reference supply, Phase 132).
-Their Tier-1 path is named, as future work: the
-§3.9 list-element encoder, together with the
-uninterpreted-function arm composed over element
-applications for the five higher-order entries
-(§3.9 alone for `range`).
+At 1.3 all six stand at Tier-1: the §3.9 list-element
+encoder landed (Phases 139–143 of the 1.3 campaign),
+together with the uninterpreted-function arm composed
+over element applications for the five higher-order
+entries (§3.9 alone for `range`) — the Tier-1 path
+this paragraph named as future work at 1.2, discharged.
 
 ### The old Appendix A names, accounted
 

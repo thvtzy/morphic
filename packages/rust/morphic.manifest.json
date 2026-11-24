@@ -205,101 +205,101 @@
     {
       "name": "list_reverse",
       "signature": "List<Int> → List<Int>",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 15,
         "specSilent": 0
       },
-      "doc": "list_reverse(xs) = the elements of xs in reverse order; empty gives empty, a singleton gives itself (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_reverse(xs) = the elements of xs in reverse order; empty gives empty, a singleton gives itself (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_contains",
       "signature": "(List<Int>, Int) → Bool",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 75,
         "specSilent": 0
       },
-      "doc": "list_contains(xs, x) = true iff some element of xs equals x; the empty list gives false (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_contains(xs, x) = true iff some element of xs equals x; the empty list gives false (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_sum",
       "signature": "List<Int> → Int",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 15,
         "specSilent": 0
       },
-      "doc": "list_sum(xs) = the sum of the elements of xs; the empty list gives 0. Arithmetic is the language's standing Int arithmetic (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_sum(xs) = the sum of the elements of xs; the empty list gives 0. Arithmetic is the language's standing Int arithmetic (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_product",
       "signature": "List<Int> → Int",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 13,
         "specSilent": 0
       },
-      "doc": "list_product(xs) = the product of the elements of xs; the empty list gives 1, and any zero element gives 0 (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_product(xs) = the product of the elements of xs; the empty list gives 1, and any zero element gives 0 (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_min",
       "signature": "List<Int> → Option<Int>",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 15,
         "specSilent": 0
       },
-      "doc": "list_min(xs) = Some(m) with m the least element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_min(xs) = Some(m) with m the least element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_max",
       "signature": "List<Int> → Option<Int>",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 15,
         "specSilent": 0
       },
-      "doc": "list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_take",
       "signature": "(List<Int>, Int) → List<Int>",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 28,
         "specSilent": 0
       },
-      "doc": "list_take(xs, n) = the first n elements of xs, with n clamped into [0, len(xs)]: n <= 0 gives the empty list, n >= len(xs) gives xs unchanged (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_take(xs, n) = the first n elements of xs, with n clamped into [0, len(xs)]: n <= 0 gives the empty list, n >= len(xs) gives xs unchanged (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_drop",
       "signature": "(List<Int>, Int) → List<Int>",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 28,
         "specSilent": 0
       },
-      "doc": "list_drop(xs, n) = xs without its first n elements, with n clamped into [0, len(xs)]: n <= 0 gives xs unchanged, n >= len(xs) gives the empty list (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_drop(xs, n) = xs without its first n elements, with n clamped into [0, len(xs)]: n <= 0 gives xs unchanged, n >= len(xs) gives the empty list (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_is_sorted",
       "signature": "List<Int> → Bool",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 15,
         "specSilent": 0
       },
-      "doc": "list_is_sorted(xs) = true iff xs is non-strictly ascending (every adjacent pair a <= b); the empty list and singletons give true. The library form of Appendix A's is_sorted (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_is_sorted(xs) = true iff xs is non-strictly ascending (every adjacent pair a <= b); the empty list and singletons give true. The library form of Appendix A's is_sorted (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_sort",
@@ -310,7 +310,7 @@
         "pinned": 15,
         "specSilent": 0
       },
-      "doc": "list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; standing residue at 1.3 — row 1 is the is_permutation Predicate (unencoded, 3.10) and row 3 a two-binder forall past the Phase 94 envelope (LIST_ENCODER_SCOPE.md 3.3)."
     },
     {
       "name": "list_binary_search",
@@ -321,73 +321,73 @@
         "pinned": 64,
         "specSilent": 3
       },
-      "doc": "list_binary_search(xs, x) = Some(i) with xs[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a)."
+      "doc": "list_binary_search(xs, x) = Some(i) with xs[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; at 1.3 its element rows encode, but its require: is not assumable in the crown route — list_is_sorted's contract is quantifier-shaped, with no expression-level denotation for the precondition machinery — so no Verified claim is made (LIST_ENCODER_SCOPE.md 3.3; Phase 144 measurement)."
     },
     {
       "name": "list_map",
       "signature": "(List<Int>, fn(Int) -> Int) → List<Int>",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 20,
         "specSilent": 0
       },
-      "doc": "list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+      "doc": "list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_filter",
       "signature": "(List<Int>, fn(Int) -> Bool) → List<Int>",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 20,
         "specSilent": 0
       },
-      "doc": "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+      "doc": "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified of exactly its two frozen rows and executed-exact on the full battery (LIST_ENCODER_SCOPE.md 3.3)."
     },
     {
       "name": "list_fold",
       "signature": "(List<Int>, Int, fn(Int, Int) -> Int) → Int",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 18,
         "specSilent": 0
       },
-      "doc": "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+      "doc": "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_all",
       "signature": "(List<Int>, fn(Int) -> Bool) → Bool",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 16,
         "specSilent": 0
       },
-      "doc": "list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+      "doc": "list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "list_any",
       "signature": "(List<Int>, fn(Int) -> Bool) → Bool",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 16,
         "specSilent": 0
       },
-      "doc": "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1)."
+      "doc": "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     },
     {
       "name": "range",
       "signature": "(Int, Int) → List<Int>",
-      "tier": "tier-2",
-      "verdictBasis": "executed-exact",
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified",
       "battery": {
         "pinned": 15,
         "specSilent": 0
       },
-      "doc": "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9)."
+      "doc": "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3)."
     }
   ]
 }
