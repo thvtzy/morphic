@@ -90,17 +90,48 @@ const TIER2: &[&str] = &[
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn phase137_all_tier2_entries_stand_inconclusive() {
-    // The §3.9 wall stated as one sweep: every Tier-2
-    // entry's shipped (faithful, battery-exact) body is
-    // Inconclusive today. An element encoder that works
-    // moves entries off this line loudly, one by one.
+fn phase137_tier2_standings() {
+    // The §3.9 wall stated as one sweep, as measured at
+    // each phase of the campaign. At Phase 137 every
+    // Tier-2 entry's shipped (faithful, battery-exact)
+    // body stood Inconclusive; W1 (139) and W2 (140)
+    // moved none of them (their rows are
+    // quantifier-shaped). At Phase 141 (W3) the eight
+    // element-model entries — list_reverse, list_contains,
+    // list_min, list_max, list_take, list_drop,
+    // list_is_sorted, range — Verify with their shipped
+    // bodies (the crown evidence per entry, row by row,
+    // is tests/phase141_quantifiers.rs). The other nine
+    // stand Inconclusive, each for its named reason:
+    // list_sum / list_product await the fold-form arm
+    // (W4, Phase 142), the five higher-order entries the
+    // UF-composition arm (W5, Phase 143), list_sort is
+    // the standing residue (§3.10 + the two-binder row),
+    // and list_binary_search is the named stretch, judged
+    // at the Phase 144 re-tier.
+    const CROWNED_AT_W3: &[&str] = &[
+        "list_reverse",
+        "list_contains",
+        "list_min",
+        "list_max",
+        "list_take",
+        "list_drop",
+        "list_is_sorted",
+        "range",
+    ];
     let specs = stdlib::prelude_specs();
     for name in TIER2 {
         let spec = specs.iter().find(|s| &s.name == name).expect("entry ships");
         let body = stdlib::shipped_body(name).expect("entry has a shipped body");
         let status = Verifier::with_specs(&specs).verify_one(&candidate(spec, body), spec).status;
         println!("P137|A|tier2|{name}={status:?}");
+        #[cfg(feature = "z3-support")]
+        if CROWNED_AT_W3.contains(name) {
+            assert_eq!(status, VerificationStatus::Verified, "{name}");
+        } else {
+            assert_eq!(status, VerificationStatus::Inconclusive, "{name}");
+        }
+        #[cfg(not(feature = "z3-support"))]
         assert_eq!(status, VerificationStatus::Inconclusive, "{name}");
     }
 }
@@ -193,7 +224,20 @@ fn phase137_decline_shapes_by_name() {
     assert_eq!(status, VerificationStatus::Inconclusive);
 
     // (3) An element quantifier as the whole contract
-    // (list_contains' shape, distilled).
+    // (list_contains' shape, distilled). RETIRED IN
+    // PLACE at Phase 141 (W3) per LIST_ENCODER_SCOPE
+    // §9 R10: at Phase 137 the Forall arm cleared its
+    // guard set at the binder and the body's reads had
+    // no source, so the rows declined whole. W3's arm
+    // derives the binder's domain from the reads
+    // themselves and the rows now DECIDE — and what
+    // they decide about this distilled pair is that it
+    // is unsatisfiable at the empty list (both
+    // antecedents vacuously true, demanding the output
+    // be true and false at once), so the constant-true
+    // body is Refuted on the second row: the standing
+    // is VerificationFailed, the honest verdict the
+    // shape was always carrying.
     let fa = one(
         r#"Probe { spec probe_all_zero {
             input: xs: List<Int>
@@ -206,10 +250,21 @@ fn phase137_decline_shapes_by_name() {
     let body = IRNode::Literal(IRLiteral::Bool(true));
     let status = verdict(&fa, body);
     println!("P137|A|decline|element_forall={status:?}");
+    #[cfg(feature = "z3-support")]
+    assert_eq!(status, VerificationStatus::VerificationFailed);
+    #[cfg(not(feature = "z3-support"))]
     assert_eq!(status, VerificationStatus::Inconclusive);
 
     // (4) An exists-over-elements row (list_min's third
-    // row shape).
+    // row shape). RETIRED IN PLACE at Phase 141 (W3)
+    // per §9 R10: at Phase 137 the Exists had no arm at
+    // all (`Constraint::Exists => None`). W3 built the
+    // dual arm under the same derived domain, and the
+    // row now encodes: with the constant-true body its
+    // consequent is the body's own value, so it
+    // Verifies. (The arm's teeth are Phase 141's pins:
+    // the constant-false body Refutes on a one-element
+    // countermodel.)
     let ex = one(
         r#"Probe { spec probe_exists {
             input: xs: List<Int>
@@ -220,6 +275,9 @@ fn phase137_decline_shapes_by_name() {
     );
     let status = verdict(&ex, IRNode::Literal(IRLiteral::Bool(true)));
     println!("P137|A|decline|element_exists={status:?}");
+    #[cfg(feature = "z3-support")]
+    assert_eq!(status, VerificationStatus::Verified);
+    #[cfg(not(feature = "z3-support"))]
     assert_eq!(status, VerificationStatus::Inconclusive);
 
     // (5) A Map body applying a parameter (G4_SCOPE §6's

@@ -21,7 +21,9 @@
 //! specs; the counts and named buckets it pins are the
 //! before/after identity this phase must preserve), and
 //! the 17/17 Tier-2 Inconclusive sweep is
-//! `phase137_all_tier2_entries_stand_inconclusive`.
+//! `phase137_all_tier2_entries_stand_inconclusive`
+//! (renamed `phase137_tier2_standings` at Phase 141,
+//! when W3 moved eight of its entries to Verified).
 //! Neither is duplicated here; both must stay green.
 //!
 //! Every test prints a `P139|...` line with the measured

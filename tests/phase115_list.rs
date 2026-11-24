@@ -36,7 +36,11 @@
 //!   measured here);
 //! * the verifier's verdict is Inconclusive — the
 //!   honest §3.9 standing, pinned so a future encoder
-//!   improvement moves it loudly, in the open;
+//!   improvement moves it loudly, in the open (it did:
+//!   at Phase 141 (W3) seven of these entries moved to
+//!   Verified with their shipped bodies — see
+//!   `tier2_verdicts_the_section_3_9_standing_after_w3`
+//!   below — and the pin now records both standings);
 //! * the entry's doc comment names its tier (the
 //!   scope's "tier printed in the documentation").
 //!
@@ -599,7 +603,32 @@ fn list_bodies_are_executed_exact_through_the_compiled_route() {
 #[cfg(feature = "z3-support")]
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn tier2_verdicts_are_inconclusive_the_section_3_9_standing() {
+fn tier2_verdicts_the_section_3_9_standing_after_w3() {
+    // The §3.9 standing, as it moves: at Phase 115 every
+    // entry below stood Inconclusive (element-level
+    // verdicts waited on the encoder campaign). At
+    // Phase 141 (W3) the seven element-model entries —
+    // reverse, contains, min, max, take, drop,
+    // is_sorted — Verify with their shipped bodies
+    // (LIST_ENCODER_SCOPE §3; the per-entry crown
+    // evidence is tests/phase141_quantifiers.rs). The
+    // remaining four stand Inconclusive for their named
+    // reasons: list_sum / list_product await the
+    // fold-form arm (W4), list_sort is the standing
+    // residue (§3.10 + the two-binder row), and
+    // list_binary_search is the named stretch, judged
+    // at the Phase 144 re-tier. (`range`, the eighth
+    // W3 crown, is an Int-family entry pinned in
+    // Phase 111's file, not this one.)
+    const CROWNED_AT_W3: &[&str] = &[
+        "list_reverse",
+        "list_contains",
+        "list_min",
+        "list_max",
+        "list_take",
+        "list_drop",
+        "list_is_sorted",
+    ];
     let specs = list_specs();
     for name in TIER2 {
         let spec = spec_of(&specs, name);
@@ -607,12 +636,20 @@ fn tier2_verdicts_are_inconclusive_the_section_3_9_standing() {
         let verdict = Verifier::with_specs(&specs)
             .verify_one(&candidate(&spec, body), &spec)
             .status;
-        assert_eq!(
-            verdict,
-            VerificationStatus::Inconclusive,
-            "{name}: element-level verdicts wait on the §3.9 encoder — \
-             Inconclusive is the honest standing until it lands"
-        );
+        if CROWNED_AT_W3.contains(name) {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Verified,
+                "{name}: crowned at Phase 141 (W3) with its shipped body"
+            );
+        } else {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Inconclusive,
+                "{name}: element-level verdicts wait on the later W-arms — \
+                 Inconclusive is the honest standing until they land"
+            );
+        }
     }
 }
 

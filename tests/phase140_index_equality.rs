@@ -41,7 +41,9 @@
 //! instrument, `phase133_corpus_verdict_drift`, and the
 //! 17/17 Tier-2 Inconclusive sweep is
 //! `phase137_all_tier2_entries_stand_inconclusive` (their
-//! rows are quantifier-shaped — W3's — so they stand).
+//! rows are quantifier-shaped — W3's — so they stand;
+//! the sweep was renamed `phase137_tier2_standings` at
+//! Phase 141, when W3 moved eight of its entries).
 //! The P137 decline-shape pins for symbolic index and
 //! symbolic list equality retire in place per R10 in
 //! `phase137_encoder_audit.rs`; the specimens here are

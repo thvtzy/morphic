@@ -440,14 +440,20 @@ Probe {
     println!("P135PIN|range|prelude-merge check: entry + quantifier domain coexist");
 }
 
-/// The six verify Inconclusive — the Tier-2 standing
-/// (their quantified element rows are outside the
-/// encoder; nothing about them is refuted). The Phase
-/// 115 pin form.
+/// The six's verdicts — the Tier-2 standing as Phase 141
+/// (W3) leaves it. At Phase 135 all six verified
+/// Inconclusive (their quantified element rows were
+/// outside the encoder; nothing about them was refuted —
+/// the Phase 115 pin form). Phase 141's W3 arms crowned
+/// `range` — one of the eight named in LIST_ENCODER_
+/// SCOPE §3 — so its pin retires in place per §9 R10:
+/// `range` now Verifies with its shipped body. The five
+/// higher-order entries' element rows wait on W5's UF
+/// composition (Phase 143) and stay Inconclusive.
 #[cfg(feature = "z3-support")]
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn phase135_verdicts_are_the_tier2_inconclusive() {
+fn phase135_verdicts_the_tier2_standing_after_w3() {
     let specs = list_specs();
     for name in SIX {
         let spec = spec_of(&specs, name);
@@ -455,12 +461,20 @@ fn phase135_verdicts_are_the_tier2_inconclusive() {
         let verdict = Verifier::with_specs(&specs)
             .verify_one(&candidate(&spec, body), &spec)
             .status;
-        assert_eq!(
-            verdict,
-            VerificationStatus::Inconclusive,
-            "{name}: element-level verdicts wait on the §3.9 encoder — \
-             Inconclusive is the honest Tier-2 standing"
-        );
+        if name == "range" {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Verified,
+                "range: crowned at Phase 141 (W3) — Verified with its shipped body"
+            );
+        } else {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Inconclusive,
+                "{name}: element-level verdicts wait on W5's UF composition — \
+                 Inconclusive is the honest Tier-2 standing"
+            );
+        }
     }
 }
 

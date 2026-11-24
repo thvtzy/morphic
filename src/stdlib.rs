@@ -2082,3 +2082,113 @@ fn shipped_body_native(name: &str) -> Option<IRNode> {
         _ => None,
     }
 }
+
+/// The stated loop invariant for a shipped body's `For`
+/// loop (Phase 141, LIST_ENCODER_SCOPE §2.6): spec-syntax
+/// constraint rows over the loop's environment, in the
+/// Phase 96 invariant dialect (rows separated by `;`,
+/// parsed by the spec parser's own constraint parser).
+///
+/// `IRNode::For` carries no invariant field — the IR
+/// gives that field to While/Loop only — so a shipped
+/// body's loop states its invariant here, authored
+/// beside the bodies themselves as part of the library's
+/// verification data. The verifier reaches this table
+/// only through `verify_one`, keyed by spec name exactly
+/// as the engine reaches `shipped_body`; the Phase 96
+/// obligations (initiation / consecution / exit)
+/// discharge the text against the body before any fact
+/// from it is used, so a text the body does not preserve
+/// fails the route and the verdict stays Inconclusive —
+/// the table can state, never assert. Each entry below
+/// has exactly one `For` loop; the text is that loop's
+/// invariant, in the prefix form of the entry's own
+/// postconditions (the counter `i` is the prefix bound;
+/// `range`'s output elements are what its invariant
+/// says, nothing more — §2.6's named exhibit).
+///
+/// The rows are written against the encoder's standing
+/// semantics: a symbolic length is an Int the sessions
+/// know only as a count (`>= 0` is a judge-session side
+/// condition, Phase 141), so a bound the loop head
+/// reaches only on the non-degenerate case is stated as
+/// an implication (`len(xs) >= 0 implies i <= len(xs)`),
+/// never as a bare fact the entry state cannot carry.
+pub fn shipped_loop_invariant(name: &str) -> Option<&'static str> {
+    match name {
+        // out is the reversed prefix: its length is the
+        // counter, and position j holds the element the
+        // full reversal places there.
+        "list_reverse" => Some(
+            "len(out) == i; 0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             forall j: Int in range(len(out)): out[j] == xs[(len(xs) - 1) - j]",
+        ),
+        // found is the prefix disjunction, stated in both
+        // directions: every hit in the prefix is recorded
+        // (the forall form), and a recorded hit is
+        // witnessed in the prefix (the exists form).
+        "list_contains" => Some(
+            "0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             forall j: Int in range(len(xs)): j >= i || xs[j] != x || found == true; \
+             found == true implies (exists j: Int in range(len(xs)): j < i && xs[j] == x)",
+        ),
+        // m is the prefix minimum: bounded above by every
+        // element seen, and attained by one of them.
+        "list_min" => Some(
+            "1 <= i; len(xs) >= 1 implies i <= len(xs); \
+             forall j: Int in range(len(xs)): j >= i || m <= xs[j]; \
+             exists j: Int in range(len(xs)): j < i && xs[j] == m",
+        ),
+        // m is the prefix maximum, dually.
+        "list_max" => Some(
+            "1 <= i; len(xs) >= 1 implies i <= len(xs); \
+             forall j: Int in range(len(xs)): j >= i || m >= xs[j]; \
+             exists j: Int in range(len(xs)): j < i && xs[j] == m",
+        ),
+        // k counts in lockstep with i; out is the prefix
+        // of xs truncated at n (the three length cases
+        // are the postconditions' own, at the prefix).
+        "list_take" => Some(
+            "k == i; 0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             n <= 0 implies len(out) == 0; \
+             n >= i implies len(out) == i; \
+             n > 0 && n < i implies len(out) == n; \
+             forall j: Int in range(len(out)): out[j] == xs[j]",
+        ),
+        // out is the prefix of xs past n (the same three
+        // cases), and its elements are xs's, shifted by n
+        // on the positive case and unshifted otherwise —
+        // the two element rows are the postconditions'
+        // own guarded rows at the prefix.
+        "list_drop" => Some(
+            "k == i; 0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             n <= 0 implies len(out) == i; \
+             n >= i implies len(out) == 0; \
+             n > 0 && n < i implies len(out) == i - n; \
+             forall j: Int in range(len(out)): n > 0 implies out[j] == xs[j + n]; \
+             forall j: Int in range(len(out)): n <= 0 implies out[j] == xs[j]",
+        ),
+        // ok is the conjunction over the adjacent pairs
+        // strictly inside the prefix: while ok holds,
+        // every such pair is ordered; a false ok is
+        // witnessed by an inverted pair inside it.
+        "list_is_sorted" => Some(
+            "1 <= i; len(xs) >= 1 implies i <= len(xs); \
+             forall j: Int in range(len(xs)): j + 1 >= i || ok == false || xs[j] <= xs[j + 1]; \
+             ok == false implies (exists j: Int in range(len(xs)): j + 1 < i && xs[j] > xs[j + 1])",
+        ),
+        // out is the built prefix of the range: its
+        // length is the counter's distance from lo, and
+        // position j holds lo + j. The empty case is
+        // carried by the second row (before the first
+        // iteration out is empty whatever hi says; once
+        // hi > lo the loop's own progress keeps the
+        // length equation exact).
+        "range" => Some(
+            "len(out) == i - lo; len(out) == 0 || hi > lo; \
+             hi >= lo implies i <= hi; \
+             forall j: Int in range(len(out)): out[j] == lo + j",
+        ),
+        _ => None,
+    }
+}
