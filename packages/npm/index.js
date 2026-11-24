@@ -167,7 +167,7 @@ function list_is_empty(xs) {
     return (BigInt([...(xs)].length) === 0n);
 }
 
-/** list_reverse(xs) = the elements of xs in reverse order; empty gives empty, a singleton gives itself (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_reverse(xs) = the elements of xs in reverse order; empty gives empty, a singleton gives itself (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_reverse(xs) {
     let out = [];
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -176,7 +176,7 @@ function list_reverse(xs) {
     return out;
 }
 
-/** list_contains(xs, x) = true iff some element of xs equals x; the empty list gives false (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_contains(xs, x) = true iff some element of xs equals x; the empty list gives false (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_contains(xs, x) {
     let found = false;
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -185,7 +185,7 @@ function list_contains(xs, x) {
     return found;
 }
 
-/** list_sum(xs) = the sum of the elements of xs; the empty list gives 0. Arithmetic is the language's standing Int arithmetic (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_sum(xs) = the sum of the elements of xs; the empty list gives 0. Arithmetic is the language's standing Int arithmetic (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_sum(xs) {
     let acc = 0n;
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -194,7 +194,7 @@ function list_sum(xs) {
     return acc;
 }
 
-/** list_product(xs) = the product of the elements of xs; the empty list gives 1, and any zero element gives 0 (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_product(xs) = the product of the elements of xs; the empty list gives 1, and any zero element gives 0 (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_product(xs) {
     let acc = 1n;
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -203,7 +203,7 @@ function list_product(xs) {
     return acc;
 }
 
-/** list_min(xs) = Some(m) with m the least element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_min(xs) = Some(m) with m the least element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_min(xs) {
     if ((BigInt([...(xs)].length) === 0n)) {
         return null;
@@ -216,7 +216,7 @@ function list_min(xs) {
     }
 }
 
-/** list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_max(xs) {
     if ((BigInt([...(xs)].length) === 0n)) {
         return null;
@@ -229,7 +229,7 @@ function list_max(xs) {
     }
 }
 
-/** list_take(xs, n) = the first n elements of xs, with n clamped into [0, len(xs)]: n <= 0 gives the empty list, n >= len(xs) gives xs unchanged (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_take(xs, n) = the first n elements of xs, with n clamped into [0, len(xs)]: n <= 0 gives the empty list, n >= len(xs) gives xs unchanged (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_take(xs, n) {
     let out = [];
     let k = 0n;
@@ -243,7 +243,7 @@ function list_take(xs, n) {
     return out;
 }
 
-/** list_drop(xs, n) = xs without its first n elements, with n clamped into [0, len(xs)]: n <= 0 gives xs unchanged, n >= len(xs) gives the empty list (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_drop(xs, n) = xs without its first n elements, with n clamped into [0, len(xs)]: n <= 0 gives xs unchanged, n >= len(xs) gives the empty list (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_drop(xs, n) {
     let out = [];
     let k = 0n;
@@ -257,7 +257,7 @@ function list_drop(xs, n) {
     return out;
 }
 
-/** list_is_sorted(xs) = true iff xs is non-strictly ascending (every adjacent pair a <= b); the empty list and singletons give true. The library form of Appendix A's is_sorted (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_is_sorted(xs) = true iff xs is non-strictly ascending (every adjacent pair a <= b); the empty list and singletons give true. The library form of Appendix A's is_sorted (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_is_sorted(xs) {
     let ok = true;
     for (let i = 1n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -266,7 +266,7 @@ function list_is_sorted(xs) {
     return ok;
 }
 
-/** list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; standing residue at 1.3 — row 1 is the is_permutation Predicate (unencoded, 3.10) and row 3 a two-binder forall past the Phase 94 envelope (LIST_ENCODER_SCOPE.md 3.3). */
 function list_sort(xs) {
     let out = [];
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -299,7 +299,7 @@ function list_sort(xs) {
     return out;
 }
 
-/** list_binary_search(xs, x) = Some(i) with xs[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; element-level verification awaits the post-1.0 list encoder (D7a). */
+/** list_binary_search(xs, x) = Some(i) with xs[i] == x when x occurs in the sorted list xs, or None when it does not. With duplicate targets any valid index satisfies the contract — the specific index is spec-silent. Hand body at the executed standard (the G5 scope-around, STDLIB_SCOPE.md 2.6): the body is a scan, because generated Rust cannot index a Vec by an Int variable (the language has no usize — G5), so the While-form binary search cannot compile; the frozen contract is the search semantics above, and per-entry complexity is deliberately outside the gate (STDLIB_SCOPE.md 3). Tier-2: executed-exact on the full battery; at 1.3 its element rows encode, but its require: is not assumable in the crown route — list_is_sorted's contract is quantifier-shaped, with no expression-level denotation for the precondition machinery — so no Verified claim is made (LIST_ENCODER_SCOPE.md 3.3; Phase 144 measurement). */
 function list_binary_search(xs, x) {
     let res = null;
     let k = 0n;
@@ -313,7 +313,7 @@ function list_binary_search(xs, x) {
     return res;
 }
 
-/** list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+/** list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_map(xs, f) {
     let out = [];
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -322,7 +322,7 @@ function list_map(xs, f) {
     return out;
 }
 
-/** list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+/** list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified of exactly its two frozen rows and executed-exact on the full battery (LIST_ENCODER_SCOPE.md 3.3). */
 function list_filter(xs, p) {
     let out = [];
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -334,7 +334,7 @@ function list_filter(xs, p) {
     return out;
 }
 
-/** list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+/** list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_fold(xs, init, f) {
     let acc = init;
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -343,7 +343,7 @@ function list_fold(xs, init, f) {
     return acc;
 }
 
-/** list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+/** list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_all(xs, p) {
     let ok = true;
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -352,7 +352,7 @@ function list_all(xs, p) {
     return ok;
 }
 
-/** list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1). */
+/** list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function list_any(xs, p) {
     let ok = false;
     for (let i = 0n, __end_i = BigInt([...(xs)].length); i < __end_i; i++) {
@@ -361,7 +361,7 @@ function list_any(xs, p) {
     return ok;
 }
 
-/** range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9). */
+/** range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3). */
 function range(lo, hi) {
     let out = [];
     for (let i = lo, __end_i = hi; i < __end_i; i++) {

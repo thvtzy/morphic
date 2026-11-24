@@ -187,6 +187,9 @@ impl Verifier {
         for p in &spec.params {
             if let Some(sym) = param_env.get(&p.name) {
                 collect_char_conditions(sym, &mut assertions);
+                // Phase 141: the domain is a domain of
+                // real values — its lengths are counts.
+                collect_len_conditions(sym, &mut assertions);
             }
         }
         assertions.extend(terms.iter().cloned());
@@ -239,11 +242,15 @@ impl Verifier {
             _ => &[],
         };
 
-        let output = sym_eval(
-            &candidate.body,
-            &mut param_env.clone(),
-            &EvalCtx::root(&self.index),
-        );
+        // The body is evaluated under the spec's
+        // preconditions (Phase 140): the require terms are
+        // the body side's guard source for the index arm
+        // (§2.3) — a body read discharges exactly when a
+        // require states its in-range fact.
+        let body_ctx = EvalCtx::root(&self.index)
+            .with_guards(pre_terms)
+            .with_guard_timeout(self.timeout_per_constraint_ms);
+        let output = sym_eval(&candidate.body, &mut param_env.clone(), &body_ctx);
 
         // Statement-mode routing (Phase 93): the
         // statement encoder engages ONLY where the
@@ -269,6 +276,30 @@ impl Verifier {
             // invariant obligations are made under the
             // spec's preconditions (§3.1).
             ctx.assumptions = pre_terms.to_vec();
+            // Phase 141: the run's decisions are made over
+            // real values — the parameters' length
+            // well-formedness rides the assumptions, as it
+            // rides every judge session.
+            for sym in param_env.values() {
+                collect_len_conditions(sym, &mut ctx.assumptions);
+            }
+            // Phase 141 (§2.6): the stated invariant for
+            // this spec's own `For` loops, from the
+            // library's authored data — the same
+            // name-keyed supply by which the engine
+            // reaches the shipped bodies themselves.
+            ctx.for_invariant =
+                crate::stdlib::shipped_loop_invariant(&spec.name).map(|s| s.to_string());
+            // The statement route's value evaluations
+            // source their index-arm guards from the same
+            // terms (Phase 140): `stmt_eval_value` delegates
+            // to `sym_eval` under `ctx.eval`, so the
+            // statement side's reads are guarded by exactly
+            // the hypotheses the expression side's are.
+            ctx.eval = ctx
+                .eval
+                .with_guards(pre_terms)
+                .with_guard_timeout(self.timeout_per_constraint_ms);
             sym_eval_stmt(&candidate.body, param_env.clone(), &ctx)
         } else {
             None
@@ -782,9 +813,18 @@ impl Verifier {
         for p in &spec.params {
             if let Some(sym) = param_env.get(&p.name) {
                 collect_char_conditions(sym, &mut side);
+                // Phase 141: length well-formedness,
+                // asserted with the Char conditions.
+                collect_len_conditions(sym, &mut side);
             }
         }
-        let Some(formula) = encode_constraint(&resolved, &env, &EvalCtx::root(&self.index)) else {
+        // The constraint side's guard source (Phase 140,
+        // §2.3): the spec's require terms, plus each row's
+        // own antecedents (added inside `encode_constraint`).
+        let row_ctx = EvalCtx::root(&self.index)
+            .with_guards(pre)
+            .with_guard_timeout(self.timeout_per_constraint_ms);
+        let Some(formula) = encode_constraint(&resolved, &env, &row_ctx) else {
             // Phase 97 (the W8 fix): the whole row
             // declined — the literal-tag boundary (an
             // `unwrap` over a literal Err output has no
@@ -804,8 +844,7 @@ impl Verifier {
             // never Refutes, because a declined disjunct
             // might be the true one. See
             // `encode_disjunct_union`.
-            let Some(union) =
-                encode_disjunct_union(&resolved, &env, &EvalCtx::root(&self.index))
+            let Some(union) = encode_disjunct_union(&resolved, &env, &row_ctx)
             else {
                 return done(false, None, Tri::Unknown);
             };
@@ -939,11 +978,13 @@ impl Verifier {
         };
 
         // The D5a Char side conditions, asserted exactly
-        // as in `verify_constraint`.
+        // as in `verify_constraint` — and with them the
+        // Phase 141 length well-formedness conditions.
         let mut side: Vec<z3::ast::Bool> = Vec::new();
         for p in &spec.params {
             if let Some(sym) = param_env.get(&p.name) {
                 collect_char_conditions(sym, &mut side);
+                collect_len_conditions(sym, &mut side);
             }
         }
         // Int parameters, for real counterexample values.
@@ -970,8 +1011,13 @@ impl Verifier {
             else {
                 return done(false, None, Tri::Unknown);
             };
-            let formula =
-                encode_constraint(&resolved, &env, &EvalCtx::root(&self.index));
+            // The constraint side's guard source (Phase
+            // 140, §2.3): the spec's require terms, plus
+            // each row's own antecedents.
+            let row_ctx = EvalCtx::root(&self.index)
+                .with_guards(pre)
+                .with_guard_timeout(self.timeout_per_constraint_ms);
+            let formula = encode_constraint(&resolved, &env, &row_ctx);
             let Some(formula) = formula else {
                 // Phase 97 (the W8 fix): the whole row
                 // declined on this path — the literal-tag
@@ -990,8 +1036,7 @@ impl Verifier {
                 // standing outcome. See
                 // `encode_disjunct_union` and
                 // `verify_constraint`'s twin fallback.
-                let Some(union) =
-                    encode_disjunct_union(&resolved, &env, &EvalCtx::root(&self.index))
+                let Some(union) = encode_disjunct_union(&resolved, &env, &row_ctx)
                 else {
                     return done(false, None, Tri::Unknown);
                 };
@@ -1274,10 +1319,39 @@ enum Sym {
     List(Vec<Sym>),
     /// A list whose elements are unmodelled but whose
     /// LENGTH is this Int term — the binding of a List-typed
-    /// parameter or record field (Phase 76). `len` reads the
-    /// term; element access and list equality are
-    /// unencodable (a length is not the list).
+    /// parameter or record field whose element sort is not
+    /// Int (Phase 76; Phase 139 keeps it for exactly those:
+    /// see `ArrayLen` and LIST_ENCODER_SCOPE §9 R9).
+    /// `len` reads the term; element access and list
+    /// equality are unencodable (a length is not the list).
     ListLen(z3::ast::Int),
+    /// A `List<Int>` value as a PAIR (Phase 139, W1;
+    /// LIST_ENCODER_SCOPE §2.1): the standing length term
+    /// (`len` — the very term `ListLen` would carry, same
+    /// name, same form) plus an `Array<Int, Int>` term
+    /// carrying the elements, `select(elems, i)` being
+    /// index `i`'s element, meaningful exactly on
+    /// `0 <= i < len` (§2.3's guard discipline: no index
+    /// term is produced without its in-range proof, and
+    /// beyond-length content is unobservable to every
+    /// verdict). The pairing is ONE binding, carried as
+    /// one variant so the pair travels together through
+    /// environments, merges and havocs — a companion
+    /// binding keyed by path would be invisible to the
+    /// shape-driven consumers (the statement layer's
+    /// havoc above all) and could desynchronize from the
+    /// length it belongs to. At W1 no consumer reads
+    /// `elems` yet: W2 builds the guarded select and the
+    /// equality form, W3 the quantifier arms. What W1
+    /// builds is the binding and its hygiene — `len`
+    /// reads `len`, merges merge both halves (§2.11),
+    /// Append is §2.6's store, and a concrete list meets
+    /// the pair through the §2.5 bridge
+    /// (`sym_pair_of_concrete`).
+    ArrayLen {
+        len: z3::ast::Int,
+        elems: z3::ast::Array,
+    },
     /// A Char as its Unicode scalar value (Phase 76, D5a).
     /// Deliberately NOT `Sym::Int`: sort-strictness — a
     /// Char never compares or computes as an Int. A Char
@@ -1502,7 +1576,38 @@ struct EvalCtx<'a> {
     index: &'a SpecIndex,
     visiting: Vec<String>,
     depth: usize,
+    /// The guard hypotheses in scope for the index arm
+    /// (Phase 140, LIST_ENCODER_SCOPE §2.3): Bool terms the
+    /// encoding context carries as hypotheses, from which
+    /// an index term's in-range proof must arise. The
+    /// sources are exactly the freeze's enumeration, wired
+    /// at their sites: the spec's `require:` terms (the
+    /// body evaluation and both row judges in `verify_one`;
+    /// the encodability predicate), each Implies row's
+    /// antecedent (added for its consequent inside
+    /// `encode_constraint`), and — since Phase 141 (W3) —
+    /// the bounded quantifier's derived domain (the
+    /// in-range conjuncts of the binder's own element
+    /// reads, supplied by the Forall/Exists arms for
+    /// their bodies) and the statement layer's path
+    /// hypotheses (a branch's condition, a loop's
+    /// condition and invariant, threaded by `stmt_eval`).
+    /// Guards are TERMS, not names: after argument
+    /// substitution in an inlined call they still speak
+    /// about the same length/array terms, so `child`
+    /// inherits them unchanged.
+    guards: Vec<z3::ast::Bool>,
+    /// The per-discharge solver budget for the index arm's
+    /// entailment check; `verify_one` sets it to the
+    /// verifier's per-constraint timeout.
+    guard_timeout_ms: u64,
 }
+
+/// The index arm's discharge budget where no verifier
+/// timeout is in scope (the encodability predicate, unit
+/// call sites): the standing per-constraint default.
+#[cfg(feature = "z3-support")]
+const GUARD_DISCHARGE_TIMEOUT_MS: u64 = 5_000;
 
 #[cfg(feature = "z3-support")]
 impl<'a> EvalCtx<'a> {
@@ -1511,6 +1616,8 @@ impl<'a> EvalCtx<'a> {
             index,
             visiting: Vec::new(),
             depth: 0,
+            guards: Vec::new(),
+            guard_timeout_ms: GUARD_DISCHARGE_TIMEOUT_MS,
         }
     }
 
@@ -1525,6 +1632,50 @@ impl<'a> EvalCtx<'a> {
             index: self.index,
             visiting,
             depth: self.depth + 1,
+            guards: self.guards.clone(),
+            guard_timeout_ms: self.guard_timeout_ms,
+        }
+    }
+
+    /// The same context carrying `terms` as additional
+    /// guard hypotheses (Phase 140).
+    fn with_guards(&self, terms: &[z3::ast::Bool]) -> Self {
+        let mut guards = self.guards.clone();
+        guards.extend(terms.iter().cloned());
+        Self {
+            index: self.index,
+            visiting: self.visiting.clone(),
+            depth: self.depth,
+            guards,
+            guard_timeout_ms: self.guard_timeout_ms,
+        }
+    }
+
+    /// The same context under the verifier's per-constraint
+    /// timeout for guard discharges (Phase 140).
+    fn with_guard_timeout(&self, timeout_ms: u64) -> Self {
+        Self {
+            index: self.index,
+            visiting: self.visiting.clone(),
+            depth: self.depth,
+            guards: self.guards.clone(),
+            guard_timeout_ms: timeout_ms,
+        }
+    }
+
+    /// The same context with the guard set cleared — the
+    /// quantifier arms' boundary (Phase 140): inside a
+    /// quantifier, guards come from the body's own
+    /// antecedents and (Phase 141) from the binder's
+    /// derived domain, never from hypotheses about the
+    /// free parameters the binder's names may shadow.
+    fn without_guards(&self) -> Self {
+        Self {
+            index: self.index,
+            visiting: self.visiting.clone(),
+            depth: self.depth,
+            guards: Vec::new(),
+            guard_timeout_ms: self.guard_timeout_ms,
         }
     }
 }
@@ -1605,7 +1756,10 @@ const MAX_FRESH_DEPTH: usize = 8;
 /// module's declarations — `SpecIndex::from_module`; with a
 /// declarations-less index a record type binds Opaque,
 /// exactly the pre-Phase-76 behavior). A List binds its
-/// length only (`Sym::ListLen`): elements are unmodelled.
+/// length only (`Sym::ListLen`) — except `List<Int>`,
+/// which binds as the pair of LIST_ENCODER_SCOPE §2.1
+/// (`Sym::ArrayLen`: the same length term plus a fresh
+/// array term), Phase 139.
 #[cfg(feature = "z3-support")]
 fn fresh_sym(ty: &TypeRef, path: &str, index: &SpecIndex, depth: usize) -> Sym {
     if depth > MAX_FRESH_DEPTH {
@@ -1624,9 +1778,29 @@ fn fresh_sym(ty: &TypeRef, path: &str, index: &SpecIndex, depth: usize) -> Sym {
         TypeRef::Bool => Sym::Bool(z3::ast::Bool::new_const(path)),
         TypeRef::String => Sym::Str(z3::ast::String::new_const(path)),
         TypeRef::Char => Sym::Char(z3::ast::Int::new_const(path)),
-        TypeRef::List(_) => {
-            Sym::ListLen(z3::ast::Int::new_const(format!("{path}.len").as_str()))
-        }
+        TypeRef::List(inner) => match **inner {
+            // Phase 139 (W1, LIST_ENCODER_SCOPE §2.1): a
+            // `List<Int>` binds as a PAIR — the standing
+            // length term, unchanged in name and form
+            // (`{path}.len`, the term every length-level
+            // standing in the tree stands on), plus a
+            // fresh `Array<Int, Int>` term over the same
+            // binding path (`{path}.elems`). The pairing
+            // engages ONLY here (§9 R9): every other
+            // element sort — Char, Bool, String, the sized
+            // integers, nested, function — keeps the
+            // `ListLen` binding below and its exact
+            // standings.
+            TypeRef::Int => Sym::ArrayLen {
+                len: z3::ast::Int::new_const(format!("{path}.len").as_str()),
+                elems: z3::ast::Array::new_const(
+                    format!("{path}.elems").as_str(),
+                    &z3::Sort::int(),
+                    &z3::Sort::int(),
+                ),
+            },
+            _ => Sym::ListLen(z3::ast::Int::new_const(format!("{path}.len").as_str())),
+        },
         TypeRef::Option(inner) => Sym::Option {
             some: Tag::Free(z3::ast::Bool::new_const(
                 format!("{path}.is_some").as_str(),
@@ -1754,6 +1928,60 @@ fn collect_char_conditions(sym: &Sym, out: &mut Vec<z3::ast::Bool>) {
     }
 }
 
+/// The length well-formedness side-conditions owed by
+/// every list length inside a bound value (Phase 141):
+/// a length is a count, so `len >= 0` is a fact of the
+/// type, asserted in judge sessions exactly as the D5a
+/// Char range conditions are — a countermodel at a
+/// negative length is not a countermodel any execution
+/// can produce (before this phase, the row
+/// `len(xs) >= 0` was Refuted for the `len` body on
+/// exactly such a model). Both list bindings contribute
+/// their length term (the pair's and the length-only
+/// form's); record fields and Option/Result payloads
+/// recurse, as in `collect_char_conditions`. This is a
+/// SESSION fact, never a guard hypothesis: the index
+/// arm's discharge (`guard_discharged`) does not see
+/// it, and the mirror's difference-logic discharge
+/// needs no corresponding seed — the two discharges
+/// stay W2's, term for term.
+#[cfg(feature = "z3-support")]
+fn collect_len_conditions(sym: &Sym, out: &mut Vec<z3::ast::Bool>) {
+    match sym {
+        Sym::ArrayLen { len, .. } | Sym::ListLen(len) => {
+            out.push(len.ge(&z3::ast::Int::from_i64(0)));
+        }
+        Sym::List(items) => {
+            for item in items {
+                collect_len_conditions(item, out);
+            }
+        }
+        Sym::Record { fields, .. } => {
+            for (_, v) in fields {
+                collect_len_conditions(v, out);
+            }
+        }
+        Sym::Option { payload, .. } => {
+            if let Some(p) = payload {
+                collect_len_conditions(p, out);
+            }
+        }
+        Sym::Result {
+            ok_payload,
+            err_payload,
+            ..
+        } => {
+            if let Some(p) = ok_payload {
+                collect_len_conditions(p, out);
+            }
+            if let Some(p) = err_payload {
+                collect_len_conditions(p, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(feature = "z3-support")]
 fn sym_eval(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<Sym> {
     Some(sym_eval_flow(node, env, ctx)?.into_value())
@@ -1840,7 +2068,7 @@ fn sym_eval_flow(node: &IRNode, env: &mut SymEnv, ctx: &EvalCtx) -> Option<SymFl
         IRNode::Index(coll, idx) => {
             let coll = sym_eval(coll, env, ctx)?;
             let idx = sym_eval(idx, env, ctx)?;
-            Some(SymFlow::Normal(sym_index(coll, idx)?))
+            Some(SymFlow::Normal(sym_index(coll, idx, ctx)?))
         }
 
         IRNode::FieldAccess { base, field } => {
@@ -2183,7 +2411,10 @@ fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
         // Remaining pairs are provably disjoint sorts —
         // records, tagged values and list-lengths never equal
         // a literal pattern, and a Char never equals an Int,
-        // Float, Bool or String literal.
+        // Float, Bool or String literal. A paired list
+        // (Sym::ArrayLen, Phase 139) lands here too, as
+        // ListLen does: a list value is disjoint from every
+        // scalar literal pattern.
         _ => PatternCond::Never,
     }
 }
@@ -2270,6 +2501,10 @@ fn sym_len(v: Sym) -> Option<Sym> {
         Sym::List(items) => Some(Sym::Int(z3::ast::Int::from_i64(items.len() as i64))),
         Sym::Str(s) => Some(Sym::Int(s.length())),
         Sym::ListLen(n) => Some(Sym::Int(n)),
+        // The pair's length half IS the standing length
+        // term (Phase 139, §2.1): `len` reads it exactly
+        // as it reads ListLen's.
+        Sym::ArrayLen { len, .. } => Some(Sym::Int(len)),
         _ => None,
     }
 }
@@ -2352,8 +2587,54 @@ fn str_literal(s: &z3::ast::String) -> Option<String> {
 }
 
 #[cfg(feature = "z3-support")]
-fn sym_index(coll: Sym, idx: Sym) -> Option<Sym> {
+/// The guard discipline's discharge (Phase 140,
+/// LIST_ENCODER_SCOPE §2.3): the read `select(elems, i)`
+/// over a paired binding of length `len` may be produced
+/// only when the in-range fact `0 <= i < len` is PROVEN
+/// from the context's guard hypotheses. Two sources,
+/// exactly the freeze's: a concrete index provably in
+/// range (both terms numerals — the closed case, no
+/// hypotheses needed), or entailment from the guard terms
+/// the context carries (a `require:` hypothesis, an
+/// antecedent in scope). Anything else — no guards, guards
+/// that do not entail the fact, a solver that cannot
+/// decide — declines: the read is never totalized into a
+/// value, and no `select` is left for the solver to
+/// interpret freely. A verdict bought by an unguarded read
+/// is the one failure this campaign exists to prevent.
+#[cfg(feature = "z3-support")]
+fn guard_discharged(ctx: &EvalCtx, len: &z3::ast::Int, idx: &z3::ast::Int) -> bool {
+    // The closed case: a concrete index into a concrete
+    // length (the §2.5 bridge's pairs are the producers).
+    if let (Some(n), Some(m)) = (idx.as_i64(), len.as_i64()) {
+        return 0 <= n && n < m;
+    }
+    if ctx.guards.is_empty() {
+        return false;
+    }
+    let zero = z3::ast::Int::from_i64(0);
+    let in_range = z3::ast::Bool::and(&[&idx.ge(&zero), &idx.lt(len)]);
+    let mut terms: Vec<z3::ast::Bool> = ctx.guards.clone();
+    terms.push(in_range.not());
+    // Discharged exactly when guards ∧ ¬(in range) is
+    // UNSAT. Sat (a countermodel to the guard) and Unknown
+    // (the solver could not decide) both decline.
+    stmt_sat(&terms, ctx.guard_timeout_ms) == Some(false)
+}
+
+#[cfg(feature = "z3-support")]
+fn sym_index(coll: Sym, idx: Sym, ctx: &EvalCtx) -> Option<Sym> {
     match (coll, idx) {
+        // The paired binding (Phase 140, §2.3): the select
+        // term exists only under the guard discipline —
+        // `guard_discharged` is the whole arm's gate.
+        (Sym::ArrayLen { len, elems }, Sym::Int(i)) => {
+            if guard_discharged(ctx, &len, &i) {
+                elems.select(&i).as_int().map(Sym::Int)
+            } else {
+                None
+            }
+        }
         (Sym::List(items), Sym::Int(i)) => {
             // Only a constant index picks an element; a
             // symbolic index would need array theory. An
@@ -2409,6 +2690,34 @@ fn sym_ite_payload(
     }
 }
 
+/// The constructed-list bridge (Phase 139, W1;
+/// LIST_ENCODER_SCOPE §2.5): a concrete list of Int
+/// terms as a paired binding — the store-chain of its
+/// element terms over the constant base array, with
+/// length its count. The base is Z3's constant array at
+/// 0: hash-consing makes it one shared term for every
+/// crossing, so a crossed list's beyond-length content
+/// is common by construction (§9 R1) — and unobservable
+/// to any verdict regardless (§2.3). A non-Int element
+/// declines: the pair models `List<Int>` only (R9), so
+/// a concrete list of any other sort never crosses.
+#[cfg(feature = "z3-support")]
+fn sym_pair_of_concrete(items: Vec<Sym>) -> Option<Sym> {
+    let count = items.len();
+    let mut elems = z3::ast::Array::const_array(
+        &z3::Sort::int(),
+        &z3::ast::Int::from_i64(0),
+    );
+    for (idx, item) in items.into_iter().enumerate() {
+        let Sym::Int(term) = item else { return None };
+        elems = elems.store(&z3::ast::Int::from_i64(idx as i64), &term);
+    }
+    Some(Sym::ArrayLen {
+        len: z3::ast::Int::from_i64(count as i64),
+        elems,
+    })
+}
+
 #[cfg(feature = "z3-support")]
 fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
     match (a, b) {
@@ -2418,6 +2727,40 @@ fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
         (Sym::Char(x), Sym::Char(y)) => Some(Sym::Char(cond.ite(&x, &y))),
         (Sym::CharStr(x), Sym::CharStr(y)) => Some(Sym::CharStr(cond.ite(&x, &y))),
         (Sym::ListLen(x), Sym::ListLen(y)) => Some(Sym::ListLen(cond.ite(&x, &y))),
+        // Two paired bindings merge as a pair (Phase 139,
+        // §2.11): lengths by the standing ite, arrays by
+        // the same ite — a merged list's elements are the
+        // branches' elements at each index, which is
+        // exactly what the array ite says.
+        (
+            Sym::ArrayLen {
+                len: la,
+                elems: ea,
+            },
+            Sym::ArrayLen {
+                len: lb,
+                elems: eb,
+            },
+        ) => Some(Sym::ArrayLen {
+            len: cond.ite(&la, &lb),
+            elems: cond.ite(&ea, &eb),
+        }),
+        // A pair meets a concrete list through the §2.5
+        // bridge: the concrete side crosses as its
+        // store-chain pair, then the pair merge above is
+        // the whole story. (Two concretes keep the
+        // elementwise arm below; a pair against a ListLen
+        // is two different bindings and declines, as a
+        // ListLen against a concrete list declined before
+        // the pair existed.)
+        (p @ Sym::ArrayLen { .. }, Sym::List(items)) => {
+            let crossed = sym_pair_of_concrete(items)?;
+            sym_ite(cond, p, crossed)
+        }
+        (Sym::List(items), p @ Sym::ArrayLen { .. }) => {
+            let crossed = sym_pair_of_concrete(items)?;
+            sym_ite(cond, crossed, p)
+        }
         (Sym::List(x), Sym::List(y)) => {
             // Two concrete lists merge elementwise (Phase
             // 91, W4; the Phase 90 probe's p90_ite arm,
@@ -2519,6 +2862,39 @@ enum BinKind {
     Append,
 }
 
+/// List equality over two paired bindings, in the frozen
+/// §2.4 form (Phase 140): equal lengths ∧ pointwise
+/// equality over [0, len). Raw array equality is NOT the
+/// form (R1): array extensionality ranges over every
+/// index, so beyond-length content — which no execution
+/// observes and no verdict may be decided by (§2.3) —
+/// could refute two bindings of the same Morphic list.
+/// The quantifier carries no pattern (the Phase 94
+/// precedent): the pointwise body is linear in the bound
+/// index, and the range guard is the antecedent itself,
+/// so the only indices at which the selects are ever
+/// observed are in-range by construction.
+#[cfg(feature = "z3-support")]
+fn sym_list_eq(
+    len_a: &z3::ast::Int,
+    elems_a: &z3::ast::Array,
+    len_b: &z3::ast::Int,
+    elems_b: &z3::ast::Array,
+) -> Option<z3::ast::Bool> {
+    use z3::ast::Ast as _;
+    let i = z3::ast::Int::new_const("list_eq.i");
+    let zero = z3::ast::Int::from_i64(0);
+    let in_range = z3::ast::Bool::and(&[&i.ge(&zero), &i.lt(len_a)]);
+    let pointwise = elems_a
+        .select(&i)
+        .as_int()?
+        .eq(&elems_b.select(&i).as_int()?);
+    let body = in_range.implies(&pointwise);
+    let bound: &dyn z3::ast::Ast = &i;
+    let all = z3::ast::forall_const(&[bound], &[], &body);
+    Some(z3::ast::Bool::and(&[&len_a.eq(len_b), &all]))
+}
+
 /// One operator table for both IR bodies and spec expressions:
 /// the two syntaxes denote the same operations. Sort-strict,
 /// like the interpreter: operands of the wrong sort (or an
@@ -2576,6 +2952,153 @@ fn sym_binop(kind: BinKind, l: Sym, r: Sym) -> Option<Sym> {
         (Append, Sym::ListLen(n), _) => {
             Some(Sym::ListLen(z3_add(&n, &z3::ast::Int::from_i64(1))))
         }
+        // Append over a paired binding (Phase 139, W1):
+        // §2.6's store form — array `store(elems, len,
+        // item)`, length `len + 1`, exact and in-model.
+        // The length totalization above is thereby
+        // retired for paired bindings: an appended list's
+        // elements are modelled, not merely counted. The
+        // store form lands at W1 rather than W2 because
+        // the totalization's length standings (Phase 91's
+        // push_len) stand on this arm and must not move;
+        // its length half is the totalization's, term for
+        // term. The item must be an Int term — the pair
+        // models List<Int> only, and a value that is not
+        // an Int cannot store into an Array<Int, Int>;
+        // any other item declines rather than totalizing.
+        (
+            Append,
+            Sym::ArrayLen { len, elems },
+            Sym::Int(item),
+        ) => Some(Sym::ArrayLen {
+            elems: elems.store(&len, &item),
+            len: z3_add(&len, &z3::ast::Int::from_i64(1)),
+        }),
+        // Equality over paired bindings (Phase 140, §2.4):
+        // the frozen pointwise form, never raw array
+        // equality (R1). Neq is its negation — no separate
+        // form. A pair meets a concrete list through the
+        // §2.5 bridge (`sym_pair_of_concrete`) and then
+        // takes the same form; the crossing declines on a
+        // non-Int element, so the equality declines with
+        // it. Equality between a pair and a length-only
+        // binding has no arm: the two bindings model
+        // different element sorts, and the shape declines.
+        (
+            Eq,
+            Sym::ArrayLen {
+                len: len_a,
+                elems: elems_a,
+            },
+            Sym::ArrayLen {
+                len: len_b,
+                elems: elems_b,
+            },
+        ) => sym_list_eq(&len_a, &elems_a, &len_b, &elems_b).map(Sym::Bool),
+        (
+            Neq,
+            Sym::ArrayLen {
+                len: len_a,
+                elems: elems_a,
+            },
+            Sym::ArrayLen {
+                len: len_b,
+                elems: elems_b,
+            },
+        ) => sym_list_eq(&len_a, &elems_a, &len_b, &elems_b)
+            .map(|b| Sym::Bool(b.not())),
+        (
+            Eq,
+            Sym::ArrayLen {
+                len: len_a,
+                elems: elems_a,
+            },
+            Sym::List(items),
+        ) => match sym_pair_of_concrete(items)? {
+            Sym::ArrayLen {
+                len: len_b,
+                elems: elems_b,
+            } => sym_list_eq(&len_a, &elems_a, &len_b, &elems_b).map(Sym::Bool),
+            _ => None,
+        },
+        (
+            Eq,
+            Sym::List(items),
+            Sym::ArrayLen {
+                len: len_b,
+                elems: elems_b,
+            },
+        ) => match sym_pair_of_concrete(items)? {
+            Sym::ArrayLen {
+                len: len_a,
+                elems: elems_a,
+            } => sym_list_eq(&len_a, &elems_a, &len_b, &elems_b).map(Sym::Bool),
+            _ => None,
+        },
+        (
+            Neq,
+            Sym::ArrayLen {
+                len: len_a,
+                elems: elems_a,
+            },
+            Sym::List(items),
+        ) => match sym_pair_of_concrete(items)? {
+            Sym::ArrayLen {
+                len: len_b,
+                elems: elems_b,
+            } => sym_list_eq(&len_a, &elems_a, &len_b, &elems_b)
+                .map(|b| Sym::Bool(b.not())),
+            _ => None,
+        },
+        (
+            Neq,
+            Sym::List(items),
+            Sym::ArrayLen {
+                len: len_b,
+                elems: elems_b,
+            },
+        ) => match sym_pair_of_concrete(items)? {
+            Sym::ArrayLen {
+                len: len_a,
+                elems: elems_a,
+            } => sym_list_eq(&len_a, &elems_a, &len_b, &elems_b)
+                .map(|b| Sym::Bool(b.not())),
+            _ => None,
+        },
+        // Concat of two paired bindings (Phase 140, §2.6):
+        // the named residue — it declines elementwise and
+        // binds as the length-only form with the EXACT sum
+        // length, so length rows over a concatenation stand
+        // and every element row over the result declines
+        // (the ListLen binding's consumers are exactly the
+        // length-level ones). A concrete side crosses the
+        // bridge first; a non-Int element declines the
+        // crossing, and the Concat with it.
+        (
+            Concat,
+            Sym::ArrayLen { len: len_a, .. },
+            Sym::ArrayLen { len: len_b, .. },
+        ) => Some(Sym::ListLen(z3_add(&len_a, &len_b))),
+        (
+            Concat,
+            Sym::ArrayLen { len: len_a, .. },
+            Sym::List(items),
+        ) => match sym_pair_of_concrete(items)? {
+            Sym::ArrayLen { len: len_b, .. } => {
+                Some(Sym::ListLen(z3_add(&len_a, &len_b)))
+            }
+            _ => None,
+        },
+        (
+            Concat,
+            Sym::List(items),
+            Sym::ArrayLen { len: len_b, .. },
+        ) => match sym_pair_of_concrete(items)? {
+            Sym::ArrayLen { len: len_a, .. } => {
+                Some(Sym::ListLen(z3_add(&len_a, &len_b)))
+            }
+            _ => None,
+        },
         // Append of an indexed char onto a string (Phase
         // 91, W5): the lexeme shape. The CharStr form is
         // already the character as a length-≤1 string, so
@@ -3001,6 +3524,21 @@ struct StmtCtx<'a> {
     /// caller's context through their states, not through
     /// this field).
     assumptions: Vec<z3::ast::Bool>,
+    /// Phase 141 (§2.6): the stated invariant for a
+    /// `For` loop in the spec-under-judgment's own body,
+    /// supplied by `verify_one` from the library's
+    /// authored data (`stdlib::shipped_loop_invariant`,
+    /// keyed by spec name exactly as the engine reaches
+    /// `shipped_body`). A `For` node carries no invariant
+    /// text of its own (the IR gives that field to
+    /// While/Loop only), so this is the channel by which
+    /// a shipped body's loop states its invariant; the
+    /// Phase 96 obligations discharge the text before
+    /// any fact from it is used, for this body or any
+    /// other. `None` everywhere else — a `For` with no
+    /// supplied invariant takes the unrolling route
+    /// alone, as every `For` did before this phase.
+    for_invariant: Option<String>,
 }
 
 #[cfg(feature = "z3-support")]
@@ -3011,6 +3549,7 @@ impl<'a> StmtCtx<'a> {
             fuel,
             timeout_ms,
             assumptions: Vec::new(),
+            for_invariant: None,
         }
     }
 
@@ -3020,6 +3559,27 @@ impl<'a> StmtCtx<'a> {
             fuel: self.fuel,
             timeout_ms: self.timeout_ms,
             assumptions: self.assumptions.clone(),
+            // The invariant supply names the spec whose
+            // OWN body is under judgment; a callee's loops
+            // are not that body.
+            for_invariant: None,
+        }
+    }
+
+    /// The same context with additional guard hypotheses
+    /// in scope for the expression encoder (Phase 141):
+    /// the statement layer's hypotheses — a branch's
+    /// condition, a loop's condition and invariant — are
+    /// guard sources for the reads on the paths they
+    /// govern, the statement-side dual of the constraint
+    /// side's antecedent accumulation (Phase 140).
+    fn with_eval_guards(&self, terms: &[z3::ast::Bool]) -> Self {
+        Self {
+            eval: self.eval.with_guards(terms),
+            fuel: self.fuel,
+            timeout_ms: self.timeout_ms,
+            assumptions: self.assumptions.clone(),
+            for_invariant: self.for_invariant.clone(),
         }
     }
 }
@@ -3110,6 +3670,24 @@ fn stmt_sym_identical(a: &Sym, b: &Sym) -> bool {
         (Sym::Char(x), Sym::Char(y)) => term_eq(x, y),
         (Sym::CharStr(x), Sym::CharStr(y)) => term_eq(x, y),
         (Sym::ListLen(x), Sym::ListLen(y)) => term_eq(x, y),
+        // A pair is identical when both its terms are
+        // (Phase 139): the length term and the array term.
+        // This is the merge fast path's identity test
+        // (§9 R2) — it asserts nothing about list
+        // EQUALITY, whose only form is §2.4's, built at
+        // W2; two pairs with different terms merge by
+        // `stmt_ite`/`sym_ite`, never by this test passing
+        // or failing.
+        (
+            Sym::ArrayLen {
+                len: la,
+                elems: ea,
+            },
+            Sym::ArrayLen {
+                len: lb,
+                elems: eb,
+            },
+        ) => term_eq(la, lb) && term_eq(ea, eb),
         (Sym::List(x), Sym::List(y)) => {
             x.len() == y.len()
                 && x.iter().zip(y.iter()).all(|(u, v)| stmt_sym_identical(u, v))
@@ -3649,6 +4227,30 @@ fn stmt_eval(node: &IRNode, st: &mut StmtState, ctx: &StmtCtx) -> Option<()> {
                 Sym::Bool(b) => b,
                 _ => return None,
             };
+            // Phase 141: a branch is encoded under its own
+            // hypothesis — the condition (for the else
+            // branch, its negation) joins the guard set
+            // for the branch's reads, together with the
+            // length well-formedness facts of the
+            // environment the branch starts from. This is
+            // the statement-side dual of the constraint
+            // side's antecedent accumulation (Phase 140):
+            // a read the branch's own condition guards —
+            // `xs[0]` under `len(xs) != 0`, the list_min /
+            // list_max shape — discharges from exactly the
+            // hypothesis the path carries. The mirror has
+            // no statement layer, so no mirror counterpart
+            // is owed.
+            let mut branch_terms: Vec<z3::ast::Bool> = Vec::new();
+            for val in st.env.values() {
+                collect_len_conditions(val, &mut branch_terms);
+            }
+            let mut then_terms = branch_terms.clone();
+            then_terms.push(cond.clone());
+            let then_ctx = ctx.with_eval_guards(&then_terms);
+            let mut else_terms = branch_terms;
+            else_terms.push(cond.not());
+            let else_ctx = ctx.with_eval_guards(&else_terms);
             if st.guided {
                 // Guided path: decide the condition
                 // under the standing context and take
@@ -3659,11 +4261,11 @@ fn stmt_eval(node: &IRNode, st: &mut StmtState, ctx: &StmtCtx) -> Option<()> {
                 match (can_then, can_else) {
                     (Some(true), Some(false)) => {
                         st.pc = z3::ast::Bool::and(&[&st.pc, &cond]);
-                        return stmt_eval(then_branch, st, ctx);
+                        return stmt_eval(then_branch, st, &then_ctx);
                     }
                     (Some(false), Some(true)) => {
                         st.pc = z3::ast::Bool::and(&[&st.pc, &cond.not()]);
-                        return stmt_eval(else_branch, st, ctx);
+                        return stmt_eval(else_branch, st, &else_ctx);
                     }
                     _ => {
                         // Undecidable here: merging
@@ -3685,9 +4287,9 @@ fn stmt_eval(node: &IRNode, st: &mut StmtState, ctx: &StmtCtx) -> Option<()> {
                 guided: false,
             };
             let mut then_st = fresh(z3::ast::Bool::and(&[&base_pc, &cond]));
-            stmt_eval(then_branch, &mut then_st, ctx)?;
+            stmt_eval(then_branch, &mut then_st, &then_ctx)?;
             let mut else_st = fresh(z3::ast::Bool::and(&[&base_pc, &cond.not()]));
-            stmt_eval(else_branch, &mut else_st, ctx)?;
+            stmt_eval(else_branch, &mut else_st, &else_ctx)?;
             // Continuation: the paths that neither
             // returned nor broke inside either branch.
             let mut cont = base_pc.clone();
@@ -3765,6 +4367,66 @@ fn stmt_eval(node: &IRNode, st: &mut StmtState, ctx: &StmtCtx) -> Option<()> {
         ),
         IRNode::Loop { body, invariant } => {
             stmt_loop_dispatch(None, body, invariant.as_deref(), st, ctx)
+        }
+        IRNode::For {
+            var,
+            start,
+            end,
+            body,
+        } => {
+            // Phase 141 (§2.6): a `For` evaluates as its
+            // While desugaring — the counter bound to the
+            // start value, the condition `var < end`, the
+            // body followed by the increment — dispatched
+            // through the standing lazy-hybrid loop route.
+            // The invariant is the context's stated supply
+            // for this spec's own body (`StmtCtx::
+            // for_invariant`); without one the loop takes
+            // the unrolling route alone, exactly as every
+            // `For` did when it declined whole at the
+            // expression layer. Two shapes decline rather
+            // than desugar unsoundly: a body whose own
+            // `Break` would skip the increment the
+            // desugaring appends after it (the interpreter
+            // exits the loop at the break, unincremented),
+            // and a body containing a nested `For` over
+            // the same counter name (the desugaring's step
+            // reads the counter after the body, where the
+            // nested loop's binding would still stand; the
+            // interpreter's iteration state is its own).
+            // The end expression is re-evaluated per
+            // iteration, as the While form denotes; the
+            // corpus's ends are pure (`len`, a variable, a
+            // literal), where the two readings coincide.
+            if loop_has_own_break(body) || for_binds_var(body, var) {
+                return None;
+            }
+            let start_v = stmt_eval_value(start, st, ctx)?;
+            if stmt_is_false(&st.pc) {
+                return Some(());
+            }
+            stmt_bind(st, var, start_v)?;
+            let cond = IRNode::BinOp(
+                IRBinOp::Lt,
+                Box::new(IRNode::Var(var.clone())),
+                end.clone(),
+            );
+            let step = IRNode::Assign {
+                target: Box::new(IRNode::Var(var.clone())),
+                value: Box::new(IRNode::BinOp(
+                    IRBinOp::Add,
+                    Box::new(IRNode::Var(var.clone())),
+                    Box::new(IRNode::Literal(IRLiteral::Int(1))),
+                )),
+            };
+            let loop_body = IRNode::Block(vec![body.as_ref().clone(), step]);
+            stmt_loop_dispatch(
+                Some(&cond),
+                &loop_body,
+                ctx.for_invariant.as_deref(),
+                st,
+                ctx,
+            )
         }
         IRNode::BinOp(IRBinOp::Append, l, r) => {
             // A statement-position Append rebinds its
@@ -4111,6 +4773,125 @@ fn constraint_free_vars(c: &Constraint, out: &mut std::collections::HashSet<Stri
     }
 }
 
+/// The binder-aware sibling of `expr_free_vars` /
+/// `constraint_free_vars`, used ONLY by the invariant
+/// route's scope check. The standing pair deliberately
+/// over-approximates (a lambda's parameters count as
+/// free), and its other consumers are written against
+/// that shape — the statement-call capture guard
+/// declines on it, the W3 domain derivation follows it.
+/// The scope check asks a different question — which
+/// names the invariant READS from the loop state — and
+/// a lambda's parameters are not reads: they are bound
+/// by the lambda itself, and the one encoder that
+/// admits a lambda at all (the fold arm, §2.8) binds
+/// them itself. Before W4 no stated invariant carried a
+/// lambda; the fold invariants do (the op is part of
+/// the row), so the check subtracts lambda and
+/// comprehension binders, as `constraint_free_vars`
+/// already subtracts quantifier binders. Everywhere
+/// else the scoped walk is shape-for-shape the standing
+/// one.
+#[cfg(feature = "z3-support")]
+fn expr_free_vars_scoped(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    match e {
+        Expr::Lambda(params, body) => {
+            let mut inner = std::collections::HashSet::new();
+            expr_free_vars_scoped(body, &mut inner);
+            for name in inner {
+                if !params.iter().any(|(p, _)| p == &name) {
+                    out.insert(name);
+                }
+            }
+        }
+        Expr::Comprehension {
+            binder,
+            collection,
+            body,
+        } => {
+            expr_free_vars_scoped(collection, out);
+            let mut inner = std::collections::HashSet::new();
+            expr_free_vars_scoped(body, &mut inner);
+            for name in inner {
+                if name != *binder {
+                    out.insert(name);
+                }
+            }
+        }
+        Expr::Var(n) => {
+            out.insert(n.clone());
+        }
+        Expr::Field(inner, _) => expr_free_vars_scoped(inner, out),
+        Expr::Index(c, i) => {
+            expr_free_vars_scoped(c, out);
+            expr_free_vars_scoped(i, out);
+        }
+        Expr::Call(_, args) => {
+            for a in args {
+                expr_free_vars_scoped(a, out);
+            }
+        }
+        Expr::BinOp(_, l, r) => {
+            expr_free_vars_scoped(l, out);
+            expr_free_vars_scoped(r, out);
+        }
+        Expr::UnaryOp(_, inner) => expr_free_vars_scoped(inner, out),
+        Expr::Length(inner) => expr_free_vars_scoped(inner, out),
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_free_vars_scoped(receiver, out);
+            for a in args {
+                expr_free_vars_scoped(a, out);
+            }
+        }
+        Expr::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                expr_free_vars_scoped(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(feature = "z3-support")]
+fn constraint_free_vars_scoped(c: &Constraint, out: &mut std::collections::HashSet<String>) {
+    match c {
+        Constraint::True => {}
+        Constraint::Expr(e) => expr_free_vars_scoped(e, out),
+        Constraint::Forall { vars, body } | Constraint::Exists { vars, body } => {
+            let mut inner = std::collections::HashSet::new();
+            constraint_free_vars_scoped(body, &mut inner);
+            for v in inner {
+                if !vars.iter().any(|(n, _)| n == &v) {
+                    out.insert(v);
+                }
+            }
+        }
+        Constraint::Implies(a, b) => {
+            constraint_free_vars_scoped(a, out);
+            constraint_free_vars_scoped(b, out);
+        }
+        Constraint::And(parts) | Constraint::Or(parts) => {
+            for p in parts {
+                constraint_free_vars_scoped(p, out);
+            }
+        }
+        Constraint::Not(inner) => constraint_free_vars_scoped(inner, out),
+        Constraint::Eq(a, b) => {
+            expr_free_vars_scoped(a, out);
+            expr_free_vars_scoped(b, out);
+        }
+        Constraint::Order(_, a, b) => {
+            expr_free_vars_scoped(a, out);
+            expr_free_vars_scoped(b, out);
+        }
+        Constraint::Predicate(_, args) => {
+            for a in args {
+                expr_free_vars_scoped(a, out);
+            }
+        }
+    }
+}
+
 /// Direct children of an IR node, for the invariant
 /// machinery's syntactic walks (a local mirror of the
 /// selector's walker — the statement layer keeps its
@@ -4247,15 +5028,33 @@ fn loop_has_own_break(node: &IRNode) -> bool {
     }
 }
 
+/// Whether a node contains a nested `For` binding
+/// `var` (Phase 141): the For desugaring's counter
+/// discipline — a nested same-name `For` would leave
+/// its own final binding where the outer loop's step
+/// reads the counter. Lambda/Closure bodies are their
+/// own scope and do not count.
+#[cfg(feature = "z3-support")]
+fn for_binds_var(node: &IRNode, var: &str) -> bool {
+    match node {
+        IRNode::For { var: inner, .. } if inner == var => true,
+        IRNode::Lambda { .. } | IRNode::Closure { .. } => false,
+        _ => stmt_children(node).iter().any(|c| for_binds_var(c, var)),
+    }
+}
+
 /// A fresh value of `v`'s shape, for the havoc: every
 /// component the value's shape exposes becomes a fresh
 /// constant under `path`; a concrete list becomes its
 /// length-only form (an over-approximation — the exit
-/// facts the rows read are length facts). Shapes with
-/// no sound fresh form decline: a CharStr (its
-/// length-≤1 discipline is the string term itself) and
-/// an Option/Result whose absent payload carries no
-/// shape to freshen.
+/// facts the rows read are length facts), except a
+/// concrete list of Int terms, whose fresh form is a
+/// fresh pair (Phase 141: the value is a `List<Int>`,
+/// and the pair is its exact fresh form in the paired
+/// representation). Shapes with no sound fresh form
+/// decline: a CharStr (its length-≤1 discipline is the
+/// string term itself) and an Option/Result whose absent
+/// payload carries no shape to freshen.
 #[cfg(feature = "z3-support")]
 fn stmt_havoc(v: &Sym, path: &str, index: &SpecIndex) -> Option<Sym> {
     match v {
@@ -4263,9 +5062,48 @@ fn stmt_havoc(v: &Sym, path: &str, index: &SpecIndex) -> Option<Sym> {
         Sym::Bool(_) => Some(Sym::Bool(z3::ast::Bool::new_const(path))),
         Sym::Str(_) => Some(Sym::Str(z3::ast::String::new_const(path))),
         Sym::Char(_) => Some(Sym::Char(z3::ast::Int::new_const(path))),
-        Sym::ListLen(_) | Sym::List(_) => {
-            Some(Sym::ListLen(z3::ast::Int::new_const(path)))
+        Sym::ListLen(_) => Some(Sym::ListLen(z3::ast::Int::new_const(path))),
+        // A concrete list of Int terms is a `List<Int>`
+        // value, and its havoc is a fresh PAIR (Phase
+        // 141): the loop may have rewritten it into any
+        // list of Ints, which the paired representation
+        // denotes exactly — the length-only form would
+        // drop the element half the invariant bridge
+        // exists to carry. A concrete list of any other
+        // sort keeps the length-only havoc (its element
+        // sort has no pair, R9).
+        Sym::List(items) => {
+            if items.iter().all(|it| matches!(it, Sym::Int(_))) {
+                Some(Sym::ArrayLen {
+                    len: z3::ast::Int::new_const(path),
+                    elems: z3::ast::Array::new_const(
+                        format!("{path}.elems").as_str(),
+                        &z3::Sort::int(),
+                        &z3::Sort::int(),
+                    ),
+                })
+            } else {
+                Some(Sym::ListLen(z3::ast::Int::new_const(path)))
+            }
         }
+        // A havoc'd pair is a fresh PAIR (Phase 139): the
+        // loop may have rewritten any element, so both
+        // halves freshen — a fresh length constant under
+        // the havoc path (the ListLen arm's convention)
+        // and a fresh array under `{path}.elems` (the
+        // binding path's convention, §2.1). Freshening
+        // only the length would leave the pre-loop array
+        // term carrying elements the loop may have
+        // changed — a stale-content lie the moment W2's
+        // select arm can read it.
+        Sym::ArrayLen { .. } => Some(Sym::ArrayLen {
+            len: z3::ast::Int::new_const(path),
+            elems: z3::ast::Array::new_const(
+                format!("{path}.elems").as_str(),
+                &z3::Sort::int(),
+                &z3::Sort::int(),
+            ),
+        }),
         Sym::Record { type_name, .. } => {
             let (resolved, fields) = index.record_fields(type_name)?;
             Some(Sym::Record {
@@ -4390,6 +5228,29 @@ enum InvClose {
 /// construction in `st`. On failure `st` is untouched
 /// and the caller applies the exhaustion verdict.
 #[cfg(feature = "z3-support")]
+/// The §2.5 bridge at the invariant route's entry
+/// (Phase 141): a concrete list of Int terms crosses to
+/// its paired form — the store-chain over the shared
+/// constant base — so an invariant's element rows encode
+/// over the value the list denotes. Any other value
+/// carries over untouched (a concrete list of a
+/// non-Int sort has no pair and keeps its concrete
+/// form, exactly as the bridge itself declines it).
+#[cfg(feature = "z3-support")]
+fn cross_concrete_int_lists(env: &SymEnv) -> SymEnv {
+    env.iter()
+        .map(|(name, val)| {
+            let crossed = match val {
+                Sym::List(items) => sym_pair_of_concrete(items.clone())
+                    .unwrap_or_else(|| val.clone()),
+                _ => val.clone(),
+            };
+            (name.clone(), crossed)
+        })
+        .collect()
+}
+
+#[cfg(feature = "z3-support")]
 fn stmt_invariant_close(
     condition: Option<&IRNode>,
     body: &IRNode,
@@ -4400,14 +5261,17 @@ fn stmt_invariant_close(
     let fail = InvClose::Failed;
     let index = ctx.eval.index;
     // Scope: every name the invariant reads must be
-    // bound at loop entry.
+    // bound at loop entry. The read set is the
+    // binder-aware one (Phase 142): a stated fold
+    // invariant's op lambda binds its own parameters,
+    // which are not reads of the state.
     let rows = match parse_invariant_rows(text) {
         Some(r) => r,
         None => return fail,
     };
     let mut free = std::collections::HashSet::new();
     for r in &rows {
-        constraint_free_vars(r, &mut free);
+        constraint_free_vars_scoped(r, &mut free);
     }
     if free.iter().any(|v| !st.env.contains_key(v)) {
         return fail;
@@ -4423,7 +5287,15 @@ fn stmt_invariant_close(
             .collect()
     };
     // ── Initiation: entry context ∧ ¬I(entry) UNSAT.
-    let inv_entry = match inv_in(&st.env) {
+    // The entry environment crosses its concrete Int
+    // lists to their paired forms first (Phase 141): the
+    // invariant's element rows speak about the list the
+    // value denotes, and a not-yet-appended accumulator
+    // still binds as the concrete list the Alloc built —
+    // the §2.5 bridge crossing, at the one site where a
+    // loop's entry value meets the invariant.
+    let entry_env = cross_concrete_int_lists(&st.env);
+    let inv_entry = match inv_in(&entry_env) {
         Some(f) => f,
         None => return fail,
     };
@@ -4464,6 +5336,7 @@ fn stmt_invariant_close(
     // pc* = I(E*) ∧ cond(E*) for a While; I(E*) for a
     // Loop (its head is unconditional).
     let mut pc_star = inv_conjunction(&inv_star);
+    let mut cond_star: Option<z3::ast::Bool> = None;
     if let Some(cond) = condition {
         let mut scratch = StmtState {
             env: estar.clone(),
@@ -4477,13 +5350,16 @@ fn stmt_invariant_close(
             guided: true,
         };
         match stmt_eval_value(cond, &mut scratch, ctx) {
-            Some(Sym::Bool(b)) => pc_star = z3_and(&pc_star, &b),
+            Some(Sym::Bool(b)) => {
+                pc_star = z3_and(&pc_star, &b);
+                cond_star = Some(b);
+            }
             _ => return fail,
         }
     }
     // ── One arbitrary iteration from E*.
     let mut bs = StmtState {
-        env: estar,
+        env: estar.clone(),
         pc: pc_star,
         rets: Vec::new(),
         breaks: Vec::new(),
@@ -4493,7 +5369,35 @@ fn stmt_invariant_close(
         assumptions: st.assumptions.clone(),
         guided: false,
     };
-    if stmt_eval(body, &mut bs, ctx).is_none() {
+    // Phase 141: the one iteration is encoded under the
+    // hypotheses it executes under — the loop condition
+    // and the invariant's quantifier-free rows join the
+    // guard set for the body's reads, with the havoc'd
+    // state's length well-formedness facts. A counter
+    // read (`xs[i]` under `i < len(xs)`) discharges from
+    // exactly these; the quantified invariant rows are
+    // NOT guard terms (their facts reach the consecution
+    // through pc*, where the solver instantiates them —
+    // a discharge check is not asked to). The extension
+    // is confined to this one evaluation: initiation,
+    // the exit construction, and every other evaluation
+    // keep the standing context.
+    let body_ctx = {
+        let mut terms: Vec<z3::ast::Bool> = Vec::new();
+        if let Some(c) = &cond_star {
+            terms.push(c.clone());
+        }
+        for (row, term) in rows.iter().zip(inv_star.iter()) {
+            if !constraint_mentions_quantifier(row) {
+                terms.push(term.clone());
+            }
+        }
+        for val in estar.values() {
+            collect_len_conditions(val, &mut terms);
+        }
+        ctx.with_eval_guards(&terms)
+    };
+    if stmt_eval(body, &mut bs, &body_ctx).is_none() {
         return fail;
     }
     if !bs.exhausted.is_empty() {
@@ -4557,6 +5461,11 @@ fn stmt_invariant_close(
         let mut side: Vec<z3::ast::Bool> = Vec::new();
         for v in eprime.values() {
             collect_char_conditions(v, &mut side);
+            // Phase 141: a havoc'd list's length is a
+            // count too — its well-formedness is conjoined
+            // with the Char conditions, so the exit state
+            // ranges over real values only.
+            collect_len_conditions(v, &mut side);
         }
         for f in &side {
             exit_pc = z3_and(&exit_pc, f);
@@ -4982,7 +5891,15 @@ fn encode_constraint(c: &Constraint, env: &SymEnv, ctx: &EvalCtx) -> Option<z3::
             Some(acc)
         }
         Constraint::Implies(a, b) => {
-            Some(encode_constraint(a, env, ctx)?.implies(&encode_constraint(b, env, ctx)?))
+            // The antecedent is one of §2.3's guard sources
+            // (Phase 140): the consequent is encoded with
+            // the encoded antecedent added to the guard set,
+            // so a read in the consequent discharges exactly
+            // when the row's own hypothesis states its
+            // in-range fact. Nested antecedents accumulate.
+            let fa = encode_constraint(a, env, ctx)?;
+            let inner = ctx.with_guards(std::slice::from_ref(&fa));
+            Some(fa.implies(&encode_constraint(b, env, &inner)?))
         }
         Constraint::Eq(a, b) => match sym_binop(
             BinKind::Eq,
@@ -5046,15 +5963,253 @@ fn encode_constraint(c: &Constraint, env: &SymEnv, ctx: &EvalCtx) -> Option<z3::
                 env.insert(name.clone(), Sym::Int(bound.clone()));
                 bounds.push(bound);
             }
-            let f = encode_constraint(body, &env, ctx)?;
+            // The guard set clears at the binder (Phase
+            // 140): the binders rebind names, and an outer
+            // hypothesis is a fact about the free value its
+            // names denoted — the bound consts here are
+            // name-interned, so a same-named parameter's
+            // hypotheses would otherwise literally be terms
+            // over the bound variables and could discharge
+            // a read no execution guards. Inside the body,
+            // guards come from its own antecedents at W2;
+            // the binder's range guard is W3's arm (§2.7).
+            let inner = ctx.without_guards();
+            // W3 (Phase 141, §2.7): the bounded-forall arm
+            // over elements. For a SINGLE binder, the
+            // body's paired-binding reads at indices
+            // mentioning the binder derive the binder's
+            // domain — the conjunction of each read's own
+            // in-range condition — and the formula is
+            // built with that domain as the binder's
+            // guard: an antecedent on the quantifier, and
+            // the guard set for the body's own encoding.
+            // The select of every read the formula speaks
+            // about is then produced only where its
+            // in-range condition holds, so no beyond-length
+            // content can decide the row in either
+            // direction (§2.3) — and on the corpus's
+            // standing forms the derived domain IS the
+            // textual `range(...)` domain under the
+            // check's facts (the reads' lists are the
+            // domain's lists). Where no such read exists
+            // the bare Phase 94 form stands, byte for
+            // byte; where the body already encoded under
+            // its own antecedents, those antecedents
+            // entailed each read's in-range fact, so the
+            // added antecedent is a logical no-op there.
+            // A multi-binder body derives no domain (D6a:
+            // no multi-binder widening) — its element
+            // reads decline under the cleared guard set,
+            // as at W2.
+            let domain = if vars.len() == 1 {
+                binder_read_domain(body, &vars[0].0, &env, &inner)
+            } else {
+                Vec::new()
+            };
             let bound_refs: Vec<&dyn z3::ast::Ast> =
                 bounds.iter().map(|b| b as &dyn z3::ast::Ast).collect();
-            Some(z3::ast::forall_const(&bound_refs, &[], &f))
+            if domain.is_empty() {
+                let f = encode_constraint(body, &env, &inner)?;
+                Some(z3::ast::forall_const(&bound_refs, &[], &f))
+            } else {
+                let body_ctx = inner.with_guards(&domain);
+                let f = encode_constraint(body, &env, &body_ctx)?;
+                let mut dom = z3::ast::Bool::from_bool(true);
+                for d in &domain {
+                    dom = z3_and(&dom, d);
+                }
+                Some(z3::ast::forall_const(&bound_refs, &[], &dom.implies(&f)))
+            }
         }
-        // Existentials and named predicates (is_sorted
-        // and friends) have no encoding here.
-        Constraint::Exists { .. } | Constraint::Predicate(..) => None,
+        // The exists arm (Phase 141, §2.7): the dual of
+        // the bounded-forall arm, under the same envelope
+        // and the same derived domain — a conjunct for
+        // `exists`, where the forall carries an
+        // antecedent: the witness the formula speaks
+        // about is one whose reads are all in range, so
+        // beyond-length content cannot decide the row
+        // either. Scoped to element rows (and the bare
+        // pure-Int form); named predicates
+        // (is_permutation and friends, §3.10) have no
+        // encoding here.
+        Constraint::Exists { vars, body } => {
+            if vars.is_empty()
+                || vars.iter().any(|(_, ty)| *ty != TypeRef::Int)
+                || vars
+                    .iter()
+                    .enumerate()
+                    .any(|(i, (n, _))| vars[..i].iter().any(|(m, _)| m == n))
+                || constraint_mentions_quantifier(body)
+            {
+                return None;
+            }
+            let mut env = env.clone();
+            let mut bounds: Vec<z3::ast::Int> = Vec::with_capacity(vars.len());
+            for (name, _) in vars {
+                let bound = z3::ast::Int::new_const(name.as_str());
+                env.insert(name.clone(), Sym::Int(bound.clone()));
+                bounds.push(bound);
+            }
+            let inner = ctx.without_guards();
+            let domain = if vars.len() == 1 {
+                binder_read_domain(body, &vars[0].0, &env, &inner)
+            } else {
+                Vec::new()
+            };
+            let bound_refs: Vec<&dyn z3::ast::Ast> =
+                bounds.iter().map(|b| b as &dyn z3::ast::Ast).collect();
+            if domain.is_empty() {
+                let f = encode_constraint(body, &env, &inner)?;
+                Some(z3::ast::exists_const(&bound_refs, &[], &f))
+            } else {
+                let body_ctx = inner.with_guards(&domain);
+                let f = encode_constraint(body, &env, &body_ctx)?;
+                let mut dom = z3::ast::Bool::from_bool(true);
+                for d in &domain {
+                    dom = z3_and(&dom, d);
+                }
+                Some(z3::ast::exists_const(
+                    &bound_refs,
+                    &[],
+                    &z3::ast::Bool::and(&[&dom, &f]),
+                ))
+            }
+        }
+        Constraint::Predicate(..) => None,
     }
+}
+
+/// W3's domain derivation (Phase 141, LIST_ENCODER_SCOPE
+/// §2.7): for every paired-binding read in a quantifier
+/// body whose index mentions the binder, the read's own
+/// in-range conjunct `0 <= idx < len(list)` over the very
+/// terms the encoder builds for that read. The
+/// conjunction of these conjuncts is the domain the
+/// bounded arms supply as the binder's guard. A read
+/// whose collection does not encode to a pair, or whose
+/// index does not encode to an Int term, contributes no
+/// conjunct — the body's own encoding then decides that
+/// read under the standing sources (its antecedents, or
+/// decline). The walk does not descend into a nested
+/// quantifier (outside the arms' envelope; its binders
+/// shadow) and follows `expr_free_vars`' shape
+/// elsewhere.
+#[cfg(feature = "z3-support")]
+fn binder_read_domain(
+    body: &Constraint,
+    binder: &str,
+    env: &SymEnv,
+    ctx: &EvalCtx,
+) -> Vec<z3::ast::Bool> {
+    let mut out = Vec::new();
+    domain_in_constraint(body, binder, env, ctx, &mut out);
+    out
+}
+
+#[cfg(feature = "z3-support")]
+fn domain_in_constraint(
+    c: &Constraint,
+    binder: &str,
+    env: &SymEnv,
+    ctx: &EvalCtx,
+    out: &mut Vec<z3::ast::Bool>,
+) {
+    match c {
+        Constraint::True => {}
+        Constraint::Expr(e) => domain_in_expr(e, binder, env, ctx, out),
+        Constraint::Eq(a, b) => {
+            domain_in_expr(a, binder, env, ctx, out);
+            domain_in_expr(b, binder, env, ctx, out);
+        }
+        Constraint::Order(_, a, b) => {
+            domain_in_expr(a, binder, env, ctx, out);
+            domain_in_expr(b, binder, env, ctx, out);
+        }
+        Constraint::And(parts) | Constraint::Or(parts) => {
+            for p in parts {
+                domain_in_constraint(p, binder, env, ctx, out);
+            }
+        }
+        Constraint::Implies(a, b) => {
+            domain_in_constraint(a, binder, env, ctx, out);
+            domain_in_constraint(b, binder, env, ctx, out);
+        }
+        Constraint::Not(inner) => domain_in_constraint(inner, binder, env, ctx, out),
+        Constraint::Forall { .. } | Constraint::Exists { .. } => {}
+        Constraint::Predicate(_, args) => {
+            for a in args {
+                domain_in_expr(a, binder, env, ctx, out);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "z3-support")]
+fn domain_in_expr(
+    e: &Expr,
+    binder: &str,
+    env: &SymEnv,
+    ctx: &EvalCtx,
+    out: &mut Vec<z3::ast::Bool>,
+) {
+    match e {
+        Expr::Index(coll, idx) => {
+            if expr_mentions(idx, binder) {
+                if let (Some(Sym::ArrayLen { len, .. }), Some(Sym::Int(i))) = (
+                    encode_expr(coll, env, ctx),
+                    encode_expr(idx, env, ctx),
+                ) {
+                    let zero = z3::ast::Int::from_i64(0);
+                    out.push(z3::ast::Bool::and(&[&i.ge(&zero), &i.lt(&len)]));
+                }
+            }
+            domain_in_expr(coll, binder, env, ctx, out);
+            domain_in_expr(idx, binder, env, ctx, out);
+        }
+        Expr::Field(inner, _) => domain_in_expr(inner, binder, env, ctx, out),
+        Expr::Call(_, args) => {
+            for a in args {
+                domain_in_expr(a, binder, env, ctx, out);
+            }
+        }
+        Expr::BinOp(_, l, r) => {
+            domain_in_expr(l, binder, env, ctx, out);
+            domain_in_expr(r, binder, env, ctx, out);
+        }
+        Expr::UnaryOp(_, inner) => domain_in_expr(inner, binder, env, ctx, out),
+        Expr::Lambda(_, body) => domain_in_expr(body, binder, env, ctx, out),
+        Expr::Length(inner) => domain_in_expr(inner, binder, env, ctx, out),
+        Expr::Comprehension {
+            collection, body, ..
+        } => {
+            domain_in_expr(collection, binder, env, ctx, out);
+            domain_in_expr(body, binder, env, ctx, out);
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            domain_in_expr(receiver, binder, env, ctx, out);
+            for a in args {
+                domain_in_expr(a, binder, env, ctx, out);
+            }
+        }
+        Expr::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                domain_in_expr(v, binder, env, ctx, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether an expression mentions a variable name
+/// anywhere (the `expr_free_vars` over-approximation —
+/// binder shadowing inside a body is outside the
+/// quantifier arms' measured envelope, exactly as it is
+/// for the Phase 94 arm's own binding).
+#[cfg(feature = "z3-support")]
+fn expr_mentions(e: &Expr, name: &str) -> bool {
+    let mut set = std::collections::HashSet::new();
+    expr_free_vars(e, &mut set);
+    set.contains(name)
 }
 
 /// Whether a constraint syntactically contains a
@@ -5075,6 +6230,406 @@ fn constraint_mentions_quantifier(c: &Constraint) -> bool {
             constraint_mentions_quantifier(a) || constraint_mentions_quantifier(b)
         }
         _ => false,
+    }
+}
+
+// ── Phase 142 (W4): the fold form (§2.8) ───────────────
+//
+// Three frozen contracts are fold forms — `list_sum`'s,
+// `list_product`'s and `list_fold`'s
+// `output == fold(xs, init, op)`. The arm gives a fold
+// term the prefix definition as its ONLY
+// characterization, exactly as §2.8 freezes it:
+//
+// - base: the fold over the empty prefix is `init`;
+// - step: the fold over the prefix of length `k + 1` is
+//   `op(fold over the prefix of length k, select(xs,
+//   k))`, for `k` in range.
+//
+// The build realizes it by structural recursion on
+// the length — the second realization §2.8 names: a
+// Z3 recursive function definition per op, over
+// (array, length, init), whose two branches are the
+// base and step rows (see `fold_register`). The first
+// realization §2.8 names — the two rows as universally
+// quantified axioms over the array — was built and
+// measured first: it discharges the proofs, but every
+// session carrying the axioms answers Unknown in the
+// refutation direction (model search over an
+// array-quantified axiom set fails validation on
+// ground rows and times out on symbolic ones), so
+// wrong bodies could not Refute and the measurement
+// could not be taken honestly. The definition asserts
+// nothing the rows do not: at every count >= 0 it is
+// the prefix definition, unfolded one step at a time,
+// and anything it does not determine (a fold's value
+// is determined at every count — what stays open is
+// what no row of base + step can equate, e.g. two
+// different ops' folds) stays Inconclusive. No closed
+// form, no commutativity or associativity fact,
+// nothing about folds over reordered or filtered
+// lists is asserted anywhere.
+//
+// The op's slice is the contracts' own shapes. A closed
+// lambda whose body is Int arithmetic over its two
+// parameters (accumulator, element): its identity is
+// the canonical rendering of that body with the
+// parameters replaced positionally, hashed, so every
+// formation of the op's fold — the contract, a stated
+// invariant, a probe row — names the same defined
+// function for the same op. And the
+// function-typed parameter itself (`list_fold`'s `f`),
+// a UF under the Phase 133 arm at signature
+// (Int, Int) -> Int: its fold's step row is stated over
+// UF applications, and congruence is all it carries
+// (§2.9's Fold point). An op outside the slice — a
+// capturing lambda, a UF of another signature, a
+// lambda whose body leaves the arithmetic slice —
+// declines, and its fold rows decline with it.
+//
+// A fold over `list_take(xs, i)` is §2.8's own subject
+// — the fold over the consumed prefix — and is denoted
+// directly as the fold term at the CLAMPED count
+// (take's frozen contract: the prefix is the base list
+// at length clamp(i, 0, len); beyond-length content is
+// unobservable to the fold, whose definition selects
+// only below the length argument). The denotation is exact
+// for every `i` — no guard is owed, as no index term
+// is produced — and it is the form the shipped bodies'
+// stated invariants are written in
+// (`acc == fold(list_take(xs, i), init, op)`). The
+// interception is name-keyed, on the standing builtin
+// precedent (`len`, `int_to_str` in encode_expr's Call
+// match): a caller spec of its own named `list_take`
+// is read by the prefix rule inside a fold, exactly as
+// a caller-named `len` is read by the length arm. A
+// bare `list_take(...)` outside a fold encodes exactly
+// as it did (through `sym_invoke`).
+
+/// The canonical rendering of a closed fold op's body:
+/// the lambda's two parameters replaced positionally
+/// (`#0` the accumulator, `#1` the element), Int
+/// literals and the Int arithmetic operators spelled
+/// out. `None` for any other shape — a free name (the
+/// op is not closed), a non-arithmetic operator, a
+/// nested call or lambda — which is the arm's op slice,
+/// applied identically by the name, the term former and
+/// the definition builder.
+#[cfg(feature = "z3-support")]
+fn fold_render_op(e: &Expr, acc: &str, elem: &str) -> Option<String> {
+    match e {
+        Expr::Var(n) if n == acc => Some("#0".to_string()),
+        Expr::Var(n) if n == elem => Some("#1".to_string()),
+        Expr::IntLit(n) => Some(format!("({n})")),
+        Expr::BinOp(op, l, r) => {
+            let sym = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                _ => return None,
+            };
+            Some(format!(
+                "({sym} {} {})",
+                fold_render_op(l, acc, elem)?,
+                fold_render_op(r, acc, elem)?
+            ))
+        }
+        Expr::UnaryOp(UnaryOp::Neg, inner) => {
+            Some(format!("(neg {})", fold_render_op(inner, acc, elem)?))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "z3-support")]
+fn fold_fnv1a(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// The fold function's name for a closed-lambda op:
+/// derived from the canonical rendering, so
+/// alpha-renamed writings of the same op (the
+/// contract's `|acc, v|`, an invariant's) name the same
+/// defined function, and structurally different ops —
+/// `a + v` against `v + a` — name different ones
+/// (§2.8 asserts nothing across ops).
+#[cfg(feature = "z3-support")]
+fn fold_lambda_name(params: &[(String, TypeRef)], body: &Expr) -> Option<String> {
+    if params.len() != 2 {
+        return None;
+    }
+    let rendered = fold_render_op(body, &params[0].0, &params[1].0)?;
+    Some(format!("fold_lambda_{:016x}", fold_fnv1a(&rendered)))
+}
+
+/// The fold UF's name for the UF-parameter op
+/// (`list_fold`'s `f`): keyed by the parameter's own UF
+/// name, and admitted only at the fold signature
+/// (Int, Int) -> Int.
+#[cfg(feature = "z3-support")]
+fn fold_uf_name(func: &Sym) -> Option<String> {
+    let Sym::Func {
+        name,
+        domain,
+        range,
+    } = func
+    else {
+        return None;
+    };
+    if domain.as_slice() == [UfSort::Int, UfSort::Int] && *range == UfSort::Int {
+        Some(format!("fold_{name}"))
+    } else {
+        None
+    }
+}
+
+/// The fold UF's name for an op expression, resolved
+/// against an environment (the row's env at term
+/// formation, the parameter env at definition
+/// registration — both bind the spec's parameters
+/// identically).
+#[cfg(feature = "z3-support")]
+fn fold_op_name(op: &Expr, env: &SymEnv) -> Option<String> {
+    match op {
+        Expr::Lambda(params, body) => fold_lambda_name(params, body),
+        Expr::Var(name) => fold_uf_name(env.get(name)?),
+        _ => None,
+    }
+}
+
+/// Apply a fold op to two Int terms: a closed lambda by
+/// encoding its body with the parameters bound to the
+/// terms (the body is the closed slice shape the name
+/// gate admitted — the rendering check runs again here
+/// so this function declines exactly where the name
+/// does), the UF parameter by `sym_apply` (congruence
+/// only).
+#[cfg(feature = "z3-support")]
+fn fold_op_apply(
+    op: &Expr,
+    env: &SymEnv,
+    acc: z3::ast::Int,
+    elem: z3::ast::Int,
+    ctx: &EvalCtx,
+) -> Option<z3::ast::Int> {
+    match op {
+        Expr::Lambda(params, body) => {
+            if params.len() != 2 {
+                return None;
+            }
+            fold_render_op(body, &params[0].0, &params[1].0)?;
+            let mut local = SymEnv::new();
+            local.insert(params[0].0.clone(), Sym::Int(acc));
+            local.insert(params[1].0.clone(), Sym::Int(elem));
+            match encode_expr(body, &local, ctx)? {
+                Sym::Int(t) => Some(t),
+                _ => None,
+            }
+        }
+        Expr::Var(name) => match sym_apply(env.get(name)?, vec![Sym::Int(acc), Sym::Int(elem)])? {
+            Sym::Int(t) => Some(t),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Fold ops whose recursive definition is registered
+/// in this thread's Z3 context, by op name — the
+/// declaration OBJECT is cached, not just the fact:
+/// `RecFuncDecl::new` on an already-defined name does
+/// NOT intern the way `FuncDecl::new` does (measured:
+/// a second declaration object for the same name
+/// shadows the definition and its applications go
+/// opaque in later solvers), so each op's declaration
+/// is created exactly once, with its definition, and
+/// reused for the thread's life — the same lifetime
+/// the context itself has.
+#[cfg(feature = "z3-support")]
+thread_local! {
+    static FOLD_DECLS: std::cell::RefCell<
+        std::collections::HashMap<String, z3::RecFuncDecl>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The fold function for one op, as a Z3 recursive
+/// definition — §2.8's structural-recursion
+/// realization. The declaration is registered with its
+/// definition the first time the op's fold is formed
+/// on this thread:
+///
+///   F(a, n, init) = ite(n <= 0, init,
+///                       op(F(a, n - 1, init), select(a, n - 1)))
+///
+/// whose branches are exactly the frozen rows: base
+/// (the empty prefix folds to `init`) and step (the
+/// prefix of length k + 1, at n = k + 1, applies the op
+/// once to the fold of the prefix of length k and the
+/// element at k). The `n <= 0` guard is the base row;
+/// counts below zero are outside the fold's domain (a
+/// prefix has count >= 0, and every session that
+/// judges a fold row asserts length well-formedness) —
+/// that branch is the definition's totality at a point
+/// no execution and no battery reaches, never a fact a
+/// verdict rests on: at every count >= 0 the
+/// definition is the prefix definition and nothing
+/// else.
+///
+/// A definition, not session axioms — the measured
+/// alternative (base + step as universally quantified
+/// axioms over the array) proves in the UNSAT
+/// direction but its sessions answer Unknown in the
+/// refutation direction: model search over an
+/// array-quantified axiom set fails validation on
+/// ground rows and times out on symbolic ones, and a
+/// crown whose wrong bodies cannot Refute is not the
+/// frozen measurement. Registered once in the context,
+/// the definition is present in every session — row
+/// judges, invariant obligations, the exhaustion
+/// gate — with no quantified axiom asserted anywhere.
+/// Register one op's fold definition (see the
+/// `FOLD_DECLS` note for why this runs exactly once per
+/// op): build the declaration, add the §2.8 definition
+/// body, and cache the declaration object. The
+/// definition's step branch applies the op through
+/// `fold_op_apply` — for a closed lambda its body with
+/// the parameters bound to the recursive call and the
+/// selected element; for the UF parameter a `sym_apply`
+/// (congruence only).
+#[cfg(feature = "z3-support")]
+fn fold_register(name: &str, op: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<()> {
+    use z3::ast::Ast as _;
+    let array = z3::Sort::array(&z3::Sort::int(), &z3::Sort::int());
+    let int = z3::Sort::int();
+    let decl = z3::RecFuncDecl::new(name, &[&array, &int, &int], &int);
+    let a = z3::ast::Array::new_const(
+        "fold.a",
+        &z3::Sort::int(),
+        &z3::Sort::int(),
+    );
+    let n = z3::ast::Int::new_const("fold.n");
+    let init = z3::ast::Int::new_const("fold.init");
+    let zero = z3::ast::Int::from_i64(0);
+    let one = z3::ast::Int::from_i64(1);
+    let nm1 = z3_sub(&n, &one);
+    let prev_args: Vec<&dyn z3::ast::Ast> = vec![
+        &a as &dyn z3::ast::Ast,
+        &nm1 as &dyn z3::ast::Ast,
+        &init as &dyn z3::ast::Ast,
+    ];
+    let prev = decl.apply(&prev_args).as_int()?;
+    let sel = a.select(&nm1).as_int()?;
+    let stepped = fold_op_apply(op, env, prev, sel, ctx)?;
+    let body = n.le(&zero).ite(&init, &stepped);
+    decl.add_def(
+        &[
+            &a as &dyn z3::ast::Ast,
+            &n as &dyn z3::ast::Ast,
+            &init as &dyn z3::ast::Ast,
+        ],
+        &body,
+    );
+    FOLD_DECLS.with(|map| {
+        map.borrow_mut().insert(name.to_string(), decl);
+    });
+    Some(())
+}
+
+#[cfg(feature = "z3-support")]
+fn fold_term(
+    name: &str,
+    op: &Expr,
+    env: &SymEnv,
+    ctx: &EvalCtx,
+    elems: &z3::ast::Array,
+    n: &z3::ast::Int,
+    init: &z3::ast::Int,
+) -> Option<z3::ast::Int> {
+    if !FOLD_DECLS.with(|map| map.borrow().contains_key(name)) {
+        fold_register(name, op, env, ctx)?;
+    }
+    FOLD_DECLS.with(|map| {
+        let map = map.borrow();
+        let decl = map.get(name)?;
+        let args: Vec<&dyn z3::ast::Ast> = vec![
+            elems as &dyn z3::ast::Ast,
+            n as &dyn z3::ast::Ast,
+            init as &dyn z3::ast::Ast,
+        ];
+        decl.apply(&args).as_int()
+    })
+}
+
+/// The paired binding of a foldable list value: a pair
+/// directly, or a concrete Int list crossed through the
+/// §2.5 bridge. Anything else (a length-only binding, a
+/// non-Int list) has no element model to fold over.
+#[cfg(feature = "z3-support")]
+fn fold_pair(v: Sym) -> Option<(z3::ast::Array, z3::ast::Int)> {
+    match v {
+        Sym::ArrayLen { len, elems } => Some((elems, len)),
+        Sym::List(items) => match sym_pair_of_concrete(items)? {
+            Sym::ArrayLen { len, elems } => Some((elems, len)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Encode `fold(list, init, op)` (§2.8): the fold term
+/// over the list's pair at its length — or, for the
+/// prefix shape `fold(list_take(list, i), init, op)`,
+/// at the clamped count — or, over a concrete list, the
+/// prefix definition evaluated outright (no UF, no
+/// definition: the value is determined). The initial value
+/// must be an Int term and the op in the arm's slice;
+/// anything else declines.
+#[cfg(feature = "z3-support")]
+fn encode_fold(
+    list_arg: &Expr,
+    init_arg: &Expr,
+    op_arg: &Expr,
+    env: &SymEnv,
+    ctx: &EvalCtx,
+) -> Option<Sym> {
+    use z3::ast::Ast as _;
+    let name = fold_op_name(op_arg, env)?;
+    let Sym::Int(init) = encode_expr(init_arg, env, ctx)? else {
+        return None;
+    };
+    if let Expr::Call(take, targs) = list_arg {
+        if take == "list_take" && targs.len() == 2 {
+            let (elems, len) = fold_pair(encode_expr(&targs[0], env, ctx)?)?;
+            let Sym::Int(n) = encode_expr(&targs[1], env, ctx)? else {
+                return None;
+            };
+            let zero = z3::ast::Int::from_i64(0);
+            let plen = n.le(&zero).ite(&zero, &n.ge(&len).ite(&len, &n));
+            return fold_term(&name, op_arg, env, ctx, &elems, &plen, &init).map(Sym::Int);
+        }
+    }
+    match encode_expr(list_arg, env, ctx)? {
+        Sym::ArrayLen { len, elems } => {
+            fold_term(&name, op_arg, env, ctx, &elems, &len, &init).map(Sym::Int)
+        }
+        Sym::List(items) => {
+            let mut acc = init;
+            for item in items {
+                let Sym::Int(elem) = item else {
+                    return None;
+                };
+                acc = fold_op_apply(op_arg, env, acc, elem, ctx)?;
+            }
+            Some(Sym::Int(acc))
+        }
+        _ => None,
     }
 }
 
@@ -5152,6 +6707,13 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 some: Tag::False,
                 payload: None,
             }),
+            // Phase 142 (W4, §2.8): the fold form — a
+            // fold term over the paired binding (or the
+            // prefix form over `list_take`, or a concrete
+            // list folded outright), under the op's
+            // recursive definition. See the fold section
+            // above `encode_expr`.
+            "fold" if args.len() == 3 => encode_fold(&args[0], &args[1], &args[2], env, ctx),
             // A call to another spec resolves by inlining the
             // callee's body (see sym_invoke) — this arm is what
             // makes composition postconditions judgable at all;
@@ -5178,7 +6740,7 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
             }
         },
         Expr::Index(coll, idx) => {
-            sym_index(encode_expr(coll, env, ctx)?, encode_expr(idx, env, ctx)?)
+            sym_index(encode_expr(coll, env, ctx)?, encode_expr(idx, env, ctx)?, ctx)
         }
         // Field projection (Phase 76, D2a): the base must
         // encode to a record and the field must be among
@@ -5260,7 +6822,7 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 ("unwrap", Sym::Option { payload, .. }) => {
                     payload.map(|p| *p)
                 }
-                ("len", v @ (Sym::List(_) | Sym::ListLen(_))) => sym_len(v),
+                ("len", v @ (Sym::List(_) | Sym::ListLen(_) | Sym::ArrayLen { .. })) => sym_len(v),
                 _ => None,
             }
         }
@@ -5304,7 +6866,22 @@ pub fn body_is_encodable_with(
     index: &SpecIndex,
 ) -> bool {
     let mut env = param_env(spec, index);
-    sym_eval(body, &mut env, &EvalCtx::root(index)).is_some()
+    // The predicate is exactly `verify_one`'s precondition,
+    // so it sources the same guards (Phase 140): the spec's
+    // require rows, each encoded plainly (a row that
+    // declines to encode contributes no guard — for plain
+    // requires this is the same term set
+    // `precondition_assumptions` assumes; a require whose
+    // own read is unguarded declines there and here
+    // alike). Joint satisfiability is the verdict layer's
+    // question, not this predicate's.
+    let guards: Vec<z3::ast::Bool> = spec
+        .preconditions
+        .iter()
+        .filter_map(|row| encode_constraint(row, &env, &EvalCtx::root(index)))
+        .collect();
+    let ctx = EvalCtx::root(index).with_guards(&guards);
+    sym_eval(body, &mut env, &ctx).is_some()
 }
 
 /// No-Z3 build (Phase 66): the same question answered by
@@ -10940,13 +12517,6 @@ spec grow_first {
                     )),
                 },
             ),
-            (
-                "Exists (boundary unmoved)",
-                Constraint::Exists {
-                    vars: vec![int_var("i")],
-                    body: Box::new(Constraint::True),
-                },
-            ),
         ];
         for (label, row) in &declines {
             assert!(
@@ -10956,6 +12526,31 @@ spec grow_first {
             );
             println!("P94|envelope|{}|declines", label);
         }
+        // The Exists boundary MOVED at Phase 141 (W3),
+        // recorded here in place: at Phase 94 the
+        // existential had no arm and declined whole (the
+        // "boundary unmoved" entry this table carried
+        // until W3). The exists arm is the forall arm's
+        // dual under the same envelope — a bare
+        // pure-Int body encodes as parsed, and an element
+        // body under the derived domain of its reads
+        // (LIST_ENCODER_SCOPE §2.7). `exists i: True` is
+        // the minimal exhibit: it encodes, and it is
+        // Proven.
+        let exists_true = Constraint::Exists {
+            vars: vec![int_var("i")],
+            body: Box::new(Constraint::True),
+        };
+        assert!(
+            encode_constraint(&exists_true, &env, &ectx).is_some(),
+            "Exists (bare): ENCODES since Phase 141 (W3)"
+        );
+        let (verdict, ms) = p94_judge_formula(&exists_true, &env, &ectx);
+        assert_eq!(
+            verdict, "Proven",
+            "exists i: True is Proven under the W3 arm"
+        );
+        println!("P94|envelope|Exists bare|Proven|judge_ms={}", ms);
         // Multi-var Int binders encode and decide:
         // the tautology is Proven, the strict order
         // claim is Refuted (i = j is a countermodel).
@@ -12868,7 +14463,7 @@ spec grow_first {
         idx: &z3::ast::Int,
         index: &SpecIndex,
     ) -> Option<z3::ast::Bool> {
-        let ch = sym_index(Sym::Str(source.clone()), Sym::Int(idx.clone()))?;
+        let ch = sym_index(Sym::Str(source.clone()), Sym::Int(idx.clone()), &EvalCtx::root(index))?;
         match sym_invoke(&EvalCtx::root(index), "is_whitespace", vec![ch])? {
             Sym::Bool(b) => Some(b),
             _ => None,
@@ -13337,7 +14932,7 @@ spec grow_first {
                 Some(Sym::Int(i)) => i.clone(),
                 _ => panic!("skipped pos"),
             };
-            let ch = sym_index(Sym::Str(src.clone()), Sym::Int(pos.clone()))
+            let ch = sym_index(Sym::Str(src.clone()), Sym::Int(pos.clone()), &EvalCtx::root(&index))
                 .expect("the skipped char takes the bridge form");
             let call_bool = |name: &str| -> z3::ast::Bool {
                 match sym_invoke(&EvalCtx::root(&index), name, vec![ch.clone()]) {

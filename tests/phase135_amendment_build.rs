@@ -208,15 +208,19 @@ const SIX: [&str; 6] = [
     "range",
 ];
 
-/// The frozen doc texts (Amendment 2 §A2.1), verbatim.
+/// The frozen doc texts (Amendment 2 §A2.1), verbatim
+/// — except the tier sentence of each, which
+/// LIST_ENCODER_SCOPE §5.1 updates at the Phase 144
+/// re-tier (the six stand Tier-1 from 1.3; the
+/// contract sentences are untouched).
 fn frozen_doc(name: &str) -> &'static str {
     match name {
-        "list_map" => "list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "list_filter" => "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "list_fold" => "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "list_all" => "list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "list_any" => "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; Tier-1 awaits the list-element encoder (3.9) together with the uninterpreted-function arm (G4_AUDIT.md 2.1).",
-        "range" => "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-2: executed-exact on the full battery; element-level verification awaits the list-element encoder (3.9).",
+        "list_map" => "list_map(xs, f) = the list of f applied to each element of xs, in order; the empty list gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+        "list_filter" => "list_filter(xs, p) = the elements of xs for which p holds, in their original order; the empty list gives the empty list, and a predicate that holds for no element gives the empty list (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified of exactly its two frozen rows and executed-exact on the full battery (LIST_ENCODER_SCOPE.md 3.3).",
+        "list_fold" => "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+        "list_all" => "list_all(xs, p) = true iff p holds for every element of xs; the empty list gives true (vacuous truth) (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+        "list_any" => "list_any(xs, p) = true iff p holds for at least one element of xs; the empty list gives false (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+        "range" => "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
         other => panic!("no frozen doc for {other}"),
     }
 }
@@ -440,14 +444,31 @@ Probe {
     println!("P135PIN|range|prelude-merge check: entry + quantifier domain coexist");
 }
 
-/// The six verify Inconclusive — the Tier-2 standing
-/// (their quantified element rows are outside the
-/// encoder; nothing about them is refuted). The Phase
-/// 115 pin form.
+/// The six's verdicts — the Tier-2 standing as Phase 143
+/// (W5) leaves it. At Phase 135 all six verified
+/// Inconclusive (their quantified element rows were
+/// outside the encoder; nothing about them was refuted —
+/// the Phase 115 pin form). Phase 141's W3 arms crowned
+/// `range` — one of the eight named in LIST_ENCODER_
+/// SCOPE §3 — so its pin retired in place per §9 R10:
+/// `range` now Verifies with its shipped body. At Phase
+/// 142 the fold-form arm crowned `list_fold` — §3.3
+/// carries it as W4 + W5 jointly, and the composition
+/// it needed is §2.9's Fold point (the prefix step over
+/// UF applications), which the W4 build carries — so
+/// its pin retires in place the same way
+/// (tests/phase142_fold_form.rs). At Phase 143 the
+/// UF-composition arm crowned the four remaining
+/// higher-order entries — list_map, list_filter,
+/// list_all, list_any — under §2.9's composition, so
+/// their pins retire in place the same way
+/// (tests/phase143_uf_composition.rs). All six now
+/// Verify with their shipped bodies; the tier LABELS
+/// move at Phase 144's re-tier, not here.
 #[cfg(feature = "z3-support")]
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn phase135_verdicts_are_the_tier2_inconclusive() {
+fn phase135_verdicts_the_tier2_standing_after_w5() {
     let specs = list_specs();
     for name in SIX {
         let spec = spec_of(&specs, name);
@@ -457,9 +478,9 @@ fn phase135_verdicts_are_the_tier2_inconclusive() {
             .status;
         assert_eq!(
             verdict,
-            VerificationStatus::Inconclusive,
-            "{name}: element-level verdicts wait on the §3.9 encoder — \
-             Inconclusive is the honest Tier-2 standing"
+            VerificationStatus::Verified,
+            "{name}: crowned by the W-arms (range at W3, list_fold at W4, \
+             the higher-order four at W5) — Verified with its shipped body"
         );
     }
 }
@@ -1300,9 +1321,9 @@ fn phase135_packages_carry_the_six_at_35() {
             .find(|r| r["name"] == name)
             .unwrap_or_else(|| panic!("{name}: manifest row present"));
         assert_eq!(row["signature"], signature, "{name}: the A2.1 signature");
-        assert_eq!(row["tier"], "tier-2", "{name}: tier-2 in the manifest");
+        assert_eq!(row["tier"], "tier-1", "{name}: tier-1 in the manifest (Phase 144 re-tier)");
         assert_eq!(
-            row["verdictBasis"], "executed-exact",
+            row["verdictBasis"], "z3-verified",
             "{name}: verdict basis in the manifest"
         );
         assert_eq!(row["battery"]["pinned"], pinned, "{name}: battery pinned");

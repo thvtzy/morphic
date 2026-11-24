@@ -22,10 +22,12 @@
 //! the tier is a property of the proof standard, not
 //! of the behaviour; each function is held to 100%
 //! agreement on every battery point. When the
-//! post-1.0 list-element encoder verifies a Tier-2
+//! list-element encoder verifies a Tier-2
 //! entry, its label upgrades in place at a lockstep
 //! release; the function's behaviour and bytes do not
-//! change.
+//! change. The 1.3 release applied exactly that
+//! upgrade to fifteen entries; two List entries
+//! remain Tier-2 with named residues.
 //!
 //! **Types.** The Rust mapping is exact (EMBED_SCOPE
 //! §3): `Int` is `i64`, `Char` is `char`, `String` is

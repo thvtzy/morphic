@@ -41,7 +41,17 @@ specification, and golden-exact on its frozen battery:
 - String: `string_is_empty`
 - Result / Option: `result_unwrap_or`,
   `option_unwrap_or`, `option_ok_or`
-- List: `list_is_empty`
+- List: `list_is_empty`, `list_reverse`,
+  `list_contains`, `list_sum`, `list_product`,
+  `list_min`, `list_max`, `list_take`, `list_drop`,
+  `list_is_sorted`, `list_map`, `list_filter`,
+  `list_fold`, `list_all`, `list_any`, `range`
+
+Fifteen of the List entries upgraded at 1.3, when
+the list-element encoder landed (the 1.3 list-encoder
+campaign): their labels upgraded in place, exactly as
+the tier mechanism always stated — the functions'
+bytes did not change.
 
 Tier 2 — executed-exact on the full frozen battery, the
 tier printed here and in the manifest (the tier is a
@@ -49,14 +59,19 @@ property of the proof standard, not of the behavior;
 each function is held to 100% agreement on every
 battery point):
 
-- List: `list_reverse`, `list_contains`, `list_sum`,
-  `list_product`, `list_min`, `list_max`, `list_take`,
-  `list_drop`, `list_is_sorted`, `list_sort`,
-  `list_binary_search`, `list_map`, `list_filter`,
-  `list_fold`, `list_all`, `list_any`, `range`
+- List: `list_sort`, `list_binary_search`
 
-The last six are the 1.2 amendment's entries
-(STDLIB_SCOPE.md Amendment 2). Five of them are
+The two carry named residues, stated in their
+manifest rows: `list_sort`'s contract opens with the
+`is_permutation` predicate form, which the encoder
+does not carry, and closes with a two-binder
+quantifier past its envelope; `list_binary_search`'s
+`require:` names a quantifier-shaped contract the
+crown route cannot assume.
+
+The last six Tier-1 List entries are the 1.2
+amendment's entries (STDLIB_SCOPE.md Amendment 2).
+Five of them are
 higher-order: they take a function argument, and at
 runtime any JavaScript function of the right shape
 answers — including this package's own exports

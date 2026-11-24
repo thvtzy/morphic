@@ -36,7 +36,11 @@
 //!   measured here);
 //! * the verifier's verdict is Inconclusive — the
 //!   honest §3.9 standing, pinned so a future encoder
-//!   improvement moves it loudly, in the open;
+//!   improvement moves it loudly, in the open (it did:
+//!   at Phase 141 (W3) seven of these entries moved to
+//!   Verified with their shipped bodies — see
+//!   `tier2_verdicts_the_section_3_9_standing_after_w3`
+//!   below — and the pin now records both standings);
 //! * the entry's doc comment names its tier (the
 //!   scope's "tier printed in the documentation").
 //!
@@ -487,9 +491,39 @@ fn dbg(node: &IRNode) -> String {
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn tier2_docs_name_the_tier() {
+fn docs_name_the_tier_after_the_1_3_retier() {
+    // At Phase 115 every entry in TIER2 shipped at
+    // Tier-2 and this pin held each doc to naming it.
+    // At Phase 144 (the 1.3 re-tier, LIST_ENCODER_
+    // SCOPE §5.1) ten of the twelve stand Tier-1 —
+    // their `doc:` tier sentences were updated at the
+    // source and this pin follows them in place:
+    // every entry's doc names the tier it stands at,
+    // and the two that stay Tier-2 (list_sort, the
+    // standing residue; list_binary_search, the
+    // stretch whose require is not assumable in the
+    // crown route) name Tier-2 with their residues.
+    const TIER1_AT_1_3: &[&str] = &[
+        "list_reverse",
+        "list_contains",
+        "list_sum",
+        "list_product",
+        "list_min",
+        "list_max",
+        "list_take",
+        "list_drop",
+        "list_is_sorted",
+    ];
     let specs = list_specs();
-    for name in TIER2 {
+    for name in TIER1_AT_1_3 {
+        let spec = spec_of(&specs, name);
+        let doc = spec.doc.clone().unwrap_or_default();
+        assert!(
+            doc.contains("Tier-1"),
+            "{name}: the tier must be printed in the entry's documentation, got: {doc}"
+        );
+    }
+    for name in ["list_sort", "list_binary_search"] {
         let spec = spec_of(&specs, name);
         let doc = spec.doc.clone().unwrap_or_default();
         assert!(
@@ -599,7 +633,45 @@ fn list_bodies_are_executed_exact_through_the_compiled_route() {
 #[cfg(feature = "z3-support")]
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn tier2_verdicts_are_inconclusive_the_section_3_9_standing() {
+fn tier2_verdicts_the_section_3_9_standing_after_w4() {
+    // The §3.9 standing, as it moves: at Phase 115 every
+    // entry below stood Inconclusive (element-level
+    // verdicts waited on the encoder campaign). At
+    // Phase 141 (W3) the seven element-model entries —
+    // reverse, contains, min, max, take, drop,
+    // is_sorted — Verify with their shipped bodies
+    // (LIST_ENCODER_SCOPE §3; the per-entry crown
+    // evidence is tests/phase141_quantifiers.rs). At
+    // Phase 142 (W4) the fold-form arm crowned
+    // list_sum / list_product under §2.8's prefix
+    // definition (tests/phase142_fold_form.rs), so
+    // their pins retire in place per §9 R10. The
+    // remaining two stand Inconclusive for their named
+    // reasons: list_sort is the standing residue
+    // (§3.10 + the two-binder row), and
+    // list_binary_search is the named stretch, judged
+    // at the Phase 144 re-tier. (`range`, the eighth
+    // W3 crown, is an Int-family entry pinned in
+    // Phase 111's file, not this one.)
+    // Phase 144 judged the stretch: it does not land —
+    // the entry's require (`list_is_sorted(xs)`) is
+    // not assumable in the crown route, because
+    // list_is_sorted's quantifier-shaped contract has
+    // no expression-level denotation for the Phase 109
+    // precondition machinery (measured in isolation in
+    // tests/phase144_gate_merge.rs). The standing this
+    // pin asserts is unchanged: Inconclusive, now with
+    // the reason measured rather than pending.
+    const CROWNED_AT_W3: &[&str] = &[
+        "list_reverse",
+        "list_contains",
+        "list_min",
+        "list_max",
+        "list_take",
+        "list_drop",
+        "list_is_sorted",
+    ];
+    const CROWNED_AT_W4: &[&str] = &["list_sum", "list_product"];
     let specs = list_specs();
     for name in TIER2 {
         let spec = spec_of(&specs, name);
@@ -607,12 +679,26 @@ fn tier2_verdicts_are_inconclusive_the_section_3_9_standing() {
         let verdict = Verifier::with_specs(&specs)
             .verify_one(&candidate(&spec, body), &spec)
             .status;
-        assert_eq!(
-            verdict,
-            VerificationStatus::Inconclusive,
-            "{name}: element-level verdicts wait on the §3.9 encoder — \
-             Inconclusive is the honest standing until it lands"
-        );
+        if CROWNED_AT_W3.contains(name) {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Verified,
+                "{name}: crowned at Phase 141 (W3) with its shipped body"
+            );
+        } else if CROWNED_AT_W4.contains(name) {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Verified,
+                "{name}: crowned at Phase 142 (W4) with its shipped body"
+            );
+        } else {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Inconclusive,
+                "{name}: element-level verdicts wait on the later W-arms — \
+                 Inconclusive is the honest standing until they land"
+            );
+        }
     }
 }
 

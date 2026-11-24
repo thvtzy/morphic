@@ -82,6 +82,9 @@ pub struct BindingInput {
     /// The battery's recorded spec-silent points
     /// (manifest `battery.specSilent`).
     pub battery_silent: usize,
+    /// How this entry's Tier-1 crown is re-verified at
+    /// assembly (internal; not a manifest field).
+    pub crown_route: CrownRoute,
 }
 
 /// The tier manifest (EMBED_SCOPE §2.4, frozen form).
@@ -355,6 +358,39 @@ pub fn generate_bindings(
 // ranges, `list_binary_search`'s duplicate-target
 // indices — the battery's 67 property points split
 // 64 exactly-pinned + 3 index-silent).
+//
+// Phase 144 (the 1.3 re-tier, LIST_ENCODER_SCOPE §5.1,
+// EMBED_SCOPE R11): the fifteen entries the list-
+// encoder campaign crowned (Phases 141–143) carry
+// tier-1 / z3-verified here — label data only; their
+// bodies are the same shipped bodies. Their crown
+// route is `CrownRoute::Encoder` (see the enum): the
+// assembly re-verifies them by the route that crowned
+// them, not by the synthesis pipeline, which crowns
+// no body for their specs. `list_sort` and
+// `list_binary_search` stay tier-2 with their
+// residues named in their `doc:` tier sentences.
+
+/// How an entry's Tier-1 crown is re-verified at
+/// assembly (package.rs's crown checks). `Pipeline`:
+/// the seeded synthesis pipeline (seed 42) must crown
+/// exactly the shipped body, Verified — the Phase 110
+/// procedure, the standing route for the entries the
+/// pipeline itself crowned. `Encoder`: the entry was
+/// crowned by the 1.3 list-encoder campaign (Phases
+/// 141–143) — its shipped hand body Verifies through
+/// `verify_one` over the prelude index, every row
+/// Proven, battery-exact — because the synthesis pool
+/// holds no candidate for these specs and the pipeline
+/// crowns a different, unverified body (measured at
+/// Phase 144). The field is assembly-internal: it is
+/// not a manifest field (§2.4's form carries no such
+/// row) and moves no package byte.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CrownRoute {
+    Pipeline,
+    Encoder,
+}
 
 struct FrozenRow {
     name: &'static str,
@@ -362,46 +398,47 @@ struct FrozenRow {
     verdict_basis: &'static str,
     battery_pinned: usize,
     battery_silent: usize,
+    crown: CrownRoute,
 }
 
 const FROZEN: &[FrozenRow] = &[
-    FrozenRow { name: "int_abs", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 16, battery_silent: 1 },
-    FrozenRow { name: "int_sign", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 11, battery_silent: 0 },
-    FrozenRow { name: "int_min", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 16, battery_silent: 0 },
-    FrozenRow { name: "int_max", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 16, battery_silent: 0 },
-    FrozenRow { name: "int_clamp", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 13, battery_silent: 2 },
-    FrozenRow { name: "int_is_even", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "int_is_odd", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "char_is_digit", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0 },
-    FrozenRow { name: "char_is_alpha", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0 },
-    FrozenRow { name: "char_is_whitespace", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0 },
-    FrozenRow { name: "char_is_uppercase", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0 },
-    FrozenRow { name: "char_is_lowercase", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0 },
-    FrozenRow { name: "char_to_digit", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0 },
-    FrozenRow { name: "string_is_empty", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "result_unwrap_or", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 36, battery_silent: 0 },
-    FrozenRow { name: "option_unwrap_or", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 28, battery_silent: 0 },
-    FrozenRow { name: "option_ok_or", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 9, battery_silent: 0 },
-    FrozenRow { name: "list_is_empty", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "list_reverse", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "list_contains", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 75, battery_silent: 0 },
-    FrozenRow { name: "list_sum", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "list_product", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 13, battery_silent: 0 },
-    FrozenRow { name: "list_min", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "list_max", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "list_take", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 28, battery_silent: 0 },
-    FrozenRow { name: "list_drop", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 28, battery_silent: 0 },
-    FrozenRow { name: "list_is_sorted", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "list_sort", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
-    FrozenRow { name: "list_binary_search", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 64, battery_silent: 3 },
+    FrozenRow { name: "int_abs", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 16, battery_silent: 1, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "int_sign", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 11, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "int_min", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 16, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "int_max", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 16, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "int_clamp", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 13, battery_silent: 2, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "int_is_even", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "int_is_odd", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "char_is_digit", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "char_is_alpha", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "char_is_whitespace", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "char_is_uppercase", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "char_is_lowercase", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "char_to_digit", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 101, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "string_is_empty", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "result_unwrap_or", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 36, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "option_unwrap_or", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 28, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "option_ok_or", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 9, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "list_is_empty", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "list_reverse", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_contains", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 75, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_sum", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_product", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 13, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_min", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_max", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_take", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 28, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_drop", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 28, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_is_sorted", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_sort", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Pipeline },
+    FrozenRow { name: "list_binary_search", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 64, battery_silent: 3, crown: CrownRoute::Pipeline },
     // Amendment 2 (Phase 135): the higher-order entries
     // + range, Tier-2 on the A2.3 batteries.
-    FrozenRow { name: "list_map", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 20, battery_silent: 0 },
-    FrozenRow { name: "list_filter", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 20, battery_silent: 0 },
-    FrozenRow { name: "list_fold", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 18, battery_silent: 0 },
-    FrozenRow { name: "list_all", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 16, battery_silent: 0 },
-    FrozenRow { name: "list_any", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 16, battery_silent: 0 },
-    FrozenRow { name: "range", tier: "tier-2", verdict_basis: "executed-exact", battery_pinned: 15, battery_silent: 0 },
+    FrozenRow { name: "list_map", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 20, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_filter", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 20, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_fold", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 18, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_all", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 16, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "list_any", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 16, battery_silent: 0, crown: CrownRoute::Encoder },
+    FrozenRow { name: "range", tier: "tier-1", verdict_basis: "z3-verified", battery_pinned: 15, battery_silent: 0, crown: CrownRoute::Encoder },
 ];
 
 /// The binding inputs for the frozen stdlib surface:
@@ -426,6 +463,7 @@ pub fn stdlib_inputs() -> Vec<BindingInput> {
                 verdict_basis: row.verdict_basis.to_string(),
                 battery_pinned: row.battery_pinned,
                 battery_silent: row.battery_silent,
+                crown_route: row.crown,
             }
         })
         .collect()
