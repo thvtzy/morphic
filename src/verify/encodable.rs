@@ -12,9 +12,10 @@
 //  Some/None outcome depends on:
 //
 //    - the SORT of the value (Int / Bool / Str / List /
-//      ListLen / Char / CharStr / Record / Option / Result /
-//      Opaque) — every operator in the real evaluator is
-//      sort-strict, and sort mismatches are `None`;
+//      ListLen / ArrayLen / Char / CharStr / Record /
+//      Option / Result / Opaque) — every operator in the
+//      real evaluator is sort-strict, and sort mismatches
+//      are `None`;
 //    - for Int, whether the Z3 term is a NUMERAL (the only
 //      place a value is ever inspected is `sym_index`'s
 //      `as_i64()`). A term is a numeral only when it was
@@ -75,6 +76,18 @@ enum Abs {
     /// A list known only by its length (Phase 76) — `len`
     /// is an (Unknown) Int; everything else is `None`.
     ListLen,
+    /// A `List<Int>` value as a pair (Phase 139, W1) —
+    /// mirrors `Sym::ArrayLen`: the standing length term
+    /// plus an `Array<Int, Int>` term. Abstractly the
+    /// pair carries no element facts (W1 builds no
+    /// consumer of them), so the shape is a unit: `len`
+    /// is an (Unknown) Int, an Int Append stores (the
+    /// shape survives), merges of two pairs — or of a
+    /// pair with a concrete Int list, through the §2.5
+    /// bridge — stay pairs; indexing, equality and
+    /// concatenation are `None`, exactly as the real
+    /// evaluator's arms stand at W1.
+    ArrayLen,
     /// A Char scalar (Phase 76): Known iff the real term
     /// is a Z3 numeral (literal / constant index).
     Char(IntVal),
@@ -310,7 +323,13 @@ fn fresh_abs(ty: &TypeRef, index: &SpecIndex, depth: usize) -> Abs {
         TypeRef::Bool => Abs::Bool,
         TypeRef::String => Abs::Str(StrVal::Unknown),
         TypeRef::Char => Abs::Char(IntVal::Unknown),
-        TypeRef::List(_) => Abs::ListLen,
+        TypeRef::List(inner) => match **inner {
+            // Phase 139 (W1): `List<Int>` binds as the
+            // pair, mirroring `fresh_sym` — every other
+            // element sort keeps ListLen (§9 R9).
+            TypeRef::Int => Abs::ArrayLen,
+            _ => Abs::ListLen,
+        },
         TypeRef::Option(inner) => Abs::Option {
             some: AbsTag::Free,
             payload: Some(Box::new(fresh_abs(inner, index, depth + 1))),
@@ -789,6 +808,10 @@ fn abs_len(v: Abs) -> Option<Abs> {
         // A symbolic list's length is its binding constant,
         // not a numeral.
         Abs::ListLen => Some(Abs::Int(IntVal::Unknown)),
+        // A paired binding's length is the same standing
+        // term (Phase 139): a binding constant, not a
+        // numeral — mirrors `sym_len`'s ArrayLen arm.
+        Abs::ArrayLen => Some(Abs::Int(IntVal::Unknown)),
         _ => None,
     }
 }
@@ -859,6 +882,22 @@ fn abs_ite(a: Abs, b: Abs) -> Option<Abs> {
         (Abs::Char(_), Abs::Char(_)) => Some(Abs::Char(IntVal::Unknown)),
         (Abs::CharStr, Abs::CharStr) => Some(Abs::CharStr),
         (Abs::ListLen, Abs::ListLen) => Some(Abs::ListLen),
+        // Two paired bindings merge as a pair (Phase 139,
+        // mirroring sym_ite's §2.11 arm).
+        (Abs::ArrayLen, Abs::ArrayLen) => Some(Abs::ArrayLen),
+        // A pair meets a concrete list through the §2.5
+        // bridge, mirroring `sym_pair_of_concrete`: the
+        // concrete side crosses exactly when every
+        // element is an Int (an empty list crosses
+        // vacuously); any other element sort declines,
+        // as the real crossing declines.
+        (Abs::ArrayLen, Abs::List(items)) | (Abs::List(items), Abs::ArrayLen) => {
+            if items.iter().all(|it| matches!(it, Abs::Int(_))) {
+                Some(Abs::ArrayLen)
+            } else {
+                None
+            }
+        }
         // Two concrete lists merge elementwise (Phase 91),
         // mirroring sym_ite: equal lengths only.
         (Abs::List(x), Abs::List(y)) => {
@@ -1002,6 +1041,13 @@ fn abs_binop(kind: BinKind, l: Abs, r: Abs) -> Option<Abs> {
         // Append over a length-only list (Phase 91): the
         // length grows by exactly one, whatever the item.
         (Append, Abs::ListLen, _) => Some(Abs::ListLen),
+        // Append over a paired binding (Phase 139):
+        // §2.6's store form, mirroring the real arm's
+        // item discipline — the item must be an Int; the
+        // pair survives with its length grown (abstractly
+        // the shape is all that survives). Any other item
+        // declines, as the real store declines.
+        (Append, Abs::ArrayLen, Abs::Int(_)) => Some(Abs::ArrayLen),
         // Append of an indexed char onto a string (Phase
         // 91): a concatenation term, never a known literal.
         (Append, Abs::Str(_), Abs::CharStr) => Some(Abs::Str(StrVal::Unknown)),

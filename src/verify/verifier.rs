@@ -1274,10 +1274,39 @@ enum Sym {
     List(Vec<Sym>),
     /// A list whose elements are unmodelled but whose
     /// LENGTH is this Int term — the binding of a List-typed
-    /// parameter or record field (Phase 76). `len` reads the
-    /// term; element access and list equality are
-    /// unencodable (a length is not the list).
+    /// parameter or record field whose element sort is not
+    /// Int (Phase 76; Phase 139 keeps it for exactly those:
+    /// see `ArrayLen` and LIST_ENCODER_SCOPE §9 R9).
+    /// `len` reads the term; element access and list
+    /// equality are unencodable (a length is not the list).
     ListLen(z3::ast::Int),
+    /// A `List<Int>` value as a PAIR (Phase 139, W1;
+    /// LIST_ENCODER_SCOPE §2.1): the standing length term
+    /// (`len` — the very term `ListLen` would carry, same
+    /// name, same form) plus an `Array<Int, Int>` term
+    /// carrying the elements, `select(elems, i)` being
+    /// index `i`'s element, meaningful exactly on
+    /// `0 <= i < len` (§2.3's guard discipline: no index
+    /// term is produced without its in-range proof, and
+    /// beyond-length content is unobservable to every
+    /// verdict). The pairing is ONE binding, carried as
+    /// one variant so the pair travels together through
+    /// environments, merges and havocs — a companion
+    /// binding keyed by path would be invisible to the
+    /// shape-driven consumers (the statement layer's
+    /// havoc above all) and could desynchronize from the
+    /// length it belongs to. At W1 no consumer reads
+    /// `elems` yet: W2 builds the guarded select and the
+    /// equality form, W3 the quantifier arms. What W1
+    /// builds is the binding and its hygiene — `len`
+    /// reads `len`, merges merge both halves (§2.11),
+    /// Append is §2.6's store, and a concrete list meets
+    /// the pair through the §2.5 bridge
+    /// (`sym_pair_of_concrete`).
+    ArrayLen {
+        len: z3::ast::Int,
+        elems: z3::ast::Array,
+    },
     /// A Char as its Unicode scalar value (Phase 76, D5a).
     /// Deliberately NOT `Sym::Int`: sort-strictness — a
     /// Char never compares or computes as an Int. A Char
@@ -1605,7 +1634,10 @@ const MAX_FRESH_DEPTH: usize = 8;
 /// module's declarations — `SpecIndex::from_module`; with a
 /// declarations-less index a record type binds Opaque,
 /// exactly the pre-Phase-76 behavior). A List binds its
-/// length only (`Sym::ListLen`): elements are unmodelled.
+/// length only (`Sym::ListLen`) — except `List<Int>`,
+/// which binds as the pair of LIST_ENCODER_SCOPE §2.1
+/// (`Sym::ArrayLen`: the same length term plus a fresh
+/// array term), Phase 139.
 #[cfg(feature = "z3-support")]
 fn fresh_sym(ty: &TypeRef, path: &str, index: &SpecIndex, depth: usize) -> Sym {
     if depth > MAX_FRESH_DEPTH {
@@ -1624,9 +1656,29 @@ fn fresh_sym(ty: &TypeRef, path: &str, index: &SpecIndex, depth: usize) -> Sym {
         TypeRef::Bool => Sym::Bool(z3::ast::Bool::new_const(path)),
         TypeRef::String => Sym::Str(z3::ast::String::new_const(path)),
         TypeRef::Char => Sym::Char(z3::ast::Int::new_const(path)),
-        TypeRef::List(_) => {
-            Sym::ListLen(z3::ast::Int::new_const(format!("{path}.len").as_str()))
-        }
+        TypeRef::List(inner) => match **inner {
+            // Phase 139 (W1, LIST_ENCODER_SCOPE §2.1): a
+            // `List<Int>` binds as a PAIR — the standing
+            // length term, unchanged in name and form
+            // (`{path}.len`, the term every length-level
+            // standing in the tree stands on), plus a
+            // fresh `Array<Int, Int>` term over the same
+            // binding path (`{path}.elems`). The pairing
+            // engages ONLY here (§9 R9): every other
+            // element sort — Char, Bool, String, the sized
+            // integers, nested, function — keeps the
+            // `ListLen` binding below and its exact
+            // standings.
+            TypeRef::Int => Sym::ArrayLen {
+                len: z3::ast::Int::new_const(format!("{path}.len").as_str()),
+                elems: z3::ast::Array::new_const(
+                    format!("{path}.elems").as_str(),
+                    &z3::Sort::int(),
+                    &z3::Sort::int(),
+                ),
+            },
+            _ => Sym::ListLen(z3::ast::Int::new_const(format!("{path}.len").as_str())),
+        },
         TypeRef::Option(inner) => Sym::Option {
             some: Tag::Free(z3::ast::Bool::new_const(
                 format!("{path}.is_some").as_str(),
@@ -2183,7 +2235,10 @@ fn sym_pattern_cond(scrut: &Sym, lit: &IRLiteral) -> PatternCond {
         // Remaining pairs are provably disjoint sorts —
         // records, tagged values and list-lengths never equal
         // a literal pattern, and a Char never equals an Int,
-        // Float, Bool or String literal.
+        // Float, Bool or String literal. A paired list
+        // (Sym::ArrayLen, Phase 139) lands here too, as
+        // ListLen does: a list value is disjoint from every
+        // scalar literal pattern.
         _ => PatternCond::Never,
     }
 }
@@ -2270,6 +2325,10 @@ fn sym_len(v: Sym) -> Option<Sym> {
         Sym::List(items) => Some(Sym::Int(z3::ast::Int::from_i64(items.len() as i64))),
         Sym::Str(s) => Some(Sym::Int(s.length())),
         Sym::ListLen(n) => Some(Sym::Int(n)),
+        // The pair's length half IS the standing length
+        // term (Phase 139, §2.1): `len` reads it exactly
+        // as it reads ListLen's.
+        Sym::ArrayLen { len, .. } => Some(Sym::Int(len)),
         _ => None,
     }
 }
@@ -2409,6 +2468,34 @@ fn sym_ite_payload(
     }
 }
 
+/// The constructed-list bridge (Phase 139, W1;
+/// LIST_ENCODER_SCOPE §2.5): a concrete list of Int
+/// terms as a paired binding — the store-chain of its
+/// element terms over the constant base array, with
+/// length its count. The base is Z3's constant array at
+/// 0: hash-consing makes it one shared term for every
+/// crossing, so a crossed list's beyond-length content
+/// is common by construction (§9 R1) — and unobservable
+/// to any verdict regardless (§2.3). A non-Int element
+/// declines: the pair models `List<Int>` only (R9), so
+/// a concrete list of any other sort never crosses.
+#[cfg(feature = "z3-support")]
+fn sym_pair_of_concrete(items: Vec<Sym>) -> Option<Sym> {
+    let count = items.len();
+    let mut elems = z3::ast::Array::const_array(
+        &z3::Sort::int(),
+        &z3::ast::Int::from_i64(0),
+    );
+    for (idx, item) in items.into_iter().enumerate() {
+        let Sym::Int(term) = item else { return None };
+        elems = elems.store(&z3::ast::Int::from_i64(idx as i64), &term);
+    }
+    Some(Sym::ArrayLen {
+        len: z3::ast::Int::from_i64(count as i64),
+        elems,
+    })
+}
+
 #[cfg(feature = "z3-support")]
 fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
     match (a, b) {
@@ -2418,6 +2505,40 @@ fn sym_ite(cond: &z3::ast::Bool, a: Sym, b: Sym) -> Option<Sym> {
         (Sym::Char(x), Sym::Char(y)) => Some(Sym::Char(cond.ite(&x, &y))),
         (Sym::CharStr(x), Sym::CharStr(y)) => Some(Sym::CharStr(cond.ite(&x, &y))),
         (Sym::ListLen(x), Sym::ListLen(y)) => Some(Sym::ListLen(cond.ite(&x, &y))),
+        // Two paired bindings merge as a pair (Phase 139,
+        // §2.11): lengths by the standing ite, arrays by
+        // the same ite — a merged list's elements are the
+        // branches' elements at each index, which is
+        // exactly what the array ite says.
+        (
+            Sym::ArrayLen {
+                len: la,
+                elems: ea,
+            },
+            Sym::ArrayLen {
+                len: lb,
+                elems: eb,
+            },
+        ) => Some(Sym::ArrayLen {
+            len: cond.ite(&la, &lb),
+            elems: cond.ite(&ea, &eb),
+        }),
+        // A pair meets a concrete list through the §2.5
+        // bridge: the concrete side crosses as its
+        // store-chain pair, then the pair merge above is
+        // the whole story. (Two concretes keep the
+        // elementwise arm below; a pair against a ListLen
+        // is two different bindings and declines, as a
+        // ListLen against a concrete list declined before
+        // the pair existed.)
+        (p @ Sym::ArrayLen { .. }, Sym::List(items)) => {
+            let crossed = sym_pair_of_concrete(items)?;
+            sym_ite(cond, p, crossed)
+        }
+        (Sym::List(items), p @ Sym::ArrayLen { .. }) => {
+            let crossed = sym_pair_of_concrete(items)?;
+            sym_ite(cond, crossed, p)
+        }
         (Sym::List(x), Sym::List(y)) => {
             // Two concrete lists merge elementwise (Phase
             // 91, W4; the Phase 90 probe's p90_ite arm,
@@ -2576,6 +2697,28 @@ fn sym_binop(kind: BinKind, l: Sym, r: Sym) -> Option<Sym> {
         (Append, Sym::ListLen(n), _) => {
             Some(Sym::ListLen(z3_add(&n, &z3::ast::Int::from_i64(1))))
         }
+        // Append over a paired binding (Phase 139, W1):
+        // §2.6's store form — array `store(elems, len,
+        // item)`, length `len + 1`, exact and in-model.
+        // The length totalization above is thereby
+        // retired for paired bindings: an appended list's
+        // elements are modelled, not merely counted. The
+        // store form lands at W1 rather than W2 because
+        // the totalization's length standings (Phase 91's
+        // push_len) stand on this arm and must not move;
+        // its length half is the totalization's, term for
+        // term. The item must be an Int term — the pair
+        // models List<Int> only, and a value that is not
+        // an Int cannot store into an Array<Int, Int>;
+        // any other item declines rather than totalizing.
+        (
+            Append,
+            Sym::ArrayLen { len, elems },
+            Sym::Int(item),
+        ) => Some(Sym::ArrayLen {
+            elems: elems.store(&len, &item),
+            len: z3_add(&len, &z3::ast::Int::from_i64(1)),
+        }),
         // Append of an indexed char onto a string (Phase
         // 91, W5): the lexeme shape. The CharStr form is
         // already the character as a length-≤1 string, so
@@ -3110,6 +3253,24 @@ fn stmt_sym_identical(a: &Sym, b: &Sym) -> bool {
         (Sym::Char(x), Sym::Char(y)) => term_eq(x, y),
         (Sym::CharStr(x), Sym::CharStr(y)) => term_eq(x, y),
         (Sym::ListLen(x), Sym::ListLen(y)) => term_eq(x, y),
+        // A pair is identical when both its terms are
+        // (Phase 139): the length term and the array term.
+        // This is the merge fast path's identity test
+        // (§9 R2) — it asserts nothing about list
+        // EQUALITY, whose only form is §2.4's, built at
+        // W2; two pairs with different terms merge by
+        // `stmt_ite`/`sym_ite`, never by this test passing
+        // or failing.
+        (
+            Sym::ArrayLen {
+                len: la,
+                elems: ea,
+            },
+            Sym::ArrayLen {
+                len: lb,
+                elems: eb,
+            },
+        ) => term_eq(la, lb) && term_eq(ea, eb),
         (Sym::List(x), Sym::List(y)) => {
             x.len() == y.len()
                 && x.iter().zip(y.iter()).all(|(u, v)| stmt_sym_identical(u, v))
@@ -4266,6 +4427,24 @@ fn stmt_havoc(v: &Sym, path: &str, index: &SpecIndex) -> Option<Sym> {
         Sym::ListLen(_) | Sym::List(_) => {
             Some(Sym::ListLen(z3::ast::Int::new_const(path)))
         }
+        // A havoc'd pair is a fresh PAIR (Phase 139): the
+        // loop may have rewritten any element, so both
+        // halves freshen — a fresh length constant under
+        // the havoc path (the ListLen arm's convention)
+        // and a fresh array under `{path}.elems` (the
+        // binding path's convention, §2.1). Freshening
+        // only the length would leave the pre-loop array
+        // term carrying elements the loop may have
+        // changed — a stale-content lie the moment W2's
+        // select arm can read it.
+        Sym::ArrayLen { .. } => Some(Sym::ArrayLen {
+            len: z3::ast::Int::new_const(path),
+            elems: z3::ast::Array::new_const(
+                format!("{path}.elems").as_str(),
+                &z3::Sort::int(),
+                &z3::Sort::int(),
+            ),
+        }),
         Sym::Record { type_name, .. } => {
             let (resolved, fields) = index.record_fields(type_name)?;
             Some(Sym::Record {
@@ -5260,7 +5439,7 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 ("unwrap", Sym::Option { payload, .. }) => {
                     payload.map(|p| *p)
                 }
-                ("len", v @ (Sym::List(_) | Sym::ListLen(_))) => sym_len(v),
+                ("len", v @ (Sym::List(_) | Sym::ListLen(_) | Sym::ArrayLen { .. })) => sym_len(v),
                 _ => None,
             }
         }
