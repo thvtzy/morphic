@@ -2189,6 +2189,33 @@ pub fn shipped_loop_invariant(name: &str) -> Option<&'static str> {
              hi >= lo implies i <= hi; \
              forall j: Int in range(len(out)): out[j] == lo + j",
         ),
+        // acc is the fold over the consumed prefix, in
+        // §2.8's prefix form itself (Phase 142): the
+        // fold over `list_take(xs, i)` under the
+        // contract's own op. Initiation is the base row
+        // (the empty prefix folds to the initial value),
+        // consecution is the step row at the counter,
+        // and at exit the counter is the length, where
+        // the prefix is the whole list — the
+        // postcondition's own fold.
+        "list_sum" => Some(
+            "0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             acc == fold(list_take(xs, i), 0, |acc, v| acc + v)",
+        ),
+        // The product, dually: initial value 1, the
+        // multiplying op.
+        "list_product" => Some(
+            "0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             acc == fold(list_take(xs, i), 1, |acc, v| acc * v)",
+        ),
+        // The fold of the parameter `f` itself: the
+        // prefix form over UF applications (§2.9's Fold
+        // point) — congruence is all the step row
+        // carries, and all the invariant states.
+        "list_fold" => Some(
+            "0 <= i; len(xs) >= 0 implies i <= len(xs); \
+             acc == fold(list_take(xs, i), init, f)",
+        ),
         _ => None,
     }
 }

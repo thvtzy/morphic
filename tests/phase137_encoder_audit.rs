@@ -101,13 +101,17 @@ fn phase137_tier2_standings() {
     // list_min, list_max, list_take, list_drop,
     // list_is_sorted, range — Verify with their shipped
     // bodies (the crown evidence per entry, row by row,
-    // is tests/phase141_quantifiers.rs). The other nine
-    // stand Inconclusive, each for its named reason:
-    // list_sum / list_product await the fold-form arm
-    // (W4, Phase 142), the five higher-order entries the
-    // UF-composition arm (W5, Phase 143), list_sort is
-    // the standing residue (§3.10 + the two-binder row),
-    // and list_binary_search is the named stretch, judged
+    // is tests/phase141_quantifiers.rs). At Phase 142
+    // (W4) the fold-form arm crowned the three fold
+    // contracts — list_sum, list_product, list_fold
+    // (tests/phase142_fold_form.rs) — under §2.8's
+    // prefix definition, so their pins retire in place
+    // per §9 R10. The other six stand Inconclusive, each
+    // for its named reason: the four remaining
+    // higher-order entries await the UF-composition arm
+    // (W5, Phase 143), list_sort is the standing
+    // residue (§3.10 + the two-binder row), and
+    // list_binary_search is the named stretch, judged
     // at the Phase 144 re-tier.
     const CROWNED_AT_W3: &[&str] = &[
         "list_reverse",
@@ -119,6 +123,7 @@ fn phase137_tier2_standings() {
         "list_is_sorted",
         "range",
     ];
+    const CROWNED_AT_W4: &[&str] = &["list_sum", "list_product", "list_fold"];
     let specs = stdlib::prelude_specs();
     for name in TIER2 {
         let spec = specs.iter().find(|s| &s.name == name).expect("entry ships");
@@ -126,7 +131,7 @@ fn phase137_tier2_standings() {
         let status = Verifier::with_specs(&specs).verify_one(&candidate(spec, body), spec).status;
         println!("P137|A|tier2|{name}={status:?}");
         #[cfg(feature = "z3-support")]
-        if CROWNED_AT_W3.contains(name) {
+        if CROWNED_AT_W3.contains(name) || CROWNED_AT_W4.contains(name) {
             assert_eq!(status, VerificationStatus::Verified, "{name}");
         } else {
             assert_eq!(status, VerificationStatus::Inconclusive, "{name}");

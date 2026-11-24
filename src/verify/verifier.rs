@@ -4773,6 +4773,125 @@ fn constraint_free_vars(c: &Constraint, out: &mut std::collections::HashSet<Stri
     }
 }
 
+/// The binder-aware sibling of `expr_free_vars` /
+/// `constraint_free_vars`, used ONLY by the invariant
+/// route's scope check. The standing pair deliberately
+/// over-approximates (a lambda's parameters count as
+/// free), and its other consumers are written against
+/// that shape — the statement-call capture guard
+/// declines on it, the W3 domain derivation follows it.
+/// The scope check asks a different question — which
+/// names the invariant READS from the loop state — and
+/// a lambda's parameters are not reads: they are bound
+/// by the lambda itself, and the one encoder that
+/// admits a lambda at all (the fold arm, §2.8) binds
+/// them itself. Before W4 no stated invariant carried a
+/// lambda; the fold invariants do (the op is part of
+/// the row), so the check subtracts lambda and
+/// comprehension binders, as `constraint_free_vars`
+/// already subtracts quantifier binders. Everywhere
+/// else the scoped walk is shape-for-shape the standing
+/// one.
+#[cfg(feature = "z3-support")]
+fn expr_free_vars_scoped(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    match e {
+        Expr::Lambda(params, body) => {
+            let mut inner = std::collections::HashSet::new();
+            expr_free_vars_scoped(body, &mut inner);
+            for name in inner {
+                if !params.iter().any(|(p, _)| p == &name) {
+                    out.insert(name);
+                }
+            }
+        }
+        Expr::Comprehension {
+            binder,
+            collection,
+            body,
+        } => {
+            expr_free_vars_scoped(collection, out);
+            let mut inner = std::collections::HashSet::new();
+            expr_free_vars_scoped(body, &mut inner);
+            for name in inner {
+                if name != *binder {
+                    out.insert(name);
+                }
+            }
+        }
+        Expr::Var(n) => {
+            out.insert(n.clone());
+        }
+        Expr::Field(inner, _) => expr_free_vars_scoped(inner, out),
+        Expr::Index(c, i) => {
+            expr_free_vars_scoped(c, out);
+            expr_free_vars_scoped(i, out);
+        }
+        Expr::Call(_, args) => {
+            for a in args {
+                expr_free_vars_scoped(a, out);
+            }
+        }
+        Expr::BinOp(_, l, r) => {
+            expr_free_vars_scoped(l, out);
+            expr_free_vars_scoped(r, out);
+        }
+        Expr::UnaryOp(_, inner) => expr_free_vars_scoped(inner, out),
+        Expr::Length(inner) => expr_free_vars_scoped(inner, out),
+        Expr::MethodCall { receiver, args, .. } => {
+            expr_free_vars_scoped(receiver, out);
+            for a in args {
+                expr_free_vars_scoped(a, out);
+            }
+        }
+        Expr::RecordLit { fields, .. } => {
+            for (_, v) in fields {
+                expr_free_vars_scoped(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(feature = "z3-support")]
+fn constraint_free_vars_scoped(c: &Constraint, out: &mut std::collections::HashSet<String>) {
+    match c {
+        Constraint::True => {}
+        Constraint::Expr(e) => expr_free_vars_scoped(e, out),
+        Constraint::Forall { vars, body } | Constraint::Exists { vars, body } => {
+            let mut inner = std::collections::HashSet::new();
+            constraint_free_vars_scoped(body, &mut inner);
+            for v in inner {
+                if !vars.iter().any(|(n, _)| n == &v) {
+                    out.insert(v);
+                }
+            }
+        }
+        Constraint::Implies(a, b) => {
+            constraint_free_vars_scoped(a, out);
+            constraint_free_vars_scoped(b, out);
+        }
+        Constraint::And(parts) | Constraint::Or(parts) => {
+            for p in parts {
+                constraint_free_vars_scoped(p, out);
+            }
+        }
+        Constraint::Not(inner) => constraint_free_vars_scoped(inner, out),
+        Constraint::Eq(a, b) => {
+            expr_free_vars_scoped(a, out);
+            expr_free_vars_scoped(b, out);
+        }
+        Constraint::Order(_, a, b) => {
+            expr_free_vars_scoped(a, out);
+            expr_free_vars_scoped(b, out);
+        }
+        Constraint::Predicate(_, args) => {
+            for a in args {
+                expr_free_vars_scoped(a, out);
+            }
+        }
+    }
+}
+
 /// Direct children of an IR node, for the invariant
 /// machinery's syntactic walks (a local mirror of the
 /// selector's walker — the statement layer keeps its
@@ -5142,14 +5261,17 @@ fn stmt_invariant_close(
     let fail = InvClose::Failed;
     let index = ctx.eval.index;
     // Scope: every name the invariant reads must be
-    // bound at loop entry.
+    // bound at loop entry. The read set is the
+    // binder-aware one (Phase 142): a stated fold
+    // invariant's op lambda binds its own parameters,
+    // which are not reads of the state.
     let rows = match parse_invariant_rows(text) {
         Some(r) => r,
         None => return fail,
     };
     let mut free = std::collections::HashSet::new();
     for r in &rows {
-        constraint_free_vars(r, &mut free);
+        constraint_free_vars_scoped(r, &mut free);
     }
     if free.iter().any(|v| !st.env.contains_key(v)) {
         return fail;
@@ -6111,6 +6233,406 @@ fn constraint_mentions_quantifier(c: &Constraint) -> bool {
     }
 }
 
+// ── Phase 142 (W4): the fold form (§2.8) ───────────────
+//
+// Three frozen contracts are fold forms — `list_sum`'s,
+// `list_product`'s and `list_fold`'s
+// `output == fold(xs, init, op)`. The arm gives a fold
+// term the prefix definition as its ONLY
+// characterization, exactly as §2.8 freezes it:
+//
+// - base: the fold over the empty prefix is `init`;
+// - step: the fold over the prefix of length `k + 1` is
+//   `op(fold over the prefix of length k, select(xs,
+//   k))`, for `k` in range.
+//
+// The build realizes it by structural recursion on
+// the length — the second realization §2.8 names: a
+// Z3 recursive function definition per op, over
+// (array, length, init), whose two branches are the
+// base and step rows (see `fold_register`). The first
+// realization §2.8 names — the two rows as universally
+// quantified axioms over the array — was built and
+// measured first: it discharges the proofs, but every
+// session carrying the axioms answers Unknown in the
+// refutation direction (model search over an
+// array-quantified axiom set fails validation on
+// ground rows and times out on symbolic ones), so
+// wrong bodies could not Refute and the measurement
+// could not be taken honestly. The definition asserts
+// nothing the rows do not: at every count >= 0 it is
+// the prefix definition, unfolded one step at a time,
+// and anything it does not determine (a fold's value
+// is determined at every count — what stays open is
+// what no row of base + step can equate, e.g. two
+// different ops' folds) stays Inconclusive. No closed
+// form, no commutativity or associativity fact,
+// nothing about folds over reordered or filtered
+// lists is asserted anywhere.
+//
+// The op's slice is the contracts' own shapes. A closed
+// lambda whose body is Int arithmetic over its two
+// parameters (accumulator, element): its identity is
+// the canonical rendering of that body with the
+// parameters replaced positionally, hashed, so every
+// formation of the op's fold — the contract, a stated
+// invariant, a probe row — names the same defined
+// function for the same op. And the
+// function-typed parameter itself (`list_fold`'s `f`),
+// a UF under the Phase 133 arm at signature
+// (Int, Int) -> Int: its fold's step row is stated over
+// UF applications, and congruence is all it carries
+// (§2.9's Fold point). An op outside the slice — a
+// capturing lambda, a UF of another signature, a
+// lambda whose body leaves the arithmetic slice —
+// declines, and its fold rows decline with it.
+//
+// A fold over `list_take(xs, i)` is §2.8's own subject
+// — the fold over the consumed prefix — and is denoted
+// directly as the fold term at the CLAMPED count
+// (take's frozen contract: the prefix is the base list
+// at length clamp(i, 0, len); beyond-length content is
+// unobservable to the fold, whose definition selects
+// only below the length argument). The denotation is exact
+// for every `i` — no guard is owed, as no index term
+// is produced — and it is the form the shipped bodies'
+// stated invariants are written in
+// (`acc == fold(list_take(xs, i), init, op)`). The
+// interception is name-keyed, on the standing builtin
+// precedent (`len`, `int_to_str` in encode_expr's Call
+// match): a caller spec of its own named `list_take`
+// is read by the prefix rule inside a fold, exactly as
+// a caller-named `len` is read by the length arm. A
+// bare `list_take(...)` outside a fold encodes exactly
+// as it did (through `sym_invoke`).
+
+/// The canonical rendering of a closed fold op's body:
+/// the lambda's two parameters replaced positionally
+/// (`#0` the accumulator, `#1` the element), Int
+/// literals and the Int arithmetic operators spelled
+/// out. `None` for any other shape — a free name (the
+/// op is not closed), a non-arithmetic operator, a
+/// nested call or lambda — which is the arm's op slice,
+/// applied identically by the name, the term former and
+/// the definition builder.
+#[cfg(feature = "z3-support")]
+fn fold_render_op(e: &Expr, acc: &str, elem: &str) -> Option<String> {
+    match e {
+        Expr::Var(n) if n == acc => Some("#0".to_string()),
+        Expr::Var(n) if n == elem => Some("#1".to_string()),
+        Expr::IntLit(n) => Some(format!("({n})")),
+        Expr::BinOp(op, l, r) => {
+            let sym = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                _ => return None,
+            };
+            Some(format!(
+                "({sym} {} {})",
+                fold_render_op(l, acc, elem)?,
+                fold_render_op(r, acc, elem)?
+            ))
+        }
+        Expr::UnaryOp(UnaryOp::Neg, inner) => {
+            Some(format!("(neg {})", fold_render_op(inner, acc, elem)?))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "z3-support")]
+fn fold_fnv1a(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// The fold function's name for a closed-lambda op:
+/// derived from the canonical rendering, so
+/// alpha-renamed writings of the same op (the
+/// contract's `|acc, v|`, an invariant's) name the same
+/// defined function, and structurally different ops —
+/// `a + v` against `v + a` — name different ones
+/// (§2.8 asserts nothing across ops).
+#[cfg(feature = "z3-support")]
+fn fold_lambda_name(params: &[(String, TypeRef)], body: &Expr) -> Option<String> {
+    if params.len() != 2 {
+        return None;
+    }
+    let rendered = fold_render_op(body, &params[0].0, &params[1].0)?;
+    Some(format!("fold_lambda_{:016x}", fold_fnv1a(&rendered)))
+}
+
+/// The fold UF's name for the UF-parameter op
+/// (`list_fold`'s `f`): keyed by the parameter's own UF
+/// name, and admitted only at the fold signature
+/// (Int, Int) -> Int.
+#[cfg(feature = "z3-support")]
+fn fold_uf_name(func: &Sym) -> Option<String> {
+    let Sym::Func {
+        name,
+        domain,
+        range,
+    } = func
+    else {
+        return None;
+    };
+    if domain.as_slice() == [UfSort::Int, UfSort::Int] && *range == UfSort::Int {
+        Some(format!("fold_{name}"))
+    } else {
+        None
+    }
+}
+
+/// The fold UF's name for an op expression, resolved
+/// against an environment (the row's env at term
+/// formation, the parameter env at definition
+/// registration — both bind the spec's parameters
+/// identically).
+#[cfg(feature = "z3-support")]
+fn fold_op_name(op: &Expr, env: &SymEnv) -> Option<String> {
+    match op {
+        Expr::Lambda(params, body) => fold_lambda_name(params, body),
+        Expr::Var(name) => fold_uf_name(env.get(name)?),
+        _ => None,
+    }
+}
+
+/// Apply a fold op to two Int terms: a closed lambda by
+/// encoding its body with the parameters bound to the
+/// terms (the body is the closed slice shape the name
+/// gate admitted — the rendering check runs again here
+/// so this function declines exactly where the name
+/// does), the UF parameter by `sym_apply` (congruence
+/// only).
+#[cfg(feature = "z3-support")]
+fn fold_op_apply(
+    op: &Expr,
+    env: &SymEnv,
+    acc: z3::ast::Int,
+    elem: z3::ast::Int,
+    ctx: &EvalCtx,
+) -> Option<z3::ast::Int> {
+    match op {
+        Expr::Lambda(params, body) => {
+            if params.len() != 2 {
+                return None;
+            }
+            fold_render_op(body, &params[0].0, &params[1].0)?;
+            let mut local = SymEnv::new();
+            local.insert(params[0].0.clone(), Sym::Int(acc));
+            local.insert(params[1].0.clone(), Sym::Int(elem));
+            match encode_expr(body, &local, ctx)? {
+                Sym::Int(t) => Some(t),
+                _ => None,
+            }
+        }
+        Expr::Var(name) => match sym_apply(env.get(name)?, vec![Sym::Int(acc), Sym::Int(elem)])? {
+            Sym::Int(t) => Some(t),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Fold ops whose recursive definition is registered
+/// in this thread's Z3 context, by op name — the
+/// declaration OBJECT is cached, not just the fact:
+/// `RecFuncDecl::new` on an already-defined name does
+/// NOT intern the way `FuncDecl::new` does (measured:
+/// a second declaration object for the same name
+/// shadows the definition and its applications go
+/// opaque in later solvers), so each op's declaration
+/// is created exactly once, with its definition, and
+/// reused for the thread's life — the same lifetime
+/// the context itself has.
+#[cfg(feature = "z3-support")]
+thread_local! {
+    static FOLD_DECLS: std::cell::RefCell<
+        std::collections::HashMap<String, z3::RecFuncDecl>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The fold function for one op, as a Z3 recursive
+/// definition — §2.8's structural-recursion
+/// realization. The declaration is registered with its
+/// definition the first time the op's fold is formed
+/// on this thread:
+///
+///   F(a, n, init) = ite(n <= 0, init,
+///                       op(F(a, n - 1, init), select(a, n - 1)))
+///
+/// whose branches are exactly the frozen rows: base
+/// (the empty prefix folds to `init`) and step (the
+/// prefix of length k + 1, at n = k + 1, applies the op
+/// once to the fold of the prefix of length k and the
+/// element at k). The `n <= 0` guard is the base row;
+/// counts below zero are outside the fold's domain (a
+/// prefix has count >= 0, and every session that
+/// judges a fold row asserts length well-formedness) —
+/// that branch is the definition's totality at a point
+/// no execution and no battery reaches, never a fact a
+/// verdict rests on: at every count >= 0 the
+/// definition is the prefix definition and nothing
+/// else.
+///
+/// A definition, not session axioms — the measured
+/// alternative (base + step as universally quantified
+/// axioms over the array) proves in the UNSAT
+/// direction but its sessions answer Unknown in the
+/// refutation direction: model search over an
+/// array-quantified axiom set fails validation on
+/// ground rows and times out on symbolic ones, and a
+/// crown whose wrong bodies cannot Refute is not the
+/// frozen measurement. Registered once in the context,
+/// the definition is present in every session — row
+/// judges, invariant obligations, the exhaustion
+/// gate — with no quantified axiom asserted anywhere.
+/// Register one op's fold definition (see the
+/// `FOLD_DECLS` note for why this runs exactly once per
+/// op): build the declaration, add the §2.8 definition
+/// body, and cache the declaration object. The
+/// definition's step branch applies the op through
+/// `fold_op_apply` — for a closed lambda its body with
+/// the parameters bound to the recursive call and the
+/// selected element; for the UF parameter a `sym_apply`
+/// (congruence only).
+#[cfg(feature = "z3-support")]
+fn fold_register(name: &str, op: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<()> {
+    use z3::ast::Ast as _;
+    let array = z3::Sort::array(&z3::Sort::int(), &z3::Sort::int());
+    let int = z3::Sort::int();
+    let decl = z3::RecFuncDecl::new(name, &[&array, &int, &int], &int);
+    let a = z3::ast::Array::new_const(
+        "fold.a",
+        &z3::Sort::int(),
+        &z3::Sort::int(),
+    );
+    let n = z3::ast::Int::new_const("fold.n");
+    let init = z3::ast::Int::new_const("fold.init");
+    let zero = z3::ast::Int::from_i64(0);
+    let one = z3::ast::Int::from_i64(1);
+    let nm1 = z3_sub(&n, &one);
+    let prev_args: Vec<&dyn z3::ast::Ast> = vec![
+        &a as &dyn z3::ast::Ast,
+        &nm1 as &dyn z3::ast::Ast,
+        &init as &dyn z3::ast::Ast,
+    ];
+    let prev = decl.apply(&prev_args).as_int()?;
+    let sel = a.select(&nm1).as_int()?;
+    let stepped = fold_op_apply(op, env, prev, sel, ctx)?;
+    let body = n.le(&zero).ite(&init, &stepped);
+    decl.add_def(
+        &[
+            &a as &dyn z3::ast::Ast,
+            &n as &dyn z3::ast::Ast,
+            &init as &dyn z3::ast::Ast,
+        ],
+        &body,
+    );
+    FOLD_DECLS.with(|map| {
+        map.borrow_mut().insert(name.to_string(), decl);
+    });
+    Some(())
+}
+
+#[cfg(feature = "z3-support")]
+fn fold_term(
+    name: &str,
+    op: &Expr,
+    env: &SymEnv,
+    ctx: &EvalCtx,
+    elems: &z3::ast::Array,
+    n: &z3::ast::Int,
+    init: &z3::ast::Int,
+) -> Option<z3::ast::Int> {
+    if !FOLD_DECLS.with(|map| map.borrow().contains_key(name)) {
+        fold_register(name, op, env, ctx)?;
+    }
+    FOLD_DECLS.with(|map| {
+        let map = map.borrow();
+        let decl = map.get(name)?;
+        let args: Vec<&dyn z3::ast::Ast> = vec![
+            elems as &dyn z3::ast::Ast,
+            n as &dyn z3::ast::Ast,
+            init as &dyn z3::ast::Ast,
+        ];
+        decl.apply(&args).as_int()
+    })
+}
+
+/// The paired binding of a foldable list value: a pair
+/// directly, or a concrete Int list crossed through the
+/// §2.5 bridge. Anything else (a length-only binding, a
+/// non-Int list) has no element model to fold over.
+#[cfg(feature = "z3-support")]
+fn fold_pair(v: Sym) -> Option<(z3::ast::Array, z3::ast::Int)> {
+    match v {
+        Sym::ArrayLen { len, elems } => Some((elems, len)),
+        Sym::List(items) => match sym_pair_of_concrete(items)? {
+            Sym::ArrayLen { len, elems } => Some((elems, len)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Encode `fold(list, init, op)` (§2.8): the fold term
+/// over the list's pair at its length — or, for the
+/// prefix shape `fold(list_take(list, i), init, op)`,
+/// at the clamped count — or, over a concrete list, the
+/// prefix definition evaluated outright (no UF, no
+/// definition: the value is determined). The initial value
+/// must be an Int term and the op in the arm's slice;
+/// anything else declines.
+#[cfg(feature = "z3-support")]
+fn encode_fold(
+    list_arg: &Expr,
+    init_arg: &Expr,
+    op_arg: &Expr,
+    env: &SymEnv,
+    ctx: &EvalCtx,
+) -> Option<Sym> {
+    use z3::ast::Ast as _;
+    let name = fold_op_name(op_arg, env)?;
+    let Sym::Int(init) = encode_expr(init_arg, env, ctx)? else {
+        return None;
+    };
+    if let Expr::Call(take, targs) = list_arg {
+        if take == "list_take" && targs.len() == 2 {
+            let (elems, len) = fold_pair(encode_expr(&targs[0], env, ctx)?)?;
+            let Sym::Int(n) = encode_expr(&targs[1], env, ctx)? else {
+                return None;
+            };
+            let zero = z3::ast::Int::from_i64(0);
+            let plen = n.le(&zero).ite(&zero, &n.ge(&len).ite(&len, &n));
+            return fold_term(&name, op_arg, env, ctx, &elems, &plen, &init).map(Sym::Int);
+        }
+    }
+    match encode_expr(list_arg, env, ctx)? {
+        Sym::ArrayLen { len, elems } => {
+            fold_term(&name, op_arg, env, ctx, &elems, &len, &init).map(Sym::Int)
+        }
+        Sym::List(items) => {
+            let mut acc = init;
+            for item in items {
+                let Sym::Int(elem) = item else {
+                    return None;
+                };
+                acc = fold_op_apply(op_arg, env, acc, elem, ctx)?;
+            }
+            Some(Sym::Int(acc))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(feature = "z3-support")]
 fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
     match expr {
@@ -6185,6 +6707,13 @@ fn encode_expr(expr: &Expr, env: &SymEnv, ctx: &EvalCtx) -> Option<Sym> {
                 some: Tag::False,
                 payload: None,
             }),
+            // Phase 142 (W4, §2.8): the fold form — a
+            // fold term over the paired binding (or the
+            // prefix form over `list_take`, or a concrete
+            // list folded outright), under the op's
+            // recursive definition. See the fold section
+            // above `encode_expr`.
+            "fold" if args.len() == 3 => encode_fold(&args[0], &args[1], &args[2], env, ctx),
             // A call to another spec resolves by inlining the
             // callee's body (see sym_invoke) — this arm is what
             // makes composition postconditions judgable at all;

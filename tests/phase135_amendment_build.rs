@@ -440,20 +440,26 @@ Probe {
     println!("P135PIN|range|prelude-merge check: entry + quantifier domain coexist");
 }
 
-/// The six's verdicts — the Tier-2 standing as Phase 141
-/// (W3) leaves it. At Phase 135 all six verified
+/// The six's verdicts — the Tier-2 standing as Phase 142
+/// (W4) leaves it. At Phase 135 all six verified
 /// Inconclusive (their quantified element rows were
 /// outside the encoder; nothing about them was refuted —
 /// the Phase 115 pin form). Phase 141's W3 arms crowned
 /// `range` — one of the eight named in LIST_ENCODER_
-/// SCOPE §3 — so its pin retires in place per §9 R10:
-/// `range` now Verifies with its shipped body. The five
+/// SCOPE §3 — so its pin retired in place per §9 R10:
+/// `range` now Verifies with its shipped body. At Phase
+/// 142 the fold-form arm crowned `list_fold` — §3.3
+/// carries it as W4 + W5 jointly, and the composition
+/// it needed is §2.9's Fold point (the prefix step over
+/// UF applications), which the W4 build carries — so
+/// its pin retires in place the same way
+/// (tests/phase142_fold_form.rs). The four remaining
 /// higher-order entries' element rows wait on W5's UF
-/// composition (Phase 143) and stay Inconclusive.
+/// composition proper (Phase 143) and stay Inconclusive.
 #[cfg(feature = "z3-support")]
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn phase135_verdicts_the_tier2_standing_after_w3() {
+fn phase135_verdicts_the_tier2_standing_after_w4() {
     let specs = list_specs();
     for name in SIX {
         let spec = spec_of(&specs, name);
@@ -466,6 +472,12 @@ fn phase135_verdicts_the_tier2_standing_after_w3() {
                 verdict,
                 VerificationStatus::Verified,
                 "range: crowned at Phase 141 (W3) — Verified with its shipped body"
+            );
+        } else if name == "list_fold" {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Verified,
+                "list_fold: crowned at Phase 142 (W4) — Verified with its shipped body"
             );
         } else {
             assert_eq!(

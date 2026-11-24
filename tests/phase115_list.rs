@@ -603,7 +603,7 @@ fn list_bodies_are_executed_exact_through_the_compiled_route() {
 #[cfg(feature = "z3-support")]
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn tier2_verdicts_the_section_3_9_standing_after_w3() {
+fn tier2_verdicts_the_section_3_9_standing_after_w4() {
     // The §3.9 standing, as it moves: at Phase 115 every
     // entry below stood Inconclusive (element-level
     // verdicts waited on the encoder campaign). At
@@ -611,11 +611,14 @@ fn tier2_verdicts_the_section_3_9_standing_after_w3() {
     // reverse, contains, min, max, take, drop,
     // is_sorted — Verify with their shipped bodies
     // (LIST_ENCODER_SCOPE §3; the per-entry crown
-    // evidence is tests/phase141_quantifiers.rs). The
-    // remaining four stand Inconclusive for their named
-    // reasons: list_sum / list_product await the
-    // fold-form arm (W4), list_sort is the standing
-    // residue (§3.10 + the two-binder row), and
+    // evidence is tests/phase141_quantifiers.rs). At
+    // Phase 142 (W4) the fold-form arm crowned
+    // list_sum / list_product under §2.8's prefix
+    // definition (tests/phase142_fold_form.rs), so
+    // their pins retire in place per §9 R10. The
+    // remaining two stand Inconclusive for their named
+    // reasons: list_sort is the standing residue
+    // (§3.10 + the two-binder row), and
     // list_binary_search is the named stretch, judged
     // at the Phase 144 re-tier. (`range`, the eighth
     // W3 crown, is an Int-family entry pinned in
@@ -629,6 +632,7 @@ fn tier2_verdicts_the_section_3_9_standing_after_w3() {
         "list_drop",
         "list_is_sorted",
     ];
+    const CROWNED_AT_W4: &[&str] = &["list_sum", "list_product"];
     let specs = list_specs();
     for name in TIER2 {
         let spec = spec_of(&specs, name);
@@ -641,6 +645,12 @@ fn tier2_verdicts_the_section_3_9_standing_after_w3() {
                 verdict,
                 VerificationStatus::Verified,
                 "{name}: crowned at Phase 141 (W3) with its shipped body"
+            );
+        } else if CROWNED_AT_W4.contains(name) {
+            assert_eq!(
+                verdict,
+                VerificationStatus::Verified,
+                "{name}: crowned at Phase 142 (W4) with its shipped body"
             );
         } else {
             assert_eq!(

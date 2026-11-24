@@ -565,21 +565,26 @@ fn phase141_the_eight_crowned() {
 
 #[cfg(not(feature = "wasm-playground"))]
 #[test]
-fn phase141_the_nine_stand_inconclusive() {
-    // The drift discipline's other half: the fold-form
-    // pair (W4), the HO five (W5), binary_search (its
-    // stretch is judged at Phase 144) and sort (the
-    // standing residue) do not move at W3.
+fn phase141_the_six_stand_inconclusive() {
+    // The drift discipline's other half, as the later
+    // arms leave it. At Phase 141 nine stood here: the
+    // fold-form three (W4), the HO five (W5),
+    // binary_search (its stretch is judged at Phase
+    // 144) and sort (the standing residue). At Phase
+    // 142 (W4) the fold-form arm crowned list_sum,
+    // list_product and list_fold (the crown evidence is
+    // tests/phase142_fold_form.rs), so their pins retire
+    // from this list in place, per §9 R10. The six that
+    // remain do not move at W4: the HO four are W5's,
+    // binary_search is the named stretch, sort the
+    // standing residue.
     let specs = stdlib::prelude_specs();
     let verifier = Verifier::with_specs(&specs);
     for name in [
-        "list_sum",
-        "list_product",
         "list_sort",
         "list_binary_search",
         "list_map",
         "list_filter",
-        "list_fold",
         "list_all",
         "list_any",
     ] {
