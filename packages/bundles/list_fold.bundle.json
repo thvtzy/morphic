@@ -1,0 +1,514 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "list_fold",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "encoder",
+  "battery": {
+    "total": 8,
+    "evaluable": 8,
+    "passed": 8
+  },
+  "spec": {
+    "name": "list_fold",
+    "doc": "list_fold(xs, init, f) = the left fold of xs under f, starting from the accumulator init: f(f(f(init, x0), x1), ...) in element order; the empty list gives init (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "xs",
+        "ty": {
+          "List": "Int"
+        },
+        "annotations": {}
+      },
+      {
+        "name": "init",
+        "ty": "Int",
+        "annotations": {}
+      },
+      {
+        "name": "f",
+        "ty": {
+          "Function": [
+            [
+              "Int",
+              "Int"
+            ],
+            "Int"
+          ]
+        },
+        "annotations": {}
+      }
+    ],
+    "return_type": "Int",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "Call": [
+                "fold",
+                [
+                  {
+                    "Var": "xs"
+                  },
+                  {
+                    "Var": "init"
+                  },
+                  {
+                    "Var": "f"
+                  }
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "empty sum",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  []
+                ]
+              },
+              {
+                "IntLit": 42
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "a",
+                      {
+                        "Named": "_"
+                      }
+                    ],
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Add",
+                      {
+                        "Var": "a"
+                      },
+                      {
+                        "Var": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 42
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "empty product",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  []
+                ]
+              },
+              {
+                "IntLit": 7
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "a",
+                      {
+                        "Named": "_"
+                      }
+                    ],
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Mul",
+                      {
+                        "Var": "a"
+                      },
+                      {
+                        "Var": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 7
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "singleton",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 5
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 10
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "a",
+                      {
+                        "Named": "_"
+                      }
+                    ],
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Add",
+                      {
+                        "Var": "a"
+                      },
+                      {
+                        "Var": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 15
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "typical sum",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 3
+                    },
+                    {
+                      "IntLit": 4
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 0
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "a",
+                      {
+                        "Named": "_"
+                      }
+                    ],
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Add",
+                      {
+                        "Var": "a"
+                      },
+                      {
+                        "Var": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 10
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "left order subtraction",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 3
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 100
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "a",
+                      {
+                        "Named": "_"
+                      }
+                    ],
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Sub",
+                      {
+                        "Var": "a"
+                      },
+                      {
+                        "Var": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 94
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negatives",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "BinOp": [
+                        "Sub",
+                        {
+                          "IntLit": 0
+                        },
+                        {
+                          "IntLit": 5
+                        }
+                      ]
+                    },
+                    {
+                      "IntLit": 5
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 3
+              },
+              {
+                "Lambda": [
+                  [
+                    [
+                      "a",
+                      {
+                        "Named": "_"
+                      }
+                    ],
+                    [
+                      "x",
+                      {
+                        "Named": "_"
+                      }
+                    ]
+                  ],
+                  {
+                    "BinOp": [
+                      "Add",
+                      {
+                        "Var": "a"
+                      },
+                      {
+                        "Var": "x"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 3
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "named min",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 4
+                    },
+                    {
+                      "IntLit": 2
+                    },
+                    {
+                      "IntLit": 8
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 99
+              },
+              {
+                "Var": "int_min"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 2
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "named max init wins",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "List",
+                  [
+                    {
+                      "IntLit": 1
+                    },
+                    {
+                      "IntLit": 2
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 50
+              },
+              {
+                "Var": "int_max"
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 50
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(block (alloc \"acc\" Int (var \"init\")) (for \"i\" (lit (int 0)) (unop Len (var \"xs\")) (assign (var \"acc\") (call \"f\" (var \"acc\") (index (var \"xs\") (var \"i\"))))) (return (var \"acc\")))\n"
+}

@@ -298,6 +298,20 @@ duplicate targets any valid index satisfies it; the
 scan is disclosed in its doc, its JSDoc/rustdoc and its
 manifest row, not hidden behind the name.
 
+The rows are claims, and since 1.4 they carry their
+evidence. Each entry has a re-verification bundle in
+the repository at `packages/bundles/<entry>.bundle.json`
+— its spec, its body in the `morphic-ir/1` text
+serialization, the claimed verdict and tier, the
+executed battery's counts, and the crown route that
+judged it. `morphic verify-bundle <file>` re-runs that
+route from the bundle's (spec, body) alone and answers
+whether the claim reproduces; `morphic verify
+--library` re-verifies all 35 shipped crowns the same
+way. A tampered bundle — a flipped verdict, a swapped
+body, a wrong route, a stale format version — is
+refused by name, never silently passed.
+
 ## Contracts: preconditions and out-of-domain inputs
 
 The generated functions perform no runtime precondition

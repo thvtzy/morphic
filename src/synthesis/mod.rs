@@ -5,6 +5,7 @@
 
 pub mod engine;
 pub mod eval;
+pub mod irtext;
 pub mod selector;
 pub mod templates;
 

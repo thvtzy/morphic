@@ -237,6 +237,19 @@ Generated — do not edit. The package is assembled by
 shipped bodies; assembly re-runs the crowning checks
 and refuses to write if a crown has moved.
 
+The manifest's tier and verdict-basis rows are claims,
+and their evidence ships as re-verification bundles:
+one bundle per entry — its spec, its body in the
+morphic-ir text serialization, the claimed verdict,
+the executed battery, and the crown route that judged
+it — in the Morphic repository at `packages/bundles/`,
+produced by `morphic build --bundles`. Any holder of
+the Morphic binary can re-judge a bundle from its
+(spec, body) alone with `morphic verify-bundle
+<file>`, or re-verify every shipped crown at once with
+`morphic verify --library`; a claim that does not
+reproduce is refused by name.
+
 ## License
 
 Dual-licensed under MIT OR Apache-2.0, as Morphic
@@ -368,6 +381,23 @@ pub fn check_tier1_crown(
     let name = &spec.name;
     let report = crate::api::synthesize_seeded_spec(module_source, name, 42)
         .map_err(|e| format!("{name}: the pipeline run failed: {e:?}"))?;
+    judge_pipeline_report(&report, spec, shipped)
+}
+
+/// The pipeline crown's judgment over one seeded run's
+/// report: the crowned body is exactly the shipped body,
+/// Verified, golden-exact on its evaluable tests. Factored
+/// out of `check_tier1_crown` at Phase 150 so the bundle
+/// re-verification (src/pcc.rs) applies the assembly's own
+/// comparisons to a run it drives over ASTs — one judgment,
+/// two drivers, no drift between them.
+#[cfg(not(feature = "wasm-playground"))]
+pub fn judge_pipeline_report(
+    report: &crate::api::SynthesisReport,
+    spec: &FunctionSpec,
+    shipped: &IRNode,
+) -> Result<(), String> {
+    let name = &spec.name;
     if report.winner.body_debug != format!("{shipped:?}") {
         return Err(format!(
             "{name}: the pipeline crown has moved — the shipped body is no longer \

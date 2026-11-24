@@ -1,0 +1,175 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "int_is_odd",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 7,
+    "evaluable": 7,
+    "passed": 7
+  },
+  "spec": {
+    "name": "int_is_odd",
+    "doc": "int_is_odd(x) = true iff 2 does not divide x; the exact complement of int_is_even, negatives included (STDLIB_SCOPE.md 2.2).",
+    "generics": [],
+    "params": [
+      {
+        "name": "x",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "BinOp": [
+                "Neq",
+                {
+                  "BinOp": [
+                    "Mod",
+                    {
+                      "Var": "x"
+                    },
+                    {
+                      "IntLit": 2
+                    }
+                  ]
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "zero",
+        "input": {
+          "IntLit": 0
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "two",
+        "input": {
+          "IntLit": 2
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "three",
+        "input": {
+          "IntLit": 3
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negative even",
+        "input": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 4
+            }
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negative odd",
+        "input": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 3
+            }
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "int maximum",
+        "input": {
+          "IntLit": 9223372036854775807
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "int minimum",
+        "input": {
+          "BinOp": [
+            "Sub",
+            {
+              "BinOp": [
+                "Sub",
+                {
+                  "IntLit": 0
+                },
+                {
+                  "IntLit": 9223372036854775807
+                }
+              ]
+            },
+            {
+              "IntLit": 1
+            }
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(binop Neq (binop Mod (var \"x\") (lit (int 2))) (lit (int 0)))\n"
+}

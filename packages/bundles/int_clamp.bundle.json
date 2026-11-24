@@ -1,0 +1,485 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "int_clamp",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 9,
+    "evaluable": 8,
+    "passed": 8
+  },
+  "spec": {
+    "name": "int_clamp",
+    "doc": "int_clamp(x, lo, hi) = x confined to [lo, hi]: lo when x is below, hi when x is above, x between (STDLIB_SCOPE.md 2.2). Requires lo <= hi; at lo = hi every x gives lo.",
+    "generics": [],
+    "params": [
+      {
+        "name": "x",
+        "ty": "Int",
+        "annotations": {}
+      },
+      {
+        "name": "lo",
+        "ty": "Int",
+        "annotations": {}
+      },
+      {
+        "name": "hi",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Int",
+    "preconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Le",
+            {
+              "Var": "lo"
+            },
+            {
+              "Var": "hi"
+            }
+          ]
+        }
+      }
+    ],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Ge",
+                {
+                  "Var": "x"
+                },
+                {
+                  "Var": "lo"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Var": "lo"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Le",
+                {
+                  "Var": "x"
+                },
+                {
+                  "Var": "hi"
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Var": "hi"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Or",
+                {
+                  "BinOp": [
+                    "Lt",
+                    {
+                      "Var": "x"
+                    },
+                    {
+                      "Var": "lo"
+                    }
+                  ]
+                },
+                {
+                  "BinOp": [
+                    "Gt",
+                    {
+                      "Var": "x"
+                    },
+                    {
+                      "Var": "hi"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Var": "x"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "Call": [
+                "int_min",
+                [
+                  {
+                    "Call": [
+                      "int_max",
+                      [
+                        {
+                          "Var": "x"
+                        },
+                        {
+                          "Var": "lo"
+                        }
+                      ]
+                    ]
+                  },
+                  {
+                    "Var": "hi"
+                  }
+                ]
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "between",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 10
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 5
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "below",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 3
+                  }
+                ]
+              },
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 10
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "above",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 99
+              },
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 10
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 10
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "at lower bound",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 10
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "at upper bound",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 10
+              },
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 10
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 10
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "degenerate range",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 5
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negative range between",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 7
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 10
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 5
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 7
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negative range below",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 12
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 10
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 5
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 10
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "inverted range excluded",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 10
+              },
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(if (binop Gt (if (binop Lt (var \"x\") (var \"lo\")) (var \"lo\") (var \"x\")) (var \"hi\")) (var \"hi\") (if (binop Lt (var \"x\") (var \"lo\")) (var \"lo\") (var \"x\")))\n"
+}

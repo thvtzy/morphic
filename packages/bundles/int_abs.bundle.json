@@ -1,0 +1,212 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "int_abs",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 5,
+    "evaluable": 4,
+    "passed": 4
+  },
+  "spec": {
+    "name": "int_abs",
+    "doc": "int_abs(x) = |x|. The Int minimum is excluded by precondition: its absolute value is not representable in Int (STDLIB_SCOPE.md 2.2, frozen domain note).",
+    "generics": [],
+    "params": [
+      {
+        "name": "x",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Int",
+    "preconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Neq",
+            {
+              "Var": "x"
+            },
+            {
+              "BinOp": [
+                "Sub",
+                {
+                  "BinOp": [
+                    "Sub",
+                    {
+                      "IntLit": 0
+                    },
+                    {
+                      "IntLit": 9223372036854775807
+                    }
+                  ]
+                },
+                {
+                  "IntLit": 1
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Lt",
+                {
+                  "Var": "x"
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Var": "x"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "BinOp": [
+                "Ge",
+                {
+                  "Var": "x"
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "BinOp": [
+                    "Sub",
+                    {
+                      "IntLit": 0
+                    },
+                    {
+                      "Var": "x"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "zero",
+        "input": {
+          "IntLit": 0
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "positive",
+        "input": {
+          "IntLit": 4
+        },
+        "expected_output": {
+          "IntLit": 4
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negative",
+        "input": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 7
+            }
+          ]
+        },
+        "expected_output": {
+          "IntLit": 7
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "int maximum",
+        "input": {
+          "IntLit": 9223372036854775807
+        },
+        "expected_output": {
+          "IntLit": 9223372036854775807
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "int minimum excluded",
+        "input": {
+          "BinOp": [
+            "Sub",
+            {
+              "BinOp": [
+                "Sub",
+                {
+                  "IntLit": 0
+                },
+                {
+                  "IntLit": 9223372036854775807
+                }
+              ]
+            },
+            {
+              "IntLit": 1
+            }
+          ]
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(if (binop Lt (var \"x\") (lit (int 0))) (binop Sub (lit (int 0)) (var \"x\")) (var \"x\"))\n"
+}

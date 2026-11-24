@@ -28,7 +28,7 @@ mean at the boundary.
 
 ```toml
 [dependencies]
-morphic = "1.3.0"
+morphic = "1.4.0"
 ```
 
 ```rust
@@ -141,6 +141,19 @@ Generated — do not edit. The crate is assembled by
 `morphic build --facade` from the standard library's
 shipped bodies; assembly re-runs the crowning checks
 and refuses to write if a crown has moved.
+
+The manifest's tier and verdict-basis rows are claims,
+and their evidence ships as re-verification bundles:
+one bundle per entry — its spec, its body in the
+morphic-ir text serialization, the claimed verdict,
+the executed battery, and the crown route that judged
+it — in the Morphic repository at `packages/bundles/`,
+produced by `morphic build --bundles`. Any holder of
+the Morphic binary can re-judge a bundle from its
+(spec, body) alone with `morphic verify-bundle
+<file>`, or re-verify every shipped crown at once with
+`morphic verify --library`; a claim that does not
+reproduce is refused by name.
 
 ## License
 

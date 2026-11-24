@@ -1,0 +1,398 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "range",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "encoder",
+  "battery": {
+    "total": 7,
+    "evaluable": 7,
+    "passed": 7
+  },
+  "spec": {
+    "name": "range",
+    "doc": "range(lo, hi) = the ascending list [lo, lo + 1, ..., hi - 1]; lo == hi gives the empty list, and lo > hi gives the empty list — there is no descending form and no precondition (STDLIB_SCOPE.md Amendment 2). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "lo",
+        "ty": "Int",
+        "annotations": {}
+      },
+      {
+        "name": "hi",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": {
+      "List": "Int"
+    },
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Implies": [
+          {
+            "Expr": {
+              "BinOp": [
+                "Ge",
+                {
+                  "Var": "hi"
+                },
+                {
+                  "Var": "lo"
+                }
+              ]
+            }
+          },
+          {
+            "Expr": {
+              "BinOp": [
+                "Eq",
+                {
+                  "Call": [
+                    "len",
+                    [
+                      {
+                        "Var": "output"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "BinOp": [
+                    "Sub",
+                    {
+                      "Var": "hi"
+                    },
+                    {
+                      "Var": "lo"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "Implies": [
+          {
+            "Expr": {
+              "BinOp": [
+                "Le",
+                {
+                  "Var": "hi"
+                },
+                {
+                  "Var": "lo"
+                }
+              ]
+            }
+          },
+          {
+            "Expr": {
+              "BinOp": [
+                "Eq",
+                {
+                  "Call": [
+                    "len",
+                    [
+                      {
+                        "Var": "output"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "Forall": {
+          "vars": [
+            [
+              "i",
+              "Int"
+            ]
+          ],
+          "body": {
+            "Expr": {
+              "BinOp": [
+                "Eq",
+                {
+                  "Index": [
+                    {
+                      "Var": "output"
+                    },
+                    {
+                      "Var": "i"
+                    }
+                  ]
+                },
+                {
+                  "BinOp": [
+                    "Add",
+                    {
+                      "Var": "lo"
+                    },
+                    {
+                      "Var": "i"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "probe span",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "probe empty",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "equal bounds",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 4
+              },
+              {
+                "IntLit": 4
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "reversed",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 2
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "singleton",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 6
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negative span",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 3
+                  }
+                ]
+              },
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 3
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 2
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 1
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "typical",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 3
+              },
+              {
+                "IntLit": 4
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(block (alloc \"out\" (List Int) (collection List)) (for \"i\" (var \"lo\") (var \"hi\") (binop Append (var \"out\") (var \"i\"))) (return (var \"out\")))\n"
+}
