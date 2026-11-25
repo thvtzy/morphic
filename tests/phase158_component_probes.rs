@@ -40,8 +40,15 @@ fn read_repo(rel: &str) -> String {
 /// untouched; the tree's one WIT file is the component
 /// crate's, at the home the audit recommended. The
 /// audit document itself is untouched.
+///
+/// RETIRED AGAIN IN PLACE at Phase 160, same
+/// discipline: Phase 160 built the callback component
+/// (DISEBAR_16_SCOPE §5), whose world is the tree's
+/// second WIT file — so the pin now records exactly
+/// two WIT files, the library component's and the
+/// callback component's, each at its frozen home.
 #[test]
-fn p158_pipeline_standing_retired_at_159() {
+fn p158_pipeline_standing_retired_at_160() {
     let build = read_repo("playground/build.sh");
     assert!(
         build.contains("wasm-bindgen"),
@@ -66,22 +73,25 @@ fn p158_pipeline_standing_retired_at_159() {
     }
     scan(&repo_root(), &mut wit_files);
     println!(
-        "P158|pipeline|bindgen=core-module wit_files={} (standing replaced at Phase 159)",
+        "P158|pipeline|bindgen=core-module wit_files={} (standing replaced at Phases 159+160)",
         wit_files.len()
     );
+    wit_files.sort();
     assert_eq!(
         wit_files.len(),
-        1,
-        "exactly one WIT file stands in-tree — the component crate's: {wit_files:?}"
+        2,
+        "exactly two WIT files stand in-tree — the two component crates': {wit_files:?}"
     );
     assert!(
-        wit_files[0].ends_with("packages/component/wit/world.wit"),
-        "the one WIT file is the library component's world: {wit_files:?}"
+        wit_files[0].ends_with("packages/component-callbacks/wit/world.wit")
+            && wit_files[1].ends_with("packages/component/wit/world.wit"),
+        "the WIT files are the callback component's and the library component's worlds: {wit_files:?}"
     );
     assert!(
         !repo_root().join("crates/morphic-component").exists()
-            && repo_root().join("packages/component").exists(),
-        "the component crate stands at packages/component (Phase 159), not in crates/"
+            && repo_root().join("packages/component").exists()
+            && repo_root().join("packages/component-callbacks").exists(),
+        "the component crates stand at packages/component + packages/component-callbacks (Phases 159+160), not in crates/"
     );
 }
 

@@ -1,0 +1,29 @@
+# The Morphic library's higher-order five as a WASM
+# component (DISEBAR_16_SCOPE §5, decision D2a): the
+# facade (packages/rust) wrapped behind wit-bindgen glue,
+# with the entries' function arguments carried by three
+# host-imported callbacks. A SEPARATE artifact from the
+# library component (packages/component) because imports
+# satisfy at instantiation: a host that cannot supply
+# the callbacks must still be able to instantiate the
+# library component, and vice versa.
+# Its own workspace root (the [workspace] table below),
+# so the compiler tree's Cargo.toml/Cargo.lock never move.
+# Built with plain cargo — no cargo-component:
+#   cargo build --target wasm32-wasip2 --release
+[package]
+name = "morphic-component-callbacks"
+version = "1.5.0"
+edition = "2021"
+description = "Morphic's verified higher-order standard-library entries as a WASM component (world library-callbacks): the facade's five functions with their callbacks supplied by the host as imports."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thvtzy/morphic"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+morphic = { path = "../rust" }
+wit-bindgen = "=0.63.0"
