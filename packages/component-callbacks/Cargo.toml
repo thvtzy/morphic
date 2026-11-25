@@ -13,7 +13,7 @@
 #   cargo build --target wasm32-wasip2 --release
 [package]
 name = "morphic-component-callbacks"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2021"
 description = "Morphic's verified higher-order standard-library entries as a WASM component (world library-callbacks): the facade's five functions with their callbacks supplied by the host as imports."
 license = "MIT OR Apache-2.0"
