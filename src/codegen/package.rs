@@ -256,6 +256,55 @@ Dual-licensed under MIT OR Apache-2.0, as Morphic
 itself: see LICENSE-MIT and LICENSE-APACHE.
 "#;
 
+/// The `package.json` description of the stdlib package.
+const STDLIB_DESCRIPTION: &str = "Morphic's verified standard library as ready-to-import functions: pre-generated from the specifications the Morphic pipeline verified (Tier-1) or proved executed-exact (Tier-2). Per-function tiers and batteries: morphic.manifest.json.";
+
+/// The `package.json` furniture that does NOT derive
+/// from the binding set (Phase 154: the shell generalized
+/// for the user-package verb — the set-derived parts,
+/// name / version / exports map, were never
+/// stdlib-specific; this furniture was). The stdlib
+/// package's furniture states Morphic's own facts about
+/// Morphic's package (its license, its project links); a
+/// user package assembled by `build --package-from`
+/// carries the author's facts instead — no license field
+/// and no project links are asserted on their behalf.
+pub struct PackageFurniture {
+    /// The `description` field's text.
+    pub description: String,
+    /// The `license` field's value, when the package
+    /// carries one.
+    pub license_field: Option<String>,
+    /// License files riding the package — (file name,
+    /// contents), in `files`-listing order.
+    pub licenses: Vec<(String, String)>,
+    /// Whether the project-links block (repository /
+    /// homepage / keywords — the Morphic project's own
+    /// facts) is emitted.
+    pub project_links: bool,
+}
+
+/// The stdlib package's furniture (Phase 122's shape,
+/// unchanged): Morphic's description of its own package,
+/// its dual license, its project links.
+fn stdlib_furniture() -> PackageFurniture {
+    PackageFurniture {
+        description: STDLIB_DESCRIPTION.to_string(),
+        license_field: Some("MIT OR Apache-2.0".to_string()),
+        licenses: vec![
+            (
+                "LICENSE-MIT".to_string(),
+                include_str!("../../LICENSE-MIT").to_string(),
+            ),
+            (
+                "LICENSE-APACHE".to_string(),
+                include_str!("../../LICENSE-APACHE").to_string(),
+            ),
+        ],
+        project_links: true,
+    }
+}
+
 /// The `package.json`: ESM-only (R7), the exports map
 /// naming the root module, every per-function subpath
 /// (§2.2), the manifest and the package file itself;
@@ -268,7 +317,7 @@ itself: see LICENSE-MIT and LICENSE-APACHE.
 /// the listing the tarball silently carried neither.
 /// The version is the manifest's
 /// — the crate's — so one source stamps both (R6).
-fn package_json(set: &BindingSet) -> String {
+fn package_json(set: &BindingSet, furniture: &PackageFurniture) -> String {
     let mut out = String::new();
     out.push_str("{\n");
     out.push_str(&format!("  \"name\": \"{}\",\n", set.manifest.package));
@@ -276,11 +325,7 @@ fn package_json(set: &BindingSet) -> String {
         "  \"version\": \"{}\",\n",
         set.manifest.package_version
     ));
-    out.push_str(
-        "  \"description\": \"Morphic's verified standard library as ready-to-import functions: \
-         pre-generated from the specifications the Morphic pipeline verified (Tier-1) or proved \
-         executed-exact (Tier-2). Per-function tiers and batteries: morphic.manifest.json.\",\n",
-    );
+    out.push_str(&format!("  \"description\": \"{}\",\n", furniture.description));
     out.push_str("  \"type\": \"module\",\n");
     out.push_str("  \"main\": \"./index.js\",\n");
     out.push_str("  \"types\": \"./index.d.ts\",\n");
@@ -297,17 +342,25 @@ fn package_json(set: &BindingSet) -> String {
     out.push_str("    \"./morphic.manifest.json\": \"./morphic.manifest.json\",\n");
     out.push_str("    \"./package.json\": \"./package.json\"\n");
     out.push_str("  },\n");
-    out.push_str("  \"files\": [\n    \"*.js\",\n    \"*.d.ts\",\n    \"morphic.manifest.json\",\n    \"LICENSE-MIT\",\n    \"LICENSE-APACHE\"\n  ],\n");
-    out.push_str("  \"sideEffects\": false,\n");
-    out.push_str("  \"license\": \"MIT OR Apache-2.0\",\n");
-    out.push_str(
-        "  \"repository\": {\n    \"type\": \"git\",\n    \"url\": \"git+https://github.com/thvtzy/morphic.git\"\n  },\n",
-    );
-    out.push_str("  \"homepage\": \"https://thvtzy.github.io/morphic/\",\n");
-    out.push_str(
-        "  \"keywords\": [\"morphic\", \"verified\", \"formal-verification\", \"standard-library\"]\n",
-    );
-    out.push_str("}\n");
+    out.push_str("  \"files\": [\n    \"*.js\",\n    \"*.d.ts\",\n    \"morphic.manifest.json\"");
+    for (name, _) in &furniture.licenses {
+        out.push_str(&format!(",\n    \"{name}\""));
+    }
+    out.push_str("\n  ],\n");
+    out.push_str("  \"sideEffects\": false");
+    if let Some(license) = &furniture.license_field {
+        out.push_str(&format!(",\n  \"license\": \"{license}\""));
+    }
+    if furniture.project_links {
+        out.push_str(
+            ",\n  \"repository\": {\n    \"type\": \"git\",\n    \"url\": \"git+https://github.com/thvtzy/morphic.git\"\n  },\n",
+        );
+        out.push_str("  \"homepage\": \"https://thvtzy.github.io/morphic/\",\n");
+        out.push_str(
+            "  \"keywords\": [\"morphic\", \"verified\", \"formal-verification\", \"standard-library\"]",
+        );
+    }
+    out.push_str("\n}\n");
     out
 }
 
@@ -315,6 +368,41 @@ fn package_json(set: &BindingSet) -> String {
 /// the subpath denotes exactly the root export.
 fn per_function_shim(name: &str) -> String {
     format!("export {{ {name} }} from \"./index.js\";\n")
+}
+
+/// The package shell (Phase 154): a binding set +
+/// README + furniture becomes the standing npm layout —
+/// `package.json`, the README, any license files, the
+/// root module + declarations + manifest, and one
+/// per-function module per export. Pure generation, no
+/// filesystem contact. The stdlib assembly and the
+/// user-package verb are this one shell over different
+/// inputs — the layout cannot drift between them.
+pub fn assemble_package_files(
+    set: &BindingSet,
+    readme: &str,
+    furniture: &PackageFurniture,
+) -> Vec<PackageFile> {
+    let mut files: Vec<PackageFile> = Vec::new();
+    let mut push = |path: &str, contents: String| {
+        files.push(PackageFile {
+            path: path.to_string(),
+            contents,
+        })
+    };
+    push("package.json", package_json(set, furniture));
+    push("README.md", readme.to_string());
+    for (name, contents) in &furniture.licenses {
+        push(name, contents.clone());
+    }
+    push("index.js", set.js_module.clone());
+    push("index.d.ts", set.declarations.clone());
+    push("morphic.manifest.json", set.manifest_json.clone());
+    for e in &set.manifest.exports {
+        push(&format!("{}.js", e.name), per_function_shim(&e.name));
+        push(&format!("{}.d.ts", e.name), per_function_shim(&e.name));
+    }
+    files
 }
 
 /// Assemble the npm package: the full file set, in a
@@ -325,28 +413,11 @@ fn per_function_shim(name: &str) -> String {
 /// no filesystem contact.
 pub fn assemble_npm_package() -> Result<Vec<PackageFile>, CodegenError> {
     let set = bindings::stdlib_bindings()?;
-    let mut files: Vec<PackageFile> = Vec::new();
-    let mut push = |path: &str, contents: String| {
-        files.push(PackageFile {
-            path: path.to_string(),
-            contents,
-        })
-    };
-    push("package.json", package_json(&set));
-    push("README.md", PACKAGE_README.to_string());
-    push("LICENSE-MIT", include_str!("../../LICENSE-MIT").to_string());
-    push(
-        "LICENSE-APACHE",
-        include_str!("../../LICENSE-APACHE").to_string(),
-    );
-    push("index.js", set.js_module.clone());
-    push("index.d.ts", set.declarations.clone());
-    push("morphic.manifest.json", set.manifest_json.clone());
-    for e in &set.manifest.exports {
-        push(&format!("{}.js", e.name), per_function_shim(&e.name));
-        push(&format!("{}.d.ts", e.name), per_function_shim(&e.name));
-    }
-    Ok(files)
+    Ok(assemble_package_files(
+        &set,
+        PACKAGE_README,
+        &stdlib_furniture(),
+    ))
 }
 
 /// The package's unpacked mass: the file set's total
@@ -561,4 +632,305 @@ pub fn verify_crowns() -> Result<(), CodegenError> {
 pub fn assemble_npm_package_checked() -> Result<Vec<PackageFile>, CodegenError> {
     verify_crowns()?;
     assemble_npm_package()
+}
+
+// ── The user-package verb (Phase 154, DISEBAR_15_SCOPE
+// §4 — D2a: `build --package` generalized to a user
+// module as `--package-from <file.morph>`) ─────────────
+//
+// The binding generator accepts user modules in-process,
+// ungated — and prints caller-stated tier/basis claims
+// verbatim (the PCC-1 fact, re-pinned at Phase 152). The
+// verb is therefore the one place user packages are
+// allowed to come from, and it feeds the generator ONLY
+// rows it measured itself, in one seeded run per spec
+// (`api::synthesize_seeded_spec_winner` — the report and
+// the crowned body from the SAME run, so the packaged
+// body is the body the rows describe):
+//
+//   * the verdict is the run's own `verification_status`;
+//   * the battery is the run's executed counts — pinned
+//     points are the tests the crown passed, spec-silent
+//     points are the run's per-test `spec_silent`
+//     outcomes (points the spec's own `require:` excludes,
+//     Phase 109), counted from the same run's outcomes.
+//
+// ADMISSION (freeze §4.2): a spec enters the package iff
+// its crown is Verified with an exact battery on its
+// evaluable points (passed == evaluable — the assembly's
+// own Tier-1 judgment, package.rs's
+// `judge_pipeline_report`) → tier-1 / z3-verified; or
+// executed-exact (passed == evaluable == total,
+// total > 0 — the standing Tier-2 strictness of
+// `check_tier2_body`: no spec-silent points at this
+// tier) → tier-2 / executed-exact. Anything else —
+// Inconclusive, VerificationFailed, a partial battery, an
+// unevaluable spec — is REFUSED BY NAME, and the reading
+// taken of the freeze's "refused by name, and nothing is
+// written" is the stricter one: if ANY spec of the
+// module is refused, the whole assembly is refused and
+// no file set exists. (The looser reading — refuse the
+// spec, package the rest — would let a module's package
+// silently differ from the module; a package that claims
+// to be a module's exports and quietly omits the spec
+// that failed is a claim of the class this project
+// refuses.)
+//
+// The stdlib crown checks do NOT transfer (they re-judge
+// shipped bodies against the prelude); what transfers is
+// the refusal discipline, the generator, and the layout
+// shell above. In a build without the verifier, no crown
+// stands Verified and the same module measures
+// executed-exact rows instead — the rows say which
+// evidence they are (the api's D2 honesty contract,
+// carried into the manifest).
+
+/// One admitted spec's measured standing, as the CLI
+/// reports it and the README records it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserStanding {
+    pub name: String,
+    /// `"tier-1"` | `"tier-2"` (the §2.4 vocabulary).
+    pub tier: String,
+    /// `"z3-verified"` | `"executed-exact"`.
+    pub verdict_basis: String,
+    /// The run's verification status, verbatim
+    /// ("Verified" | "Inconclusive" | …).
+    pub status: String,
+    /// The run's executed counts for the crowned body.
+    pub passed: usize,
+    pub evaluable: usize,
+    pub total: usize,
+    /// Points the spec's own `require:` excludes
+    /// (the run's `spec_silent` outcomes).
+    pub spec_silent: usize,
+}
+
+/// A user package assembled by the verb: the file set
+/// (the standing layout, via `assemble_package_files`)
+/// and the measured standings it was admitted on.
+#[derive(Debug, Clone)]
+pub struct UserPackageAssembly {
+    pub files: Vec<PackageFile>,
+    pub standings: Vec<UserStanding>,
+}
+
+/// The user package's README: the factual surface,
+/// generated from the assembly's own manifest rows —
+/// what the package is, the export list with its tiers,
+/// the admission + provenance language, the boundary
+/// notes that are the generator's own facts (including
+/// EMBED_SCOPE §3's `never` stance for function-typed
+/// parameters), and the two version fields' separate
+/// facts. No license is asserted: licensing a user
+/// package is its author's act, not the verb's.
+fn user_package_readme(
+    package_name: &str,
+    scope: &str,
+    seed: u64,
+    set: &BindingSet,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {package_name}\n\n"));
+    out.push_str(&format!(
+        "Functions generated from the Morphic module `{scope}` by \
+         `morphic build --package-from` — every export synthesized from its \
+         specification by the Morphic pipeline and admitted on the standing \
+         the pipeline itself measured (below). The root module exports all \
+         of them; each is also importable from its own subpath (for example \
+         `{package_name}/{}`).\n\n",
+        set.manifest.exports.first().map(|e| e.name.as_str()).unwrap_or("")
+    ));
+    out.push_str(
+        "This package is an artifact, not a compiler: it contains no \
+         synthesizer and makes no runtime verification claims. The \
+         functions are plain, environment-neutral ES modules (BigInt, \
+         ES2020, is the only versioned requirement).\n\n",
+    );
+    out.push_str("## The functions\n\n");
+    for e in &set.manifest.exports {
+        out.push_str(&format!(
+            "- `{}` — `{}` — {} ({}) — battery: {} pinned, {} spec-silent\n",
+            e.name, e.signature, e.tier, e.verdict_basis, e.battery.pinned,
+            e.battery.spec_silent
+        ));
+    }
+    out.push_str(
+        "\nTier 1 — Z3-verified against the function's specification, and \
+         exact on every evaluable battery point. Tier 2 — executed-exact \
+         on the function's full in-spec battery (every point evaluable, \
+         every point passed); the tier is a property of the proof \
+         standard, not of the behavior.\n\n",
+    );
+    out.push_str("## Provenance — measured rows only\n\n");
+    out.push_str(&format!(
+        "Generated — do not edit. This package was assembled by `morphic \
+         build --package-from {scope}` (seed {seed}, the seeded bounded \
+         LLM-free profile). Every tier, verdict basis and battery figure \
+         in `morphic.manifest.json` was measured by that assembly's own \
+         synthesis run: no argument, flag, file or caller statement \
+         supplies a tier, a verdict basis, or a battery figure. A spec \
+         whose crown stands neither Verified (with an exact battery) nor \
+         executed-exact is refused by name and the whole assembly is \
+         refused — nothing is written. Re-running the verb over the same \
+         module with the same seed reproduces this package byte-for-byte; \
+         that re-run is the package's re-judgment route.\n\n"
+    ));
+    out.push_str("## Types at the boundary\n\n");
+    out.push_str(
+        "- Morphic `Int` is TypeScript `bigint` — exact inside the i64 \
+         domain [-2^63, 2^63 - 1]. The functions carry no runtime \
+         precondition checks: a host value outside that domain is \
+         out-of-domain input, outside the battery-exactness promise. \
+         BigInt `/` truncates toward zero and `%` takes the dividend's \
+         sign, matching Morphic Int semantics.\n\
+         - `Char` is a `string` of exactly one Unicode code point (an \
+         astral character has `.length` 2; the contract is the code \
+         point, not the length). Morphic counts string length in code \
+         points; JS `.length` counts UTF-16 code units — never use \
+         `.length` where a Morphic length is meant.\n\
+         - `Option<T>` is `T | null`. A nested `Option<Option<T>>` would \
+         flatten under this form.\n\
+         - `Result<T, E>` is the discriminated union \
+         `{ tag: \"Ok\", value: T } | { tag: \"Err\", error: E }`.\n\
+         - A function-typed parameter is declared `never` in the \
+         TypeScript declarations (EMBED_SCOPE §3): no callable TypeScript \
+         function type is frozen, and the manifest's `signature` field \
+         carries the true Morphic signature. At runtime any JavaScript \
+         function of the right shape answers for such a parameter — \
+         including this package's own exports.\n\n",
+    );
+    out.push_str("## Versioning\n\n");
+    out.push_str(&format!(
+        "The package version (`{}`) is the module author's, supplied to \
+         the verb by flag. The manifest's `morphicVersion` records the \
+         version of Morphic whose pipeline generated and judged the \
+         contents; the two are separate facts and neither borrows the \
+         other.\n",
+        set.manifest.package_version
+    ));
+    out
+}
+
+/// The verb's core (the CLI arm is a shell over this):
+/// parse + typecheck the user's module, run the seeded
+/// profile per spec, admit on measured rows only, and
+/// assemble the standing package layout. On any refusal
+/// the `Err` names every refused spec with its measured
+/// standing, and no file set exists.
+pub fn assemble_user_package(
+    source: &str,
+    package_name: &str,
+    package_version: &str,
+    scope: &str,
+    seed: u64,
+) -> Result<UserPackageAssembly, String> {
+    let parsed = crate::spec::parser::parse(source).map_err(|e| {
+        format!("--package-from: the module does not parse: {e}")
+    })?;
+    let checked = crate::spec::typeck::check(parsed).map_err(|e| {
+        format!("--package-from: the module does not typecheck: {e}")
+    })?;
+    let specs = checked.spec.functions;
+    if specs.is_empty() {
+        return Err(
+            "--package-from: the module declares no specs — nothing to package"
+                .to_string(),
+        );
+    }
+
+    let mut inputs: Vec<bindings::BindingInput> = Vec::new();
+    let mut standings: Vec<UserStanding> = Vec::new();
+    let mut refusals: Vec<String> = Vec::new();
+    for spec in &specs {
+        let (report, winner) =
+            match crate::api::synthesize_seeded_spec_winner(source, &spec.name, seed) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    refusals.push(format!(
+                        "{}: the seeded run failed at the {} stage: {}",
+                        spec.name, e.stage, e.message
+                    ));
+                    continue;
+                }
+            };
+        let w = &report.winner;
+        let spec_silent = w
+            .test_outcomes
+            .iter()
+            .filter(|o| o.outcome == "spec_silent")
+            .count();
+        let (tier, verdict_basis) =
+            if w.verification_status == "Verified" && w.tests_passed == w.tests_evaluable {
+                ("tier-1", "z3-verified")
+            } else if w.tests_passed == w.tests_evaluable
+                && w.tests_evaluable == w.tests_total
+                && w.tests_total > 0
+            {
+                ("tier-2", "executed-exact")
+            } else {
+                refusals.push(format!(
+                    "{}: its crown stands {} at {}/{} executed \
+                     ({} of {} in-spec tests evaluable, {} spec-silent) — \
+                     neither Verified with an exact battery nor executed-exact",
+                    spec.name,
+                    w.verification_status,
+                    w.tests_passed,
+                    w.tests_evaluable,
+                    w.tests_evaluable,
+                    w.tests_total,
+                    spec_silent
+                ));
+                continue;
+            };
+        standings.push(UserStanding {
+            name: spec.name.clone(),
+            tier: tier.to_string(),
+            verdict_basis: verdict_basis.to_string(),
+            status: w.verification_status.clone(),
+            passed: w.tests_passed,
+            evaluable: w.tests_evaluable,
+            total: w.tests_total,
+            spec_silent,
+        });
+        inputs.push(bindings::BindingInput {
+            spec: spec.clone(),
+            body: winner.body.clone(),
+            tier: tier.to_string(),
+            verdict_basis: verdict_basis.to_string(),
+            battery_pinned: w.tests_passed,
+            battery_silent: spec_silent,
+            crown_route: bindings::CrownRoute::Pipeline,
+        });
+    }
+    if !refusals.is_empty() {
+        return Err(format!(
+            "package assembly refused — nothing is written: {}",
+            refusals.join("; ")
+        ));
+    }
+
+    let set = bindings::generate_bindings_versioned(
+        &inputs,
+        package_name,
+        package_version,
+        env!("CARGO_PKG_VERSION"),
+        scope,
+    )
+    .map_err(|e| format!("--package-from: binding generation failed: {e}"))?;
+    let readme = user_package_readme(package_name, scope, seed, &set);
+    let furniture = PackageFurniture {
+        description: format!(
+            "Functions generated from the Morphic module {scope} by \
+             `morphic build --package-from`: every export was synthesized \
+             by the seeded pipeline and admitted on its own measured \
+             standing (Tier-1 Z3-verified or Tier-2 executed-exact). \
+             Per-function tiers and batteries: morphic.manifest.json."
+        ),
+        license_field: None,
+        licenses: Vec::new(),
+        project_links: false,
+    };
+    let files = assemble_package_files(&set, &readme, &furniture);
+    Ok(UserPackageAssembly { files, standings })
 }

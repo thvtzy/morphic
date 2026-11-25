@@ -284,6 +284,25 @@ pub fn generate_bindings(
     version: &str,
     scope: &str,
 ) -> Result<BindingSet, CodegenError> {
+    generate_bindings_versioned(inputs, package, version, version, scope)
+}
+
+/// `generate_bindings` with the two version fields
+/// stated separately (Phase 154): the lockstep packages
+/// pass one version twice (R6 — the package version IS
+/// the Morphic version whose pipeline generated the
+/// contents); a user package assembled by
+/// `build --package-from` carries the AUTHOR's version
+/// as `packageVersion` while `morphicVersion` stays the
+/// generating pipeline's own — the crate's — so neither
+/// field borrows the other's fact.
+pub fn generate_bindings_versioned(
+    inputs: &[BindingInput],
+    package: &str,
+    package_version: &str,
+    morphic_version: &str,
+    scope: &str,
+) -> Result<BindingSet, CodegenError> {
     // The assembled module: each input's generated
     // function (its own per-function export line
     // stripped), then one export list naming them all.
@@ -325,8 +344,8 @@ pub fn generate_bindings(
 
     let manifest = Manifest {
         package: package.to_string(),
-        package_version: version.to_string(),
-        morphic_version: version.to_string(),
+        package_version: package_version.to_string(),
+        morphic_version: morphic_version.to_string(),
         scope: scope.to_string(),
         exports,
     };

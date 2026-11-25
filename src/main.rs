@@ -90,6 +90,33 @@ enum Command {
         #[arg(long)]
         bundles: bool,
 
+        /// Assemble an npm package from a USER module's
+        /// specs instead of compiling one spec (Phase 154,
+        /// DISEBAR_15_SCOPE §4): each spec is synthesized
+        /// by the seeded bounded LLM-free profile and
+        /// admitted only on the rows that run itself
+        /// measures — a spec whose crown stands neither
+        /// Verified nor executed-exact is refused by name
+        /// and nothing is written. No flag supplies a
+        /// standing; the run is the only source of one.
+        #[arg(long)]
+        package_from: Option<PathBuf>,
+
+        /// Package name for --package-from
+        /// (default: the module file's stem)
+        #[arg(long)]
+        package_name: Option<String>,
+
+        /// Package version for --package-from
+        /// (default: this Morphic version)
+        #[arg(long)]
+        package_version: Option<String>,
+
+        /// Seed for the --package-from admission run
+        /// (default: 42, the standing seeded discipline)
+        #[arg(long)]
+        seed: Option<u64>,
+
         /// Directory the assembled package is written to
         /// (with --package or --facade; default: the
         /// package's repo home, packages/npm resp.
@@ -199,13 +226,19 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Command::Build { package: true, input, out, .. } => {
+        Command::Build { package: true, input, out, package_from, .. } => {
             // Phase 122: `morphic build --package` — assemble
             // the npm package (@thvtzy/morphic) from the
             // standard library's shipped bodies. The assembly
             // re-runs the crowning checks before generating
             // (codegen::package); a moved crown fails here and
             // nothing is written.
+            if package_from.is_some() {
+                anyhow::bail!(
+                    "--package-from assembles a user module's package; \
+                     it does not combine with --package"
+                );
+            }
             if input.is_some() {
                 anyhow::bail!(
                     "build --package assembles the standard-library package \
@@ -254,7 +287,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Build { facade: true, input, out, .. } => {
+        Command::Build { facade: true, input, out, package_from, .. } => {
             // Phase 123: `morphic build --facade` — assemble
             // the Rust facade crate (crates.io `morphic`)
             // from the standard library's shipped bodies.
@@ -263,6 +296,12 @@ fn main() -> anyhow::Result<()> {
             // codegen::package's crowning surface); a moved
             // crown fails here and nothing is written. The
             // crate carries no size budget (EMBED_SCOPE R8).
+            if package_from.is_some() {
+                anyhow::bail!(
+                    "--package-from assembles a user module's package; \
+                     it does not combine with --facade"
+                );
+            }
             if input.is_some() {
                 anyhow::bail!(
                     "build --facade assembles the standard-library crate \
@@ -305,7 +344,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Build { bundles: true, input, out, .. } => {
+        Command::Build { bundles: true, input, out, package_from, .. } => {
             // Phase 150: `morphic build --bundles` — produce
             // the re-verification bundles through the checked
             // route (src/pcc.rs): the whole crowning surface
@@ -314,6 +353,12 @@ fn main() -> anyhow::Result<()> {
             // bundles are a sibling artifact (packages/
             // bundles) — in neither package's file set, so
             // neither package's budget is charged for them.
+            if package_from.is_some() {
+                anyhow::bail!(
+                    "--package-from assembles a user module's package; \
+                     it does not combine with --bundles"
+                );
+            }
             if input.is_some() {
                 anyhow::bail!(
                     "build --bundles produces the standard library's \
@@ -423,6 +468,97 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!(
                     "the library self-check runs from a native build \
                      (this build carries no embedded library data)"
+                );
+            }
+        }
+
+        Command::Build {
+            package_from: Some(module_path),
+            package_name,
+            package_version,
+            seed,
+            out,
+            input,
+            ..
+        } => {
+            // Phase 154: `morphic build --package-from
+            // <file.morph>` — the user-package verb
+            // (DISEBAR_15_SCOPE §4): the seeded profile
+            // measures every spec of the user's module,
+            // admission is built only from those measured
+            // rows (codegen::package::assemble_user_package),
+            // and a refused spec fails the whole assembly
+            // here with nothing written — the --package
+            // discipline carried to user modules. Naming
+            // defaults: the package name is the module
+            // file's stem, the version is this Morphic
+            // version, the seed is the standing 42, and
+            // the output directory is `<stem>-package`.
+            if input.is_some() {
+                anyhow::bail!(
+                    "build --package-from names its module with \
+                     --package-from itself and takes no positional input file"
+                );
+            }
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let source = std::fs::read_to_string(&module_path)?;
+                let stem = module_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "morphic-module".to_string());
+                let scope = module_path
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "module.morph".to_string());
+                let name = package_name.unwrap_or_else(|| stem.clone());
+                let version =
+                    package_version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+                let seed = seed.unwrap_or(morphic::api::PLAYGROUND_DEFAULT_SEED);
+                let assembly = codegen::package::assemble_user_package(
+                    &source, &name, &version, &scope, seed,
+                )
+                .map_err(anyhow::Error::msg)?;
+                let mass = codegen::package::unpacked_mass(&assembly.files);
+                if mass > codegen::package::NPM_UNPACKED_BUDGET {
+                    anyhow::bail!(
+                        "the assembled package is {mass} B unpacked, over the \
+                         frozen budget of {} B (DISEBAR_15_SCOPE §7) — refusing to write",
+                        codegen::package::NPM_UNPACKED_BUDGET
+                    );
+                }
+                for s in &assembly.standings {
+                    println!(
+                        "  {} {} — {} ({}): {} at {}/{} executed",
+                        "✓".green().bold(),
+                        s.name,
+                        s.tier,
+                        s.verdict_basis,
+                        s.status,
+                        s.passed,
+                        s.total
+                    );
+                }
+                let dir = out.unwrap_or_else(|| PathBuf::from(format!("{stem}-package")));
+                std::fs::create_dir_all(&dir)?;
+                for f in &assembly.files {
+                    std::fs::write(dir.join(&f.path), &f.contents)?;
+                }
+                println!(
+                    "{} Assembled {} — {} files, {mass} B unpacked (budget {} B)",
+                    "✓".green().bold(),
+                    name,
+                    assembly.files.len(),
+                    codegen::package::NPM_UNPACKED_BUDGET
+                );
+                println!("  {} {}", "•".dimmed(), dir.display());
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = (module_path, package_name, package_version, seed, out);
+                anyhow::bail!(
+                    "user-package assembly runs from a native build \
+                     (assembly verbs are native-build acts in this tree)"
                 );
             }
         }

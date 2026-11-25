@@ -456,7 +456,7 @@ pub struct WinnerReport {
 /// this — its runs stay entropy-seeded, as before.
 pub fn synthesize_seeded(source: &str, seed: u64) -> Result<SynthesisReport, StageError> {
     let (functions, first) = parse_and_first(source)?;
-    synthesize_spec(&functions, &first, seed)
+    Ok(synthesize_spec(&functions, &first, seed)?.0)
 }
 
 /// `synthesize_seeded` for a NAMED spec of the module (the
@@ -469,6 +469,35 @@ pub fn synthesize_seeded_spec(
     spec_name: &str,
     seed: u64,
 ) -> Result<SynthesisReport, StageError> {
+    let (functions, spec) = parse_and_find(source, spec_name)?;
+    Ok(synthesize_spec(&functions, &spec, seed)?.0)
+}
+
+/// The seeded run WITH its crowned winner attached
+/// (Phase 154, DISEBAR_15_SCOPE §4): the report and the
+/// winning candidate from the SAME run, so a consumer
+/// packaging the crown (the `build --package-from` verb)
+/// holds the very body the report's verdict and battery
+/// describe — never a second run's body wearing the
+/// first run's measurements. The report-only entry
+/// points above are this function with the candidate
+/// dropped.
+pub fn synthesize_seeded_spec_winner(
+    source: &str,
+    spec_name: &str,
+    seed: u64,
+) -> Result<(SynthesisReport, CandidateImplementation), StageError> {
+    let (functions, spec) = parse_and_find(source, spec_name)?;
+    synthesize_spec(&functions, &spec, seed)
+}
+
+/// Parse + typecheck `source` and resolve the named
+/// spec, the shared front half of the named-spec entry
+/// points.
+fn parse_and_find(
+    source: &str,
+    spec_name: &str,
+) -> Result<(Vec<FunctionSpec>, FunctionSpec), StageError> {
     let err = |stage: &str, e: &dyn std::fmt::Display| StageError {
         stage: stage.into(),
         message: e.to_string(),
@@ -497,7 +526,7 @@ pub fn synthesize_seeded_spec(
             column: None,
         })?
         .clone();
-    synthesize_spec(&functions, &spec, seed)
+    Ok((functions, spec))
 }
 
 /// The seeded run over an already-checked module given
@@ -526,7 +555,7 @@ pub fn synthesize_seeded_functions(
             column: None,
         })?
         .clone();
-    synthesize_spec(functions, &spec, seed)
+    Ok(synthesize_spec(functions, &spec, seed)?.0)
 }
 
 fn parse_and_first(
@@ -566,7 +595,7 @@ fn synthesize_spec(
     functions: &[FunctionSpec],
     spec: &FunctionSpec,
     seed: u64,
-) -> Result<SynthesisReport, StageError> {
+) -> Result<(SynthesisReport, CandidateImplementation), StageError> {
     let err = |stage: &str, e: &dyn std::fmt::Display| StageError {
         stage: stage.into(),
         message: e.to_string(),
@@ -603,46 +632,54 @@ fn synthesize_spec(
         })
         .collect();
 
-    Ok(SynthesisReport {
-        spec_name: spec.name.clone(),
-        candidates,
-        verification_available: cfg!(feature = "z3-support"),
-        winner: WinnerReport {
-            body_debug: format!("{:?}", winner.body),
-            score: winner.score,
-            test_pass_ratio: winner.scores.test_pass_ratio,
-            constraint_score: winner.scores.constraint_score,
-            tests_passed: run.passed,
-            tests_evaluable: run.evaluable,
-            tests_total: spec.tests.len(),
-            test_outcomes: outcomes
-                .iter()
-                .enumerate()
-                .map(|(i, o)| {
-                    let (outcome, reason) = match o {
-                        eval::TestOutcome::Passed => ("passed", None),
-                        eval::TestOutcome::Failed => ("failed", None),
-                        eval::TestOutcome::BodyNotEvaluable(r) => {
-                            ("body_not_evaluable", Some(r.clone()))
+    let crowned = winner.clone();
+    Ok((
+        SynthesisReport {
+            spec_name: spec.name.clone(),
+            candidates,
+            verification_available: cfg!(feature = "z3-support"),
+            winner: WinnerReport {
+                body_debug: format!("{:?}", winner.body),
+                score: winner.score,
+                test_pass_ratio: winner.scores.test_pass_ratio,
+                constraint_score: winner.scores.constraint_score,
+                tests_passed: run.passed,
+                tests_evaluable: run.evaluable,
+                tests_total: spec.tests.len(),
+                test_outcomes: outcomes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, o)| {
+                        let (outcome, reason) = match o {
+                            eval::TestOutcome::Passed => ("passed", None),
+                            eval::TestOutcome::Failed => ("failed", None),
+                            eval::TestOutcome::BodyNotEvaluable(r) => {
+                                ("body_not_evaluable", Some(r.clone()))
+                            }
+                            eval::TestOutcome::Unbindable(r) => {
+                                ("unbindable", Some(r.clone()))
+                            }
+                            eval::TestOutcome::SpecSilent(r) => {
+                                ("spec_silent", Some(r.clone()))
+                            }
+                        };
+                        TestOutcomeReport {
+                            index: i,
+                            name: spec.tests[i].name.clone(),
+                            outcome: outcome.into(),
+                            reason,
                         }
-                        eval::TestOutcome::Unbindable(r) => ("unbindable", Some(r.clone())),
-                        eval::TestOutcome::SpecSilent(r) => ("spec_silent", Some(r.clone())),
-                    };
-                    TestOutcomeReport {
-                        index: i,
-                        name: spec.tests[i].name.clone(),
-                        outcome: outcome.into(),
-                        reason,
-                    }
-                })
-                .collect(),
-            renders,
-            verification_status: match &winner.verification_status {
-                Some(s) => format!("{:?}", s),
-                None => "Unverified".into(),
+                    })
+                    .collect(),
+                renders,
+                verification_status: match &winner.verification_status {
+                    Some(s) => format!("{:?}", s),
+                    None => "Unverified".into(),
+                },
             },
         },
-    })
+        crowned,
+    ))
 }
 
 #[cfg(test)]
