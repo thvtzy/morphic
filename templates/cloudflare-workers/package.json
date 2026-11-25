@@ -1,0 +1,1 @@
+{"dependencies":{"@thvtzy/morphic":"^1.4.0"},"description":"Cloudflare Workers template serving Morphic's verified standard library at the edge.","name":"morphic-functions-worker","private":true,"type":"module","version":"0.1.0"}
