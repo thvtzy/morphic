@@ -1,0 +1,25 @@
+# The Morphic library as a WASM component (DISEBAR_16_SCOPE
+# §4, decision D1a): the facade (packages/rust) wrapped
+# behind wit-bindgen glue, one line per export. Its own
+# workspace root (the [workspace] table below), so the
+# compiler tree's Cargo.toml/Cargo.lock never move.
+# Built with plain cargo — no cargo-component (Phase 158
+# §1.3: its latest release ships zero assets, and the
+# pipeline provably does not need it):
+#   cargo build --target wasm32-wasip2 --release
+[package]
+name = "morphic-component"
+version = "1.6.0"
+edition = "2021"
+description = "Morphic's verified standard library as a WASM component (world morphic:library): the facade's functions behind the Component Model boundary, at the tiers the manifest and bundles state."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thvtzy/morphic"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+morphic = { path = "../rust" }
+wit-bindgen = "=0.63.0"

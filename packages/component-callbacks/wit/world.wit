@@ -1,0 +1,26 @@
+// The WIT package version tracks the project lockstep
+// (DISEBAR_16_SCOPE §4's discipline, applied to this
+// sibling): it stands at the tree's version and moves
+// with the release stamp.
+package morphic:library@1.6.0;
+
+// The callback world (DISEBAR_16_SCOPE §5, frozen):
+// the facade's five higher-order entries, with their
+// function arguments carried by host imports — WIT has
+// no function-typed values, so no exported signature
+// anywhere carries one; what crosses is values.
+//   map-apply serves list-map
+//   pred      serves list-filter / list-all / list-any
+//   combine   serves list-fold (accumulator first —
+//             the frozen LEFT fold's argument order)
+world library-callbacks {
+  import map-apply: func(x: s64) -> s64;
+  import pred: func(x: s64) -> bool;
+  import combine: func(acc: s64, x: s64) -> s64;
+
+  export list-map: func(xs: list<s64>) -> list<s64>;
+  export list-filter: func(xs: list<s64>) -> list<s64>;
+  export list-fold: func(xs: list<s64>, init: s64) -> s64;
+  export list-all: func(xs: list<s64>) -> bool;
+  export list-any: func(xs: list<s64>) -> bool;
+}

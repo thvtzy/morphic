@@ -28,3 +28,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
+
+      # The 1.6 component pipeline (DISEBAR_16_SCOPE §3,
+      # wired at Phase 161): the same pinned tarballs,
+      # the same target, plain cargo — then the fresh
+      # library build answers one battery point through
+      # the pinned wasmtime and the fresh callback
+      # build's printed world carries its frozen
+      # imports. (Byte-for-byte reproduction against
+      # the committed artifacts of record is the
+      # sandbox gate instrument's pin; CI's rustc is
+      # the runner's stable, not the sandbox's.)
+      - name: Components (pinned tools, plain cargo)
+        run: |
+          set -euo pipefail
+          TOOLS="$RUNNER_TEMP/morphic-tools"
+          mkdir -p "$TOOLS"
+          curl -fsSL -o "$TOOLS/wasm-tools.tar.gz" \
+            https://github.com/bytecodealliance/wasm-tools/releases/download/v1.263.0/wasm-tools-1.263.0-x86_64-linux.tar.gz
+          echo "21c036c1740a0552124c79c6e2170cb61c5b016005671a6d5bc06cf642165431  $TOOLS/wasm-tools.tar.gz" | sha256sum -c -
+          tar -xzf "$TOOLS/wasm-tools.tar.gz" -C "$TOOLS"
+          curl -fsSL -o "$TOOLS/wasmtime.tar.xz" \
+            https://github.com/bytecodealliance/wasmtime/releases/download/v51.0.0/wasmtime-v51.0.0-x86_64-linux.tar.xz
+          echo "a18020674fac4107f329bc9ed720ea9c88e4b30a61e8a527787bcce051123d32  $TOOLS/wasmtime.tar.xz" | sha256sum -c -
+          tar -xJf "$TOOLS/wasmtime.tar.xz" -C "$TOOLS"
+          WASM_TOOLS="$TOOLS/wasm-tools-1.263.0-x86_64-linux/wasm-tools"
+          WASMTIME="$TOOLS/wasmtime-v51.0.0-x86_64-linux/wasmtime"
+          "$WASM_TOOLS" --version
+          "$WASMTIME" --version
+          rustup target add wasm32-wasip2
+          (cd packages/component && cargo build --target wasm32-wasip2 --release)
+          (cd packages/component-callbacks && cargo build --target wasm32-wasip2 --release)
+          LIB=packages/component/target/wasm32-wasip2/release/morphic_component.wasm
+          CB=packages/component-callbacks/target/wasm32-wasip2/release/morphic_component_callbacks.wasm
+          test "$("$WASMTIME" run --invoke 'int-clamp(15, 0, 10)' "$LIB")" = "10"
+          "$WASM_TOOLS" component wit "$CB" | grep -q 'import map-apply: func(x: s64) -> s64;'
+          "$WASM_TOOLS" component wit "$LIB" | grep -q 'export morphic:library/functions'
