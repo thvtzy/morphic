@@ -29,8 +29,19 @@ fn read_repo(rel: &str) -> String {
 /// file exists anywhere in the tree — the component
 /// pipeline is entire-missing, as DISEBAR_AUDIT §2
 /// measured and this phase re-verifies.
+///
+/// RETIRED IN PLACE at Phase 159 (the standing
+/// retirement discipline — Phase 142's R10 precedent,
+/// as Phase 155 retired the LSP stub probe and Phase
+/// 156 the VS Code greenfield probe): Phase 159 built
+/// exactly the crate and WIT this probe measured as
+/// absent, so the pin now records the standing that
+/// replaced the audit's — the playground half stands
+/// untouched; the tree's one WIT file is the component
+/// crate's, at the home the audit recommended. The
+/// audit document itself is untouched.
 #[test]
-fn p158_pipeline_is_core_module_and_wit_absent() {
+fn p158_pipeline_standing_retired_at_159() {
     let build = read_repo("playground/build.sh");
     assert!(
         build.contains("wasm-bindgen"),
@@ -55,17 +66,22 @@ fn p158_pipeline_is_core_module_and_wit_absent() {
     }
     scan(&repo_root(), &mut wit_files);
     println!(
-        "P158|pipeline|bindgen=core-module wit_files={}",
+        "P158|pipeline|bindgen=core-module wit_files={} (standing replaced at Phase 159)",
         wit_files.len()
     );
+    assert_eq!(
+        wit_files.len(),
+        1,
+        "exactly one WIT file stands in-tree — the component crate's: {wit_files:?}"
+    );
     assert!(
-        wit_files.is_empty(),
-        "no WIT file exists in-tree yet: {wit_files:?}"
+        wit_files[0].ends_with("packages/component/wit/world.wit"),
+        "the one WIT file is the library component's world: {wit_files:?}"
     );
     assert!(
         !repo_root().join("crates/morphic-component").exists()
-            && !repo_root().join("packages/component").exists(),
-        "no component crate exists yet (greenfield)"
+            && repo_root().join("packages/component").exists(),
+        "the component crate stands at packages/component (Phase 159), not in crates/"
     );
 }
 
