@@ -19,6 +19,7 @@
 
 pub mod api;
 pub mod codegen;
+pub mod lsp;
 pub mod mcp;
 pub mod pcc;
 pub mod spec;

@@ -267,14 +267,21 @@ fn p152_edge_verb_admission_inputs_are_measured() {
 
 // ── LSP ──────────────────────────────────────────────────
 
-/// LSP-1: the `lsp` subcommand's current behavior,
-/// re-measured on the shipped binary — it prints the
-/// CLI banner and one "Starting" line to STDOUT (the
-/// stream a real server would own), reads nothing, and
-/// exits 0 immediately. It is a reserved name with a
-/// banner, not a server in any degraded sense.
+/// LSP-1: the `lsp` subcommand's behavior. At audit
+/// time this probe measured the STUB: the CLI banner
+/// and one "Starting" line on stdout, exit 0
+/// immediately, no protocol. **Retired in place at
+/// Phase 155**, which built the server this probe's
+/// measurement priced (DISEBAR_15_SCOPE §5, D4a): the
+/// pin now records the standing that replaced it —
+/// on immediate EOF the process still exits promptly
+/// (EOF ends a stdio server), stdout carries ZERO
+/// bytes (no banner byte ever touches the stream),
+/// and the exit code is the lifecycle's 1 (EOF without
+/// shutdown). The full server behavior is pinned by
+/// tests/phase155_lsp.rs.
 #[test]
-fn p152_lsp_stub_prints_banner_and_exits() {
+fn p152_lsp_stub_standing_retired_at_155() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_morphic"))
         .arg("lsp")
         .stdin(Stdio::piped())
@@ -296,20 +303,26 @@ fn p152_lsp_stub_prints_banner_and_exits() {
             None => {
                 assert!(
                     Instant::now() < deadline,
-                    "morphic lsp did not exit within 15 s — it became a server?"
+                    "morphic lsp did not exit on EOF within 15 s"
                 );
                 std::thread::sleep(Duration::from_millis(25));
             }
         }
     };
-    let stdout = String::from_utf8_lossy(&reader.join().expect("reader joins")).to_string();
-    assert!(status.success(), "the stub exits 0: {status}");
-    assert!(stdout.contains("Starting Morphic Language Server"));
-    assert!(stdout.contains('╔'), "the CLI banner rides the same stdout");
-    assert!(!stdout.contains("\"jsonrpc\""), "no protocol bytes are spoken");
-    println!(
-        "P152|lsp|stub stdout_bytes={} banner_on_stdout=true protocol=none exit=0-immediate",
+    let stdout = reader.join().expect("reader joins");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "EOF without shutdown → the lifecycle code 1: {status}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "no banner byte, no protocol byte on EOF: {} bytes",
         stdout.len()
+    );
+    println!(
+        "P152|lsp|stub RETIRED-at-155 stdout_bytes=0 banner_on_stdout=false \
+         protocol=live-server exit=1-on-eof-without-shutdown"
     );
 }
 

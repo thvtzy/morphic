@@ -175,7 +175,8 @@ enum Command {
         iterations: usize,
     },
 
-    /// Start the Morphic language server (LSP)
+    /// Serve the Morphic language server (LSP,
+    /// diagnostics-only) over stdio
     Lsp,
 
     /// Serve the Model Context Protocol over stdio
@@ -220,8 +221,10 @@ fn main() -> anyhow::Result<()> {
     // file (Phase 112) — the banner would corrupt it, so
     // that one command runs without it. The mcp
     // subcommand's stdout IS the JSON-RPC stream
-    // (Phase 149) — same discipline.
-    if !matches!(cli.command, Command::StdlibAsset | Command::Mcp) {
+    // (Phase 149) — same discipline. The lsp
+    // subcommand's stdout IS the LSP stream (Phase 155)
+    // — same discipline again.
+    if !matches!(cli.command, Command::StdlibAsset | Command::Mcp | Command::Lsp) {
         println!("{}", banner.cyan());
     }
 
@@ -673,8 +676,16 @@ fn main() -> anyhow::Result<()> {
         }
 
         Command::Lsp => {
-            println!("{} Starting Morphic Language Server...", "🔌".bold());
-            // TODO: LSP implementation
+            // Phase 155 (DISEBAR_15_SCOPE §5): the real
+            // LSP diagnostics-only server — Content-Length
+            // framed JSON-RPC 2.0 over stdio (src/lsp.rs):
+            // initialize / shutdown / exit, full-document
+            // sync, push diagnostics from api::check.
+            // Stdout IS the protocol stream (the banner is
+            // suppressed above, and nothing else prints);
+            // the process takes the lifecycle's own exit
+            // code — 0 after shutdown, 1 without.
+            std::process::exit(morphic::lsp::run_stdio()?);
         }
 
         Command::Mcp => {
