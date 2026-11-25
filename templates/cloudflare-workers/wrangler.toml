@@ -1,0 +1,9 @@
+# Morphic functions on Cloudflare Workers.
+# Wrangler itself is not a dependency of the Morphic repo:
+# it runs on your machine (`npx wrangler dev` /
+# `npx wrangler deploy`). Deploying is your account act —
+# see README.md.
+name = "morphic-functions"
+main = "src/index.js"
+compatibility_date = "2026-11-25"
+workers_dev = true
