@@ -441,17 +441,30 @@ fn p152_lsp_diagnostic_surface_remeasured() {
 /// be built with (node, for vscode-languageclient +
 /// vsce) is present in this sandbox. The client is a
 /// new small package, not a refactor of anything.
+///
+/// RETIRED IN PLACE at Phase 156 (the standing
+/// retirement discipline, Phase 142's R10 precedent;
+/// the audit document itself is untouched): Phase 156
+/// built exactly the package this probe measured as
+/// absent, so the pin now records the standing that
+/// replaced it — packages/vscode EXISTS with the
+/// extension's manifest (its contributed surface is
+/// pinned in full by tests/phase156_vscode.rs), the
+/// packages/ scan finds exactly that one entry, and
+/// the rest of the greenfield measurement stands as
+/// measured: no package.json at the root or in
+/// playground/, no .vscode directory, the library's
+/// package.json in place, node present.
 #[test]
-fn p152_vscode_surface_is_greenfield() {
+fn p152_vscode_greenfield_standing_retired_at_156() {
     let root = manifest_dir();
-    assert!(!root.join("packages/vscode").exists(), "no extension package yet");
-    assert!(!root.join(".vscode").exists(), "no .vscode directory yet");
-    for absent in [
-        "package.json",
-        "playground/package.json",
-        "packages/vscode/package.json",
-    ] {
-        assert!(!root.join(absent).exists(), "{absent} must not exist yet");
+    assert!(
+        root.join("packages/vscode/package.json").exists(),
+        "the extension package stands where the greenfield was measured"
+    );
+    assert!(!root.join(".vscode").exists(), "no .vscode directory");
+    for absent in ["package.json", "playground/package.json"] {
+        assert!(!root.join(absent).exists(), "{absent} must not exist");
     }
     assert!(root.join("packages/npm/package.json").exists());
     let mut grammars = 0usize;
@@ -461,7 +474,7 @@ fn p152_vscode_surface_is_greenfield() {
             grammars += 1;
         }
     }
-    assert_eq!(grammars, 0, "no grammar or extension entries under packages/");
+    assert_eq!(grammars, 1, "exactly the vscode entry under packages/");
     let out = Command::new("node")
         .arg("--version")
         .output()
@@ -469,6 +482,6 @@ fn p152_vscode_surface_is_greenfield() {
     let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
     assert!(version.starts_with('v'), "node reports a version: {version}");
     println!(
-        "P152|vscode|greenfield=true only_package_json=packages/npm node={version}"
+        "P152|vscode|greenfield=false retired-at-156 extension=packages/vscode node={version}"
     );
 }
