@@ -118,10 +118,10 @@ const CALLBACK_BUDGET: usize = 90_112;
 /// (Phases 159/160 measurements).
 const LIBRARY_SIZE: usize = 96_100;
 const LIBRARY_SHA256: &str =
-    "f08c214c1a56ad360b5a90a42e04371524258a6a713a44cedec480938738a212";
+    "d424f202fa8b9bd5439df26eecb0b233cce782f827d1b93af10502547927afac";
 const CALLBACK_SIZE: usize = 81_840;
 const CALLBACK_SHA256: &str =
-    "9d8f7e972775cdb6e947da2681a0d4937316019121e313ba90481d49b64155a8";
+    "8c51788872c4af6bca24256a6fe82ce03aff3c622d4cd23498a3440ad14fdb2f";
 
 /// The library component's 30 frozen exports with
 /// their frozen WIT types (DISEBAR_16_SCOPE §4.3).

@@ -201,12 +201,26 @@ fn p164_sha2_placement_and_catalog_digests() {
     );
 
     // The lock records the direct dependency on the
-    // morphic package itself.
+    // morphic package itself. (The block is found by
+    // name and its version asserted against the
+    // crate's own — the lockstep — rather than by a
+    // literal version: the Phase 166 stamp moved the
+    // tree to 1.7.0 and the literal went stale, the
+    // Phase 161 re-pin class.)
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
+    let crate_version = cargo_toml
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("version = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("the crate's version line");
     let morphic_block = lock
         .split("[[package]]")
-        .find(|b| b.contains("name = \"morphic\"\nversion = \"1.6.0\""))
+        .find(|b| b.contains("name = \"morphic\""))
         .expect("the lock carries the morphic package");
+    assert!(
+        morphic_block.contains(&format!("version = \"{crate_version}\"")),
+        "the lock's morphic entry stands at the crate's version ({crate_version})"
+    );
     assert!(
         morphic_block.contains("\"sha2\""),
         "the lock's morphic entry names sha2 as a direct dependency"

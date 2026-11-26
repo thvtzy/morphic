@@ -9,7 +9,7 @@
 #   cargo build --target wasm32-wasip2 --release
 [package]
 name = "morphic-component"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2021"
 description = "Morphic's verified standard library as a WASM component (world morphic:library): the facade's functions behind the Component Model boundary, at the tiers the manifest and bundles state."
 license = "MIT OR Apache-2.0"
