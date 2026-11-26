@@ -117,6 +117,16 @@ enum Command {
         #[arg(long)]
         bundles_from: Option<PathBuf>,
 
+        /// Assemble a multi-spec Solidity contract (`<Module>.sol`)
+        /// alongside companion PCC re-verification bundles from a
+        /// USER module's specs (Phase 169, IKONIK_18_SCOPE §5.2):
+        /// shares the --package-from / --bundles-from admission
+        /// loop (seed 42, measured rows only), binds each function's
+        /// NatSpec to its companion bundle's SHA-256, and refuses
+        /// any uncrowning or non-direct-ABI spec with nothing written.
+        #[arg(long)]
+        contract_from: Option<PathBuf>,
+
         /// Package name for --package-from
         /// (default: the module file's stem)
         #[arg(long)]
@@ -140,7 +150,7 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
 
-        /// Output language (rust, c, wasm)
+        /// Output language (rust, c, wasm, python, javascript, solidity, ir)
         #[arg(short, long, default_value = "rust")]
         target: String,
 
@@ -309,7 +319,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Command::Build { package: true, input, out, package_from, bundles_from, .. } => {
+        Command::Build { package: true, input, out, package_from, bundles_from, contract_from, .. } => {
             // Phase 122: `morphic build --package` — assemble
             // the npm package (@thvtzy/morphic) from the
             // standard library's shipped bodies. The assembly
@@ -327,6 +337,12 @@ fn main() -> anyhow::Result<()> {
                     "--bundles-from produces a user module's \
                      re-verification bundles; \
                      it does not combine with --package"
+                );
+            }
+            if contract_from.is_some() {
+                anyhow::bail!(
+                    "--contract-from assembles a user module's Solidity \
+                     contract and PCC bundles; it does not combine with --package"
                 );
             }
             if input.is_some() {
@@ -377,7 +393,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Build { facade: true, input, out, package_from, bundles_from, .. } => {
+        Command::Build { facade: true, input, out, package_from, bundles_from, contract_from, .. } => {
             // Phase 123: `morphic build --facade` — assemble
             // the Rust facade crate (crates.io `morphic`)
             // from the standard library's shipped bodies.
@@ -397,6 +413,12 @@ fn main() -> anyhow::Result<()> {
                     "--bundles-from produces a user module's \
                      re-verification bundles; \
                      it does not combine with --facade"
+                );
+            }
+            if contract_from.is_some() {
+                anyhow::bail!(
+                    "--contract-from assembles a user module's Solidity \
+                     contract and PCC bundles; it does not combine with --facade"
                 );
             }
             if input.is_some() {
@@ -441,7 +463,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Build { bundles: true, input, out, package_from, bundles_from, .. } => {
+        Command::Build { bundles: true, input, out, package_from, bundles_from, contract_from, .. } => {
             // Phase 150: `morphic build --bundles` — produce
             // the re-verification bundles through the checked
             // route (src/pcc.rs): the whole crowning surface
@@ -461,6 +483,12 @@ fn main() -> anyhow::Result<()> {
                     "--bundles-from produces a user module's \
                      re-verification bundles; \
                      it does not combine with --bundles"
+                );
+            }
+            if contract_from.is_some() {
+                anyhow::bail!(
+                    "--contract-from assembles a user module's Solidity \
+                     contract and PCC bundles; it does not combine with --bundles"
                 );
             }
             if input.is_some() {
@@ -584,6 +612,7 @@ fn main() -> anyhow::Result<()> {
             out,
             input,
             bundles_from,
+            contract_from,
             ..
         } => {
             // Phase 154: `morphic build --package-from
@@ -604,6 +633,12 @@ fn main() -> anyhow::Result<()> {
                     "--bundles-from produces a user module's \
                      re-verification bundles; \
                      it does not combine with --package-from"
+                );
+            }
+            if contract_from.is_some() {
+                anyhow::bail!(
+                    "--contract-from assembles a user module's Solidity \
+                     contract and PCC bundles; it does not combine with --package-from"
                 );
             }
             if input.is_some() {
@@ -681,6 +716,7 @@ fn main() -> anyhow::Result<()> {
             out,
             input,
             package_from,
+            contract_from,
             ..
         } => {
             // Phase 163: `morphic build --bundles-from
@@ -704,6 +740,12 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!(
                     "--package-from assembles a user module's package; \
                      it does not combine with --bundles-from"
+                );
+            }
+            if contract_from.is_some() {
+                anyhow::bail!(
+                    "--contract-from assembles a user module's Solidity \
+                     contract and PCC bundles; it does not combine with --bundles-from"
                 );
             }
             if input.is_some() {
@@ -755,6 +797,89 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!(
                     "bundle production runs from a native build \
                      (this build carries no embedded library data)"
+                );
+            }
+        }
+
+        Command::Build {
+            contract_from: Some(module_path),
+            seed,
+            out,
+            input,
+            package_from,
+            bundles_from,
+            ..
+        } => {
+            // Phase 169: `morphic build --contract-from
+            // <file.morph>` — multi-spec checked Solidity
+            // contract + PCC bundle assembly (IKONIK_18_SCOPE
+            // §5.2, decision D5a): shares `admit_user_specs`,
+            // produces companion `bundleVersion: 1` PCC
+            // bundles, hashes each with SHA-256, and writes
+            // `<Module>.sol` carrying per-function NatSpec
+            // provenance beside `<entry>.bundle.json`. Any
+            // refusal writes nothing.
+            if package_from.is_some() {
+                anyhow::bail!(
+                    "--contract-from does not combine with --package-from"
+                );
+            }
+            if bundles_from.is_some() {
+                anyhow::bail!(
+                    "--contract-from does not combine with --bundles-from"
+                );
+            }
+            if input.is_some() {
+                anyhow::bail!(
+                    "build --contract-from names its module with \
+                     --contract-from itself and takes no positional input file"
+                );
+            }
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let source = std::fs::read_to_string(&module_path)?;
+                let stem = module_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "morphic-contract".to_string());
+                let seed = seed.unwrap_or(morphic::api::PLAYGROUND_DEFAULT_SEED);
+                let assembly = codegen::solidity::assemble_user_contract(&source, seed)
+                    .map_err(anyhow::Error::msg)?;
+                for (s, (_, _, sha)) in assembly.standings.iter().zip(assembly.bundles.iter()) {
+                    println!(
+                        "  {} {} — {} ({}): {} at {}/{} executed | sha256 {}…",
+                        "✓".green().bold(),
+                        s.name,
+                        s.tier,
+                        s.verdict_basis,
+                        s.status,
+                        s.passed,
+                        s.total,
+                        &sha[..12]
+                    );
+                }
+                let dir = out.unwrap_or_else(|| PathBuf::from(format!("{stem}-contract")));
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(dir.join(&assembly.contract_file), &assembly.contract_source)?;
+                let mut total = assembly.contract_source.len();
+                for (name, contents, _) in &assembly.bundles {
+                    total += contents.len();
+                    std::fs::write(dir.join(name), contents)?;
+                }
+                println!(
+                    "{} Assembled Solidity contract {} + {} PCC bundle(s) — {total} B total",
+                    "✓".green().bold(),
+                    assembly.contract_file,
+                    assembly.bundles.len()
+                );
+                println!("  {} {}", "•".dimmed(), dir.display());
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = (module_path, seed, out);
+                anyhow::bail!(
+                    "contract assembly runs from a native build \
+                     (assembly verbs are native-build acts in this tree)"
                 );
             }
         }
@@ -825,7 +950,11 @@ fn main() -> anyhow::Result<()> {
 
             // Phase 7: Output
             let out_path = output.unwrap_or_else(|| {
-                input.with_extension(target)
+                let ext = match target.as_str() {
+                    "solidity" | "sol" => "sol",
+                    other => other,
+                };
+                input.with_extension(ext)
             });
             std::fs::write(&out_path, &code)?;
 

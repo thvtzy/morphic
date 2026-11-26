@@ -37,6 +37,8 @@ pub fn generate(candidate: &CandidateImplementation, target: &str) -> Result<Str
             // reconciliation paragraph below.
             generate_javascript(candidate)
         }
+        #[cfg(not(feature = "wasm-playground"))]
+        "solidity" | "sol" => solidity::generate_solidity(candidate),
         "ir" => Ok(debug_ir_string(&candidate.body, 0)),
         other => Err(CodegenError::UnsupportedTarget(other.into())),
     }
@@ -3594,6 +3596,14 @@ impl std::fmt::Display for CodegenError {
 impl std::error::Error for CodegenError {}
 
 // ── Tests ─────────────────────────────────────────────────
+
+/// Phase 168 (1.8 Smart-Contract Target, IKONIK_18_SCOPE):
+/// the pure/view Solidity (`^0.8.24`) emitter — direct-ABI
+/// types, always-on runtime `require(...)`, transitive
+/// `internal pure` prelude helpers, and hard refusals on
+/// unsupported types/quantifiers/IR.
+#[cfg(not(feature = "wasm-playground"))]
+pub mod solidity;
 
 /// The M5-S1 bootstrap artifact (Phase 51): the M3 Codegen
 /// Phase 121 (1.1 Embeddable): the typed-binding

@@ -1,6 +1,6 @@
 {
   "name": "@thvtzy/morphic",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Morphic's verified standard library as ready-to-import functions: pre-generated from the specifications the Morphic pipeline verified (Tier-1) or proved executed-exact (Tier-2). Per-function tiers and batteries: morphic.manifest.json.",
   "type": "module",
   "main": "./index.js",

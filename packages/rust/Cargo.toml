@@ -7,7 +7,7 @@
 # tool and is never published.
 [package]
 name = "morphic"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 description = "Morphic's verified standard library as ready-to-call Rust functions: pre-generated from the specifications the Morphic pipeline verified (Tier-1) or proved executed-exact (Tier-2). Per-function tiers and batteries: morphic.manifest.json."
 license = "MIT OR Apache-2.0"

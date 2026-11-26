@@ -96,11 +96,11 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "morphic"
-version = "1.7.0"
+version = "1.8.0"
 
 [[package]]
 name = "morphic-component-callbacks"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "morphic",
  "wit-bindgen",

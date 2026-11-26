@@ -1,0 +1,113 @@
+// ─────────────────────────────────────────────────────────────
+//  MORPHIC SMART-CONTRACT EXHIBIT — DeFiMath (1.8, Phase 169)
+//
+//  Six pure/view DeFi arithmetic and guard specifications
+//  audited in IKONIK_18_AUDIT.md §6 and frozen in
+//  IKONIK_18_SCOPE.md §5.2. Every spec crowns Tier-1
+//  (Z3-Verified, 100% battery) under the seeded pipeline
+//  (seed 42), bundles as a standalone re-verifiable PCC
+//  artifact (`bundleVersion: 1`), and compiles to a zero-warning
+//  Solidity ^0.8.24 `public pure` function with runtime
+//  `require(...)` preconditions via:
+//
+//      morphic build --contract-from examples/contracts/defi_math.morph
+// ─────────────────────────────────────────────────────────────
+
+DeFiMath {
+spec fee_bps {
+    doc: "Protocol fee in basis points: floor(amount * bps / 10000) for non-negative amount and bps in [0, 10000]."
+    input: amount: Int, bps: Int
+    output: Int
+
+    require: amount >= 0
+    require: bps >= 0
+    require: bps <= 10000
+
+    constraint: output == (amount * bps) / 10000
+
+    test "zero amount" { input: (0, 30) expect: 0 }
+    test "30 bps of 10000" { input: (10000, 30) expect: 30 }
+    test "250 bps of 1000000" { input: (1000000, 250) expect: 25000 }
+    test "rounding down" { input: (999, 30) expect: 2 }
+    test "max bps 100pct" { input: (5000, 10000) expect: 5000 }
+}
+
+spec debit_balance {
+    doc: "Safe balance debit: returns balance - amount when 0 <= amount <= balance."
+    input: balance: Int, amount: Int
+    output: Int
+
+    require: amount >= 0
+    require: balance >= amount
+
+    constraint: output == balance - amount
+
+    test "partial debit" { input: (1000, 250) expect: 750 }
+    test "full drain" { input: (500, 500) expect: 0 }
+    test "zero debit" { input: (42, 0) expect: 42 }
+    test "large balance" { input: (1000000000, 123456) expect: 999876544 }
+}
+
+spec bounded_payout {
+    doc: "Treasury payout clamped to [min_out, max_out] via stdlib int_clamp."
+    input: amount: Int, min_out: Int, max_out: Int
+    output: Int
+
+    require: min_out <= max_out
+
+    constraint: output == int_clamp(amount, min_out, max_out)
+
+    test "in range" { input: (500, 100, 1000) expect: 500 }
+    test "below floor" { input: (50, 100, 1000) expect: 100 }
+    test "above cap" { input: (2500, 100, 1000) expect: 1000 }
+    test "at floor" { input: (100, 100, 1000) expect: 100 }
+    test "at cap" { input: (1000, 100, 1000) expect: 1000 }
+}
+
+spec linear_vested {
+    doc: "Linear token vesting: 0 before start, total after duration, proportional in between."
+    input: total: Int, elapsed: Int, duration: Int
+    output: Int
+
+    require: total >= 0
+    require: duration > 0
+
+    constraint: output == (total * int_clamp(elapsed, 0, duration)) / duration
+
+    test "before start" { input: (1000, 0, 100) expect: 0 }
+    test "negative elapsed" { input: (1000, (0 - 5), 100) expect: 0 }
+    test "halfway" { input: (1000, 50, 100) expect: 500 }
+    test "quarter" { input: (1000, 25, 100) expect: 250 }
+    test "completed" { input: (1000, 100, 100) expect: 1000 }
+    test "past end" { input: (1000, 250, 100) expect: 1000 }
+}
+
+spec can_withdraw {
+    doc: "Pure withdrawal guard predicate: positive amount within both account balance and per-tx limit."
+    input: balance: Int, amount: Int, limit: Int
+    output: Bool
+
+    require: balance >= 0
+    require: limit >= 0
+
+    constraint: output == (amount > 0 && amount <= balance && amount <= limit)
+
+    test "allowed" { input: (1000, 200, 500) expect: true }
+    test "zero denied" { input: (1000, 0, 500) expect: false }
+    test "negative denied" { input: (1000, (0 - 10), 500) expect: false }
+    test "over balance" { input: (100, 200, 500) expect: false }
+    test "over limit" { input: (1000, 600, 500) expect: false }
+}
+
+spec non_empty_batch {
+    doc: "Guard predicate checking that a payout batch array is non-empty."
+    input: amounts: List<Int>
+    output: Bool
+
+    constraint: output == (len(amounts) > 0)
+
+    test "empty" { input: [] expect: false }
+    test "single" { input: [250] expect: true }
+    test "batch" { input: [100, 250, 650] expect: true }
+}
+}

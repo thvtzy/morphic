@@ -68,8 +68,9 @@ const ARTIFACT: &str = "packages/component/morphic-library.wasm";
 /// The frozen budget (DISEBAR_16_SCOPE §6): the Phase 158
 /// measurement (96,096 B) +10%, rounded up to a whole KiB.
 const LIBRARY_BUDGET: usize = 106_496;
-/// The artifact's measured size at this phase.
-const LIBRARY_SIZE: usize = 96_100;
+/// The artifact's measured size at the current lockstep stamp
+/// (rebuilt with plain cargo --target wasm32-wasip2 --release).
+const LIBRARY_SIZE: usize = 80_558;
 
 /// The 30 frozen exports with their frozen WIT types
 /// (EMBED_SCOPE §3's column as re-measured at Phase 158).

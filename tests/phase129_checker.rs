@@ -76,8 +76,13 @@ fn phase129_corpus_check_outcomes() {
     // spec count moved 12 → 18 — Amendment 2's six entries
     // joining the module is the phase's own act, and the
     // outcome stays CHECK_OK; no other row moved.
+    // Phase 169 amendment: examples/contracts/defi_math.morph
+    // (6 pure/view DeFi specs, IKONIK_18_SCOPE §5.2) joins the
+    // repo deliberately as the 1.8 smart-contract exhibit;
+    // CHECK_OK specs=6, no other row moved.
     const PINNED: &[(&str, &str)] = &[
         ("examples/binary_search.morph", "CHECK_OK specs=1"),
+        ("examples/contracts/defi_math.morph", "CHECK_OK specs=6"),
         ("examples/functional_tokenizer.morph", "CHECK_OK specs=8"),
         ("examples/self_host/codegen.morph", "CHECK_OK specs=130"),
         ("examples/self_host/count_matching.morph", "CHECK_OK specs=1"),

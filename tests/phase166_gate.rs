@@ -1270,12 +1270,12 @@ const CALLBACK_COMPONENT_BUDGET: usize = 90_112;
 /// 1.6 stamp; the stamp re-pins the component pair.
 const INDEX_MASS: usize = 10_927;
 const CATALOG_MASS: usize = 276_678;
-const LIBRARY_COMPONENT_MASS: usize = 96_100;
+const LIBRARY_COMPONENT_MASS: usize = 80_558;
 const LIBRARY_COMPONENT_SHA256: &str =
-    "d424f202fa8b9bd5439df26eecb0b233cce782f827d1b93af10502547927afac";
-const CALLBACK_COMPONENT_MASS: usize = 81_840;
+    "64b99919caf2f8bba9823c1fa26261ef4cdbaf7f02f48793162372eb011b1fd5";
+const CALLBACK_COMPONENT_MASS: usize = 66_011;
 const CALLBACK_COMPONENT_SHA256: &str =
-    "8c51788872c4af6bca24256a6fe82ce03aff3c622d4cd23498a3440ad14fdb2f";
+    "15f3f0a2cdbd4d043748a2d78b2bc96e9b6c5ec1bc1f99d2ddd57e90f11a5ba8";
 
 fn dir_mass(dir: &std::path::Path) -> (usize, usize) {
     let mut files = 0;
