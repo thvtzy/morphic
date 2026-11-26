@@ -1136,8 +1136,23 @@ fn ir_to_solidity_expr(
             else_branch,
         } => {
             let cond = ir_to_solidity_expr(condition, Some(SolValTy::Bool), ctx)?;
-            let then_e = ir_to_solidity_expr(then_branch, expected, ctx)?;
-            let else_e = ir_to_solidity_expr(else_branch, expected, ctx)?;
+            let arm_ty = infer_concrete_ty(then_branch, ctx)
+                .or_else(|| infer_concrete_ty(else_branch, ctx))
+                .or(expected);
+            let mut then_e = ir_to_solidity_expr(then_branch, arm_ty, ctx)?;
+            let mut else_e = ir_to_solidity_expr(else_branch, arm_ty, ctx)?;
+            // Solidity Error 1080: a non-negative integer literal (mobile type `uint8`)
+            // in one ternary branch does not unify with a signed `int256` sibling unless
+            // explicitly cast to the sibling's scalar type (caught by real solc 0.8.28
+            // on `linear_vested` in Phase 170).
+            if let Some(SolValTy::Scalar(s)) = arm_ty {
+                if is_const_int_expr(then_branch) {
+                    then_e = format!("{s}({then_e})");
+                }
+                if is_const_int_expr(else_branch) {
+                    else_e = format!("{s}({else_e})");
+                }
+            }
             Ok(format!("({cond} ? {then_e} : {else_e})"))
         }
         IRNode::Index(base, idx) => {
@@ -1182,6 +1197,27 @@ fn ir_to_solidity_expr(
             ir_node_kind_name(other)
         ))),
     }
+}
+
+fn is_const_int_expr(node: &IRNode) -> bool {
+    match node {
+        IRNode::Literal(IRLiteral::Int(_)) => true,
+        IRNode::Typed { node: inner, .. } => is_const_int_expr(inner),
+        IRNode::UnaryOp(IRUnaryOp::Neg | IRUnaryOp::Abs, inner) => is_const_int_expr(inner),
+        IRNode::BinOp(
+            IRBinOp::Add | IRBinOp::Sub | IRBinOp::Mul | IRBinOp::Div | IRBinOp::Mod,
+            l,
+            r,
+        ) => is_const_int_expr(l) && is_const_int_expr(r),
+        _ => false,
+    }
+}
+
+fn infer_concrete_ty(node: &IRNode, ctx: &SolCtx<'_>) -> Option<SolValTy> {
+    if is_const_int_expr(node) {
+        return None;
+    }
+    ctx.infer_expr_ty(node)
 }
 
 fn ir_node_kind_name(node: &IRNode) -> &'static str {
