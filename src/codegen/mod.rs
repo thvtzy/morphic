@@ -37,6 +37,7 @@ pub fn generate(candidate: &CandidateImplementation, target: &str) -> Result<Str
             // reconciliation paragraph below.
             generate_javascript(candidate)
         }
+        #[cfg(not(feature = "wasm-playground"))]
         "solidity" | "sol" => solidity::generate_solidity(candidate),
         "ir" => Ok(debug_ir_string(&candidate.body, 0)),
         other => Err(CodegenError::UnsupportedTarget(other.into())),
@@ -3601,6 +3602,7 @@ impl std::error::Error for CodegenError {}
 /// types, always-on runtime `require(...)`, transitive
 /// `internal pure` prelude helpers, and hard refusals on
 /// unsupported types/quantifiers/IR.
+#[cfg(not(feature = "wasm-playground"))]
 pub mod solidity;
 
 /// The M5-S1 bootstrap artifact (Phase 51): the M3 Codegen

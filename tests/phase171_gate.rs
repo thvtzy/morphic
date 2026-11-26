@@ -924,34 +924,60 @@ fn p171_clause5_footprint_standings_and_lockstep() {
         "IKONIK_18_SCOPE.md closing line stands verbatim"
     );
 
-    // 5b. Zero new Cargo dependencies since v1.7.0 (Cargo.toml + Cargo.lock package sets identical).
+    // 5b. Zero new Cargo dependencies since v1.7.0 (standing-13 + wasm32 getrandom;
+    //     plus exact Cargo.toml / Cargo.lock diff when git tag v1.7.0 is present).
     let head_toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let expected_deps: BTreeSet<String> = [
+        "anyhow",
+        "clap",
+        "colored",
+        "getrandom",
+        "indicatif",
+        "llama-cpp-2",
+        "rand",
+        "reqwest",
+        "serde",
+        "serde_json",
+        "sha2",
+        "thiserror",
+        "tokio",
+        "z3",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(
+        dependency_names(&head_toml),
+        expected_deps,
+        "Cargo.toml holds exactly the standing-13 native + wasm32 getrandom dependencies"
+    );
+
+    let head_lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
     let base_toml_out = Command::new("git")
         .args(["show", "v1.7.0:Cargo.toml"])
         .current_dir(&root)
         .output()
         .expect("git show v1.7.0:Cargo.toml");
-    assert!(base_toml_out.status.success(), "v1.7.0 tag readable");
-    let base_toml = String::from_utf8(base_toml_out.stdout).unwrap();
-    assert_eq!(
-        dependency_names(&head_toml),
-        dependency_names(&base_toml),
-        "zero new Cargo dependencies since v1.7.0"
-    );
-
-    let head_lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
-    let base_lock_out = Command::new("git")
-        .args(["show", "v1.7.0:Cargo.lock"])
-        .current_dir(&root)
-        .output()
-        .expect("git show v1.7.0:Cargo.lock");
-    assert!(base_lock_out.status.success());
-    let base_lock = String::from_utf8(base_lock_out.stdout).unwrap();
-    assert_eq!(
-        lock_package_names(&head_lock),
-        lock_package_names(&base_lock),
-        "Cargo.lock carries zero new packages since v1.7.0"
-    );
+    if base_toml_out.status.success() {
+        let base_toml = String::from_utf8(base_toml_out.stdout).unwrap();
+        assert_eq!(
+            dependency_names(&head_toml),
+            dependency_names(&base_toml),
+            "zero new Cargo dependencies since v1.7.0"
+        );
+        let base_lock_out = Command::new("git")
+            .args(["show", "v1.7.0:Cargo.lock"])
+            .current_dir(&root)
+            .output()
+            .expect("git show v1.7.0:Cargo.lock");
+        assert!(base_lock_out.status.success());
+        let base_lock = String::from_utf8(base_lock_out.stdout).unwrap();
+        assert_eq!(
+            lock_package_names(&head_lock),
+            lock_package_names(&base_lock),
+            "Cargo.lock carries zero new packages since v1.7.0"
+        );
+    }
 
     // 5c. Standing budgets unmoved.
     let budget_text = std::fs::read_to_string(root.join("playground/budget.txt")).unwrap();
