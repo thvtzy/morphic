@@ -68,6 +68,7 @@ pub fn generate_solidity(candidate: &CandidateImplementation) -> Result<String, 
     let main_fn = render_solidity_function(
         candidate,
         "public",
+        None,
         &allowed_callees,
         &mut needed_append,
         &mut needed_clone,
@@ -112,6 +113,7 @@ pub fn generate_solidity(candidate: &CandidateImplementation) -> Result<String, 
             helper_fns.push(render_solidity_function(
                 &helper,
                 "internal",
+                None,
                 &allowed_callees,
                 &mut needed_append,
                 &mut needed_clone,
@@ -534,6 +536,7 @@ impl<'a> SolCtx<'a> {
 pub(crate) fn render_solidity_function(
     candidate: &CandidateImplementation,
     visibility: &str,
+    extra_dev_doc: Option<&str>,
     allowed_callees: &BTreeSet<String>,
     needed_append: &mut BTreeSet<&'static str>,
     needed_clone: &mut BTreeSet<&'static str>,
@@ -572,6 +575,9 @@ pub(crate) fn render_solidity_function(
         for line in doc.lines() {
             out.push_str(&format!("    /// @notice {line}\n"));
         }
+    }
+    if let Some(dev) = extra_dev_doc {
+        out.push_str(&format!("    /// @dev {dev}\n"));
     }
     out.push_str(&format!(
         "    function {}({}) {} pure{} {{\n",
@@ -1240,4 +1246,213 @@ pub(crate) fn render_clone_helper(elem_ty: &str) -> String {
          \x20       return out;\n\
          \x20   }}\n"
     )
+}
+
+// ── Multi-Spec Checked Contract + PCC Bundle Assembly ─────
+// (Phase 169, IKONIK_18_SCOPE §5.2, decision D5a)
+
+/// Output of `morphic build --contract-from <file.morph>`:
+/// one deployable Solidity `^0.8.24` contract carrying every
+/// admitted spec as `public pure` with per-function NatSpec
+/// provenance, paired with its companion `bundleVersion: 1`
+/// PCC re-verification bundles and measured standings.
+#[cfg(not(feature = "wasm-playground"))]
+#[derive(Debug)]
+pub struct UserContractAssembly {
+    pub contract_name: String,
+    pub contract_file: String,
+    pub contract_source: String,
+    /// `(bundle_filename, bundle_json, sha256_hex)` in module order.
+    pub bundles: Vec<(String, String, String)>,
+    pub standings: Vec<super::package::UserStanding>,
+}
+
+/// Checked multi-spec Solidity contract + PCC bundle assembly
+/// (IKONIK_18_SCOPE §5.2): runs the shared `admit_user_specs`
+/// loop, produces one re-verifiable PCC bundle per admitted spec
+/// via `pcc::produce_bundle` (`bundleVersion: 1`), hashes each
+/// bundle with `registry::sha256_hex`, and emits one `<Module>.sol`
+/// carrying per-function NatSpec provenance (`tier`, `verdictBasis`,
+/// `battery`, `bundle`, `bundleSha256`) and deduplicated transitive
+/// `internal pure` helpers. Any refusal (admission, bundle
+/// production, or Solidity direct-ABI/precondition/IR validation)
+/// fails the whole assembly with nothing returned.
+#[cfg(not(feature = "wasm-playground"))]
+pub fn assemble_user_contract(source: &str, seed: u64) -> Result<UserContractAssembly, String> {
+    let parsed = crate::spec::parser::parse(source)
+        .map_err(|e| format!("--contract-from: the module does not parse: {e}"))?;
+    let cname = contract_name(&parsed.name);
+
+    let (inputs, standings) = super::package::admit_user_specs(
+        source,
+        seed,
+        "--contract-from",
+        "contract assembly",
+    )?;
+
+    // Build companion PCC bundles first so every admitted spec is
+    // re-judged standalone and bound to its exact SHA-256.
+    let mut bundles: Vec<(String, String, String)> = Vec::with_capacity(inputs.len());
+    for input in &inputs {
+        let bundle = crate::pcc::produce_bundle(input).map_err(|e| {
+            format!("contract assembly refused — nothing is written: {e}")
+        })?;
+        let json = crate::pcc::bundle_json(&bundle);
+        let sha = crate::registry::sha256_hex(json.as_bytes());
+        bundles.push((format!("{}.bundle.json", bundle.entry), json, sha));
+    }
+
+    // Build candidates and collect deduplicated transitive helpers.
+    let mut candidates: Vec<CandidateImplementation> = Vec::with_capacity(inputs.len());
+    let mut module_names: BTreeSet<String> = BTreeSet::new();
+    let mut helper_names: BTreeSet<String> = BTreeSet::new();
+
+    for input in &inputs {
+        module_names.insert(input.spec.name.clone());
+        let cand = CandidateImplementation {
+            id: 169,
+            body: input.body.clone(),
+            spec_name: input.spec.name.clone(),
+            spec: input.spec.clone(),
+            score: 0.0,
+            scores: ScoreBreakdown {
+                test_pass_ratio: 0.0,
+                constraint_score: 0.0,
+                complexity_score: 0.0,
+                quality_score: 0.0,
+                synthesis_time_us: 0,
+            },
+            generation: 0,
+            provenance: Provenance::HumanGuided,
+            verified: input.verdict_basis == "z3-verified",
+            verification_status: None,
+        };
+        helper_names.extend(collect_transitive_helpers(&cand));
+        candidates.push(cand);
+    }
+    for name in &module_names {
+        helper_names.remove(name);
+    }
+
+    let mut allowed_callees: BTreeSet<String> = module_names;
+    allowed_callees.extend(helper_names.iter().cloned());
+
+    let mut needed_append: BTreeSet<&'static str> = BTreeSet::new();
+    let mut needed_clone: BTreeSet<&'static str> = BTreeSet::new();
+
+    let mut rendered_entries: Vec<String> = Vec::with_capacity(candidates.len());
+    for ((cand, standing), (bundle_file, _, sha)) in
+        candidates.iter().zip(standings.iter()).zip(bundles.iter())
+    {
+        let dev_doc = format!(
+            "Morphic tier: {} | verdictBasis: {} | battery: {}/{}/{} | bundle: {} | bundleSha256: {}",
+            standing.tier,
+            standing.verdict_basis,
+            standing.passed,
+            standing.evaluable,
+            standing.total,
+            bundle_file,
+            sha
+        );
+        let rendered = render_solidity_function(
+            cand,
+            "public",
+            Some(&dev_doc),
+            &allowed_callees,
+            &mut needed_append,
+            &mut needed_clone,
+        )
+        .map_err(|e| {
+            format!(
+                "contract assembly refused for `{}` — nothing is written: {e}",
+                cand.spec.name
+            )
+        })?;
+        rendered_entries.push(rendered);
+    }
+
+    let mut rendered_helpers: Vec<String> = Vec::with_capacity(helper_names.len());
+    if !helper_names.is_empty() {
+        let specs = crate::stdlib::prelude_specs();
+        for name in &helper_names {
+            let spec = specs
+                .iter()
+                .find(|s| &s.name == name)
+                .ok_or_else(|| {
+                    format!("contract assembly refused — prelude helper `{name}` has no spec")
+                })?
+                .clone();
+            let body = crate::stdlib::shipped_body(name).ok_or_else(|| {
+                format!("contract assembly refused — prelude helper `{name}` has no shipped body")
+            })?;
+            let helper = CandidateImplementation {
+                id: 0,
+                body,
+                spec_name: name.clone(),
+                spec,
+                score: 0.0,
+                scores: ScoreBreakdown {
+                    test_pass_ratio: 0.0,
+                    constraint_score: 0.0,
+                    complexity_score: 0.0,
+                    quality_score: 0.0,
+                    synthesis_time_us: 0,
+                },
+                generation: 0,
+                provenance: Provenance::HumanGuided,
+                verified: true,
+                verification_status: None,
+            };
+            let rendered = render_solidity_function(
+                &helper,
+                "internal",
+                None,
+                &allowed_callees,
+                &mut needed_append,
+                &mut needed_clone,
+            )
+            .map_err(|e| {
+                format!(
+                    "contract assembly refused for helper `{name}` — nothing is written: {e}"
+                )
+            })?;
+            rendered_helpers.push(rendered);
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(SPDX_LINE);
+    out.push('\n');
+    out.push_str(PRAGMA_LINE);
+    out.push_str("\n\n");
+    out.push_str(PROOF_BOUNDARY_HEADER);
+    out.push_str(&format!("contract {cname} {{\n"));
+
+    for (idx, func) in rendered_entries.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        out.push_str(func);
+    }
+    for helper in &rendered_helpers {
+        out.push('\n');
+        out.push_str(helper);
+    }
+    for elem_ty in &needed_append {
+        out.push('\n');
+        out.push_str(&render_append_helper(elem_ty));
+    }
+    for elem_ty in &needed_clone {
+        out.push('\n');
+        out.push_str(&render_clone_helper(elem_ty));
+    }
+    out.push_str("}\n");
+
+    Ok(UserContractAssembly {
+        contract_file: format!("{cname}.sol"),
+        contract_name: cname,
+        contract_source: out,
+        bundles,
+        standings,
+    })
 }
