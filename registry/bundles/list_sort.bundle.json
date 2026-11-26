@@ -1,0 +1,422 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "list_sort",
+  "tier": "tier-2",
+  "verdictBasis": "executed-exact",
+  "verdict": "ExecutedExact",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 7,
+    "evaluable": 7,
+    "passed": 7
+  },
+  "spec": {
+    "name": "list_sort",
+    "doc": "list_sort(xs) = the elements of xs in non-strict ascending order; the output is a permutation of the input, judged on the executed battery (the is_permutation Predicate form is not a shipped entry, STDLIB_SCOPE.md 2.7). Empty and singleton lists give themselves (STDLIB_SCOPE.md 2.6). Tier-2: executed-exact on the full battery; standing residue at 1.3 — row 1 is the is_permutation Predicate (unencoded, 3.10) and row 3 a two-binder forall past the Phase 94 envelope (LIST_ENCODER_SCOPE.md 3.3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "xs",
+        "ty": {
+          "List": "Int"
+        },
+        "annotations": {}
+      }
+    ],
+    "return_type": {
+      "List": "Int"
+    },
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Predicate": [
+          "is_permutation",
+          [
+            {
+              "Var": "xs"
+            },
+            {
+              "Var": "output"
+            }
+          ]
+        ]
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Call": [
+                "len",
+                [
+                  {
+                    "Var": "output"
+                  }
+                ]
+              ]
+            },
+            {
+              "Call": [
+                "len",
+                [
+                  {
+                    "Var": "xs"
+                  }
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Forall": {
+          "vars": [
+            [
+              "i",
+              "Int"
+            ],
+            [
+              "j",
+              "Int"
+            ]
+          ],
+          "body": {
+            "Implies": [
+              {
+                "Expr": {
+                  "BinOp": [
+                    "Lt",
+                    {
+                      "Var": "i"
+                    },
+                    {
+                      "Var": "j"
+                    }
+                  ]
+                }
+              },
+              {
+                "Expr": {
+                  "BinOp": [
+                    "Le",
+                    {
+                      "Index": [
+                        {
+                          "Var": "output"
+                        },
+                        {
+                          "Var": "i"
+                        }
+                      ]
+                    },
+                    {
+                      "Index": [
+                        {
+                          "Var": "output"
+                        },
+                        {
+                          "Var": "j"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "empty",
+        "input": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "singleton",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "typical",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 3
+              },
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "reverse sorted",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 4
+              },
+              {
+                "IntLit": 3
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 1
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 3
+              },
+              {
+                "IntLit": 4
+              },
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "duplicates",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 1
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 2
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "already sorted",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negatives",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 1
+                  }
+                ]
+              },
+              {
+                "IntLit": 5
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 3
+                  }
+                ]
+              },
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "List",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 3
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 1
+                  }
+                ]
+              },
+              {
+                "IntLit": 0
+              },
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(block (alloc \"out\" (List Int) (collection List)) (for \"i\" (lit (int 0)) (unop Len (var \"xs\")) (block (alloc \"x\" Int (index (var \"xs\") (var \"i\"))) (alloc \"pos\" Int (call \"len\" (var \"out\"))) (alloc \"k\" Int (lit (int 0))) (for \"j\" (lit (int 0)) (unop Len (var \"out\")) (block (if (binop And (binop Eq (var \"pos\") (call \"len\" (var \"out\"))) (binop Gt (index (var \"out\") (var \"j\")) (var \"x\"))) (assign (var \"pos\") (var \"k\")) (block)) (assign (var \"k\") (binop Add (var \"k\") (lit (int 1)))))) (alloc \"next\" (List Int) (collection List)) (alloc \"k2\" Int (lit (int 0))) (for \"j\" (lit (int 0)) (unop Len (var \"out\")) (block (if (binop Eq (var \"k2\") (var \"pos\")) (binop Append (var \"next\") (var \"x\")) (block)) (binop Append (var \"next\") (index (var \"out\") (var \"j\"))) (assign (var \"k2\") (binop Add (var \"k2\") (lit (int 1)))))) (if (binop Eq (var \"pos\") (call \"len\" (var \"out\"))) (binop Append (var \"next\") (var \"x\")) (block)) (assign (var \"out\") (var \"next\")))) (return (var \"out\")))\n"
+}

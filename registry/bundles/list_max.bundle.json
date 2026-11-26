@@ -1,0 +1,379 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "list_max",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "encoder",
+  "battery": {
+    "total": 6,
+    "evaluable": 6,
+    "passed": 6
+  },
+  "spec": {
+    "name": "list_max",
+    "doc": "list_max(xs) = Some(m) with m the greatest element of xs, or None when xs is empty — the empty case is a value, not a precondition (STDLIB_SCOPE.md 2.6). Tier-1: Z3-verified and executed-exact on the full battery (the 1.3 list-encoder campaign, LIST_ENCODER_SCOPE.md 3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "xs",
+        "ty": {
+          "List": "Int"
+        },
+        "annotations": {}
+      }
+    ],
+    "return_type": {
+      "Option": "Int"
+    },
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Implies": [
+          {
+            "Expr": {
+              "BinOp": [
+                "Eq",
+                {
+                  "Call": [
+                    "len",
+                    [
+                      {
+                        "Var": "xs"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            }
+          },
+          {
+            "Expr": {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Call": [
+                    "None",
+                    []
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "Forall": {
+          "vars": [
+            [
+              "i",
+              "Int"
+            ]
+          ],
+          "body": {
+            "Expr": {
+              "BinOp": [
+                "Or",
+                {
+                  "MethodCall": {
+                    "receiver": {
+                      "Var": "output"
+                    },
+                    "name": "is_none",
+                    "args": []
+                  }
+                },
+                {
+                  "BinOp": [
+                    "Ge",
+                    {
+                      "MethodCall": {
+                        "receiver": {
+                          "Var": "output"
+                        },
+                        "name": "unwrap",
+                        "args": []
+                      }
+                    },
+                    {
+                      "Index": [
+                        {
+                          "Var": "xs"
+                        },
+                        {
+                          "Var": "i"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "Implies": [
+          {
+            "Expr": {
+              "MethodCall": {
+                "receiver": {
+                  "Var": "output"
+                },
+                "name": "is_some",
+                "args": []
+              }
+            }
+          },
+          {
+            "Exists": {
+              "vars": [
+                [
+                  "i",
+                  "Int"
+                ]
+              ],
+              "body": {
+                "Expr": {
+                  "BinOp": [
+                    "Eq",
+                    {
+                      "Index": [
+                        {
+                          "Var": "xs"
+                        },
+                        {
+                          "Var": "i"
+                        }
+                      ]
+                    },
+                    {
+                      "MethodCall": {
+                        "receiver": {
+                          "Var": "output"
+                        },
+                        "name": "unwrap",
+                        "args": []
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "empty",
+        "input": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "None",
+            []
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "singleton",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "typical",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 3
+              },
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 4
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "IntLit": 4
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "duplicates",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 2
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "IntLit": 2
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "negatives",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 5
+                  }
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 9
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 5
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "extremes",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "BinOp": [
+                      "Sub",
+                      {
+                        "IntLit": 0
+                      },
+                      {
+                        "IntLit": 9223372036854775807
+                      }
+                    ]
+                  },
+                  {
+                    "IntLit": 1
+                  }
+                ]
+              },
+              {
+                "IntLit": 9223372036854775807
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "Call": [
+            "Some",
+            [
+              {
+                "IntLit": 9223372036854775807
+              }
+            ]
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(if (binop Eq (call \"len\" (var \"xs\")) (lit (int 0))) (call \"None\") (block (alloc \"m\" Int (index (var \"xs\") (lit (int 0)))) (for \"i\" (lit (int 1)) (unop Len (var \"xs\")) (assign (var \"m\") (if (binop Gt (index (var \"xs\") (var \"i\")) (var \"m\")) (index (var \"xs\") (var \"i\")) (var \"m\")))) (return (call \"Some\" (var \"m\")))))\n"
+}

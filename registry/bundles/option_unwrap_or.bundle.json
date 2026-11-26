@@ -1,0 +1,252 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "option_unwrap_or",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 5,
+    "evaluable": 5,
+    "passed": 5
+  },
+  "spec": {
+    "name": "option_unwrap_or",
+    "doc": "option_unwrap_or(o, d) = the Some payload of o, or d when o is None (STDLIB_SCOPE.md 2.5).",
+    "generics": [],
+    "params": [
+      {
+        "name": "o",
+        "ty": {
+          "Option": "Int"
+        },
+        "annotations": {}
+      },
+      {
+        "name": "d",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Int",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "MethodCall": {
+                "receiver": {
+                  "Var": "o"
+                },
+                "name": "is_none",
+                "args": []
+              }
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "MethodCall": {
+                    "receiver": {
+                      "Var": "o"
+                    },
+                    "name": "unwrap",
+                    "args": []
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "MethodCall": {
+                "receiver": {
+                  "Var": "o"
+                },
+                "name": "is_some",
+                "args": []
+              }
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Var": "d"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "some payload",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Some",
+                  [
+                    {
+                      "IntLit": 7
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 7
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "none default",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "None",
+                  []
+                ]
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 3
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "some zero payload",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Some",
+                  [
+                    {
+                      "IntLit": 0
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "none zero default",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "None",
+                  []
+                ]
+              },
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "some negative payload",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Some",
+                  [
+                    {
+                      "BinOp": [
+                        "Sub",
+                        {
+                          "IntLit": 0
+                        },
+                        {
+                          "IntLit": 9
+                        }
+                      ]
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 1
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 9
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(match (var \"o\") (case (ctor \"Some\" (pvar \"v\")) (var \"v\")) (case (ctor \"None\") (var \"d\")))\n"
+}

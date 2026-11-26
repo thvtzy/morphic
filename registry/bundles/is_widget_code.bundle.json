@@ -1,0 +1,129 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "is_widget_code",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 5,
+    "evaluable": 5,
+    "passed": 5
+  },
+  "spec": {
+    "name": "is_widget_code",
+    "doc": "A widget code is known when it names one of the six widget kinds.",
+    "generics": [],
+    "params": [
+      {
+        "name": "code",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "BinOp": [
+                "And",
+                {
+                  "BinOp": [
+                    "Ge",
+                    {
+                      "Var": "code"
+                    },
+                    {
+                      "IntLit": 1
+                    }
+                  ]
+                },
+                {
+                  "BinOp": [
+                    "Le",
+                    {
+                      "Var": "code"
+                    },
+                    {
+                      "IntLit": 6
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "first",
+        "input": {
+          "IntLit": 1
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "last",
+        "input": {
+          "IntLit": 6
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "zero",
+        "input": {
+          "IntLit": 0
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "above",
+        "input": {
+          "IntLit": 7
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "far",
+        "input": {
+          "IntLit": 99
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(binop And (binop Ge (var \"code\") (lit (int 1))) (binop Le (var \"code\") (lit (int 6))))\n"
+}

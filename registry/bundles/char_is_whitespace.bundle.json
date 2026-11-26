@@ -1,0 +1,172 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "char_is_whitespace",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 6,
+    "evaluable": 6,
+    "passed": 6
+  },
+  "spec": {
+    "name": "char_is_whitespace",
+    "doc": "char_is_whitespace(c) = true iff c is one of space, tab, newline, carriage return — the standing tokenizer spec's is_whitespace contract, adopted unchanged (STDLIB_SCOPE.md 2.3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "c",
+        "ty": "Char",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "BinOp": [
+                "Or",
+                {
+                  "BinOp": [
+                    "Or",
+                    {
+                      "BinOp": [
+                        "Or",
+                        {
+                          "BinOp": [
+                            "Eq",
+                            {
+                              "Var": "c"
+                            },
+                            {
+                              "CharLit": " "
+                            }
+                          ]
+                        },
+                        {
+                          "BinOp": [
+                            "Eq",
+                            {
+                              "Var": "c"
+                            },
+                            {
+                              "CharLit": "\t"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "BinOp": [
+                        "Eq",
+                        {
+                          "Var": "c"
+                        },
+                        {
+                          "CharLit": "\n"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "BinOp": [
+                    "Eq",
+                    {
+                      "Var": "c"
+                    },
+                    {
+                      "CharLit": "\r"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "space",
+        "input": {
+          "CharLit": " "
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "tab",
+        "input": {
+          "CharLit": "\t"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "newline",
+        "input": {
+          "CharLit": "\n"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "carriage return",
+        "input": {
+          "CharLit": "\r"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "letter",
+        "input": {
+          "CharLit": "x"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "digit",
+        "input": {
+          "CharLit": "0"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(binop Or (binop Or (binop Or (binop Eq (var \"c\") (lit (char \" \"))) (binop Eq (var \"c\") (lit (char \"\\t\")))) (binop Eq (var \"c\") (lit (char \"\\n\")))) (binop Eq (var \"c\") (lit (char \"\\r\"))))\n"
+}

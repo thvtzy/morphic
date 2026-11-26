@@ -1,0 +1,304 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "weights_sorted",
+  "tier": "tier-2",
+  "verdictBasis": "executed-exact",
+  "verdict": "ExecutedExact",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 5,
+    "evaluable": 5,
+    "passed": 5
+  },
+  "spec": {
+    "name": "weights_sorted",
+    "doc": "weights_sorted(xs) = true when the weights are in non-decreasing order.",
+    "generics": [],
+    "params": [
+      {
+        "name": "xs",
+        "ty": {
+          "List": "Int"
+        },
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Implies": [
+          {
+            "Expr": {
+              "BinOp": [
+                "Le",
+                {
+                  "Call": [
+                    "len",
+                    [
+                      {
+                        "Var": "xs"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "IntLit": 1
+                }
+              ]
+            }
+          },
+          {
+            "Expr": {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "BoolLit": true
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "Forall": {
+          "vars": [
+            [
+              "i",
+              "Int"
+            ]
+          ],
+          "body": {
+            "Implies": [
+              {
+                "Expr": {
+                  "BinOp": [
+                    "Eq",
+                    {
+                      "Var": "output"
+                    },
+                    {
+                      "BoolLit": true
+                    }
+                  ]
+                }
+              },
+              {
+                "Expr": {
+                  "BinOp": [
+                    "Le",
+                    {
+                      "Index": [
+                        {
+                          "Var": "xs"
+                        },
+                        {
+                          "Var": "i"
+                        }
+                      ]
+                    },
+                    {
+                      "Index": [
+                        {
+                          "Var": "xs"
+                        },
+                        {
+                          "BinOp": [
+                            "Add",
+                            {
+                              "Var": "i"
+                            },
+                            {
+                              "IntLit": 1
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "Forall": {
+          "vars": [
+            [
+              "i",
+              "Int"
+            ]
+          ],
+          "body": {
+            "Implies": [
+              {
+                "Expr": {
+                  "BinOp": [
+                    "Gt",
+                    {
+                      "Index": [
+                        {
+                          "Var": "xs"
+                        },
+                        {
+                          "Var": "i"
+                        }
+                      ]
+                    },
+                    {
+                      "Index": [
+                        {
+                          "Var": "xs"
+                        },
+                        {
+                          "BinOp": [
+                            "Add",
+                            {
+                              "Var": "i"
+                            },
+                            {
+                              "IntLit": 1
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              {
+                "Expr": {
+                  "BinOp": [
+                    "Eq",
+                    {
+                      "Var": "output"
+                    },
+                    {
+                      "BoolLit": false
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "empty",
+        "input": {
+          "Call": [
+            "List",
+            []
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "single",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "sorted",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "unsorted",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 3
+              },
+              {
+                "IntLit": 1
+              },
+              {
+                "IntLit": 2
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "equal",
+        "input": {
+          "Call": [
+            "List",
+            [
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 5
+              },
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(block (alloc \"result\" Bool (lit (bool true))) (for \"i\" (lit (int 1)) (unop Len (var \"xs\")) (assign (var \"result\") (binop And (var \"result\") (binop Le (index (var \"xs\") (binop Sub (var \"i\") (lit (int 1)))) (index (var \"xs\") (var \"i\")))))) (return (var \"result\")))\n"
+}
