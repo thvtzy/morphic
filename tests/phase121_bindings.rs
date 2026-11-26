@@ -408,13 +408,18 @@ export { clamped, digit, smallest, total, describe };
 
     // TypeScript, obtained the way the sandbox allows: a
     // scratch npm install inside the host project.
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     let (ok, out) = run(
-        "npm",
+        npm,
         &["install", "--no-audit", "--no-fund", "typescript@5.9.3"],
         &dir,
     );
     assert!(ok, "typescript installs in the host project:\n{out}");
-    let tsc = dir.join("node_modules/.bin/tsc");
+    let tsc = dir.join(if cfg!(windows) {
+        "node_modules/.bin/tsc.cmd"
+    } else {
+        "node_modules/.bin/tsc"
+    });
     let tsc = tsc.to_str().unwrap();
 
     let (ok, out) = run(tsc, &["--strict", "-p", "tsconfig.json"], &dir);

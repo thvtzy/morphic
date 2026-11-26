@@ -1,0 +1,8 @@
+# Enforce LF line endings on all text files across platforms (Windows/Linux/macOS)
+# so checked-in byte masses and SHA-256 catalog digests stay identical on every clone.
+* text=auto eol=lf
+
+# Explicit binary assets (never perform EOL conversion or text diff)
+*.wasm binary
+*.vsix binary
+*.bin binary

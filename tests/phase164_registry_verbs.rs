@@ -779,6 +779,7 @@ fn serve_root(
         while !stop_flag.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let _ = stream
                         .set_read_timeout(Some(std::time::Duration::from_secs(5)));
                     let mut buf = [0u8; 8192];
@@ -806,6 +807,7 @@ fn serve_root(
                         }
                     }
                     let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(25));
