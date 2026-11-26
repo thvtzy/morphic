@@ -122,3 +122,29 @@ jobs:
           test "$("$WASMTIME" run --invoke 'int-clamp(15, 0, 10)' "$LIB")" = "10"
           "$WASM_TOOLS" component wit "$CB" | grep -q 'import map-apply: func(x: s64) -> s64;'
           "$WASM_TOOLS" component wit "$LIB" | grep -q 'export morphic:library/functions'
+
+      # The 1.8 Solidity + EVM harness (IKONIK_18_SCOPE §7,
+      # wired at Phase 171): runs explicitly against `-p morphic`
+      # (outside the workspace test build's wasm-playground
+      # feature unification) with Node 24 and pinned solc-js +
+      # @ethereumjs/evm + ethers installed only in scratch
+      # target/solidity-harness/. Asserts 0-warning solc
+      # compilation, 100% real EVM battery execution, runtime
+      # require(...) / Panic(0x11) reverts, and the full
+      # 5-clause 1.8 gate.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Solidity compile + EVM execution (1.8)
+        run: |
+          set -euo pipefail
+          cargo build -p morphic --bin morphic
+          BIN="$PWD/target/debug/morphic"
+          WORK="$RUNNER_TEMP/morphic-solidity-18"
+          rm -rf "$WORK"
+          "$BIN" build --contract-from examples/contracts/defi_math.morph --out "$WORK/defi"
+          for b in "$WORK/defi"/*.bundle.json; do
+            "$BIN" verify-bundle "$b"
+          done
+          cargo test -p morphic --test phase170_evm_harness --test phase171_gate -- --nocapture

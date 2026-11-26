@@ -86,12 +86,12 @@ const LIBRARY_ARTIFACT: &str = "packages/component/morphic-library.wasm";
 /// 158 measurement (81,778 B) +10%, rounded up to a
 /// whole KiB.
 const CALLBACK_BUDGET: usize = 90_112;
-/// The artifact's measured size + sha256 at this phase.
-const CALLBACK_SIZE: usize = 81_840;
+/// The artifact's measured size + sha256 at the current lockstep stamp.
+const CALLBACK_SIZE: usize = 66_011;
 const CALLBACK_SHA256: &str =
-    "8c51788872c4af6bca24256a6fe82ce03aff3c622d4cd23498a3440ad14fdb2f";
+    "15f3f0a2cdbd4d043748a2d78b2bc96e9b6c5ec1bc1f99d2ddd57e90f11a5ba8";
 const LIBRARY_SHA256: &str =
-    "d424f202fa8b9bd5439df26eecb0b233cce782f827d1b93af10502547927afac";
+    "64b99919caf2f8bba9823c1fa26261ef4cdbaf7f02f48793162372eb011b1fd5";
 
 fn sha256_of(path: &std::path::Path) -> Option<String> {
     let out = Command::new("sha256sum").arg(path).output().ok()?;
@@ -299,7 +299,7 @@ fn p160_neighbours_unmoved() {
     assert_eq!((rust_files, rust_bytes), (7, 57_613), "packages/rust unmoved");
     // The library component's artifact bytes unmoved.
     let lib = std::fs::read(root.join(LIBRARY_ARTIFACT)).expect("read the library artifact");
-    assert_eq!(lib.len(), 96_100, "the library artifact's size unmoved");
+    assert_eq!(lib.len(), 80_558, "the library artifact's size unmoved");
     if let Some(sha) = sha256_of(&root.join(LIBRARY_ARTIFACT)) {
         assert_eq!(sha, LIBRARY_SHA256, "the library artifact's bytes unmoved (sha)");
     }

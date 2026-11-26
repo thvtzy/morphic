@@ -2,7 +2,7 @@
 // (DISEBAR_16_SCOPE §4): it stands at the tree's version
 // and moves with the release stamp. WIT semver governs
 // breaking changes from the first stamped release.
-package morphic:library@1.7.0;
+package morphic:library@1.8.0;
 
 interface functions {
   int-abs: func(x: s64) -> s64;
