@@ -91,6 +91,18 @@ tokio = { version = "1", features = ["rt", "macros"], optional = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 
+# Registry integrity binding (Phase 164, DISEBAR_17_SCOPE
+# §8): SHA-256 for the install flow's hash check — the
+# milestone's one new dependency. Native builds only:
+# target-gated off wasm32, so the browser profile's graph
+# never carries it (the registry has no browser surface,
+# §7); every native feature configuration carries it —
+# default, bootstrap-codegen and --no-default-features
+# alike — because a local-index install hash-checks in
+# all of them, so the hash may not be feature-gated away.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sha2 = "0.11"
+
 [profile.dev]
 opt-level = 0
 

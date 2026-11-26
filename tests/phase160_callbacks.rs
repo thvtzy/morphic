@@ -18,7 +18,7 @@
 //!    artifact's own printed world carry exactly the
 //!    three frozen imports and the five frozen exports;
 //! 4. the neighbours unmoved — the main Cargo set is
-//!    the standing 12, the root lockfile knows neither
+//!    the standing 13, the root lockfile knows neither
 //!    component crate, packages/npm and packages/rust
 //!    stand at their Phase 157 masses, and the library
 //!    component's artifact bytes are unmoved;
@@ -236,12 +236,21 @@ fn p160_neighbours_unmoved() {
     let mut deps: Vec<String> = Vec::new();
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed == "[dependencies]" {
+        if trimmed == "[dependencies]"
+            || trimmed == "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]"
+        {
+            // [dependencies] plus the native target table:
+            // Phase 164's sha2 (DISEBAR_17_SCOPE §8) is
+            // declared there — target-gated off wasm32, so
+            // the browser profile's graph excludes it while
+            // every native configuration carries it. The
+            // standing set is therefore 13 in this parse.
             in_deps = true;
             continue;
         }
         if in_deps && trimmed.starts_with('[') {
-            break;
+            in_deps = false;
+            continue;
         }
         if in_deps && !trimmed.is_empty() && !trimmed.starts_with('#') {
             let name = trimmed.split(['=', ' ', '{']).next().unwrap().trim_matches('"');
@@ -255,7 +264,7 @@ fn p160_neighbours_unmoved() {
         deps,
         [
             "anyhow", "clap", "colored", "indicatif", "llama-cpp-2", "rand", "reqwest",
-            "serde", "serde_json", "thiserror", "tokio", "z3",
+            "serde", "serde_json", "sha2", "thiserror", "tokio", "z3",
         ],
         "the Cargo dependency set is the standing set"
     );
@@ -292,7 +301,7 @@ fn p160_neighbours_unmoved() {
     if let Some(sha) = sha256_of(&root.join(LIBRARY_ARTIFACT)) {
         assert_eq!(sha, LIBRARY_SHA256, "the library artifact's bytes unmoved (sha)");
     }
-    println!("P160|neighbours|cargo=standing-12, root lock knows neither component crate, npm 77/71873, rust 7/57613, library artifact bytes unmoved");
+    println!("P160|neighbours|cargo=standing-13, root lock knows neither component crate, npm 77/71873, rust 7/57613, library artifact bytes unmoved");
 }
 
 #[test]

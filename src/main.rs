@@ -181,6 +181,18 @@ enum Command {
         library: bool,
     },
 
+    /// The registry client (Phase 164, DISEBAR_17_SCOPE
+    /// §5): fetch catalogued re-verification bundles and
+    /// install them as prelude entries — the install
+    /// re-runs the bundle's proof obligation (sha256
+    /// against the index, then `verify-bundle`'s
+    /// re-judgment) before anything is written, and the
+    /// receipt records what the re-run measured.
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
+    },
+
     /// Synthesize interactively — see candidates in real-time
     Synthesize {
         /// Path to .morph spec file
@@ -207,13 +219,51 @@ enum Command {
         /// Project name
         name: String,
     },
-
     /// Print the standard library as a JSON asset
     /// (playground build tooling, Phase 112: regenerates
     /// playground/stdlib-asset.bin from the embedded
     /// library data)
     #[command(hide = true)]
     StdlibAsset,
+}
+
+/// The registry verb family (Phase 164, DISEBAR_17_SCOPE
+/// §5.1): one subcommand group for the catalog's client,
+/// keeping the flat top level for the compiler's own
+/// verbs.
+#[derive(Subcommand)]
+enum RegistryAction {
+    /// Install a catalogued bundle by name (optionally
+    /// name@version): resolve against the index, fetch,
+    /// sha256-check, re-verify, then write + receipt
+    Add {
+        /// Entry name, optionally @<catalog version>
+        name: String,
+
+        /// The index to resolve against: an HTTPS URL or
+        /// a local path (default: the canonical catalog
+        /// index)
+        #[arg(long)]
+        index: Option<String>,
+    },
+
+    /// List the installed entries, at the standings
+    /// their installs measured
+    List,
+
+    /// Remove an installed entry (its bundle file and
+    /// its receipt row)
+    Remove {
+        /// Entry name
+        name: String,
+    },
+
+    /// Re-verify an installed entry against its receipt
+    /// (with no name: sweep the whole install directory)
+    Verify {
+        /// Entry name (omit to sweep)
+        name: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -836,6 +886,71 @@ fn main() -> anyhow::Result<()> {
                     "the MCP server ships only in the Z3-enabled native build \
                      (DISEBAR_SCOPE §3 R3) — this build has no verifier to serve \
                      verdicts from"
+                );
+            }
+        }
+
+        Command::Registry { action } => {
+            // Phase 164: `morphic registry …` — the
+            // registry client (DISEBAR_17_SCOPE §5). The
+            // judgments are the library's (src/registry.rs
+            // over src/pcc.rs); this arm is the shell. The
+            // registry has no browser surface (§7), so the
+            // wasm-playground profile refuses by name — the
+            // --package precedent.
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                match action {
+                    RegistryAction::Add { name, index } => {
+                        let line = morphic::registry::registry_add(
+                            &name,
+                            index.as_deref(),
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                        println!("{} {line}", "✓".green().bold());
+                    }
+                    RegistryAction::List => {
+                        let receipts = morphic::registry::registry_list()
+                            .map_err(anyhow::Error::msg)?;
+                        if receipts.is_empty() {
+                            println!("  (no registry entries installed)");
+                        }
+                        for r in &receipts {
+                            println!(
+                                "  {} {} — {} ({}), sha256 {}…",
+                                r.entry,
+                                r.version,
+                                r.tier,
+                                r.verdict_basis,
+                                &r.sha256[..12]
+                            );
+                        }
+                    }
+                    RegistryAction::Remove { name } => {
+                        let line = morphic::registry::registry_remove(&name)
+                            .map_err(anyhow::Error::msg)?;
+                        println!("{} {line}", "✓".green().bold());
+                    }
+                    RegistryAction::Verify { name } => {
+                        let lines = morphic::registry::registry_verify(
+                            name.as_deref(),
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                        if lines.is_empty() {
+                            println!("  (no registry entries installed)");
+                        }
+                        for line in &lines {
+                            println!("{} {line}", "✓".green().bold());
+                        }
+                    }
+                }
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = action;
+                anyhow::bail!(
+                    "the registry client runs from a native build \
+                     (this build carries no registry surface)"
                 );
             }
         }

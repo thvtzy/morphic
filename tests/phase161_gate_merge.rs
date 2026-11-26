@@ -38,7 +38,7 @@
 //!    frozen budgets (§6), headers true components,
 //!    sha-pinned, and reproduced byte-for-byte by
 //!    fresh plain-cargo builds; the main Cargo set is
-//!    the standing 12 and the root lockfile knows
+//!    the standing 13 and the root lockfile knows
 //!    neither component crate; the pinned tools are
 //!    the versions the freeze pinned, where checkable.
 //! 5. **Standings hold** — the npm package at its
@@ -408,7 +408,7 @@ fn p161_clause4_footprint() {
             assert_eq!(actual, sha, "{artifact}'s sha256 pin");
         }
     }
-    // The main Cargo graph stands: the standing 12,
+    // The main Cargo graph stands: the standing 13,
     // and the root lockfile knows neither component
     // crate (each is its own workspace root).
     let cargo_toml = read_repo("Cargo.toml");
@@ -416,12 +416,21 @@ fn p161_clause4_footprint() {
     let mut deps: Vec<String> = Vec::new();
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed == "[dependencies]" {
+        if trimmed == "[dependencies]"
+            || trimmed == "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]"
+        {
+            // [dependencies] plus the native target table:
+            // Phase 164's sha2 (DISEBAR_17_SCOPE §8) is
+            // declared there — target-gated off wasm32, so
+            // the browser profile's graph excludes it while
+            // every native configuration carries it. The
+            // standing set is therefore 13 in this parse.
             in_deps = true;
             continue;
         }
         if in_deps && trimmed.starts_with('[') {
-            break;
+            in_deps = false;
+            continue;
         }
         if in_deps && !trimmed.is_empty() && !trimmed.starts_with('#') {
             let name = trimmed.split(['=', ' ', '{']).next().unwrap().trim_matches('"');
@@ -435,7 +444,7 @@ fn p161_clause4_footprint() {
         deps,
         [
             "anyhow", "clap", "colored", "indicatif", "llama-cpp-2", "rand", "reqwest",
-            "serde", "serde_json", "thiserror", "tokio", "z3",
+            "serde", "serde_json", "sha2", "thiserror", "tokio", "z3",
         ],
         "the Cargo dependency set is the standing set"
     );
@@ -476,7 +485,7 @@ fn p161_clause4_footprint() {
         CB_ARTIFACT,
         "morphic_component_callbacks.wasm",
     );
-    println!("P161|clause4|library {LIBRARY_SIZE} B <= {LIBRARY_BUDGET} B, callbacks {CALLBACK_SIZE} B <= {CALLBACK_BUDGET} B, both sha-pinned and reproduced byte-for-byte; cargo=standing-12, root lock knows neither crate; tool pins 1.263.0/51.0.0");
+    println!("P161|clause4|library {LIBRARY_SIZE} B <= {LIBRARY_BUDGET} B, callbacks {CALLBACK_SIZE} B <= {CALLBACK_BUDGET} B, both sha-pinned and reproduced byte-for-byte; cargo=standing-13, root lock knows neither crate; tool pins 1.263.0/51.0.0");
 }
 
 fn assert_build_reproduces(crate_rel: &str, artifact_rel: &str, out_name: &str) {

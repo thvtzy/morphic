@@ -22,6 +22,7 @@ pub mod codegen;
 pub mod lsp;
 pub mod mcp;
 pub mod pcc;
+pub mod registry;
 pub mod spec;
 pub mod stdlib;
 pub mod synthesis;

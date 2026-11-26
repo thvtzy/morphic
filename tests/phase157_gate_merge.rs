@@ -798,18 +798,27 @@ fn p157_clause5_footprint() {
     let root = root();
 
     // The compiler tree's dependency set is unchanged:
-    // the standing 12.
+    // the standing 13.
     let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
     let mut in_deps = false;
     let mut deps: Vec<String> = Vec::new();
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed == "[dependencies]" {
+        if trimmed == "[dependencies]"
+            || trimmed == "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]"
+        {
+            // [dependencies] plus the native target table:
+            // Phase 164's sha2 (DISEBAR_17_SCOPE §8) is
+            // declared there — target-gated off wasm32, so
+            // the browser profile's graph excludes it while
+            // every native configuration carries it. The
+            // standing set is therefore 13 in this parse.
             in_deps = true;
             continue;
         }
         if in_deps && trimmed.starts_with('[') {
-            break;
+            in_deps = false;
+            continue;
         }
         if in_deps && !trimmed.is_empty() && !trimmed.starts_with('#') {
             let name = trimmed.split(['=', ' ', '{']).next().unwrap().trim_matches('"');
@@ -823,7 +832,7 @@ fn p157_clause5_footprint() {
         deps,
         [
             "anyhow", "clap", "colored", "indicatif", "llama-cpp-2", "rand", "reqwest",
-            "serde", "serde_json", "thiserror", "tokio", "z3",
+            "serde", "serde_json", "sha2", "thiserror", "tokio", "z3",
         ],
         "the Cargo dependency set is the standing set"
     );
@@ -837,7 +846,7 @@ fn p157_clause5_footprint() {
         "the library package's mass {npm_bytes} B stands inside the 76,800 B budget"
     );
     println!(
-        "P157|clause5|footprint cargo=standing-12 npm=77-files/{npm_bytes}B<=76800B \
+        "P157|clause5|footprint cargo=standing-13 npm=77-files/{npm_bytes}B<=76800B \
          (Cargo.lock zero-diff vs v1.4.0 and the playground bundle mass are the \
          gate record's shell evidence)"
     );
