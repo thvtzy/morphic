@@ -361,6 +361,52 @@ pub fn produce_all_bundles_checked() -> Result<Vec<(String, String)>, String> {
     produce_all_bundles()
 }
 
+/// A user module's bundles, produced by the verb: the
+/// file set (`<entry>.bundle.json`, contents) in module
+/// order, and the measured standings the admission
+/// admitted them on.
+#[cfg(not(feature = "wasm-playground"))]
+pub struct UserBundleAssembly {
+    pub files: Vec<(String, String)>,
+    pub standings: Vec<crate::codegen::package::UserStanding>,
+}
+
+/// `morphic build --bundles-from`'s core (Phase 163,
+/// DISEBAR_17_SCOPE §4): the `--package-from` admission
+/// loop, shared verbatim (`admit_user_specs` — measured
+/// rows only, the same refusal shapes), then one bundle
+/// per admitted spec through `produce_bundle`'s checked
+/// route over the retained inputs. Production is itself
+/// a refusal surface: a spec whose constraints name a
+/// sibling user spec is admitted in context but cannot
+/// be bundled standalone (the format's self-containment
+/// boundary — production re-judges (spec, body) against
+/// the prelude alone), and a crown that moved between
+/// the admission run and production refuses by the
+/// route's own reason. Any refusal — admission's or
+/// production's — fails the whole production and no
+/// file set exists: the files live only in the `Ok`.
+#[cfg(not(feature = "wasm-playground"))]
+pub fn assemble_user_bundles(
+    source: &str,
+    seed: u64,
+) -> Result<UserBundleAssembly, String> {
+    let (inputs, standings) = crate::codegen::package::admit_user_specs(
+        source,
+        seed,
+        "--bundles-from",
+        "bundle production",
+    )?;
+    let mut files = Vec::new();
+    for input in &inputs {
+        let bundle = produce_bundle(input).map_err(|e| {
+            format!("bundle production refused — nothing is written: {e}")
+        })?;
+        files.push((format!("{}.bundle.json", bundle.entry), bundle_json(&bundle)));
+    }
+    Ok(UserBundleAssembly { files, standings })
+}
+
 // ── Consumption (`verify-bundle`) ───────────────────────
 
 /// Re-judge one bundle from its text: parse it, check

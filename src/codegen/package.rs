@@ -812,31 +812,36 @@ fn user_package_readme(
     out
 }
 
-/// The verb's core (the CLI arm is a shell over this):
-/// parse + typecheck the user's module, run the seeded
-/// profile per spec, admit on measured rows only, and
-/// assemble the standing package layout. On any refusal
-/// the `Err` names every refused spec with its measured
-/// standing, and no file set exists.
-pub fn assemble_user_package(
+/// The admission loop both user-module verbs share —
+/// this package verb and the bundle production of
+/// Phase 163 (`crate::pcc::assemble_user_bundles`, the
+/// CLI's `build --bundles-from` arm): parse + typecheck
+/// the user's module, run the seeded profile per spec,
+/// admit on measured rows only (the discipline of the
+/// section header above). `flag` and `noun` name the
+/// calling arm in the refusal texts ("--package-from" /
+/// "package assembly"; "--bundles-from" / "bundle
+/// production") — the discipline is one; only the names
+/// are the caller's. On any refusal the `Err` names
+/// every refused spec with its measured standing, and
+/// no artifact of either verb exists.
+pub fn admit_user_specs(
     source: &str,
-    package_name: &str,
-    package_version: &str,
-    scope: &str,
     seed: u64,
-) -> Result<UserPackageAssembly, String> {
+    flag: &str,
+    noun: &str,
+) -> Result<(Vec<bindings::BindingInput>, Vec<UserStanding>), String> {
     let parsed = crate::spec::parser::parse(source).map_err(|e| {
-        format!("--package-from: the module does not parse: {e}")
+        format!("{flag}: the module does not parse: {e}")
     })?;
     let checked = crate::spec::typeck::check(parsed).map_err(|e| {
-        format!("--package-from: the module does not typecheck: {e}")
+        format!("{flag}: the module does not typecheck: {e}")
     })?;
     let specs = checked.spec.functions;
     if specs.is_empty() {
-        return Err(
-            "--package-from: the module declares no specs — nothing to package"
-                .to_string(),
-        );
+        return Err(format!(
+            "{flag}: the module declares no specs — nothing to admit"
+        ));
     }
 
     let mut inputs: Vec<bindings::BindingInput> = Vec::new();
@@ -905,10 +910,28 @@ pub fn assemble_user_package(
     }
     if !refusals.is_empty() {
         return Err(format!(
-            "package assembly refused — nothing is written: {}",
+            "{noun} refused — nothing is written: {}",
             refusals.join("; ")
         ));
     }
+    Ok((inputs, standings))
+}
+
+/// The verb's core (the CLI arm is a shell over this):
+/// the shared admission loop (`admit_user_specs`), then
+/// the standing package layout over the retained
+/// inputs. On any refusal the `Err` names every refused
+/// spec with its measured standing, and no file set
+/// exists.
+pub fn assemble_user_package(
+    source: &str,
+    package_name: &str,
+    package_version: &str,
+    scope: &str,
+    seed: u64,
+) -> Result<UserPackageAssembly, String> {
+    let (inputs, standings) =
+        admit_user_specs(source, seed, "--package-from", "package assembly")?;
 
     let set = bindings::generate_bindings_versioned(
         &inputs,
