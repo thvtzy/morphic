@@ -294,6 +294,20 @@ fn main() -> anyhow::Result<()> {
         println!("{}", banner.cyan());
     }
 
+    // Phase 165 (DISEBAR_17_SCOPE §7): the shells that
+    // consult the prelude for a user module name the
+    // installed layer's degradations, if any — on
+    // stderr, so no stdout shape moves. Degradation is
+    // named, never silent; a whole layer raises nothing.
+    if matches!(
+        cli.command,
+        Command::Check { .. } | Command::Build { .. } | Command::Synthesize { .. }
+    ) {
+        for line in morphic::stdlib::installed_diagnostics() {
+            eprintln!("morphic: {line}");
+        }
+    }
+
     match cli.command {
         Command::Build { package: true, input, out, package_from, bundles_from, .. } => {
             // Phase 122: `morphic build --package` — assemble

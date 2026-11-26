@@ -171,8 +171,12 @@ fn bundled_library_parses_and_checks_standalone() {
     // Phase 115: the List family — list_is_empty Tier-1
     // plus the eleven Tier-2 entries; Phase 135:
     // Amendment 2's six Tier-2 entries complete the
-    // List module).
-    let specs = stdlib::prelude_specs();
+    // List module). Enumerated over the stdlib layer
+    // (Phase 165): this pin's subject is the bundled
+    // library itself — the funnel's merged prelude
+    // additionally yields a machine's installed layer,
+    // which is Phase 165's pins' subject, not this one's.
+    let specs = stdlib::stdlib_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,

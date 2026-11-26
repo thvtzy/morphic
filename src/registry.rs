@@ -252,6 +252,16 @@ fn read_ledger(dir: &Path) -> Result<Ledger, String> {
     }
 }
 
+/// The receipt ledger's rows in `dir` — Phase 165's
+/// discovery read of the same ledger the verbs write.
+/// The ledger's own refusals (an unparseable or
+/// wrong-format ledger) are the caller's named fact,
+/// verbatim.
+#[cfg(not(feature = "wasm-playground"))]
+pub fn ledger_receipts(dir: &Path) -> Result<Vec<Receipt>, String> {
+    read_ledger(dir).map(|ledger| ledger.entries)
+}
+
 #[cfg(not(feature = "wasm-playground"))]
 fn write_ledger(dir: &Path, ledger: &Ledger) -> Result<(), String> {
     let mut sorted = ledger.clone();
@@ -524,8 +534,14 @@ pub fn registry_add(
     }
     crate::pcc::verify_bundle_text(&text)?;
 
-    // Step 4 — collision checks (§6).
-    if crate::stdlib::prelude_specs().iter().any(|s| s.name == name) {
+    // Step 4 — collision checks (§6). The stdlib
+    // question is asked of the stdlib layer alone
+    // (`stdlib_specs`, Phase 165): the funnel's merged
+    // prelude also yields the installed layer, and an
+    // already-installed name must reach the
+    // already-installed refusal below — not this one —
+    // so the two refusals stay distinct.
+    if crate::stdlib::stdlib_specs().iter().any(|s| s.name == name) {
         return Err(format!(
             "registry: '{name}' is a standard-library entry — precedence \
              user > stdlib > installed means an installed bundle may never \
