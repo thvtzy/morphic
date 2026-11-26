@@ -39,9 +39,17 @@ jobs:
       # sweep is the claim-vs-reproduction comparison).
       # A catalog PR that adds a lying or stale bundle
       # fails here, before merge.
+      # The binary is built for this step from the
+      # compiler package alone: the workspace test build
+      # above unifies features across members, and the
+      # morphic-wasm member turns `wasm-playground` on
+      # for the shared bin artifact — a build whose
+      # registry surface is compiled out by design. The
+      # shipped binary is the package's own.
       - name: Registry catalog consistency
         run: |
           set -euo pipefail
+          cargo build -p morphic --bin morphic
           BIN="$PWD/target/debug/morphic"
           WORK="$RUNNER_TEMP/morphic-catalog-consistency"
           rm -rf "$WORK"
