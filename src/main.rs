@@ -102,6 +102,21 @@ enum Command {
         #[arg(long)]
         package_from: Option<PathBuf>,
 
+        /// Produce re-verification bundles from a USER
+        /// module's specs instead of compiling one spec
+        /// (Phase 163, DISEBAR_17_SCOPE §4): the
+        /// --package-from admission loop (seeded profile,
+        /// measured rows only, the same refusal shapes),
+        /// emitting one PCC bundle per admitted spec
+        /// through produce_bundle's checked route. A spec
+        /// whose constraints name a sibling spec refuses
+        /// the whole production by name — a bundle is one
+        /// prelude-self-contained function. No flag
+        /// supplies a standing; the run is the only
+        /// source of one.
+        #[arg(long)]
+        bundles_from: Option<PathBuf>,
+
         /// Package name for --package-from
         /// (default: the module file's stem)
         #[arg(long)]
@@ -112,8 +127,9 @@ enum Command {
         #[arg(long)]
         package_version: Option<String>,
 
-        /// Seed for the --package-from admission run
-        /// (default: 42, the standing seeded discipline)
+        /// Seed for the --package-from / --bundles-from
+        /// admission runs (default: 42, the standing
+        /// seeded discipline)
         #[arg(long)]
         seed: Option<u64>,
 
@@ -165,6 +181,18 @@ enum Command {
         library: bool,
     },
 
+    /// The registry client (Phase 164, DISEBAR_17_SCOPE
+    /// §5): fetch catalogued re-verification bundles and
+    /// install them as prelude entries — the install
+    /// re-runs the bundle's proof obligation (sha256
+    /// against the index, then `verify-bundle`'s
+    /// re-judgment) before anything is written, and the
+    /// receipt records what the re-run measured.
+    Registry {
+        #[command(subcommand)]
+        action: RegistryAction,
+    },
+
     /// Synthesize interactively — see candidates in real-time
     Synthesize {
         /// Path to .morph spec file
@@ -191,13 +219,51 @@ enum Command {
         /// Project name
         name: String,
     },
-
     /// Print the standard library as a JSON asset
     /// (playground build tooling, Phase 112: regenerates
     /// playground/stdlib-asset.bin from the embedded
     /// library data)
     #[command(hide = true)]
     StdlibAsset,
+}
+
+/// The registry verb family (Phase 164, DISEBAR_17_SCOPE
+/// §5.1): one subcommand group for the catalog's client,
+/// keeping the flat top level for the compiler's own
+/// verbs.
+#[derive(Subcommand)]
+enum RegistryAction {
+    /// Install a catalogued bundle by name (optionally
+    /// name@version): resolve against the index, fetch,
+    /// sha256-check, re-verify, then write + receipt
+    Add {
+        /// Entry name, optionally @<catalog version>
+        name: String,
+
+        /// The index to resolve against: an HTTPS URL or
+        /// a local path (default: the canonical catalog
+        /// index)
+        #[arg(long)]
+        index: Option<String>,
+    },
+
+    /// List the installed entries, at the standings
+    /// their installs measured
+    List,
+
+    /// Remove an installed entry (its bundle file and
+    /// its receipt row)
+    Remove {
+        /// Entry name
+        name: String,
+    },
+
+    /// Re-verify an installed entry against its receipt
+    /// (with no name: sweep the whole install directory)
+    Verify {
+        /// Entry name (omit to sweep)
+        name: Option<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -228,8 +294,22 @@ fn main() -> anyhow::Result<()> {
         println!("{}", banner.cyan());
     }
 
+    // Phase 165 (DISEBAR_17_SCOPE §7): the shells that
+    // consult the prelude for a user module name the
+    // installed layer's degradations, if any — on
+    // stderr, so no stdout shape moves. Degradation is
+    // named, never silent; a whole layer raises nothing.
+    if matches!(
+        cli.command,
+        Command::Check { .. } | Command::Build { .. } | Command::Synthesize { .. }
+    ) {
+        for line in morphic::stdlib::installed_diagnostics() {
+            eprintln!("morphic: {line}");
+        }
+    }
+
     match cli.command {
-        Command::Build { package: true, input, out, package_from, .. } => {
+        Command::Build { package: true, input, out, package_from, bundles_from, .. } => {
             // Phase 122: `morphic build --package` — assemble
             // the npm package (@thvtzy/morphic) from the
             // standard library's shipped bodies. The assembly
@@ -239,6 +319,13 @@ fn main() -> anyhow::Result<()> {
             if package_from.is_some() {
                 anyhow::bail!(
                     "--package-from assembles a user module's package; \
+                     it does not combine with --package"
+                );
+            }
+            if bundles_from.is_some() {
+                anyhow::bail!(
+                    "--bundles-from produces a user module's \
+                     re-verification bundles; \
                      it does not combine with --package"
                 );
             }
@@ -290,7 +377,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Build { facade: true, input, out, package_from, .. } => {
+        Command::Build { facade: true, input, out, package_from, bundles_from, .. } => {
             // Phase 123: `morphic build --facade` — assemble
             // the Rust facade crate (crates.io `morphic`)
             // from the standard library's shipped bodies.
@@ -302,6 +389,13 @@ fn main() -> anyhow::Result<()> {
             if package_from.is_some() {
                 anyhow::bail!(
                     "--package-from assembles a user module's package; \
+                     it does not combine with --facade"
+                );
+            }
+            if bundles_from.is_some() {
+                anyhow::bail!(
+                    "--bundles-from produces a user module's \
+                     re-verification bundles; \
                      it does not combine with --facade"
                 );
             }
@@ -347,7 +441,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        Command::Build { bundles: true, input, out, package_from, .. } => {
+        Command::Build { bundles: true, input, out, package_from, bundles_from, .. } => {
             // Phase 150: `morphic build --bundles` — produce
             // the re-verification bundles through the checked
             // route (src/pcc.rs): the whole crowning surface
@@ -359,6 +453,13 @@ fn main() -> anyhow::Result<()> {
             if package_from.is_some() {
                 anyhow::bail!(
                     "--package-from assembles a user module's package; \
+                     it does not combine with --bundles"
+                );
+            }
+            if bundles_from.is_some() {
+                anyhow::bail!(
+                    "--bundles-from produces a user module's \
+                     re-verification bundles; \
                      it does not combine with --bundles"
                 );
             }
@@ -482,6 +583,7 @@ fn main() -> anyhow::Result<()> {
             seed,
             out,
             input,
+            bundles_from,
             ..
         } => {
             // Phase 154: `morphic build --package-from
@@ -497,6 +599,13 @@ fn main() -> anyhow::Result<()> {
             // file's stem, the version is this Morphic
             // version, the seed is the standing 42, and
             // the output directory is `<stem>-package`.
+            if bundles_from.is_some() {
+                anyhow::bail!(
+                    "--bundles-from produces a user module's \
+                     re-verification bundles; \
+                     it does not combine with --package-from"
+                );
+            }
             if input.is_some() {
                 anyhow::bail!(
                     "build --package-from names its module with \
@@ -562,6 +671,90 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!(
                     "user-package assembly runs from a native build \
                      (assembly verbs are native-build acts in this tree)"
+                );
+            }
+        }
+
+        Command::Build {
+            bundles_from: Some(module_path),
+            seed,
+            out,
+            input,
+            package_from,
+            ..
+        } => {
+            // Phase 163: `morphic build --bundles-from
+            // <file.morph>` — the registry's production
+            // verb (DISEBAR_17_SCOPE §4): the
+            // --package-from admission loop over the
+            // user's module (pcc::assemble_user_bundles),
+            // emitting one re-verification bundle per
+            // admitted spec through produce_bundle's
+            // checked route. A refused spec refuses the
+            // whole production here with nothing written —
+            // and so does production itself: a spec whose
+            // constraints name a sibling spec is admitted
+            // in context but cannot be bundled standalone
+            // (the self-containment boundary), and a moved
+            // crown is refused by the route's own reason.
+            // Naming defaults mirror the sibling verb:
+            // the seed is the standing 42 and the output
+            // directory is `<stem>-bundles`.
+            if package_from.is_some() {
+                anyhow::bail!(
+                    "--package-from assembles a user module's package; \
+                     it does not combine with --bundles-from"
+                );
+            }
+            if input.is_some() {
+                anyhow::bail!(
+                    "build --bundles-from names its module with \
+                     --bundles-from itself and takes no positional input file"
+                );
+            }
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                let source = std::fs::read_to_string(&module_path)?;
+                let stem = module_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "morphic-module".to_string());
+                let seed = seed.unwrap_or(morphic::api::PLAYGROUND_DEFAULT_SEED);
+                let assembly = morphic::pcc::assemble_user_bundles(&source, seed)
+                    .map_err(anyhow::Error::msg)?;
+                for s in &assembly.standings {
+                    println!(
+                        "  {} {} — {} ({}): {} at {}/{} executed",
+                        "✓".green().bold(),
+                        s.name,
+                        s.tier,
+                        s.verdict_basis,
+                        s.status,
+                        s.passed,
+                        s.total
+                    );
+                }
+                let total: usize =
+                    assembly.files.iter().map(|(_, c)| c.len()).sum();
+                let dir = out.unwrap_or_else(|| PathBuf::from(format!("{stem}-bundles")));
+                std::fs::create_dir_all(&dir)?;
+                for (name, contents) in &assembly.files {
+                    std::fs::write(dir.join(name), contents)?;
+                }
+                println!(
+                    "{} Produced {} re-verification bundles — {total} B total \
+                     (registry production; no package budget charged)",
+                    "✓".green().bold(),
+                    assembly.files.len()
+                );
+                println!("  {} {}", "•".dimmed(), dir.display());
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = (module_path, seed, out);
+                anyhow::bail!(
+                    "bundle production runs from a native build \
+                     (this build carries no embedded library data)"
                 );
             }
         }
@@ -707,6 +900,71 @@ fn main() -> anyhow::Result<()> {
                     "the MCP server ships only in the Z3-enabled native build \
                      (DISEBAR_SCOPE §3 R3) — this build has no verifier to serve \
                      verdicts from"
+                );
+            }
+        }
+
+        Command::Registry { action } => {
+            // Phase 164: `morphic registry …` — the
+            // registry client (DISEBAR_17_SCOPE §5). The
+            // judgments are the library's (src/registry.rs
+            // over src/pcc.rs); this arm is the shell. The
+            // registry has no browser surface (§7), so the
+            // wasm-playground profile refuses by name — the
+            // --package precedent.
+            #[cfg(not(feature = "wasm-playground"))]
+            {
+                match action {
+                    RegistryAction::Add { name, index } => {
+                        let line = morphic::registry::registry_add(
+                            &name,
+                            index.as_deref(),
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                        println!("{} {line}", "✓".green().bold());
+                    }
+                    RegistryAction::List => {
+                        let receipts = morphic::registry::registry_list()
+                            .map_err(anyhow::Error::msg)?;
+                        if receipts.is_empty() {
+                            println!("  (no registry entries installed)");
+                        }
+                        for r in &receipts {
+                            println!(
+                                "  {} {} — {} ({}), sha256 {}…",
+                                r.entry,
+                                r.version,
+                                r.tier,
+                                r.verdict_basis,
+                                &r.sha256[..12]
+                            );
+                        }
+                    }
+                    RegistryAction::Remove { name } => {
+                        let line = morphic::registry::registry_remove(&name)
+                            .map_err(anyhow::Error::msg)?;
+                        println!("{} {line}", "✓".green().bold());
+                    }
+                    RegistryAction::Verify { name } => {
+                        let lines = morphic::registry::registry_verify(
+                            name.as_deref(),
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                        if lines.is_empty() {
+                            println!("  (no registry entries installed)");
+                        }
+                        for line in &lines {
+                            println!("{} {line}", "✓".green().bold());
+                        }
+                    }
+                }
+            }
+            #[cfg(feature = "wasm-playground")]
+            {
+                let _ = action;
+                anyhow::bail!(
+                    "the registry client runs from a native build \
+                     (this build carries no registry surface)"
                 );
             }
         }

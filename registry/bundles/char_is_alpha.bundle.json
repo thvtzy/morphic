@@ -1,0 +1,205 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "char_is_alpha",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 9,
+    "evaluable": 9,
+    "passed": 9
+  },
+  "spec": {
+    "name": "char_is_alpha",
+    "doc": "char_is_alpha(c) = true iff c is in 'A'..='Z' or 'a'..='z' — ASCII letters only (STDLIB_SCOPE.md 2.3).",
+    "generics": [],
+    "params": [
+      {
+        "name": "c",
+        "ty": "Char",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "BinOp": [
+                "Or",
+                {
+                  "BinOp": [
+                    "And",
+                    {
+                      "BinOp": [
+                        "Ge",
+                        {
+                          "Var": "c"
+                        },
+                        {
+                          "CharLit": "A"
+                        }
+                      ]
+                    },
+                    {
+                      "BinOp": [
+                        "Le",
+                        {
+                          "Var": "c"
+                        },
+                        {
+                          "CharLit": "Z"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "BinOp": [
+                    "And",
+                    {
+                      "BinOp": [
+                        "Ge",
+                        {
+                          "Var": "c"
+                        },
+                        {
+                          "CharLit": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "BinOp": [
+                        "Le",
+                        {
+                          "Var": "c"
+                        },
+                        {
+                          "CharLit": "z"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "upper first",
+        "input": {
+          "CharLit": "A"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "upper last",
+        "input": {
+          "CharLit": "Z"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "lower first",
+        "input": {
+          "CharLit": "a"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "lower last",
+        "input": {
+          "CharLit": "z"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "middle",
+        "input": {
+          "CharLit": "M"
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "after upper range",
+        "input": {
+          "CharLit": "["
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "before lower range",
+        "input": {
+          "CharLit": "`"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "digit",
+        "input": {
+          "CharLit": "0"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "space",
+        "input": {
+          "CharLit": " "
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(binop Or (binop And (binop Ge (var \"c\") (lit (char \"A\"))) (binop Le (var \"c\") (lit (char \"Z\")))) (binop And (binop Ge (var \"c\") (lit (char \"a\"))) (binop Le (var \"c\") (lit (char \"z\")))))\n"
+}

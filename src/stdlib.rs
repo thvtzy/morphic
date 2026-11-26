@@ -62,6 +62,25 @@
 //  (tests/phase112_stdlib_asset.rs) regenerates it in memory
 //  and asserts the checked-in file matches byte-for-byte,
 //  so the two forms cannot drift.
+//
+//  THE INSTALLED LAYER (Phase 165, DISEBAR_17_SCOPE §7):
+//  registry-installed bundles (Phase 164) join the prelude
+//  as a third layer behind this same funnel —
+//  `prelude_specs` yields the stdlib's specs then the
+//  installed set's, and `shipped_body` answers stdlib
+//  names from the registry below and installed names from
+//  the installed layer, never across the layer line.
+//  Precedence is user > stdlib > installed (§6): the
+//  merges above already let a user definition shadow the
+//  whole prelude, and the installed layer never yields a
+//  name the stdlib holds (a hand-planted stdlib-named
+//  install is inert, named in the layer's diagnostics).
+//  Native builds only: the layer reads the install
+//  directory once per process, and the playground build —
+//  whose prelude arrives as the runtime asset — has no
+//  filesystem and no installed layer. Discovery does NOT
+//  re-verify (install ran the proof; `registry verify`
+//  re-checks it): see load_installed_layer's trust note.
 // ─────────────────────────────────────────────────────────────
 
 use std::sync::OnceLock;
@@ -152,7 +171,12 @@ pub fn library_asset() -> LibraryAsset {
             .into_iter()
             .map(|(name, source)| AssetModule { name, source })
             .collect(),
-        bodies: prelude_specs()
+        // The asset is the STDLIB's alone (Phase 165):
+        // it is built from the stdlib layer's specs, so
+        // a machine's installed entries — a native,
+        // per-user layer — never enter the playground's
+        // checked-in asset.
+        bodies: stdlib_specs()
             .iter()
             .filter_map(|spec| shipped_body(&spec.name).map(|body| (spec.name.clone(), body)))
             .collect(),
@@ -1377,12 +1401,252 @@ fn library_module() -> &'static Spec {
     })
 }
 
+/// The standard library's own specs — the prelude's
+/// first layer, alone. Consumers whose question is
+/// about the stdlib itself (the asset above, the
+/// registry's collision check) read this; every other
+/// consumer reads the merged funnel, [`prelude_specs`].
+pub fn stdlib_specs() -> Vec<FunctionSpec> {
+    library_module().functions.clone()
+}
+
 /// The library's specs — the prelude's signature surface.
 /// The typechecker registers these in every module's
 /// environment; the SpecIndex merge inserts the same specs
-/// into every module's index.
+/// into every module's index. Since Phase 165
+/// (DISEBAR_17_SCOPE §7) the prelude is two layers: the
+/// stdlib's specs, then the installed layer's — an
+/// installed name the stdlib holds is not yielded (§6's
+/// inertness, realized here at the funnel). Native builds
+/// only: a playground build's prelude is the installed
+/// asset's, and it carries no installed layer.
 pub fn prelude_specs() -> Vec<FunctionSpec> {
-    library_module().functions.clone()
+    let mut specs = stdlib_specs();
+    #[cfg(not(feature = "wasm-playground"))]
+    specs.extend(
+        installed_layer()
+            .entries
+            .iter()
+            .map(|(spec, _)| spec.clone()),
+    );
+    specs
+}
+
+// ── The installed layer (Phase 165) ─────────────────────
+
+/// One process's read of the registry install directory:
+/// the entries discovery admits to the prelude, and the
+/// named diagnostic for every entry (or the whole layer)
+/// it did not admit. Read once per process — the
+/// stdlib's own OnceLock pattern — so a long-lived
+/// shell's prelude is stable for its life; an install or
+/// a removal is a new process's fact (every CLI
+/// invocation is one).
+#[cfg(not(feature = "wasm-playground"))]
+struct InstalledLayer {
+    /// (spec, body) per admitted entry, in ledger order.
+    entries: Vec<(FunctionSpec, IRNode)>,
+    /// One line per refusal: who was not admitted, and
+    /// why — named, never silent (§7).
+    diagnostics: Vec<String>,
+}
+
+#[cfg(not(feature = "wasm-playground"))]
+fn installed_layer() -> &'static InstalledLayer {
+    static LAYER: OnceLock<InstalledLayer> = OnceLock::new();
+    LAYER.get_or_init(load_installed_layer)
+}
+
+/// The discovery read (DISEBAR_17_SCOPE §7).
+///
+/// THE TRUST BOUNDARY: discovery does NOT re-verify.
+/// The install ran the proof — sha256 against the
+/// index, then `verify_bundle_text`'s re-judgment — and
+/// the receipt records what that re-run measured.
+/// Discovery trusts the receipt + the file's presence,
+/// checking only the cheap identity facts: the file
+/// still hashes to the receipt's sha256, the bundle
+/// inside still names the receipt's entry, its spec
+/// still names it too, and its body still reads through
+/// the IR text reader. Each failure degrades that entry
+/// by name; a corrupt ledger degrades the whole layer
+/// by name; the stdlib and the user's module are
+/// unaffected in every shape. `morphic registry verify`
+/// is the re-check verb — it re-runs the proof.
+#[cfg(not(feature = "wasm-playground"))]
+fn load_installed_layer() -> InstalledLayer {
+    let mut diagnostics: Vec<String> = Vec::new();
+    let mut entries: Vec<(FunctionSpec, IRNode)> = Vec::new();
+    let empty = |diagnostics: Vec<String>| InstalledLayer {
+        entries: Vec::new(),
+        diagnostics,
+    };
+    let dir = match crate::registry::install_dir() {
+        Ok(dir) => dir,
+        Err(reason) => {
+            diagnostics.push(format!(
+                "registry discovery: the installed layer is empty — {reason}"
+            ));
+            return empty(diagnostics);
+        }
+    };
+    // An absent directory is today's behavior — no
+    // layer, and no diagnostic: absence is not
+    // degradation.
+    if !dir.exists() {
+        return empty(diagnostics);
+    }
+    let receipts = match crate::registry::ledger_receipts(&dir) {
+        Ok(receipts) => receipts,
+        Err(reason) => {
+            diagnostics.push(format!(
+                "registry discovery: the installed layer is empty — {reason}"
+            ));
+            return empty(diagnostics);
+        }
+    };
+    let stdlib_names: std::collections::BTreeSet<&str> =
+        library_module().functions.iter().map(|s| s.name.as_str()).collect();
+    let mut receipted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for receipt in &receipts {
+        let name = receipt.entry.as_str();
+        receipted.insert(name);
+        // §6's inertness, realized at the funnel: the
+        // layer order, not the directory's contents,
+        // decides — a hand-planted stdlib-named install
+        // (or a forged receipt for one) yields nothing.
+        if stdlib_names.contains(name) {
+            diagnostics.push(format!(
+                "registry discovery: installed entry '{name}' is inert — \
+                 '{name}' is a standard-library name, and precedence \
+                 user > stdlib > installed means the installed layer \
+                 never yields it (remove it with: morphic registry \
+                 remove {name})"
+            ));
+            continue;
+        }
+        if entries.iter().any(|(spec, _)| spec.name == name) {
+            diagnostics.push(format!(
+                "registry discovery: installed entry '{name}' is skipped \
+                 — the ledger carries a second receipt for it; the \
+                 first stands"
+            ));
+            continue;
+        }
+        let file = dir.join(format!("{name}.bundle.json"));
+        let bytes = match std::fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                diagnostics.push(format!(
+                    "registry discovery: installed entry '{name}' is \
+                     skipped — its bundle file at {} cannot be read: {e}",
+                    file.display()
+                ));
+                continue;
+            }
+        };
+        let digest = crate::registry::sha256_hex(&bytes);
+        if digest != receipt.sha256 {
+            diagnostics.push(format!(
+                "registry discovery: installed entry '{name}' is \
+                 skipped — the installed file's sha256 is {digest}, but \
+                 its receipt records {}: the file changed after install \
+                 (`morphic registry verify {name}` reports the same \
+                 fact as a refusal)",
+                receipt.sha256
+            ));
+            continue;
+        }
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                diagnostics.push(format!(
+                    "registry discovery: installed entry '{name}' is \
+                     skipped — its bundle file is not UTF-8 text"
+                ));
+                continue;
+            }
+        };
+        let bundle: crate::pcc::Bundle = match serde_json::from_str(&text) {
+            Ok(bundle) => bundle,
+            Err(e) => {
+                diagnostics.push(format!(
+                    "registry discovery: installed entry '{name}' is \
+                     skipped — its bundle file does not parse: {e}"
+                ));
+                continue;
+            }
+        };
+        if bundle.entry != name || bundle.spec.name != name {
+            diagnostics.push(format!(
+                "registry discovery: installed entry '{name}' is \
+                 skipped — the bundle inside names entry '{}' and its \
+                 spec names '{}'; a receipt and its file must agree",
+                bundle.entry, bundle.spec.name
+            ));
+            continue;
+        }
+        let body = match crate::synthesis::irtext::parse_ir(&bundle.body) {
+            Ok(body) => body,
+            Err(reason) => {
+                diagnostics.push(format!(
+                    "registry discovery: installed entry '{name}' is \
+                     skipped — its body's IR text does not read: {reason}"
+                ));
+                continue;
+            }
+        };
+        entries.push((bundle.spec, body));
+    }
+    // Stray bundle files — present in the directory,
+    // receipted nowhere — are not installs; named, so a
+    // hand-copied bundle's absence from the prelude is
+    // never silent (`registry verify`'s sweep names the
+    // same files as refusals).
+    if let Ok(read) = std::fs::read_dir(&dir) {
+        for item in read.flatten() {
+            let file_name = item.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = file_name.strip_suffix(".bundle.json") {
+                if !receipted.contains(stem) {
+                    diagnostics.push(format!(
+                        "registry discovery: bundle file '{file_name}' \
+                         has no receipt in {} — it is not an install and \
+                         discovery ignores it (install it with: morphic \
+                         registry add)",
+                        crate::registry::LEDGER_FILE
+                    ));
+                }
+            }
+        }
+    }
+    InstalledLayer { entries, diagnostics }
+}
+
+/// The installed layer's named diagnostics (Phase 165):
+/// one line per entry (or the layer) discovery did not
+/// admit, and why. Empty when the layer is whole — and
+/// when there is no layer at all (an absent directory is
+/// not degradation). The CLI prints these on the shells
+/// that report; `morphic registry verify` reports the
+/// same facts as refusals. Playground builds have no
+/// installed layer and always answer empty.
+pub fn installed_diagnostics() -> Vec<String> {
+    #[cfg(not(feature = "wasm-playground"))]
+    return installed_layer().diagnostics.clone();
+    #[cfg(feature = "wasm-playground")]
+    return Vec::new();
+}
+
+/// The installed layer's shipped body for `name`
+/// (native builds): the bundle's body, read back
+/// through the IR text reader at discovery time.
+#[cfg(not(feature = "wasm-playground"))]
+fn installed_body(name: &str) -> Option<IRNode> {
+    installed_layer()
+        .entries
+        .iter()
+        .find(|(spec, _)| spec.name == name)
+        .map(|(_, body)| body.clone())
 }
 
 /// The crowned body shipped for the library entry `name`,
@@ -1391,10 +1655,14 @@ pub fn prelude_specs() -> Vec<FunctionSpec> {
 /// spec — no entry ships that way). Native builds answer
 /// from the transcribed registry below; playground builds
 /// answer from the installed asset — the same data, loaded
-/// at runtime instead of compiled in.
+/// at runtime instead of compiled in. Since Phase 165 a
+/// native build answers an installed entry's name from
+/// the installed layer, and only when the stdlib registry
+/// does not hold the name — never across the layer line
+/// (§7).
 pub fn shipped_body(name: &str) -> Option<IRNode> {
     #[cfg(not(feature = "wasm-playground"))]
-    return shipped_body_native(name);
+    return shipped_body_native(name).or_else(|| installed_body(name));
     #[cfg(feature = "wasm-playground")]
     return installed_asset()?
         .bodies

@@ -459,12 +459,21 @@ fn p156_dependency_quarantine_holds() {
     let mut deps: Vec<String> = Vec::new();
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed == "[dependencies]" {
+        if trimmed == "[dependencies]"
+            || trimmed == "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]"
+        {
+            // [dependencies] plus the native target table:
+            // Phase 164's sha2 (DISEBAR_17_SCOPE §8) is
+            // declared there — target-gated off wasm32, so
+            // the browser profile's graph excludes it while
+            // every native configuration carries it. The
+            // standing set is therefore 13 in this parse.
             in_deps = true;
             continue;
         }
         if in_deps && trimmed.starts_with('[') {
-            break;
+            in_deps = false;
+            continue;
         }
         if in_deps && !trimmed.is_empty() && !trimmed.starts_with('#') {
             let name = trimmed
@@ -482,7 +491,7 @@ fn p156_dependency_quarantine_holds() {
         deps,
         [
             "anyhow", "clap", "colored", "indicatif", "llama-cpp-2", "rand", "reqwest",
-            "serde", "serde_json", "thiserror", "tokio", "z3",
+            "serde", "serde_json", "sha2", "thiserror", "tokio", "z3",
         ],
         "the Cargo dependency set is the standing set"
     );
@@ -518,5 +527,5 @@ fn p156_dependency_quarantine_holds() {
             absent.display()
         );
     }
-    println!("P156|quarantine|cargo=standing-12 npm=77-files/71873B lockfile=packages/vscode only");
+    println!("P156|quarantine|cargo=standing-13 npm=77-files/71873B lockfile=packages/vscode only");
 }

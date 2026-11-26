@@ -1,0 +1,120 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "string_is_empty",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 5,
+    "evaluable": 5,
+    "passed": 5
+  },
+  "spec": {
+    "name": "string_is_empty",
+    "doc": "string_is_empty(s) = true iff s is the empty string: len(s) == 0 (STDLIB_SCOPE.md 2.4).",
+    "generics": [],
+    "params": [
+      {
+        "name": "s",
+        "ty": "String",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Bool",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Eq",
+            {
+              "Var": "output"
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Call": [
+                    "len",
+                    [
+                      {
+                        "Var": "s"
+                      }
+                    ]
+                  ]
+                },
+                {
+                  "IntLit": 0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "empty",
+        "input": {
+          "StringLit": ""
+        },
+        "expected_output": {
+          "BoolLit": true
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "single char",
+        "input": {
+          "StringLit": "a"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "typical",
+        "input": {
+          "StringLit": "hello"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "whitespace is not empty",
+        "input": {
+          "StringLit": " "
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "long",
+        "input": {
+          "StringLit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "expected_output": {
+          "BoolLit": false
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(binop Eq (call \"len\" (var \"s\")) (lit (int 0)))\n"
+}

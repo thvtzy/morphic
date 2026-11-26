@@ -739,12 +739,21 @@ fn gate_clause4_footprint() {
     let mut deps: Vec<String> = Vec::new();
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed == "[dependencies]" {
+        if trimmed == "[dependencies]"
+            || trimmed == "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]"
+        {
+            // [dependencies] plus the native target table:
+            // Phase 164's sha2 (DISEBAR_17_SCOPE §8) is
+            // declared there — target-gated off wasm32, so
+            // the browser profile's graph excludes it while
+            // every native configuration carries it. The
+            // standing set is therefore 13 in this parse.
             in_deps = true;
             continue;
         }
         if in_deps && trimmed.starts_with('[') {
-            break;
+            in_deps = false;
+            continue;
         }
         if in_deps && !trimmed.is_empty() && !trimmed.starts_with('#') {
             let name = trimmed
@@ -762,7 +771,7 @@ fn gate_clause4_footprint() {
         deps,
         [
             "anyhow", "clap", "colored", "indicatif", "llama-cpp-2", "rand", "reqwest",
-            "serde", "serde_json", "thiserror", "tokio", "z3",
+            "serde", "serde_json", "sha2", "thiserror", "tokio", "z3",
         ],
         "the default build's dependency set is the standing set"
     );
@@ -784,7 +793,7 @@ fn gate_clause4_footprint() {
         package::NPM_UNPACKED_BUDGET
     );
     println!(
-        "P151|clause4|deps=standing-12 bundles=35-files/267156B npm={npm_files}-files/{npm_bytes}B<={}",
+        "P151|clause4|deps=standing-13 bundles=35-files/267156B npm={npm_files}-files/{npm_bytes}B<={}",
         package::NPM_UNPACKED_BUDGET
     );
 }

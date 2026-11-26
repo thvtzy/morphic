@@ -1,0 +1,339 @@
+{
+  "format": "morphic-registry-index",
+  "indexVersion": 1,
+  "entries": [
+    {
+      "entry": "char_is_alpha",
+      "version": "1.7.0",
+      "file": "registry/bundles/char_is_alpha.bundle.json",
+      "sha256": "e03f5a4749d436d88bd43009a312a2f2a0787f86dced73e5672e78bffe7ef429",
+      "bytes": 4728,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "char_is_digit",
+      "version": "1.7.0",
+      "file": "registry/bundles/char_is_digit.bundle.json",
+      "sha256": "bcd62fb7890eb5dd2d29699086d5261330398e894410ae9dda1fbd5919a7763c",
+      "bytes": 3180,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "char_is_lowercase",
+      "version": "1.7.0",
+      "file": "registry/bundles/char_is_lowercase.bundle.json",
+      "sha256": "e02763d0fe6bd56f52a7c734db0f1fb07283067343ae3401ae1ee7380edb46f0",
+      "bytes": 2987,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "char_is_uppercase",
+      "version": "1.7.0",
+      "file": "registry/bundles/char_is_uppercase.bundle.json",
+      "sha256": "3137812708004b50a9a79f5ed0dfb0e47fe403a8574e1876f97118f371881c6c",
+      "bytes": 2986,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "char_is_whitespace",
+      "version": "1.7.0",
+      "file": "registry/bundles/char_is_whitespace.bundle.json",
+      "sha256": "cadea1f3bbe4f16000665f255d4608f0776d9b44ca4639f927d41420abaa8e4a",
+      "bytes": 4196,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "char_to_digit",
+      "version": "1.7.0",
+      "file": "registry/bundles/char_to_digit.bundle.json",
+      "sha256": "b8e59848b44cdaed68edb05a73c07e1cf10ddfebbd2b87d6934210c27898a260",
+      "bytes": 12324,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "int_abs",
+      "version": "1.7.0",
+      "file": "registry/bundles/int_abs.bundle.json",
+      "sha256": "1d7e51b1163f42dcdf7ae24c5337d00f99dca477700966569fd78704559a3455",
+      "bytes": 4394,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "int_clamp",
+      "version": "1.7.0",
+      "file": "registry/bundles/int_clamp.bundle.json",
+      "sha256": "4427768e6109070f147b28eb9b071af63a60c60adb94f4eff682def0939dcd49",
+      "bytes": 9934,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "int_is_even",
+      "version": "1.7.0",
+      "file": "registry/bundles/int_is_even.bundle.json",
+      "sha256": "3c2945726bc6746225700b7d096f14e6b865482a105f0969e7aa6bf8be1b5794",
+      "bytes": 3576,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "int_is_odd",
+      "version": "1.7.0",
+      "file": "registry/bundles/int_is_odd.bundle.json",
+      "sha256": "cf74bfe4814ee9c627bf96e4ec9a2221e7f49d47cd0315669f7e7669c3814335",
+      "bytes": 3600,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "int_max",
+      "version": "1.7.0",
+      "file": "registry/bundles/int_max.bundle.json",
+      "sha256": "7160371da2bdf27a04b70343d2d5aa9d4bcaa36b4024e1368da50abc92d1644f",
+      "bytes": 6191,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "int_min",
+      "version": "1.7.0",
+      "file": "registry/bundles/int_min.bundle.json",
+      "sha256": "eedc2c5c903feb9611b192be93ea88365251d6766998efa0fa3b90a2539c6b30",
+      "bytes": 6894,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "int_sign",
+      "version": "1.7.0",
+      "file": "registry/bundles/int_sign.bundle.json",
+      "sha256": "fb20e4cc8f686248117080b28cf390a11d62767565c1dcba582d969b5505b76d",
+      "bytes": 6211,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "is_widget_code",
+      "version": "1.7.0",
+      "file": "registry/bundles/is_widget_code.bundle.json",
+      "sha256": "c92d64d5adcb812ba1d11c0ccd658d7b9252426f87ad75a8724f9650ad443f88",
+      "bytes": 2706,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_all",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_all.bundle.json",
+      "sha256": "85106bd4cf093f949f9547d72b7a5e8e2438e7004f4e311aa7bab09f6733741b",
+      "bytes": 11972,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_any",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_any.bundle.json",
+      "sha256": "04bd2e08b876f023997c7c47c95d4e622c9c4c5dbc0af35c68595cf21465a5a7",
+      "bytes": 11570,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_binary_search",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_binary_search.bundle.json",
+      "sha256": "511e64fd90006e101e7b12f34ac78010408ac9dd3442263b27ecc4220b7a1959",
+      "bytes": 13433,
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact"
+    },
+    {
+      "entry": "list_contains",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_contains.bundle.json",
+      "sha256": "918221e9349db1357cef005b7c475fe3b7b9b19b17b1b43c007877034b94cb47",
+      "bytes": 8237,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_drop",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_drop.bundle.json",
+      "sha256": "90452657ea861703d041e4364fe24d337242ed138c4270b37a702575e3790139",
+      "bytes": 12981,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_filter",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_filter.bundle.json",
+      "sha256": "c79da690724cd8a25efc2b4b9aae4472dc11fe9ec894b76736b1530e47b08985",
+      "bytes": 13802,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_fold",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_fold.bundle.json",
+      "sha256": "5b5a485a11d7dfa6d38dba4d2c7a999d5bd1537b2a96ca88c5d8746ebf0a7820",
+      "bytes": 11739,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_is_empty",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_is_empty.bundle.json",
+      "sha256": "5a7fb3cf81f82032fdb232c4f32d082b97b8143247bfea662f23caed1876bb15",
+      "bytes": 2813,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_is_sorted",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_is_sorted.bundle.json",
+      "sha256": "db40de80166763793546f19f995158ab070351f707bacae1a9d90588557d7575",
+      "bytes": 9323,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_map",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_map.bundle.json",
+      "sha256": "9e9148cf65d91b70b642abc9019403e838511a3df31003db91560d490d776a3f",
+      "bytes": 12729,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_max",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_max.bundle.json",
+      "sha256": "5771a8db15f1b75b74e2b839c3530efc6a5cb09e71576f777e7b014d1e00da01",
+      "bytes": 8465,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_min",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_min.bundle.json",
+      "sha256": "a80e656b65f29a5c963d4e05dc4d3097c4dfac1bfa502a852a85d5d070a79a6c",
+      "bytes": 8929,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_product",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_product.bundle.json",
+      "sha256": "0621bbc15974e7989768d590310c25151bc847030a661988e3c32b25f82c8f73",
+      "bytes": 6917,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_reverse",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_reverse.bundle.json",
+      "sha256": "5ecddcfb92ce3f4c824898fad4c665aee495c2d5456dfc68b19e6a0c338e3afb",
+      "bytes": 7391,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_sort",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_sort.bundle.json",
+      "sha256": "48ced2645cb7701a6dabf136cf17151e307ec8d683ecfaa2befb3367de4acf47",
+      "bytes": 9788,
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact"
+    },
+    {
+      "entry": "list_sum",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_sum.bundle.json",
+      "sha256": "bcbf5d3cdadf01b3211e5675a771abc36c5ef0cc16ddf5bc9b91d6f3c73a2ad1",
+      "bytes": 7394,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "list_take",
+      "version": "1.7.0",
+      "file": "registry/bundles/list_take.bundle.json",
+      "sha256": "5fc63202a526cc465446bacbfa97368b65bc281317c157015bc053c42481acb7",
+      "bytes": 10709,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "option_ok_or",
+      "version": "1.7.0",
+      "file": "registry/bundles/option_ok_or.bundle.json",
+      "sha256": "2cb627a75aceca0008abe02d28cfbed93e3d6a13f628e50cc849b483b754ae11",
+      "bytes": 5312,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "option_unwrap_or",
+      "version": "1.7.0",
+      "file": "registry/bundles/option_unwrap_or.bundle.json",
+      "sha256": "22ef6b498c5746bd1d08cbb78aaeec96408f73ca68896f8fb057d2990143f7b0",
+      "bytes": 5265,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "range",
+      "version": "1.7.0",
+      "file": "registry/bundles/range.bundle.json",
+      "sha256": "d3b7d9138c939762ae1a51a4cb03da5ced0a74e2195a67e64e031be8595559f3",
+      "bytes": 8242,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "result_unwrap_or",
+      "version": "1.7.0",
+      "file": "registry/bundles/result_unwrap_or.bundle.json",
+      "sha256": "a33d011f619aeca544cdcb7809f19d4d73fe960e40bc06a0bac621e8fec2b6b0",
+      "bytes": 6405,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "string_is_empty",
+      "version": "1.7.0",
+      "file": "registry/bundles/string_is_empty.bundle.json",
+      "sha256": "a2261f6480287037f997cb19454294bba543b814aab89c19cfa2c252093de1e8",
+      "bytes": 2539,
+      "tier": "tier-1",
+      "verdictBasis": "z3-verified"
+    },
+    {
+      "entry": "weights_sorted",
+      "version": "1.7.0",
+      "file": "registry/bundles/weights_sorted.bundle.json",
+      "sha256": "989e12fc08eeb05a7d155f190dd918722d52b1988770cb3220cb36f08dfda733",
+      "bytes": 6816,
+      "tier": "tier-2",
+      "verdictBasis": "executed-exact"
+    }
+  ]
+}

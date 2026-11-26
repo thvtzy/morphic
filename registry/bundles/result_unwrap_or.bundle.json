@@ -1,0 +1,307 @@
+{
+  "format": "morphic-reverification-bundle",
+  "bundleVersion": 1,
+  "entry": "result_unwrap_or",
+  "tier": "tier-1",
+  "verdictBasis": "z3-verified",
+  "verdict": "Verified",
+  "crownRoute": "pipeline",
+  "battery": {
+    "total": 6,
+    "evaluable": 6,
+    "passed": 6
+  },
+  "spec": {
+    "name": "result_unwrap_or",
+    "doc": "result_unwrap_or(r, d) = the Ok payload of r, or d when r is Err (STDLIB_SCOPE.md 2.5).",
+    "generics": [],
+    "params": [
+      {
+        "name": "r",
+        "ty": {
+          "Result": [
+            "Int",
+            "String"
+          ]
+        },
+        "annotations": {}
+      },
+      {
+        "name": "d",
+        "ty": "Int",
+        "annotations": {}
+      }
+    ],
+    "return_type": "Int",
+    "preconditions": [],
+    "postconditions": [
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "MethodCall": {
+                "receiver": {
+                  "Var": "r"
+                },
+                "name": "is_err",
+                "args": []
+              }
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "MethodCall": {
+                    "receiver": {
+                      "Var": "r"
+                    },
+                    "name": "unwrap",
+                    "args": []
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "Expr": {
+          "BinOp": [
+            "Or",
+            {
+              "MethodCall": {
+                "receiver": {
+                  "Var": "r"
+                },
+                "name": "is_ok",
+                "args": []
+              }
+            },
+            {
+              "BinOp": [
+                "Eq",
+                {
+                  "Var": "output"
+                },
+                {
+                  "Var": "d"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "invariants": [],
+    "complexity": null,
+    "resource": null,
+    "tests": [
+      {
+        "name": "ok payload",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Ok",
+                  [
+                    {
+                      "IntLit": 7
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 7
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "err default",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Err",
+                  [
+                    {
+                      "StringLit": "bad"
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 3
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 3
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "ok zero payload",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Ok",
+                  [
+                    {
+                      "IntLit": 0
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 5
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "err empty message",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Err",
+                  [
+                    {
+                      "StringLit": ""
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 0
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "IntLit": 0
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "ok negative payload",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Ok",
+                  [
+                    {
+                      "BinOp": [
+                        "Sub",
+                        {
+                          "IntLit": 0
+                        },
+                        {
+                          "IntLit": 4
+                        }
+                      ]
+                    }
+                  ]
+                ]
+              },
+              {
+                "IntLit": 9
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 4
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      },
+      {
+        "name": "err negative default",
+        "input": {
+          "Call": [
+            "__tuple__",
+            [
+              {
+                "Call": [
+                  "Err",
+                  [
+                    {
+                      "StringLit": "boom"
+                    }
+                  ]
+                ]
+              },
+              {
+                "BinOp": [
+                  "Sub",
+                  {
+                    "IntLit": 0
+                  },
+                  {
+                    "IntLit": 2
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        "expected_output": {
+          "BinOp": [
+            "Sub",
+            {
+              "IntLit": 0
+            },
+            {
+              "IntLit": 2
+            }
+          ]
+        },
+        "timeout_ms": null,
+        "property": false
+      }
+    ],
+    "annotations": {}
+  },
+  "body": "morphic-ir/1\n(match (var \"r\") (case (ctor \"Ok\" (pvar \"v\")) (var \"v\")) (case (ctor \"Err\" wildcard) (var \"d\")))\n"
+}

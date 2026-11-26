@@ -2,7 +2,7 @@
 // (DISEBAR_16_SCOPE §4's discipline, applied to this
 // sibling): it stands at the tree's version and moves
 // with the release stamp.
-package morphic:library@1.6.0;
+package morphic:library@1.7.0;
 
 // The callback world (DISEBAR_16_SCOPE §5, frozen):
 // the facade's five higher-order entries, with their

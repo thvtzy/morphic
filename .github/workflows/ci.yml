@@ -29,6 +29,64 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
 
+      # The 1.7 catalog consistency instrument
+      # (DISEBAR_17_SCOPE §9, wired at Phase 166): the
+      # shipped binary against the repo's own registry/ —
+      # for every index entry, the file exists, its
+      # sha256 matches the row, and its claim reproduces
+      # under `registry verify`'s sweep (the ledger below
+      # is staged from the bundles' own claims, so the
+      # sweep is the claim-vs-reproduction comparison).
+      # A catalog PR that adds a lying or stale bundle
+      # fails here, before merge.
+      # The binary is built for this step from the
+      # compiler package alone: the workspace test build
+      # above unifies features across members, and the
+      # morphic-wasm member turns `wasm-playground` on
+      # for the shared bin artifact — a build whose
+      # registry surface is compiled out by design. The
+      # shipped binary is the package's own.
+      - name: Registry catalog consistency
+        run: |
+          set -euo pipefail
+          cargo build -p morphic --bin morphic
+          BIN="$PWD/target/debug/morphic"
+          WORK="$RUNNER_TEMP/morphic-catalog-consistency"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/install"
+          python3 - "$WORK/install" <<'PY'
+          import hashlib, json, pathlib, sys
+          install = pathlib.Path(sys.argv[1])
+          index = json.loads(pathlib.Path("registry/index.json").read_text())
+          rows = []
+          for row in index["entries"]:
+              path = pathlib.Path(row["file"])
+              assert path.exists(), f"{row['entry']}: catalogued file missing"
+              data = path.read_bytes()
+              assert len(data) == row["bytes"], f"{row['entry']}: bytes differ from the row"
+              digest = hashlib.sha256(data).hexdigest()
+              assert digest == row["sha256"], f"{row['entry']}: sha256 differs from the row"
+              bundle = json.loads(data)
+              (install / f"{row['entry']}.bundle.json").write_bytes(data)
+              rows.append({
+                  "entry": row["entry"],
+                  "version": row["version"],
+                  "sha256": digest,
+                  "tier": bundle["tier"],
+                  "verdictBasis": bundle["verdictBasis"],
+                  "verdict": bundle["verdict"],
+                  "crownRoute": bundle["crownRoute"],
+                  "battery": bundle["battery"],
+                  "index": "ci catalog consistency (DISEBAR_17_SCOPE §9)",
+                  "installed": "1970-01-01",
+              })
+          rows.sort(key=lambda r: r["entry"])
+          ledger = {"format": "morphic-registry-ledger", "entries": rows}
+          (install / "installed.json").write_text(json.dumps(ledger, indent=2) + "\n")
+          print(f"catalog consistency: {len(rows)} entries staged for the sweep")
+          PY
+          MORPHIC_REGISTRY_DIR="$WORK/install" "$BIN" registry verify
+
       # The 1.6 component pipeline (DISEBAR_16_SCOPE §3,
       # wired at Phase 161): the same pinned tarballs,
       # the same target, plain cargo — then the fresh

@@ -18,7 +18,7 @@
 //!    artifact's own printed world carry exactly the
 //!    three frozen imports and the five frozen exports;
 //! 4. the neighbours unmoved — the main Cargo set is
-//!    the standing 12, the root lockfile knows neither
+//!    the standing 13, the root lockfile knows neither
 //!    component crate, packages/npm and packages/rust
 //!    stand at their Phase 157 masses, and the library
 //!    component's artifact bytes are unmoved;
@@ -87,9 +87,9 @@ const CALLBACK_BUDGET: usize = 90_112;
 /// The artifact's measured size + sha256 at this phase.
 const CALLBACK_SIZE: usize = 81_840;
 const CALLBACK_SHA256: &str =
-    "9d8f7e972775cdb6e947da2681a0d4937316019121e313ba90481d49b64155a8";
+    "8c51788872c4af6bca24256a6fe82ce03aff3c622d4cd23498a3440ad14fdb2f";
 const LIBRARY_SHA256: &str =
-    "f08c214c1a56ad360b5a90a42e04371524258a6a713a44cedec480938738a212";
+    "d424f202fa8b9bd5439df26eecb0b233cce782f827d1b93af10502547927afac";
 
 fn sha256_of(path: &std::path::Path) -> Option<String> {
     let out = Command::new("sha256sum").arg(path).output().ok()?;
@@ -236,12 +236,21 @@ fn p160_neighbours_unmoved() {
     let mut deps: Vec<String> = Vec::new();
     for line in cargo_toml.lines() {
         let trimmed = line.trim();
-        if trimmed == "[dependencies]" {
+        if trimmed == "[dependencies]"
+            || trimmed == "[target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]"
+        {
+            // [dependencies] plus the native target table:
+            // Phase 164's sha2 (DISEBAR_17_SCOPE §8) is
+            // declared there — target-gated off wasm32, so
+            // the browser profile's graph excludes it while
+            // every native configuration carries it. The
+            // standing set is therefore 13 in this parse.
             in_deps = true;
             continue;
         }
         if in_deps && trimmed.starts_with('[') {
-            break;
+            in_deps = false;
+            continue;
         }
         if in_deps && !trimmed.is_empty() && !trimmed.starts_with('#') {
             let name = trimmed.split(['=', ' ', '{']).next().unwrap().trim_matches('"');
@@ -255,7 +264,7 @@ fn p160_neighbours_unmoved() {
         deps,
         [
             "anyhow", "clap", "colored", "indicatif", "llama-cpp-2", "rand", "reqwest",
-            "serde", "serde_json", "thiserror", "tokio", "z3",
+            "serde", "serde_json", "sha2", "thiserror", "tokio", "z3",
         ],
         "the Cargo dependency set is the standing set"
     );
@@ -292,7 +301,7 @@ fn p160_neighbours_unmoved() {
     if let Some(sha) = sha256_of(&root.join(LIBRARY_ARTIFACT)) {
         assert_eq!(sha, LIBRARY_SHA256, "the library artifact's bytes unmoved (sha)");
     }
-    println!("P160|neighbours|cargo=standing-12, root lock knows neither component crate, npm 77/71873, rust 7/57613, library artifact bytes unmoved");
+    println!("P160|neighbours|cargo=standing-13, root lock knows neither component crate, npm 77/71873, rust 7/57613, library artifact bytes unmoved");
 }
 
 #[test]

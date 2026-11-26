@@ -66,11 +66,13 @@ fn asset_carries_the_whole_library() {
         assert_eq!(module.name, *name);
         assert_eq!(module.source, *source);
     }
-    // Bodies: exactly the prelude's shipped bodies, in
-    // prelude order, complete — every prelude spec ships
+    // Bodies: exactly the stdlib's shipped bodies, in
+    // prelude order, complete — every stdlib spec ships
     // one. (Debug-string identity, as in the crowning
-    // pin: IRNode has no PartialEq.)
-    let specs = stdlib::prelude_specs();
+    // pin: IRNode has no PartialEq.) Enumerated over the
+    // stdlib layer (Phase 165): the asset is the stdlib's
+    // alone — an installed layer never enters it.
+    let specs = stdlib::stdlib_specs();
     assert_eq!(asset.bodies.len(), specs.len());
     for ((name, body), spec) in asset.bodies.iter().zip(specs.iter()) {
         assert_eq!(name, &spec.name);
