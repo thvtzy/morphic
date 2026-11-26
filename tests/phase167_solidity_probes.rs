@@ -106,7 +106,7 @@ fn contains_type(ty: &TypeRef, pred: &dyn Fn(&TypeRef) -> bool) -> bool {
 // ── 1. Current codegen target dispatch & API renders ─────
 
 #[test]
-fn p167_target_dispatch_and_api_renders_baseline() {
+fn p167_target_dispatch_retired_at_168() {
     let _guard = crown_serial();
     let src = r#"Probe {
 spec id_int {
@@ -120,17 +120,15 @@ spec id_int {
     let spec = checked.spec.functions[0].clone();
     let cand = dummy_candidate(spec, IRNode::Var("x".into()));
 
+    // Retired in place at Phase 168 (IKONIK_18_SCOPE §5.1):
+    // `"solidity"` and `"sol"` now dispatch to the Solidity emitter.
     for target in ["solidity", "sol"] {
-        let err = codegen::generate(&cand, target)
-            .expect_err("solidity target does not exist yet");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Unsupported target language"),
-            "unexpected error for {target}: {msg}"
-        );
-        println!("P167|target|{target} refused: {msg}");
+        let code = codegen::generate(&cand, target)
+            .unwrap_or_else(|e| panic!("Phase 168 wired {target}: {e}"));
+        assert!(code.contains("pragma solidity ^0.8.24;"));
     }
 
+    // D6a: WinnerReport.renders remains at the standing 6 targets in 1.8.
     let report = morphic::api::synthesize_seeded(src, 42).expect("seeded run succeeds");
     let targets: Vec<&str> = report
         .winner
@@ -142,11 +140,6 @@ spec id_int {
         targets,
         vec!["rust", "c", "wasm", "python", "javascript", "ir"],
         "standing 6 render targets"
-    );
-    println!(
-        "P167|api-renders|count={} targets={}",
-        targets.len(),
-        targets.join(",")
     );
 }
 

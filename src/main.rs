@@ -140,7 +140,7 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
 
-        /// Output language (rust, c, wasm)
+        /// Output language (rust, c, wasm, python, javascript, solidity, ir)
         #[arg(short, long, default_value = "rust")]
         target: String,
 
@@ -825,7 +825,11 @@ fn main() -> anyhow::Result<()> {
 
             // Phase 7: Output
             let out_path = output.unwrap_or_else(|| {
-                input.with_extension(target)
+                let ext = match target.as_str() {
+                    "solidity" | "sol" => "sol",
+                    other => other,
+                };
+                input.with_extension(ext)
             });
             std::fs::write(&out_path, &code)?;
 
