@@ -67,7 +67,7 @@ fn p158_pipeline_standing_retired_at_160() {
                     scan(&path, out);
                 }
             } else if name.ends_with(".wit") {
-                out.push(path.to_string_lossy().into_owned());
+                out.push(path.to_string_lossy().replace('\\', "/"));
             }
         }
     }
@@ -151,7 +151,9 @@ fn p158_wasip2_target_installed() {
 /// not repo facts, and CI does not carry them.
 #[test]
 fn p158_pinned_component_tools() {
-    let home = std::env::var("HOME").expect("HOME");
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .expect("HOME or USERPROFILE");
     for (rel, want) in [
         ("workspace/tools/wasm-tools-1.263.0/wasm-tools", "wasm-tools 1.263.0"),
         ("workspace/tools/wasmtime-51.0.0/wasmtime", "wasmtime 51.0.0"),

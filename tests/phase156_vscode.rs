@@ -393,11 +393,19 @@ fn p156_vsix_packages_and_contains_the_frozen_surface() {
         vsix.display()
     );
 
-    let listing = Command::new("unzip")
-        .arg("-Z1")
-        .arg(&vsix)
-        .output()
-        .expect("unzip lists the .vsix");
+    let listing = if cfg!(windows) {
+        Command::new("tar")
+            .arg("-tf")
+            .arg(&vsix)
+            .output()
+            .expect("tar lists the .vsix")
+    } else {
+        Command::new("unzip")
+            .arg("-Z1")
+            .arg(&vsix)
+            .output()
+            .expect("unzip lists the .vsix")
+    };
     assert!(listing.status.success(), "the .vsix is a readable zip");
     let listing = String::from_utf8(listing.stdout).unwrap();
     for entry in [
@@ -408,17 +416,26 @@ fn p156_vsix_packages_and_contains_the_frozen_surface() {
         "extension/node_modules/vscode-languageclient/package.json",
     ] {
         assert!(
-            listing.lines().any(|line| line == entry),
+            listing.lines().any(|line| line.trim_end_matches('\r') == entry),
             "the .vsix contains {entry}"
         );
     }
 
-    let contained = Command::new("unzip")
-        .arg("-p")
-        .arg(&vsix)
-        .arg("extension/package.json")
-        .output()
-        .expect("unzip reads the contained manifest");
+    let contained = if cfg!(windows) {
+        Command::new("tar")
+            .arg("-xOf")
+            .arg(&vsix)
+            .arg("extension/package.json")
+            .output()
+            .expect("tar reads the contained manifest")
+    } else {
+        Command::new("unzip")
+            .arg("-p")
+            .arg(&vsix)
+            .arg("extension/package.json")
+            .output()
+            .expect("unzip reads the contained manifest")
+    };
     assert!(contained.status.success());
     let contained: Value = serde_json::from_slice(&contained.stdout)
         .expect("the contained manifest parses");

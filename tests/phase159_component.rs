@@ -55,7 +55,9 @@ fn flattened(text: &str) -> String {
 }
 
 fn tool_path(rel: &str) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
     let path = PathBuf::from(home).join(rel);
     path.exists().then_some(path)
 }
@@ -540,9 +542,11 @@ fn p159_wasmtime_rehearsal() {
 
 #[test]
 fn p159_build_reproduces() {
-    let home = std::env::var("HOME").expect("HOME");
-    let cargo = PathBuf::from(&home).join(".cargo/bin/cargo");
-    let rustup = PathBuf::from(&home).join(".cargo/bin/rustup");
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .expect("HOME or USERPROFILE");
+    let cargo = PathBuf::from(&home).join(format!(".cargo/bin/cargo{}", std::env::consts::EXE_SUFFIX));
+    let rustup = PathBuf::from(&home).join(format!(".cargo/bin/rustup{}", std::env::consts::EXE_SUFFIX));
     if !cargo.exists() || !rustup.exists() {
         println!("P159|build|cargo/rustup ABSENT in this environment; reproduction not run");
         return;

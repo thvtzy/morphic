@@ -23,7 +23,15 @@ fn corpus_files() -> Vec<PathBuf> {
     ] {
         collect_morph(&root.join(dir), &mut files);
     }
-    files.sort();
+    files.sort_by(|a, b| {
+        let norm = |p: &Path| {
+            p.strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+        norm(a).cmp(&norm(b))
+    });
     files
 }
 
@@ -109,7 +117,10 @@ fn phase129_corpus_check_outcomes() {
     );
     for (path, (rel, expected)) in files.iter().zip(PINNED) {
         assert_eq!(
-            path.strip_prefix(root).unwrap().display().to_string(),
+            path.strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/"),
             *rel,
             "corpus file order/set moved"
         );

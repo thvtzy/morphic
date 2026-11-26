@@ -716,12 +716,21 @@ fn p157_clause4_thin_client() {
     // inside it contributes the same frozen surface.
     let vsix = dir.join(format!("morphic-{version}.vsix"));
     assert!(vsix.exists(), "the packaged extension stands at {}", vsix.display());
-    let contained = Command::new("unzip")
-        .arg("-p")
-        .arg(&vsix)
-        .arg("extension/package.json")
-        .output()
-        .expect("unzip reads the contained manifest");
+    let contained = if cfg!(windows) {
+        Command::new("tar")
+            .arg("-xOf")
+            .arg(&vsix)
+            .arg("extension/package.json")
+            .output()
+            .expect("tar reads the contained manifest")
+    } else {
+        Command::new("unzip")
+            .arg("-p")
+            .arg(&vsix)
+            .arg("extension/package.json")
+            .output()
+            .expect("unzip reads the contained manifest")
+    };
     assert!(contained.status.success(), "the .vsix is a readable zip");
     let contained: Value =
         serde_json::from_slice(&contained.stdout).expect("the contained manifest parses");

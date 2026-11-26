@@ -617,6 +617,7 @@ fn p166_clause1_the_url_fetch_path_installs() {
             while !stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                         let mut buf = [0u8; 4096];
                         let n = stream.read(&mut buf).unwrap_or(0);
@@ -643,6 +644,7 @@ fn p166_clause1_the_url_fetch_path_installs() {
                             }
                         }
                         let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1293,14 +1295,18 @@ fn dir_mass(dir: &std::path::Path) -> (usize, usize) {
 }
 
 fn sha256_of_file(path: &std::path::Path) -> String {
-    let out = Command::new("sha256sum").arg(path).output().unwrap();
-    assert!(out.status.success(), "sha256sum runs");
-    String::from_utf8(out.stdout)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string()
+    if let Ok(out) = Command::new("sha256sum").arg(path).output() {
+        if out.status.success() {
+            return String::from_utf8(out.stdout)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .to_string();
+        }
+    }
+    let bytes = std::fs::read(path).expect("read file for sha256");
+    registry::sha256_hex(&bytes)
 }
 
 /// The dependency names a Cargo.toml declares, across
